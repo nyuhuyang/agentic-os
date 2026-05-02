@@ -228,10 +228,6 @@
     {% if stats.errors > 0 %}
     <div class="stat-chip" style="border-color: var(--red)">Errors <span style="color:var(--red)">{{ stats.errors }}</span></div>
     {% endif %}
-    <div class="agent-toggle">
-      <button class="agent-btn active" id="agent-claude" onclick="setAgent('claude')">◆ Claude</button>
-      <button class="agent-btn" id="agent-codex" onclick="setAgent('codex')">✦ Codex</button>
-    </div>
     <div class="header-right">{{ now }}</div>
   </header>
 
@@ -329,6 +325,15 @@
         </div>
         <div class="trash-cards" id="trash-cards"></div>
       </div>
+    </div>
+
+    <!-- Agent toggle — above skills, switch when quota changes -->
+    <div style="display:flex; align-items:center; gap:12px; margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--border);">
+      <div class="agent-toggle">
+        <button class="agent-btn active" id="agent-claude" onclick="setAgent('claude')">◆ Claude</button>
+        <button class="agent-btn" id="agent-codex" onclick="setAgent('codex')">✦ Codex</button>
+      </div>
+      <span style="font-size:11px;color:var(--text-dim)">Active agent for skill cards &amp; terminal injection</span>
     </div>
 
     <!-- Skill stacks -->
