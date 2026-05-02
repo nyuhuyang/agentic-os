@@ -206,7 +206,7 @@ def load_state() -> dict:
         return {}
 
 
-def load_runs(limit: int = 20) -> list[dict]:
+def load_runs(limit: int = 20, include_archived: bool = False) -> list[dict]:
     if not RUN_LOG.exists():
         return []
     lines = RUN_LOG.read_text(encoding="utf-8").strip().splitlines()
@@ -223,6 +223,8 @@ def load_runs(limit: int = 20) -> list[dict]:
             if run_id in seen:
                 continue  # dedup: latest append wins
             seen.add(run_id)
+            if not include_archived and r.get("status") == "archived":
+                continue  # mark seen for dedup, but exclude from normal results
             records.append(r)
         except Exception:
             continue
@@ -770,6 +772,10 @@ def api_runs():
     state_filter = request.args.get("state", "")
     if state_filter == "running":
         return jsonify(list(_running_jobs.values()))
+    if state_filter == "archived":
+        runs = load_runs(200, include_archived=True)
+        archived = [r for r in runs if r.get("status") == "archived"]
+        return jsonify([{**r, "when": _fmt_dt(r.get("started_at")), "duration": _fmt_dur(r.get("duration_s"))} for r in archived])
     runs = load_runs(limit)
     return jsonify([{
         **r,
@@ -802,7 +808,7 @@ def api_run_detail(run_id: str):
 def api_run_set_status(run_id: str):
     data = request.get_json(silent=True) or {}
     new_status = data.get("status", "").strip()
-    allowed = {"success", "failed"}
+    allowed = {"success", "failed", "archived"}
     if new_status not in allowed:
         return jsonify({"error": f"status must be one of {allowed}"}), 400
     if not RUN_LOG.exists():
@@ -824,11 +830,38 @@ def api_run_set_status(run_id: str):
     if not original:
         return jsonify({"error": "not found"}), 404
     record = {**original, "status": new_status}
+    if new_status == "archived":
+        record["prev_status"] = original.get("status", "failed")
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     with RUN_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     socketio.emit("run_state_change", {"run_id": run_id, "state": new_status})
     return jsonify({"ok": True, "run_id": run_id, "status": new_status})
+
+
+@app.route("/api/runs/<run_id>/restore", methods=["POST"])
+def api_run_restore(run_id: str):
+    if not RUN_LOG.exists():
+        return jsonify({"error": "not found"}), 404
+    for line in reversed(RUN_LOG.read_text(encoding="utf-8").strip().splitlines()):
+        try:
+            r = json.loads(line)
+            rid = r.get("run_id")
+            if not rid:
+                h = hashlib.md5(f"{r.get('started_at','')}{r.get('skill','')}".encode()).hexdigest()[:8]
+                rid = f"legacy-{h}"
+            if rid == run_id and r.get("status") == "archived":
+                prev_status = r.get("prev_status", "failed")
+                record = {k: v for k, v in r.items() if k not in ("prev_status",)}
+                record["status"] = prev_status
+                OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+                with RUN_LOG.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(record) + "\n")
+                socketio.emit("run_state_change", {"run_id": run_id, "state": prev_status})
+                return jsonify({"ok": True, "run_id": run_id, "status": prev_status})
+        except Exception:
+            continue
+    return jsonify({"error": "not found or not archived"}), 404
 
 
 @app.route("/api/runs/<run_id>/retry", methods=["POST"])

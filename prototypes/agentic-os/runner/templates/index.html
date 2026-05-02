@@ -93,8 +93,11 @@
   .job-col-body { display: flex; flex-direction: column; gap: 6px; }
   .job-col-empty { font-size: 11px; color: var(--text-dim); padding: 10px 4px; text-align: center; border: 1px dashed var(--border); border-radius: 6px; }
 
-  .job-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; cursor: pointer; transition: border-color .15s, background .15s; }
+  .job-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; cursor: pointer; transition: border-color .15s, background .15s; position: relative; }
   .job-card:hover { background: #1c1c1c; border-color: #3a3a3a; }
+  .job-card-dismiss { position: absolute; top: 6px; right: 7px; background: transparent; border: none; color: var(--text-dim); font-size: 13px; line-height: 1; cursor: pointer; padding: 0 2px; opacity: 0; transition: opacity .15s; }
+  .job-card:hover .job-card-dismiss { opacity: 1; }
+  .job-card-dismiss:hover { color: var(--red); }
   .job-card-id { font-size: 10px; color: var(--text-dim); margin-bottom: 4px; font-family: monospace; }
   .job-card-title { font-size: 13px; font-weight: 500; color: var(--text); margin-bottom: 4px; line-height: 1.35; }
   .job-card-prompt { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 7px; }
@@ -105,6 +108,19 @@
   .job-btn:hover { border-color: var(--accent-dim); color: var(--text); }
   .job-btn.retry { color: var(--accent); border-color: var(--accent-dim); }
   .job-btn.retry:hover { background: rgba(232,114,58,.1); }
+
+  /* Trash panel */
+  .trash-toggle { background: transparent; border: 1px solid var(--border); color: var(--text-dim); font-size: 11px; padding: 3px 9px; border-radius: 3px; cursor: pointer; font-family: inherit; transition: all .15s; }
+  .trash-toggle:hover { border-color: var(--text-dim); color: var(--text); }
+  .trash-panel { margin-top: 16px; padding-top: 14px; border-top: 1px dashed var(--border); }
+  .trash-panel-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 11px; color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; }
+  .trash-panel-header button { background: transparent; border: none; color: var(--text-dim); font-size: 12px; cursor: pointer; padding: 0; }
+  .trash-panel-header button:hover { color: var(--text); }
+  .trash-cards { display: flex; flex-wrap: wrap; gap: 8px; }
+  .trash-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; min-width: 200px; max-width: 260px; opacity: 0.7; }
+  .trash-card-id { font-size: 10px; color: var(--text-dim); margin-bottom: 3px; font-family: monospace; }
+  .trash-card-title { font-size: 12px; font-weight: 500; color: var(--text); margin-bottom: 6px; }
+  .trash-card-meta { font-size: 11px; color: var(--text-dim); margin-bottom: 6px; }
 
   /* State badges */
   .state-badge {
@@ -301,9 +317,17 @@
       <div class="job-board-header">
         <div class="job-board-title">◈ Job Board</div>
         <div class="job-board-meta" id="job-board-meta">loading…</div>
+        <button class="trash-toggle" id="trash-toggle" onclick="toggleTrash()" title="Show archived runs">🗑 <span id="trash-count">—</span></button>
       </div>
       <div class="job-board-cols" id="job-board-cols">
         <!-- columns built by JS -->
+      </div>
+      <div class="trash-panel" id="trash-panel" style="display:none">
+        <div class="trash-panel-header">
+          <span>Archived <span id="trash-panel-count"></span></span>
+          <button onclick="toggleTrash()" title="Hide">✕</button>
+        </div>
+        <div class="trash-cards" id="trash-cards"></div>
       </div>
     </div>
 
@@ -590,6 +614,7 @@ function _buildColCard(run) {
   const canRetry = state !== 'running' && state !== 'sent';
   const isDraggable = state !== 'running';
   card.innerHTML = `
+    <button class="job-card-dismiss" title="Archive" onclick="event.stopPropagation();archiveRun('${run.run_id}')">✕</button>
     <div class="job-card-id">${_esc(_shortId(run.run_id))}</div>
     <div class="job-card-title">${_esc((run.skill || '?').toUpperCase())}</div>
     ${prompt ? `<div class="job-card-prompt">${_esc(prompt)}</div>` : ''}
@@ -706,6 +731,65 @@ function updateJobCardState(run_id, state) {
   setTimeout(refreshJobBoard, state === 'running' ? 0 : 600);
 }
 
+async function archiveRun(run_id) {
+  if (!run_id) return;
+  await fetch(`/api/runs/${run_id}/status`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: 'archived' }),
+  });
+  refreshJobBoard();
+  refreshTrashCount();
+}
+
+let _trashOpen = false;
+
+async function refreshTrashCount() {
+  try {
+    const res = await fetch('/api/runs?state=archived&limit=200');
+    const runs = await res.json();
+    const n = runs.length;
+    document.getElementById('trash-count').textContent = n > 0 ? n : '—';
+    if (_trashOpen) renderTrash(runs);
+  } catch (_) {}
+}
+
+function toggleTrash() {
+  _trashOpen = !_trashOpen;
+  document.getElementById('trash-panel').style.display = _trashOpen ? '' : 'none';
+  if (_trashOpen) refreshTrashCount();
+}
+
+function renderTrash(runs) {
+  const container = document.getElementById('trash-cards');
+  const countEl = document.getElementById('trash-panel-count');
+  if (!container) return;
+  countEl.textContent = `(${runs.length})`;
+  if (!runs.length) {
+    container.innerHTML = '<span style="font-size:12px;color:var(--text-dim)">Empty.</span>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  runs.forEach(r => {
+    const card = document.createElement('div');
+    card.className = 'trash-card';
+    card.innerHTML = `
+      <div class="trash-card-id">${_esc(_shortId(r.run_id))}</div>
+      <div class="trash-card-title">${_esc((r.skill || '?').toUpperCase())}</div>
+      <div class="trash-card-meta">${r.when || '—'} · ${r.prev_status || '?'}</div>
+      <button class="job-btn" onclick="restoreRun('${r.run_id}')">↩ Restore</button>
+    `;
+    frag.appendChild(card);
+  });
+  container.replaceChildren(frag);
+}
+
+async function restoreRun(run_id) {
+  await fetch(`/api/runs/${run_id}/restore`, { method: 'POST' });
+  refreshJobBoard();
+  refreshTrashCount();
+}
+
 async function openDetailModal(run_id) {
   if (!run_id) return;
   _detailRunId = run_id;
@@ -792,6 +876,7 @@ document.getElementById('detail-modal').addEventListener('click', function(e) {
 
 // Initial load + polling
 refreshJobBoard();
+refreshTrashCount();
 updateWindows(selectedAgent);
 initPaceMarkers();
 setInterval(refreshJobBoard, 15000);
