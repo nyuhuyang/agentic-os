@@ -10,11 +10,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
 import sys
 import time
+import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -60,6 +62,9 @@ VAULT_PULSE_ROOTS = ("wiki", "raw", "outputs")
 
 VENV_PYTHON = ROOT / ".venv" / "bin" / "python3"
 
+# In-memory running jobs: run_id -> {run_id, skill, started_at, prompt}
+_running_jobs: dict[str, dict] = {}
+
 app = Flask(__name__, template_folder="templates")
 socketio = SocketIO(app, cors_allowed_origins="*")
 
@@ -89,6 +94,7 @@ def _record_pending_handoff(sid: str, line: str) -> None:
     if not command:
         return
     started_at = datetime.now(timezone.utc).isoformat()
+    run_id = pending.get("run_id") or str(uuid.uuid4())
     _write_run_log(
         pending["skill"],
         "sent",
@@ -96,8 +102,9 @@ def _record_pending_handoff(sid: str, line: str) -> None:
         0.0,
         prompt=command,
         output="dispatched to terminal",
+        run_id=run_id,
     )
-    socketio.emit("run_logged", {"skill": pending["skill"]}, to=sid)
+    socketio.emit("run_logged", {"skill": pending["skill"], "run_id": run_id}, to=sid)
 
 
 def _track_pty_input(sid: str, text: str) -> None:
@@ -150,7 +157,8 @@ def skill_selected(data):
     phrase = (data or {}).get("phrase", "").strip()
     if not skill:
         return
-    _pending_skill_handoffs[request.sid] = {"skill": skill, "phrase": phrase}
+    run_id = str(uuid.uuid4())
+    _pending_skill_handoffs[request.sid] = {"skill": skill, "phrase": phrase, "run_id": run_id}
 
 
 @socketio.on("pty_resize")
@@ -205,7 +213,12 @@ def load_runs(limit: int = 20) -> list[dict]:
     records = []
     for line in reversed(lines):
         try:
-            records.append(json.loads(line))
+            r = json.loads(line)
+            if "run_id" not in r:
+                h = hashlib.md5(f"{r.get('started_at','')}{r.get('skill','')}".encode()).hexdigest()[:8]
+                r["run_id"] = f"legacy-{h}"
+            r.setdefault("output_path", "")
+            records.append(r)
         except Exception:
             continue
         if len(records) >= limit:
@@ -420,16 +433,21 @@ def load_usage() -> dict:
 # ---------------------------------------------------------------------------
 
 def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
-                   prompt: str = "", output: str = "", error: str = "") -> None:
+                   prompt: str = "", output: str = "", error: str = "",
+                   run_id: str | None = None, output_path: str = "") -> str:
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    if run_id is None:
+        run_id = str(uuid.uuid4())
     record = {
+        "run_id": run_id,
         "skill": skill,
         "status": status,
         "started_at": started_at,
         "duration_s": round(duration_s, 2),
-        "prompt": prompt[:200],
-        "output": output[:500],
-        "error": error[:300],
+        "prompt": prompt,
+        "output": output,
+        "error": error,
+        "output_path": output_path,
     }
     with RUN_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
@@ -437,6 +455,7 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
     state = load_state()
     state[skill] = {"status": status, "last_run": started_at, "duration_s": record["duration_s"]}
     JOB_STATE.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    return run_id
 
 
 # ---------------------------------------------------------------------------
@@ -558,8 +577,11 @@ def run():
 
         # If skill has an executable entrypoint, run via run_skill.py (agent-agnostic)
         if entry.get("schedule_eligible") and entry.get("entrypoint"):
+            run_id = str(uuid.uuid4())
             started_at = datetime.now(timezone.utc).isoformat()
             t0 = time.monotonic()
+            _running_jobs[run_id] = {"run_id": run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running"}
+            socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill})
             try:
                 result = subprocess.run(
                     [_python(), str(RUNNER), skill],
@@ -571,10 +593,15 @@ def run():
                 dur = time.monotonic() - t0
                 ok = result.returncode == 0
                 output = (result.stdout or "").strip()
-                _write_run_log(skill, "success" if ok else "failed", started_at, dur,
-                               prompt=prompt, output=output, error=result.stderr)
+                _running_jobs.pop(run_id, None)
+                final_state = "success" if ok else "failed"
+                _write_run_log(skill, final_state, started_at, dur,
+                               prompt=prompt, output=output, error=result.stderr, run_id=run_id)
+                socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": skill})
+                socketio.emit("run_logged", {"skill": skill, "run_id": run_id})
                 return jsonify({
                     "ok": ok,
+                    "run_id": run_id,
                     "output": output if ok else result.stderr.strip(),
                     "duration_s": round(dur, 2),
                     "skill": skill,
@@ -583,19 +610,26 @@ def run():
                 })
             except subprocess.TimeoutExpired:
                 dur = time.monotonic() - t0
-                _write_run_log(skill, "timeout", started_at, dur, prompt=prompt, error="Timed out after 300s")
+                _running_jobs.pop(run_id, None)
+                _write_run_log(skill, "timeout", started_at, dur, prompt=prompt, error="Timed out after 300s", run_id=run_id)
+                socketio.emit("run_state_change", {"run_id": run_id, "state": "failed", "skill": skill})
                 return jsonify({"ok": False, "error": "Timed out after 300s."})
             except Exception as e:
                 dur = time.monotonic() - t0
-                _write_run_log(skill, "error", started_at, dur, prompt=prompt, error=str(e))
+                _running_jobs.pop(run_id, None)
+                _write_run_log(skill, "error", started_at, dur, prompt=prompt, error=str(e), run_id=run_id)
+                socketio.emit("run_state_change", {"run_id": run_id, "state": "failed", "skill": skill})
                 return jsonify({"ok": False, "error": str(e)})
 
     # AI-only skill or free prompt — dispatch to selected agent CLI
     cli = _ai_cli(agent)
     extra = ["--output-format", "text"] if agent == "claude" else []
     skill_name = skill or "_prompt"
+    run_id = str(uuid.uuid4())
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
+    _running_jobs[run_id] = {"run_id": run_id, "skill": skill_name, "started_at": started_at, "prompt": prompt, "state": "running"}
+    socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill_name})
     try:
         result = subprocess.run(
             cli + [prompt] + extra,
@@ -607,27 +641,36 @@ def run():
         dur = time.monotonic() - t0
         ok = result.returncode == 0
         output = (result.stdout or result.stderr or "").strip()
-        _write_run_log(skill_name, "success" if ok else "failed", started_at, dur,
-                       prompt=prompt, output=output, error="" if ok else output)
+        _running_jobs.pop(run_id, None)
+        final_state = "success" if ok else "failed"
+        _write_run_log(skill_name, final_state, started_at, dur,
+                       prompt=prompt, output=output, error="" if ok else output, run_id=run_id)
+        socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": skill_name})
+        socketio.emit("run_logged", {"skill": skill_name, "run_id": run_id})
         return jsonify({
             "ok": ok,
+            "run_id": run_id,
             "output": output,
             "duration_s": round(dur, 2),
             "skill": skill_name,
-            "message": output[:200] if ok else None,
-            "error": output[:300] if not ok else None,
         })
     except FileNotFoundError:
         dur = time.monotonic() - t0
-        _write_run_log(skill_name, "error", started_at, dur, prompt=prompt, error=f"{agent} CLI not found")
+        _running_jobs.pop(run_id, None)
+        _write_run_log(skill_name, "error", started_at, dur, prompt=prompt, error=f"{agent} CLI not found", run_id=run_id)
+        socketio.emit("run_state_change", {"run_id": run_id, "state": "failed", "skill": skill_name})
         return jsonify({"ok": False, "error": f"{agent} CLI not found."})
     except subprocess.TimeoutExpired:
         dur = time.monotonic() - t0
-        _write_run_log(skill_name, "timeout", started_at, dur, prompt=prompt, error="Timed out after 120s")
+        _running_jobs.pop(run_id, None)
+        _write_run_log(skill_name, "timeout", started_at, dur, prompt=prompt, error="Timed out after 120s", run_id=run_id)
+        socketio.emit("run_state_change", {"run_id": run_id, "state": "failed", "skill": skill_name})
         return jsonify({"ok": False, "error": "Timed out after 120s."})
     except Exception as e:
         dur = time.monotonic() - t0
-        _write_run_log(skill_name, "error", started_at, dur, prompt=prompt, error=str(e))
+        _running_jobs.pop(run_id, None)
+        _write_run_log(skill_name, "error", started_at, dur, prompt=prompt, error=str(e), run_id=run_id)
+        socketio.emit("run_state_change", {"run_id": run_id, "state": "failed", "skill": skill_name})
         return jsonify({"ok": False, "error": str(e)})
 
 
@@ -658,9 +701,14 @@ def stream():
             yield _sse({"type": "error", "text": "No prompt."})
             return
 
+        run_id = str(uuid.uuid4())
         started_at = datetime.now(timezone.utc).isoformat()
         t0 = time.monotonic()
         output_buf: list[str] = []
+
+        _running_jobs[run_id] = {"run_id": run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running"}
+        socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill})
+        yield _sse({"type": "start", "run_id": run_id})
 
         # Schedule-eligible entrypoint path
         registry = load_registry()
@@ -690,12 +738,18 @@ def stream():
             proc.wait()
             dur = time.monotonic() - t0
             ok = proc.returncode == 0
-            _write_run_log(skill, "success" if ok else "failed", started_at, dur,
-                           prompt=prompt, output="".join(output_buf))
-            yield _sse({"type": "done", "ok": ok, "duration_s": round(dur, 2)})
+            _running_jobs.pop(run_id, None)
+            final_state = "success" if ok else "failed"
+            _write_run_log(skill, final_state, started_at, dur,
+                           prompt=prompt, output="".join(output_buf), run_id=run_id)
+            socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": skill})
+            socketio.emit("run_logged", {"skill": skill, "run_id": run_id})
+            yield _sse({"type": "done", "ok": ok, "run_id": run_id, "duration_s": round(dur, 2)})
         except Exception as e:
             dur = time.monotonic() - t0
-            _write_run_log(skill, "error", started_at, dur, prompt=prompt, error=str(e))
+            _running_jobs.pop(run_id, None)
+            _write_run_log(skill, "error", started_at, dur, prompt=prompt, error=str(e), run_id=run_id)
+            socketio.emit("run_state_change", {"run_id": run_id, "state": "failed", "skill": skill})
             yield _sse({"type": "error", "text": str(e)})
 
     return Response(
@@ -707,13 +761,54 @@ def stream():
 
 @app.route("/api/runs")
 def api_runs():
-    limit = int(request.args.get("limit", 20))
+    limit = int(request.args.get("limit", 30))
+    state_filter = request.args.get("state", "")
+    if state_filter == "running":
+        return jsonify(list(_running_jobs.values()))
     runs = load_runs(limit)
     return jsonify([{
         **r,
         "when": _fmt_dt(r.get("started_at")),
         "duration": _fmt_dur(r.get("duration_s")),
     } for r in runs])
+
+
+@app.route("/api/runs/<run_id>")
+def api_run_detail(run_id: str):
+    if not RUN_LOG.exists():
+        return jsonify({"error": "not found"}), 404
+    for line in reversed(RUN_LOG.read_text(encoding="utf-8").strip().splitlines()):
+        try:
+            r = json.loads(line)
+            rid = r.get("run_id")
+            if not rid:
+                h = hashlib.md5(f"{r.get('started_at','')}{r.get('skill','')}".encode()).hexdigest()[:8]
+                rid = f"legacy-{h}"
+            if rid == run_id:
+                r["run_id"] = rid
+                r.setdefault("output_path", "")
+                return jsonify(r)
+        except Exception:
+            continue
+    return jsonify({"error": "not found"}), 404
+
+
+@app.route("/api/runs/<run_id>/retry", methods=["POST"])
+def api_run_retry(run_id: str):
+    if not RUN_LOG.exists():
+        return jsonify({"error": "not found"}), 404
+    for line in reversed(RUN_LOG.read_text(encoding="utf-8").strip().splitlines()):
+        try:
+            r = json.loads(line)
+            rid = r.get("run_id")
+            if not rid:
+                h = hashlib.md5(f"{r.get('started_at','')}{r.get('skill','')}".encode()).hexdigest()[:8]
+                rid = f"legacy-{h}"
+            if rid == run_id:
+                return jsonify({"ok": True, "skill": r.get("skill", ""), "prompt": r.get("prompt", "")})
+        except Exception:
+            continue
+    return jsonify({"error": "not found"}), 404
 
 
 @app.route("/api/windows")
