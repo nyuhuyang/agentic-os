@@ -210,6 +210,7 @@ def load_runs(limit: int = 20) -> list[dict]:
     if not RUN_LOG.exists():
         return []
     lines = RUN_LOG.read_text(encoding="utf-8").strip().splitlines()
+    seen: set[str] = set()
     records = []
     for line in reversed(lines):
         try:
@@ -218,6 +219,10 @@ def load_runs(limit: int = 20) -> list[dict]:
                 h = hashlib.md5(f"{r.get('started_at','')}{r.get('skill','')}".encode()).hexdigest()[:8]
                 r["run_id"] = f"legacy-{h}"
             r.setdefault("output_path", "")
+            run_id = r["run_id"]
+            if run_id in seen:
+                continue  # dedup: latest append wins
+            seen.add(run_id)
             records.append(r)
         except Exception:
             continue
@@ -791,6 +796,39 @@ def api_run_detail(run_id: str):
         except Exception:
             continue
     return jsonify({"error": "not found"}), 404
+
+
+@app.route("/api/runs/<run_id>/status", methods=["PATCH"])
+def api_run_set_status(run_id: str):
+    data = request.get_json(silent=True) or {}
+    new_status = data.get("status", "").strip()
+    allowed = {"success", "failed"}
+    if new_status not in allowed:
+        return jsonify({"error": f"status must be one of {allowed}"}), 400
+    if not RUN_LOG.exists():
+        return jsonify({"error": "not found"}), 404
+    original = None
+    for line in reversed(RUN_LOG.read_text(encoding="utf-8").strip().splitlines()):
+        try:
+            r = json.loads(line)
+            rid = r.get("run_id")
+            if not rid:
+                h = hashlib.md5(f"{r.get('started_at','')}{r.get('skill','')}".encode()).hexdigest()[:8]
+                rid = f"legacy-{h}"
+            if rid == run_id:
+                r["run_id"] = rid
+                original = r
+                break
+        except Exception:
+            continue
+    if not original:
+        return jsonify({"error": "not found"}), 404
+    record = {**original, "status": new_status}
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    with RUN_LOG.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+    socketio.emit("run_state_change", {"run_id": run_id, "state": new_status})
+    return jsonify({"ok": True, "run_id": run_id, "status": new_status})
 
 
 @app.route("/api/runs/<run_id>/retry", methods=["POST"])

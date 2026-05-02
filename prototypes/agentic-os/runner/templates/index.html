@@ -84,7 +84,6 @@
   .job-col { flex: 0 0 260px; min-width: 0; }
   .job-col-header { display: flex; align-items: center; gap: 8px; padding: 6px 2px 10px; }
   .job-col-dot { width: 13px; height: 13px; border-radius: 50%; flex-shrink: 0; }
-  .job-col-dot.backlog { background: #555; }
   .job-col-dot.running { background: var(--yellow); animation: pulse-dot 1.4s ease-in-out infinite; }
   .job-col-dot.review  { background: var(--red); }
   .job-col-dot.done    { background: var(--green); }
@@ -557,10 +556,9 @@ function openModal(skill, onConfirm) {
 let _detailRunId = null;
 
 const JOB_COLS = [
-  { key: 'backlog',  label: 'Backlog',      states: ['sent'],                       dotClass: 'backlog' },
-  { key: 'running',  label: 'In Progress',  states: ['running'],                    dotClass: 'running' },
-  { key: 'review',   label: 'Human Review', states: ['failed', 'error', 'timeout'], dotClass: 'review'  },
-  { key: 'done',     label: 'Done',         states: ['success'],                    dotClass: 'done'    },
+  { key: 'running',  label: 'In Progress',  states: ['running'],                    dotClass: 'running', droppable: false },
+  { key: 'review',   label: 'Human Review', states: ['failed', 'error', 'timeout'], dotClass: 'review',  droppable: true, dropStatus: 'failed'  },
+  { key: 'done',     label: 'Done',         states: ['success'],                    dotClass: 'done',    droppable: true, dropStatus: 'success' },
 ];
 
 function _stateBadgeHtml(state) {
@@ -588,6 +586,7 @@ function _buildColCard(run) {
   const when = run.when || '';
   const dur = run.duration || '';
   const canRetry = state !== 'running' && state !== 'sent';
+  const isDraggable = state !== 'running';
   card.innerHTML = `
     <div class="job-card-id">${_esc(_shortId(run.run_id))}</div>
     <div class="job-card-title">${_esc((run.skill || '?').toUpperCase())}</div>
@@ -608,6 +607,15 @@ function _buildColCard(run) {
     if (e.target.classList.contains('job-btn')) return;
     openDetailModal(run.run_id);
   });
+  if (isDraggable) {
+    card.draggable = true;
+    card.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', run.run_id);
+      e.dataTransfer.effectAllowed = 'move';
+      card.style.opacity = '0.45';
+    });
+    card.addEventListener('dragend', () => { card.style.opacity = ''; });
+  }
   return card;
 }
 
@@ -664,6 +672,27 @@ async function refreshJobBoard() {
         body.innerHTML = '<div class="job-col-empty">No items</div>';
       } else {
         items.slice(0, 15).forEach(r => body.appendChild(_buildColCard(r)));
+      }
+      if (col.droppable) {
+        body.addEventListener('dragover', (e) => {
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          body.style.outline = '2px solid var(--accent)';
+          body.style.borderRadius = '6px';
+        });
+        body.addEventListener('dragleave', () => { body.style.outline = ''; });
+        body.addEventListener('drop', async (e) => {
+          e.preventDefault();
+          body.style.outline = '';
+          const run_id = e.dataTransfer.getData('text/plain');
+          if (!run_id) return;
+          await fetch(`/api/runs/${run_id}/status`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: col.dropStatus }),
+          });
+          refreshJobBoard();
+        });
       }
       frag.appendChild(colEl);
     });
