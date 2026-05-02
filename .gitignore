@@ -1,0 +1,23 @@
+# Obsidian vault has its own git repo
+obsidian/
+
+# Other workspace dirs - not tracked here
+experiments/
+scratch/
+clients_links/
+
+# Python
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+*.egg-info/
+
+# OS
+.DS_Store
+**/.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
