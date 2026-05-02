@@ -84,6 +84,7 @@
   .job-col { flex: 0 0 260px; min-width: 0; }
   .job-col-header { display: flex; align-items: center; gap: 8px; padding: 6px 2px 10px; }
   .job-col-dot { width: 13px; height: 13px; border-radius: 50%; flex-shrink: 0; }
+  .job-col-dot.backlog { background: #555; }
   .job-col-dot.running { background: var(--yellow); animation: pulse-dot 1.4s ease-in-out infinite; }
   .job-col-dot.review  { background: var(--red); }
   .job-col-dot.done    { background: var(--green); }
@@ -556,6 +557,7 @@ function openModal(skill, onConfirm) {
 let _detailRunId = null;
 
 const JOB_COLS = [
+  { key: 'backlog',  label: 'Backlog',      states: ['sent'],                       dotClass: 'backlog', droppable: false },
   { key: 'running',  label: 'In Progress',  states: ['running'],                    dotClass: 'running', droppable: false },
   { key: 'review',   label: 'Human Review', states: ['failed', 'error', 'timeout'], dotClass: 'review',  droppable: true, dropStatus: 'failed'  },
   { key: 'done',     label: 'Done',         states: ['success'],                    dotClass: 'done',    droppable: true, dropStatus: 'success' },
