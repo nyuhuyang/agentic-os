@@ -74,42 +74,34 @@
   .chart-title { font-size: 12px; color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 12px; }
   .chart-wrap { height: 100px; }
 
-  /* Job board */
+  /* Job board — kanban columns */
   .job-board { margin-bottom: 24px; }
-  .job-board-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+  .job-board-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
   .job-board-title { font-size: 12px; color: var(--accent); letter-spacing: 2px; text-transform: uppercase; }
   .job-board-meta { font-size: 11px; color: var(--text-dim); }
-  .job-board-empty { font-size: 12px; color: var(--text-dim); padding: 14px 0; }
 
-  .job-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--border);
-    border-radius: 5px;
-    padding: 10px 14px;
-    margin-bottom: 6px;
-    cursor: pointer;
-    transition: border-color .15s, background .15s;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-  .job-card:hover { background: #1c1c1c; }
-  .job-card.is-running  { border-left-color: var(--accent); }
-  .job-card.is-success  { border-left-color: var(--green); }
-  .job-card.is-failed   { border-left-color: var(--red); }
-  .job-card.is-timeout  { border-left-color: var(--yellow); }
-  .job-card.is-sent     { border-left-color: var(--accent-dim); }
-  .job-card.is-error    { border-left-color: var(--red); }
+  .job-board-cols { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 8px; align-items: flex-start; }
+  .job-col { flex: 0 0 260px; min-width: 0; }
+  .job-col-header { display: flex; align-items: center; gap: 8px; padding: 6px 2px 10px; }
+  .job-col-dot { width: 13px; height: 13px; border-radius: 50%; flex-shrink: 0; }
+  .job-col-dot.backlog { background: #555; }
+  .job-col-dot.running { background: var(--yellow); animation: pulse-dot 1.4s ease-in-out infinite; }
+  .job-col-dot.review  { background: var(--red); }
+  .job-col-dot.done    { background: var(--green); }
+  .job-col-title { font-size: 13px; font-weight: 600; color: var(--text); }
+  .job-col-count { font-size: 12px; color: var(--text-dim); margin-left: 2px; }
+  .job-col-body { display: flex; flex-direction: column; gap: 6px; }
+  .job-col-empty { font-size: 11px; color: var(--text-dim); padding: 10px 4px; text-align: center; border: 1px dashed var(--border); border-radius: 6px; }
 
-  .job-card-state { flex-shrink: 0; width: 88px; }
-  .job-card-body  { flex: 1; min-width: 0; }
-  .job-card-skill { font-size: 12px; font-weight: 700; color: var(--text); letter-spacing: .5px; text-transform: uppercase; }
-  .job-card-prompt { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; max-width: 600px; }
-  .job-card-time { flex-shrink: 0; text-align: right; font-size: 11px; color: var(--text-dim); line-height: 1.6; min-width: 60px; }
-  .job-card-actions { flex-shrink: 0; display: flex; gap: 6px; }
+  .job-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; cursor: pointer; transition: border-color .15s, background .15s; }
+  .job-card:hover { background: #1c1c1c; border-color: #3a3a3a; }
+  .job-card-id { font-size: 10px; color: var(--text-dim); margin-bottom: 4px; font-family: monospace; }
+  .job-card-title { font-size: 13px; font-weight: 500; color: var(--text); margin-bottom: 4px; line-height: 1.35; }
+  .job-card-prompt { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 7px; }
+  .job-card-footer { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; justify-content: space-between; }
+  .job-card-dur { font-size: 10px; color: var(--text-dim); }
 
-  .job-btn { background: transparent; border: 1px solid var(--border); color: var(--text-dim); font-size: 11px; padding: 3px 8px; border-radius: 3px; cursor: pointer; font-family: inherit; letter-spacing: .5px; transition: all .15s; }
+  .job-btn { background: transparent; border: 1px solid var(--border); color: var(--text-dim); font-size: 10px; padding: 2px 7px; border-radius: 3px; cursor: pointer; font-family: inherit; letter-spacing: .5px; transition: all .15s; margin-top: 8px; display: inline-block; }
   .job-btn:hover { border-color: var(--accent-dim); color: var(--text); }
   .job-btn.retry { color: var(--accent); border-color: var(--accent-dim); }
   .job-btn.retry:hover { background: rgba(232,114,58,.1); }
@@ -310,8 +302,8 @@
         <div class="job-board-title">◈ Job Board</div>
         <div class="job-board-meta" id="job-board-meta">loading…</div>
       </div>
-      <div id="job-board-list">
-        <div class="job-board-empty">Loading runs…</div>
+      <div class="job-board-cols" id="job-board-cols">
+        <!-- columns built by JS -->
       </div>
     </div>
 
@@ -560,9 +552,16 @@ function openModal(skill, onConfirm) {
   document.getElementById('modal-confirm-btn').onclick = () => { closeModal(); onConfirm(); };
 }
 
-// ── Job Board ───────────────────────────────────────────────────────────────
+// ── Job Board — kanban columns ──────────────────────────────────────────────
 
 let _detailRunId = null;
+
+const JOB_COLS = [
+  { key: 'backlog',  label: 'Backlog',      states: ['sent'],                       dotClass: 'backlog' },
+  { key: 'running',  label: 'In Progress',  states: ['running'],                    dotClass: 'running' },
+  { key: 'review',   label: 'Human Review', states: ['failed', 'error', 'timeout'], dotClass: 'review'  },
+  { key: 'done',     label: 'Done',         states: ['success'],                    dotClass: 'done'    },
+];
 
 function _stateBadgeHtml(state) {
   const dot = state === 'running' ? '<span class="pulse-dot"></span>' : '';
@@ -570,89 +569,110 @@ function _stateBadgeHtml(state) {
   return `<span class="state-badge ${state}">${dot}${labels[state] || state}</span>`;
 }
 
-function _buildJobCard(run) {
-  const state = run.status || run.state || 'unknown';
-  const stateClass = state === 'success' ? 'is-success'
-    : state === 'failed' || state === 'error' ? 'is-failed'
-    : state === 'timeout' ? 'is-timeout'
-    : state === 'sent' ? 'is-sent'
-    : state === 'running' ? 'is-running' : '';
-  const prompt = (run.prompt || '').trim() || '—';
-  const when = run.when || '';
-  const dur = run.duration || '';
-  const canRetry = state !== 'running' && state !== 'sent';
-
-  const card = document.createElement('div');
-  card.className = `job-card ${stateClass}`;
-  card.dataset.runId = run.run_id || '';
-  card.innerHTML = `
-    <div class="job-card-state">${_stateBadgeHtml(state)}</div>
-    <div class="job-card-body">
-      <div class="job-card-skill">${_esc(run.skill || '?')}</div>
-      <div class="job-card-prompt">${_esc(prompt)}</div>
-    </div>
-    <div class="job-card-time">${_esc(when)}<br>${_esc(dur)}</div>
-    <div class="job-card-actions">
-      ${canRetry ? `<button class="job-btn retry" onclick="event.stopPropagation();retryRun('${run.run_id}')">↺</button>` : ''}
-      <button class="job-btn" onclick="event.stopPropagation();openDetailModal('${run.run_id}')">Detail</button>
-    </div>
-  `;
-  card.addEventListener('click', () => openDetailModal(run.run_id));
-  return card;
+function _shortId(run_id) {
+  if (!run_id) return 'AS-?';
+  if (run_id.startsWith('legacy-')) return run_id.replace('legacy-', 'AS-');
+  return 'AS-' + run_id.slice(0, 6);
 }
 
 function _esc(str) {
   return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+function _buildColCard(run) {
+  const state = run.status || run.state || 'unknown';
+  const card = document.createElement('div');
+  card.className = 'job-card';
+  card.dataset.runId = run.run_id || '';
+  const prompt = (run.prompt || '').trim();
+  const when = run.when || '';
+  const dur = run.duration || '';
+  const canRetry = state !== 'running' && state !== 'sent';
+  card.innerHTML = `
+    <div class="job-card-id">${_esc(_shortId(run.run_id))}</div>
+    <div class="job-card-title">${_esc((run.skill || '?').toUpperCase())}</div>
+    ${prompt ? `<div class="job-card-prompt">${_esc(prompt)}</div>` : ''}
+    <div class="job-card-footer">
+      <span>${when ? 'Updated ' + _esc(when) : '—'}</span>
+      <span class="job-card-dur">${_esc(dur)}</span>
+    </div>
+  `;
+  if (canRetry) {
+    const btn = document.createElement('button');
+    btn.className = 'job-btn retry';
+    btn.textContent = '↺ Retry';
+    btn.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id); };
+    card.appendChild(btn);
+  }
+  card.addEventListener('click', (e) => {
+    if (e.target.classList.contains('job-btn')) return;
+    openDetailModal(run.run_id);
+  });
+  return card;
+}
+
 async function refreshJobBoard() {
   try {
     const [runningRes, recentRes] = await Promise.all([
       fetch('/api/runs?state=running'),
-      fetch('/api/runs?limit=20'),
+      fetch('/api/runs?limit=40'),
     ]);
     const running = await runningRes.json();
     const recent  = await recentRes.json();
 
-    // Merge: running jobs first, then recent (dedup by run_id)
     const seen = new Set();
     const all = [];
     for (const r of running) {
-      if (r.run_id && !seen.has(r.run_id)) { seen.add(r.run_id); all.push({...r, state:'running', status:'running'}); }
+      if (r.run_id && !seen.has(r.run_id)) { seen.add(r.run_id); all.push({...r, status: 'running'}); }
     }
     for (const r of recent) {
       if (r.run_id && !seen.has(r.run_id)) { seen.add(r.run_id); all.push(r); }
     }
 
-    const list = document.getElementById('job-board-list');
-    const meta = document.getElementById('job-board-meta');
-    if (!list) return;
+    // Bucket by column
+    const byCol = {};
+    JOB_COLS.forEach(c => { byCol[c.key] = []; });
+    all.forEach(r => {
+      const state = r.status || r.state || 'unknown';
+      const col = JOB_COLS.find(c => c.states.includes(state));
+      if (col) byCol[col.key].push(r);
+    });
 
-    if (!all.length) {
-      list.innerHTML = '<div class="job-board-empty">No runs yet.</div>';
-      meta.textContent = '';
-      return;
-    }
+    const container = document.getElementById('job-board-cols');
+    if (!container) return;
 
-    const runningCount = all.filter(r => (r.status || r.state) === 'running').length;
-    meta.textContent = runningCount > 0 ? `${runningCount} running · ${all.length} total` : `${all.length} runs`;
+    const runningCount = byCol['running']?.length || 0;
+    document.getElementById('job-board-meta').textContent =
+      runningCount > 0 ? `${runningCount} running · ${all.length} total` : `${all.length} runs`;
 
     const frag = document.createDocumentFragment();
-    all.forEach(run => frag.appendChild(_buildJobCard(run)));
-    list.replaceChildren(frag);
+    JOB_COLS.forEach(col => {
+      const items = byCol[col.key] || [];
+      const colEl = document.createElement('div');
+      colEl.className = 'job-col';
+      colEl.dataset.colKey = col.key;
+      colEl.innerHTML = `
+        <div class="job-col-header">
+          <div class="job-col-dot ${col.dotClass}"></div>
+          <span class="job-col-title">${col.label}</span>
+          <span class="job-col-count">${items.length}</span>
+        </div>
+        <div class="job-col-body"></div>
+      `;
+      const body = colEl.querySelector('.job-col-body');
+      if (items.length === 0) {
+        body.innerHTML = '<div class="job-col-empty">No items</div>';
+      } else {
+        items.slice(0, 15).forEach(r => body.appendChild(_buildColCard(r)));
+      }
+      frag.appendChild(colEl);
+    });
+    container.replaceChildren(frag);
   } catch (_) {}
 }
 
 function updateJobCardState(run_id, state) {
-  const card = document.querySelector(`.job-card[data-run-id="${run_id}"]`);
-  if (!card) return;
-  card.className = `job-card is-${state}`;
-  const stateEl = card.querySelector('.job-card-state');
-  if (stateEl) stateEl.innerHTML = _stateBadgeHtml(state);
-  // Refresh full board after state change to get duration
-  if (state !== 'running') {
-    setTimeout(refreshJobBoard, 800);
-  }
+  setTimeout(refreshJobBoard, state === 'running' ? 0 : 600);
 }
 
 async function openDetailModal(run_id) {
