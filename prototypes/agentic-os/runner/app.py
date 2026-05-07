@@ -808,7 +808,7 @@ def api_run_detail(run_id: str):
 def api_run_set_status(run_id: str):
     data = request.get_json(silent=True) or {}
     new_status = data.get("status", "").strip()
-    allowed = {"success", "failed", "archived"}
+    allowed = {"success", "failed", "archived", "todo", "rework", "merging", "cancelled", "duplicate"}
     if new_status not in allowed:
         return jsonify({"error": f"status must be one of {allowed}"}), 400
     if not RUN_LOG.exists():

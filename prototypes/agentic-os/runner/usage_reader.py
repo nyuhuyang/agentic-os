@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 CLAUDE_DIR = Path.home() / ".claude"
-WORKSPACE_ROOT = Path(__file__).resolve().parents[4]
+WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 WORKSPACE_CLAUDE_DIR = WORKSPACE_ROOT / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 STATS_CACHE = CLAUDE_DIR / "stats-cache.json"

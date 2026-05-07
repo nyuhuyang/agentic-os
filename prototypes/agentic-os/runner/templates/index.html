@@ -84,10 +84,28 @@
   .job-col { flex: 0 0 260px; min-width: 0; }
   .job-col-header { display: flex; align-items: center; gap: 8px; padding: 6px 2px 10px; }
   .job-col-dot { width: 13px; height: 13px; border-radius: 50%; flex-shrink: 0; }
-  .job-col-dot.backlog { background: #555; }
-  .job-col-dot.running { background: var(--yellow); animation: pulse-dot 1.4s ease-in-out infinite; }
-  .job-col-dot.review  { background: var(--red); }
-  .job-col-dot.done    { background: var(--green); }
+  .job-col-dot.backlog   { background: #555; }
+  .job-col-dot.todo      { background: #64b5f6; }
+  .job-col-dot.running   { background: var(--yellow); animation: pulse-dot 1.4s ease-in-out infinite; }
+  .job-col-dot.review    { background: var(--red); }
+  .job-col-dot.rework    { background: #ffa726; }
+  .job-col-dot.merging   { background: #ab47bc; }
+  .job-col-dot.done      { background: var(--green); }
+  .job-col-dot.cancelled { background: #555; }
+  .job-col-dot.duplicate { background: #444; }
+
+  /* Hidden columns separator */
+  .hidden-sep { flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 6px 10px; border-left: 1px solid var(--border); cursor: pointer; transition: opacity .15s; min-width: 38px; }
+  .hidden-sep:hover { opacity: 1 !important; }
+  .hidden-sep-arrow { font-size: 11px; color: var(--text-dim); font-weight: 700; }
+  .hidden-sep-label { font-size: 8px; color: var(--text-dim); letter-spacing: 2px; text-transform: uppercase; writing-mode: vertical-rl; margin: 4px 0; }
+  .hidden-sep-badge { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--text-dim); }
+  .hidden-sep-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .hidden-sep-dot.rework    { background: #ffa726; }
+  .hidden-sep-dot.merging   { background: #ab47bc; }
+  .hidden-sep-dot.done      { background: var(--green); }
+  .hidden-sep-dot.cancelled { background: #555; }
+  .hidden-sep-dot.duplicate { background: #444; }
   .job-col-title { font-size: 13px; font-weight: 600; color: var(--text); }
   .job-col-count { font-size: 12px; color: var(--text-dim); margin-left: 2px; }
   .job-col-body { display: flex; flex-direction: column; gap: 6px; }
@@ -128,12 +146,17 @@
     font-size: 10px; padding: 2px 7px; border-radius: 3px;
     font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
   }
-  .state-badge.running { color: var(--accent); background: rgba(232,114,58,.14); border: 1px solid var(--accent-dim); }
-  .state-badge.success { color: var(--green); background: rgba(76,175,80,.10); border: 1px solid #2e7d32; }
-  .state-badge.failed  { color: var(--red); background: rgba(229,57,53,.10); border: 1px solid #b71c1c; }
-  .state-badge.timeout { color: var(--yellow); background: rgba(255,193,7,.10); border: 1px solid #f57f17; }
-  .state-badge.sent    { color: #a0a0a0; background: rgba(100,100,100,.10); border: 1px solid #444; }
-  .state-badge.error   { color: var(--red); background: rgba(229,57,53,.10); border: 1px solid #b71c1c; }
+  .state-badge.running   { color: var(--accent); background: rgba(232,114,58,.14); border: 1px solid var(--accent-dim); }
+  .state-badge.success   { color: var(--green); background: rgba(76,175,80,.10); border: 1px solid #2e7d32; }
+  .state-badge.failed    { color: var(--red); background: rgba(229,57,53,.10); border: 1px solid #b71c1c; }
+  .state-badge.timeout   { color: var(--yellow); background: rgba(255,193,7,.10); border: 1px solid #f57f17; }
+  .state-badge.sent      { color: #a0a0a0; background: rgba(100,100,100,.10); border: 1px solid #444; }
+  .state-badge.error     { color: var(--red); background: rgba(229,57,53,.10); border: 1px solid #b71c1c; }
+  .state-badge.todo      { color: #64b5f6; background: rgba(100,181,246,.10); border: 1px solid #1565c0; }
+  .state-badge.rework    { color: #ffa726; background: rgba(255,167,38,.10);  border: 1px solid #e65100; }
+  .state-badge.merging   { color: #ab47bc; background: rgba(171,71,188,.10);  border: 1px solid #6a1b9a; }
+  .state-badge.cancelled { color: #888;    background: rgba(100,100,100,.10); border: 1px solid #444; }
+  .state-badge.duplicate { color: #666;    background: rgba(80,80,80,.10);    border: 1px solid #3a3a3a; }
 
   .pulse-dot {
     width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
@@ -586,16 +609,82 @@ function openModal(skill, onConfirm) {
 let _detailRunId = null;
 
 const JOB_COLS = [
-  { key: 'backlog',  label: 'Backlog',      states: ['sent'],                       dotClass: 'backlog', droppable: false },
-  { key: 'running',  label: 'In Progress',  states: ['running'],                    dotClass: 'running', droppable: false },
-  { key: 'review',   label: 'Human Review', states: ['failed', 'error', 'timeout'], dotClass: 'review',  droppable: true, dropStatus: 'failed'  },
-  { key: 'done',     label: 'Done',         states: ['success'],                    dotClass: 'done',    droppable: true, dropStatus: 'success' },
+  { key: 'backlog', label: 'Backlog',      states: ['sent'],                       dotClass: 'backlog', droppable: false },
+  { key: 'todo',    label: 'Todo',         states: ['todo'],                       dotClass: 'todo',    droppable: true, dropStatus: 'todo'   },
+  { key: 'running', label: 'In Progress',  states: ['running'],                    dotClass: 'running', droppable: false },
+  { key: 'review',  label: 'Human Review', states: ['failed', 'error', 'timeout'], dotClass: 'review',  droppable: true, dropStatus: 'failed' },
 ];
+
+const HIDDEN_COLS = [
+  { key: 'rework',    label: 'Rework',     states: ['rework'],     dotClass: 'rework',    droppable: true, dropStatus: 'rework'    },
+  { key: 'merging',   label: 'Merging',    states: ['merging'],    dotClass: 'merging',   droppable: true, dropStatus: 'merging'   },
+  { key: 'done',      label: 'Done',       states: ['success'],    dotClass: 'done',      droppable: true, dropStatus: 'success'   },
+  { key: 'cancelled', label: 'Canceled',   states: ['cancelled'],  dotClass: 'cancelled', droppable: true, dropStatus: 'cancelled' },
+  { key: 'duplicate', label: 'Duplicated', states: ['duplicate'],  dotClass: 'duplicate', droppable: true, dropStatus: 'duplicate' },
+];
+
+const ALL_COLS = [...JOB_COLS, ...HIDDEN_COLS];
 
 function _stateBadgeHtml(state) {
   const dot = state === 'running' ? '<span class="pulse-dot"></span>' : '';
-  const labels = { running: 'Running', success: 'Done', failed: 'Failed', timeout: 'Timeout', sent: 'Sent', error: 'Error' };
+  const labels = {
+    running: 'Running', success: 'Done', failed: 'Failed', timeout: 'Timeout',
+    sent: 'Sent', error: 'Error', todo: 'Todo', rework: 'Rework',
+    merging: 'Merging', cancelled: 'Canceled', duplicate: 'Duplicated',
+  };
   return `<span class="state-badge ${state}">${dot}${labels[state] || state}</span>`;
+}
+
+function _buildCol(col, items) {
+  const colEl = document.createElement('div');
+  colEl.className = 'job-col';
+  colEl.dataset.colKey = col.key;
+  colEl.innerHTML = `
+    <div class="job-col-header">
+      <div class="job-col-dot ${col.dotClass}"></div>
+      <span class="job-col-title">${col.label}</span>
+      <span class="job-col-count">${items.length}</span>
+    </div>
+    <div class="job-col-body"></div>
+  `;
+  const body = colEl.querySelector('.job-col-body');
+  if (items.length === 0) {
+    body.innerHTML = '<div class="job-col-empty">No items</div>';
+  } else {
+    items.slice(0, 15).forEach(r => body.appendChild(_buildColCard(r)));
+  }
+  if (col.droppable) {
+    body.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      body.style.outline = '2px solid var(--accent)';
+      body.style.borderRadius = '6px';
+    });
+    body.addEventListener('dragleave', () => { body.style.outline = ''; });
+    body.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      body.style.outline = '';
+      const run_id = e.dataTransfer.getData('text/plain');
+      if (!run_id) return;
+      await fetch(`/api/runs/${run_id}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: col.dropStatus }),
+      });
+      refreshJobBoard();
+    });
+  }
+  return colEl;
+}
+
+let _hiddenColsOpen = false;
+
+function toggleHiddenCols() {
+  _hiddenColsOpen = !_hiddenColsOpen;
+  const group = document.getElementById('hidden-cols-group');
+  const arrow = document.getElementById('hidden-sep-arrow');
+  if (group) group.style.display = _hiddenColsOpen ? 'contents' : 'none';
+  if (arrow) arrow.textContent = _hiddenColsOpen ? '◀' : '▶';
 }
 
 function _shortId(run_id) {
@@ -669,12 +758,11 @@ async function refreshJobBoard() {
       if (r.run_id && !seen.has(r.run_id)) { seen.add(r.run_id); all.push(r); }
     }
 
-    // Bucket by column
     const byCol = {};
-    JOB_COLS.forEach(c => { byCol[c.key] = []; });
+    ALL_COLS.forEach(c => { byCol[c.key] = []; });
     all.forEach(r => {
       const state = r.status || r.state || 'unknown';
-      const col = JOB_COLS.find(c => c.states.includes(state));
+      const col = ALL_COLS.find(c => c.states.includes(state));
       if (col) byCol[col.key].push(r);
     });
 
@@ -686,48 +774,35 @@ async function refreshJobBoard() {
       runningCount > 0 ? `${runningCount} running · ${all.length} total` : `${all.length} runs`;
 
     const frag = document.createDocumentFragment();
-    JOB_COLS.forEach(col => {
-      const items = byCol[col.key] || [];
-      const colEl = document.createElement('div');
-      colEl.className = 'job-col';
-      colEl.dataset.colKey = col.key;
-      colEl.innerHTML = `
-        <div class="job-col-header">
-          <div class="job-col-dot ${col.dotClass}"></div>
-          <span class="job-col-title">${col.label}</span>
-          <span class="job-col-count">${items.length}</span>
+
+    // Visible columns
+    JOB_COLS.forEach(col => frag.appendChild(_buildCol(col, byCol[col.key] || [])));
+
+    // Hidden separator
+    const sep = document.createElement('div');
+    sep.className = 'hidden-sep';
+    sep.id = 'hidden-cols-sep';
+    sep.style.opacity = _hiddenColsOpen ? '1' : '0.5';
+    sep.onclick = toggleHiddenCols;
+    sep.innerHTML = `
+      <div class="hidden-sep-arrow" id="hidden-sep-arrow">${_hiddenColsOpen ? '◀' : '▶'}</div>
+      <div class="hidden-sep-label">HIDDEN</div>
+      ${HIDDEN_COLS.map(c => `
+        <div class="hidden-sep-badge" title="${c.label}">
+          <div class="hidden-sep-dot ${c.dotClass}"></div>
+          <span>${byCol[c.key]?.length || 0}</span>
         </div>
-        <div class="job-col-body"></div>
-      `;
-      const body = colEl.querySelector('.job-col-body');
-      if (items.length === 0) {
-        body.innerHTML = '<div class="job-col-empty">No items</div>';
-      } else {
-        items.slice(0, 15).forEach(r => body.appendChild(_buildColCard(r)));
-      }
-      if (col.droppable) {
-        body.addEventListener('dragover', (e) => {
-          e.preventDefault();
-          e.dataTransfer.dropEffect = 'move';
-          body.style.outline = '2px solid var(--accent)';
-          body.style.borderRadius = '6px';
-        });
-        body.addEventListener('dragleave', () => { body.style.outline = ''; });
-        body.addEventListener('drop', async (e) => {
-          e.preventDefault();
-          body.style.outline = '';
-          const run_id = e.dataTransfer.getData('text/plain');
-          if (!run_id) return;
-          await fetch(`/api/runs/${run_id}/status`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ status: col.dropStatus }),
-          });
-          refreshJobBoard();
-        });
-      }
-      frag.appendChild(colEl);
-    });
+      `).join('')}
+    `;
+    frag.appendChild(sep);
+
+    // Hidden columns group — display:contents makes children direct flex items
+    const group = document.createElement('div');
+    group.id = 'hidden-cols-group';
+    group.style.display = _hiddenColsOpen ? 'contents' : 'none';
+    HIDDEN_COLS.forEach(col => group.appendChild(_buildCol(col, byCol[col.key] || [])));
+    frag.appendChild(group);
+
     container.replaceChildren(frag);
   } catch (_) {}
 }
