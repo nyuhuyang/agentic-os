@@ -21,8 +21,20 @@ from pathlib import Path
 from typing import Any
 
 CLAUDE_DIR = Path.home() / ".claude"
-WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
-WORKSPACE_CLAUDE_DIR = WORKSPACE_ROOT / ".claude"
+_PROTO = Path(__file__).resolve().parents[1]         # agentic-os/
+
+def _find_workspace_claude_dir() -> Path:
+    # Walk up from _PROTO looking for a .claude dir that has rate-limits-live.json
+    p = _PROTO
+    for _ in range(5):
+        candidate = p / ".claude"
+        if (candidate / "rate-limits-live.json").exists():
+            return candidate
+        p = p.parent
+    return _PROTO / ".claude"  # fallback
+
+_workspace_claude_env = os.environ.get("WORKSPACE_CLAUDE_DIR", "").strip()
+WORKSPACE_CLAUDE_DIR = Path(_workspace_claude_env).expanduser() if _workspace_claude_env else _find_workspace_claude_dir()
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 STATS_CACHE = CLAUDE_DIR / "stats-cache.json"
 CODEX_DB = Path.home() / ".codex" / "state_5.sqlite"
@@ -441,9 +453,9 @@ def _claude_window_range(since: datetime, until: datetime) -> dict[str, Any]:
                         continue
                     i = usage.get("input_tokens", 0)
                     o = usage.get("output_tokens", 0)
-                    r = usage.get("cache_read_input_tokens", 0)
                     c = usage.get("cache_creation_input_tokens", 0)
-                    tokens += i + o + r + c
+                    # Exclude cache_read_input_tokens: billed at 0.1x, inflates count 10-20x
+                    tokens += i + o + c
                     out += o
                     sid = record.get("sessionId", "")
                     if sid:
@@ -500,35 +512,24 @@ def _reset_label(earliest_ts: datetime | None, window_hours: float, now: datetim
     return f"{h}h{m:02d}m" if h else f"{m}m"
 
 
-def _cost_today_claude(now: datetime) -> float:
-    today_str = now.strftime("%Y-%m-%d")
-    data = _collect_jsonl_usage(today_str)
-    cost = 0.0
-    for model, stats in data["by_model"].items():
-        price = MODEL_PRICES.get(model, DEFAULT_PRICE)
-        cost += stats.get("output_tokens", 0) / 1_000_000 * price
-    return round(cost, 4)
+def _today_stats_claude(now: datetime) -> dict[str, Any]:
+    """Tokens, sessions, and estimated cost for today (local calendar day)."""
+    # Use local midnight so non-UTC users see their own "today", not UTC's.
+    local_midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    local_midnight_utc = local_midnight.astimezone(timezone.utc)
+    data = _claude_window_range(local_midnight_utc, now)
+    tokens = data["tokens"]
+    sessions = data["sessions"]
+    cost = round(data.get("output", 0) / 1_000_000 * DEFAULT_PRICE, 4)
+    return {"tokens": tokens, "sessions": sessions, "cost": cost}
 
 
-def _cost_today_codex(now: datetime) -> float:
-    if not CODEX_DB.exists():
-        return 0.0
-    try:
-        import sqlite3
-        db = sqlite3.connect(str(CODEX_DB))
-        today_ts = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-        rows = db.execute(
-            "SELECT model, COALESCE(SUM(tokens_used),0) FROM threads "
-            "WHERE created_at >= ? AND tokens_used > 0 GROUP BY model",
-            (today_ts,),
-        ).fetchall()
-        cost = 0.0
-        for model, tokens in rows:
-            price = MODEL_PRICES.get(model, DEFAULT_PRICE)
-            cost += tokens / 1_000_000 * price
-        return round(cost, 4)
-    except Exception:
-        return 0.0
+def _fmt_tok(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
 
 
 def _count_runs_today(run_log_path: Path, now: datetime) -> int:
@@ -567,8 +568,7 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
     def _pct(val: int, lim: int) -> int:
         return min(100, round(val / lim * 100)) if lim else 0
 
-    runs_today = _count_runs_today(run_log_path, now)
-    cost_today = _cost_today_claude(now) if agent != "codex" else _cost_today_codex(now)
+    today_stats = _today_stats_claude(now) if agent != "codex" else None
 
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     secs_to_midnight = int((midnight - now).total_seconds())
@@ -648,7 +648,7 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
                     "window_minutes": secondary.get("window_minutes", 10080),
                 },
                 "aux": {
-                    "title":      "Today",
+                    "title":      "Today Tokens",
                     "reset":      midnight_label,
                     "pct":        0,
                     "value_line": f"{today_tokens:,} local tokens".replace(",", "_").replace("_", ","),
@@ -705,11 +705,15 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
                     "window_minutes": 10080,
                 },
                 "aux": {
-                    "title":      "Local Runs Today",
+                    "title":      "Today Tokens",
                     "reset":      midnight_label,
-                    "pct":        _pct(runs_today, lim_runs),
-                    "value_line": f"{runs_today} / {lim_runs}",
-                    "sub_line":   f"${cost_today:.3f} output cost today",
+                    "pct":        _pct(today_stats["tokens"], lim_7d // 7),
+                    "value_line": f"{_fmt_tok(today_stats['tokens'])} tokens",
+                    "sub_line":   (
+                        f"${today_stats['cost']:.3f} est. cost"
+                        f" · {today_stats['sessions']} session"
+                        f"{'s' if today_stats['sessions'] != 1 else ''}"
+                    ),
                 },
             }
 
@@ -742,11 +746,15 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
                              f" · {cur_7d['sessions']} sessions",
         },
         "aux": {
-            "title":      "Local Runs Today",
+            "title":      "Today Tokens",
             "reset":      midnight_label,
-            "pct":        _pct(runs_today, lim_runs),
-            "value_line": f"{runs_today} / {lim_runs}",
-            "sub_line":   f"${cost_today:.3f} output cost today",
+            "pct":        _pct(today_stats["tokens"], lim_7d // 7),
+            "value_line": f"{_fmt_tok(today_stats['tokens'])} tokens",
+            "sub_line":   (
+                f"${today_stats['cost']:.3f} est. cost"
+                f" · {today_stats['sessions']} session"
+                f"{'s' if today_stats['sessions'] != 1 else ''}"
+            ),
         },
     }
 
@@ -764,7 +772,6 @@ def compute_stats(days: int = 30) -> dict[str, Any]:
     today_tokens = (
         today_data.get("input_tokens", 0)
         + today_data.get("output_tokens", 0)
-        + today_data.get("cache_read", 0)
         + today_data.get("cache_creation", 0)
     )
 
@@ -775,14 +782,14 @@ def compute_stats(days: int = 30) -> dict[str, Any]:
     for i in range(7):
         d = (datetime.now(timezone.utc) - timedelta(days=i)).strftime("%Y-%m-%d")
         dd = daily.get(d, {})
-        week_tokens   += dd.get("input_tokens", 0) + dd.get("output_tokens", 0) + dd.get("cache_read", 0) + dd.get("cache_creation", 0)
+        week_tokens   += dd.get("input_tokens", 0) + dd.get("output_tokens", 0) + dd.get("cache_creation", 0)
         week_messages += dd.get("messages", 0)
         week_sessions += dd.get("sessions", 0)
 
     # Total across window
     total_tokens = sum(
         dd.get("input_tokens", 0) + dd.get("output_tokens", 0)
-        + dd.get("cache_read", 0) + dd.get("cache_creation", 0)
+        + dd.get("cache_creation", 0)
         for dd in daily.values()
     )
 

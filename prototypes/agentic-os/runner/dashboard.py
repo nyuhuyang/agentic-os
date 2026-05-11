@@ -4,11 +4,11 @@
 Displays skill registry state, recent run history, and quick-run commands.
 
 Usage:
-    .venv/bin/python3 .codex/runner/dashboard.py
-    .venv/bin/python3 .codex/runner/dashboard.py --watch          # refresh every 10s
-    .venv/bin/python3 .codex/runner/dashboard.py --watch 30       # refresh every 30s
-    .venv/bin/python3 .codex/runner/dashboard.py --runs 20        # show last 20 runs
-    .venv/bin/python3 .codex/runner/dashboard.py --skill <name>   # detail view for one skill
+    .venv/bin/python3 runner/dashboard.py
+    .venv/bin/python3 runner/dashboard.py --watch          # refresh every 10s
+    .venv/bin/python3 runner/dashboard.py --watch 30       # refresh every 30s
+    .venv/bin/python3 runner/dashboard.py --runs 20        # show last 20 runs
+    .venv/bin/python3 runner/dashboard.py --skill <name>   # detail view for one skill
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ OUTPUTS_DIR = ROOT / "outputs"
 RUN_LOG = OUTPUTS_DIR / "run_log.jsonl"
 JOB_STATE = OUTPUTS_DIR / "job_state.json"
 
-RUNNER_CMD = ".venv/bin/python3 .codex/runner/run_skill.py"
+RUNNER_CMD = ".venv/bin/python3 runner/run_skill.py"
 
 STATUS_STYLE = {
     "success": "green",

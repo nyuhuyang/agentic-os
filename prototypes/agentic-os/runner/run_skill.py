@@ -5,11 +5,11 @@ Wraps execution of a skill's entrypoint script with structured logging,
 state tracking, and optional retry.
 
 Usage:
-    .venv/bin/python3 .codex/runner/run_skill.py <skill> [-- <args...>]
-    .venv/bin/python3 .codex/runner/run_skill.py yt-pipeline -- --query "RAG" --goal "survey"
-    .venv/bin/python3 .codex/runner/run_skill.py llm-wiki-lint
-    .venv/bin/python3 .codex/runner/run_skill.py --list
-    .venv/bin/python3 .codex/runner/run_skill.py --status
+    .venv/bin/python3 runner/run_skill.py <skill> [-- <args...>]
+    .venv/bin/python3 runner/run_skill.py yt-pipeline -- --query "RAG" --goal "survey"
+    .venv/bin/python3 runner/run_skill.py llm-wiki-lint
+    .venv/bin/python3 runner/run_skill.py --list
+    .venv/bin/python3 runner/run_skill.py --status
 
 Logs:
     outputs/run_log.jsonl    append-only run record per execution
@@ -34,16 +34,18 @@ try:
 except ImportError:
     _HAVE_FCNTL = False  # Windows fallback: locking skipped
 
-ROOT = Path.cwd()
-# Registry lives at workspace root (AI_Workspace/.codex/), not inside knowledge_base.
-WORKSPACE_ROOT = ROOT.parent.parent
-REGISTRY_JSON = WORKSPACE_ROOT / ".codex" / "registry.json"
-OUTPUTS_DIR = ROOT / "outputs"
+_HERE = Path(__file__).resolve().parent              # runner/
+_PROTO = _HERE.parent                                # agentic-os root
+
+ROOT = _PROTO
+
+REGISTRY_JSON = Path(os.environ.get("REGISTRY_JSON", str(_PROTO / ".codex" / "registry.json")))
+OUTPUTS_DIR = _PROTO / "outputs"
 RUN_LOG = OUTPUTS_DIR / "run_log.jsonl"
 JOB_STATE = OUTPUTS_DIR / "job_state.json"
 LOCKS_DIR = OUTPUTS_DIR / "locks"
 
-VENV_PYTHON = ROOT / ".venv" / "bin" / "python3"
+VENV_PYTHON = _PROTO / ".venv" / "bin" / "python3"
 
 
 def _python() -> str:
@@ -286,7 +288,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Job runner for schedulable skills.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Example: .venv/bin/python3 .codex/runner/run_skill.py yt-pipeline -- --query 'AI agents' --goal 'survey'",
+        epilog="Example: .venv/bin/python3 runner/run_skill.py yt-pipeline -- --query 'AI agents' --goal 'survey'",
     )
     parser.add_argument("skill", nargs="?", help="Skill name to run.")
     parser.add_argument("skill_args", nargs=argparse.REMAINDER, help="Arguments forwarded to the skill script (after --).")

@@ -32,17 +32,20 @@
 
   /* Header */
   .logo { color: var(--accent); font-size: 16px; font-weight: 700; letter-spacing: 2px; margin-right: 4px; }
-  .stat-chip { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 3px 9px; font-size: 12px; color: var(--text-dim); }
+  .stat-chip { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 3px 9px; font-family: inherit; font-size: 12px; color: var(--text-dim); }
+  button.stat-chip { cursor: pointer; }
+  button.stat-chip:hover { color: var(--text); }
   .stat-chip span { color: var(--text); font-weight: 600; }
-  .header-right { margin-left: auto; color: var(--text-dim); font-size: 11px; }
+  .header-right { margin-left: 12px; color: var(--text-dim); font-size: 11px; }
 
-  /* Agent toggle — in header */
+  /* Agent toggle */
   .agent-toggle { display: flex; gap: 0; }
   .agent-btn { padding: 4px 12px; border: 1px solid var(--border); background: var(--bg); color: var(--text-dim); font-family: inherit; font-size: 11px; cursor: pointer; letter-spacing: 1px; text-transform: uppercase; transition: all .15s; }
   .agent-btn:first-child { border-radius: 4px 0 0 4px; }
   .agent-btn:last-child  { border-radius: 0 4px 4px 0; border-left: none; }
   .agent-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); font-weight: 700; }
   .agent-btn:not(.active):hover { border-color: var(--accent-dim); color: var(--text); }
+  .agent-toggle.inline-agent-toggle .agent-btn { padding: 2px 8px; font-size: 9px; letter-spacing: .6px; }
 
   /* Window cards */
   .windows-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 20px; }
@@ -108,11 +111,44 @@
   .hidden-sep-dot.duplicate { background: #444; }
   .job-col-title { font-size: 13px; font-weight: 600; color: var(--text); }
   .job-col-count { font-size: 12px; color: var(--text-dim); margin-left: 2px; }
+  .col-toggle-btn { margin-left: auto; background: none; border: none; color: var(--text-dim); font-size: 10px; cursor: pointer; padding: 0 2px; line-height: 1; }
+  .col-toggle-btn:hover { color: var(--text); }
+  .col-add-btn { margin-left: auto; background: none; border: none; color: var(--text-dim); font-size: 16px; line-height: 1; cursor: pointer; padding: 0 3px; font-weight: 400; }
+  .col-add-btn:hover { color: var(--accent); }
+  .job-col-collapsed { min-width: 90px; max-width: 90px; opacity: 0.6; }
+  .detail-reply-input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-family: inherit; font-size: 12px; padding: 8px 10px; resize: vertical; box-sizing: border-box; }
+  .detail-reply-input:focus { outline: none; border-color: var(--accent-dim); }
+  .detail-reply-status { margin-top: 4px; min-height: 12px; font-size: 10px; color: var(--text-dim); }
+  /* New issue modal */
+  .new-issue-modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 300; align-items: center; justify-content: center; }
+  .new-issue-modal-bg.open { display: flex; }
+  .new-issue-modal { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; width: 100%; max-width: 480px; padding: 24px; }
+  .new-issue-modal h3 { font-size: 13px; color: var(--accent); letter-spacing: 1px; text-transform: uppercase; margin: 0 0 18px; }
+  .new-issue-field { margin-bottom: 14px; }
+  .new-issue-label { font-size: 10px; color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 5px; }
+  .new-issue-input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-family: inherit; font-size: 13px; padding: 8px 10px; box-sizing: border-box; }
+  .new-issue-input:focus { outline: none; border-color: var(--accent-dim); }
+  textarea.new-issue-input { resize: vertical; min-height: 80px; }
+  .new-issue-agent-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .new-issue-agent-hint { font-size: 10px; color: var(--text-dim); white-space: nowrap; }
+  .new-issue-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+  .new-issue-cancel { background: none; border: 1px solid var(--border); color: var(--text-dim); font-family: inherit; font-size: 12px; padding: 6px 16px; border-radius: 4px; cursor: pointer; }
+  .new-issue-submit { background: var(--accent); border: none; color: #fff; font-family: inherit; font-size: 12px; font-weight: 700; padding: 6px 18px; border-radius: 4px; cursor: pointer; letter-spacing: .5px; }
+  .new-issue-submit:disabled { opacity: .4; cursor: default; }
+  .new-issue-status { font-size: 11px; color: var(--text-dim); align-self: center; margin-right: auto; }
   .job-col-body { display: flex; flex-direction: column; gap: 6px; }
+  .job-col-body.drag-over { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
   .job-col-empty { font-size: 11px; color: var(--text-dim); padding: 10px 4px; text-align: center; border: 1px dashed var(--border); border-radius: 6px; }
 
   .job-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; cursor: pointer; transition: border-color .15s, background .15s; position: relative; }
   .job-card:hover { background: #1c1c1c; border-color: #3a3a3a; }
+  .job-card[draggable="true"] {
+    cursor: grab;
+    user-select: none;
+    -webkit-user-select: none;
+    -webkit-user-drag: element;
+  }
+  .job-card.dragging { opacity: 0.55; }
   .job-card-dismiss { position: absolute; top: 6px; right: 7px; background: transparent; border: none; color: var(--text-dim); font-size: 13px; line-height: 1; cursor: pointer; padding: 0 2px; opacity: 0; transition: opacity .15s; }
   .job-card:hover .job-card-dismiss { opacity: 1; }
   .job-card-dismiss:hover { color: var(--red); }
@@ -120,22 +156,52 @@
   .job-card-title { font-size: 13px; font-weight: 500; color: var(--text); margin-bottom: 4px; line-height: 1.35; }
   .job-card-prompt { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 7px; }
   .job-card-footer { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; justify-content: space-between; }
-  .job-card-dur { font-size: 10px; color: var(--text-dim); }
+  .job-card-dur { font-size: 10px; color: var(--text-dim); display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 
   .job-btn { background: transparent; border: 1px solid var(--border); color: var(--text-dim); font-size: 10px; padding: 2px 7px; border-radius: 3px; cursor: pointer; font-family: inherit; letter-spacing: .5px; transition: all .15s; margin-top: 8px; display: inline-block; }
   .job-btn:hover { border-color: var(--accent-dim); color: var(--text); }
   .job-btn.retry { color: var(--accent); border-color: var(--accent-dim); }
   .job-btn.retry:hover { background: rgba(232,114,58,.1); }
+  .job-btn.retry-claude { color: var(--accent); border-color: var(--accent-dim); }
+  .job-btn.retry-claude:hover { background: rgba(232,114,58,.12); }
+  .job-btn.retry-codex { color: #6fb5d4; border-color: #3a6a80; }
+  .job-btn.retry-codex:hover { background: rgba(111,181,212,.1); }
+  .job-btn-group { display: inline-flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
+  .job-card-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  .model-badge { font-size: 8px; color: var(--text-dim); background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 3px; padding: 0 5px; letter-spacing: .2px; vertical-align: middle; white-space: nowrap; }
+  .agent-badge {
+    font-size: 9px; border-radius: 3px; padding: 0 5px; letter-spacing: .3px;
+    vertical-align: middle; cursor: pointer; border: 1px solid; font-weight: 700;
+    text-transform: uppercase; font-family: inherit; line-height: 1.2;
+    display: inline-flex; align-items: center; justify-content: center;
+    appearance: none; -webkit-appearance: none;
+  }
+  .agent-badge.claude { color: #e8a87c; border-color: rgba(232,168,124,.4); background: rgba(232,168,124,.1); }
+  .agent-badge.codex  { color: #6fb5d4; border-color: rgba(111,181,212,.4); background: rgba(111,181,212,.1); }
+  .agent-badge.none   { color: var(--text-dim); border-color: var(--border); background: rgba(255,255,255,0.04); }
+  .agent-badge:hover { opacity: .75; }
+  .agent-badge.locked { cursor: default; opacity: .45; }
+  .agent-badge.active { opacity: 1; box-shadow: 0 0 0 1px rgba(255,255,255,.08) inset; }
+  .todo-agent-toggle { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+  .todo-run-btn { background: transparent; border: 1px solid var(--border); color: var(--text-dim); font-size: 10px; padding: 2px 7px; border-radius: 3px; cursor: pointer; font-family: inherit; letter-spacing: .4px; transition: all .15s; }
+  .todo-run-btn.claude { color: var(--accent); border-color: var(--accent-dim); }
+  .todo-run-btn.claude:hover { background: rgba(232,114,58,.12); border-color: var(--accent); }
+  .todo-run-btn.claude.selected { background: rgba(232,114,58,.10); border-color: var(--accent); }
+  .todo-run-btn.codex { color: #6fb5d4; border-color: #3a6a80; }
+  .todo-run-btn.codex:hover { background: rgba(111,181,212,.12); border-color: #6fb5d4; }
+  .todo-run-btn.codex.selected { background: rgba(111,181,212,.10); border-color: #6fb5d4; }
 
   /* Trash panel */
-  .trash-toggle { background: transparent; border: 1px solid var(--border); color: var(--text-dim); font-size: 11px; padding: 3px 9px; border-radius: 3px; cursor: pointer; font-family: inherit; transition: all .15s; }
-  .trash-toggle:hover { border-color: var(--text-dim); color: var(--text); }
-  .trash-panel { margin-top: 16px; padding-top: 14px; border-top: 1px dashed var(--border); }
+  .trash-toggle { background: rgba(100,100,100,.10); border: 1px solid #3e3e3e; color: #9a9a9a; font-size: 11px; padding: 3px 9px; border-radius: 3px; cursor: pointer; font-family: inherit; transition: all .15s; }
+  .trash-toggle:hover { border-color: #5a5a5a; color: #c2c2c2; background: rgba(130,130,130,.12); }
+  .trash-toggle.open { color: #d1d1d1; border-color: #666; background: rgba(130,130,130,.16); }
+  .trash-panel { margin-top: 16px; padding-top: 14px; border-top: 1px dashed #303030; }
   .trash-panel-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; font-size: 11px; color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; }
   .trash-panel-header button { background: transparent; border: none; color: var(--text-dim); font-size: 12px; cursor: pointer; padding: 0; }
   .trash-panel-header button:hover { color: var(--text); }
   .trash-cards { display: flex; flex-wrap: wrap; gap: 8px; }
-  .trash-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; min-width: 200px; max-width: 260px; opacity: 0.7; }
+  .trash-card { background: rgba(80,80,80,.08); border: 1px solid #323232; border-radius: 6px; padding: 8px 12px; min-width: 200px; max-width: 260px; opacity: 0.78; cursor: pointer; transition: border-color .15s, background .15s, opacity .15s; }
+  .trash-card:hover { border-color: #4a4a4a; background: rgba(110,110,110,.10); opacity: 0.92; }
   .trash-card-id { font-size: 10px; color: var(--text-dim); margin-bottom: 3px; font-family: monospace; }
   .trash-card-title { font-size: 12px; font-weight: 500; color: var(--text); margin-bottom: 6px; }
   .trash-card-meta { font-size: 11px; color: var(--text-dim); margin-bottom: 6px; }
@@ -150,6 +216,7 @@
   .state-badge.success   { color: var(--green); background: rgba(76,175,80,.10); border: 1px solid #2e7d32; }
   .state-badge.failed    { color: var(--red); background: rgba(229,57,53,.10); border: 1px solid #b71c1c; }
   .state-badge.timeout   { color: var(--yellow); background: rgba(255,193,7,.10); border: 1px solid #f57f17; }
+  .state-badge.stalled   { color: var(--yellow); background: rgba(255,193,7,.10); border: 1px solid #f57f17; }
   .state-badge.sent      { color: #a0a0a0; background: rgba(100,100,100,.10); border: 1px solid #444; }
   .state-badge.error     { color: var(--red); background: rgba(229,57,53,.10); border: 1px solid #b71c1c; }
   .state-badge.todo      { color: #64b5f6; background: rgba(100,181,246,.10); border: 1px solid #1565c0; }
@@ -157,6 +224,15 @@
   .state-badge.merging   { color: #ab47bc; background: rgba(171,71,188,.10);  border: 1px solid #6a1b9a; }
   .state-badge.cancelled { color: #888;    background: rgba(100,100,100,.10); border: 1px solid #444; }
   .state-badge.duplicate { color: #666;    background: rgba(80,80,80,.10);    border: 1px solid #3a3a3a; }
+  .state-badge.queued    { color: #64b5f6; background: rgba(100,181,246,.10); border: 1px solid #1565c0; }
+
+  /* Running card extras */
+  .job-card-status-line { font-size: 10px; color: var(--text-dim); margin: 3px 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-style: italic; }
+  .job-card-elapsed { font-size: 10px; color: var(--accent); font-weight: 600; }
+  .job-card-turn { font-size: 10px; color: var(--text-dim); }
+  .job-card-attempt { font-size: 10px; color: #ffa726; font-weight: 600; }
+  .cancel-btn { background: transparent; border: 1px solid #b71c1c; color: var(--red); font-size: 10px; padding: 2px 7px; border-radius: 3px; cursor: pointer; font-family: inherit; letter-spacing: .5px; transition: all .15s; margin-top: 8px; display: inline-block; }
+  .cancel-btn:hover { background: rgba(229,57,53,.15); }
 
   .pulse-dot {
     width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
@@ -170,6 +246,32 @@
 
   /* Skill cards */
   .skill-card.agent-disabled { opacity: 0.28; pointer-events: none; }
+  .skill-panel {
+    margin: 18px 0 24px;
+    padding: 16px 18px 18px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .skill-panel-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding-bottom: 8px;
+    margin-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .skill-panel-title {
+    font-size: 12px;
+    color: var(--accent);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .skill-panel-subtitle {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
   .stack-section { margin-bottom: 20px; }
   .stack-label { font-size: 12px; color: var(--accent); letter-spacing: 2px; text-transform: uppercase; margin-bottom: 10px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
   .skill-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
@@ -187,6 +289,28 @@
   .badge.risk-write { color: #64b5f6; border-color: #1565c0; }
   .badge.risk-external { color: var(--yellow); border-color: #f57f17; }
   .badge.risk-destructive { color: var(--red); border-color: #b71c1c; }
+
+  /* Linear project selector */
+  .linear-selector { position: relative; display: none; }
+  .linear-selector.visible { display: flex; align-items: center; gap: 6px; }
+  .linear-selector-btn { background: var(--bg); border: 1px solid var(--border); color: var(--text-dim); font-family: inherit; font-size: 11px; padding: 3px 8px; border-radius: 4px; cursor: pointer; letter-spacing: .5px; white-space: nowrap; max-width: 160px; overflow: hidden; text-overflow: ellipsis; }
+  .linear-selector-btn:hover { border-color: var(--accent-dim); color: var(--text); }
+  .linear-dropdown { position: absolute; top: calc(100% + 4px); left: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; min-width: 200px; z-index: 200; box-shadow: 0 4px 16px rgba(0,0,0,.5); display: none; }
+  .linear-dropdown.open { display: block; }
+  .linear-dropdown-item { padding: 7px 12px; font-size: 12px; cursor: pointer; color: var(--text-dim); transition: background .1s; }
+  .linear-dropdown-item:hover, .linear-dropdown-item.active { background: rgba(232,114,58,.12); color: var(--text); }
+  .linear-dropdown-item.active { font-weight: 600; }
+
+  /* Linear edit section in detail modal */
+  .linear-edit-field { margin-bottom: 10px; }
+  .linear-edit-label { font-size: 10px; color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 4px; }
+  .linear-edit-input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-family: inherit; font-size: 12px; padding: 6px 10px; resize: vertical; }
+  .linear-edit-input:focus { outline: none; border-color: var(--accent-dim); }
+  .linear-edit-select { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-family: inherit; font-size: 12px; padding: 5px 10px; }
+  .linear-save-btn { background: var(--accent); border: 1px solid var(--accent); color: #fff; font-family: inherit; font-size: 11px; padding: 5px 14px; border-radius: 4px; cursor: pointer; font-weight: 700; letter-spacing: .5px; }
+  .linear-save-btn:hover { opacity: .85; }
+  .linear-save-btn:disabled { opacity: .4; cursor: default; }
+  .linear-edit-status { font-size: 11px; margin-left: 8px; }
 
   /* Terminal — at bottom */
   .term-container { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 24px; overflow: hidden; }
@@ -221,6 +345,17 @@
   .btn-run { background: var(--accent); border: 1px solid var(--accent); color: #fff; font-weight: 700; }
   .btn-run:hover { opacity: 0.85; }
 
+  /* Attempt history accordion */
+  .attempt-item { border: 1px solid var(--border); border-radius: 4px; margin-bottom: 5px; overflow: hidden; }
+  .attempt-header { padding: 7px 12px; cursor: pointer; display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--text-dim); background: var(--bg); user-select: none; }
+  .attempt-header:hover { color: var(--text); background: #111; }
+  .attempt-toggle { margin-left: auto; font-size: 9px; color: var(--text-dim); }
+  .attempt-body { display: none; padding: 4px 12px 10px; background: var(--surface); }
+  .attempt-body.open { display: block; }
+  .attempt-sub-label { font-size: 9px; color: var(--text-dim); letter-spacing: 1.5px; text-transform: uppercase; margin-top: 8px; margin-bottom: 3px; }
+  .attempt-content { font-size: 11px; color: var(--text); background: var(--bg); border-radius: 3px; padding: 7px 10px; white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow-y: auto; line-height: 1.45; }
+  .attempt-content.err { color: var(--red); }
+
   /* Detail modal */
   .detail-modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.8); z-index: 200; align-items: flex-start; justify-content: center; padding: 40px 20px; overflow-y: auto; }
   .detail-modal-bg.open { display: flex; }
@@ -229,6 +364,8 @@
   .detail-skill { font-size: 14px; font-weight: 700; color: var(--text); text-transform: uppercase; letter-spacing: 1px; flex: 1; }
   .detail-close { background: transparent; border: 1px solid var(--border); color: var(--text-dim); font-size: 13px; padding: 4px 10px; border-radius: 3px; cursor: pointer; font-family: inherit; }
   .detail-close:hover { border-color: var(--text-dim); color: var(--text); }
+  .detail-cancel-btn { background: transparent; border: 1px solid #b71c1c; color: var(--red); font-size: 12px; padding: 4px 10px; border-radius: 3px; cursor: pointer; font-family: inherit; }
+  .detail-cancel-btn:hover { background: rgba(229,57,53,.15); }
   .detail-meta { display: flex; gap: 16px; padding: 12px 20px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--text-dim); background: var(--surface); flex-wrap: wrap; }
   .detail-meta span { color: var(--text); }
   .detail-section { padding: 14px 20px; border-bottom: 1px solid var(--border); }
@@ -237,6 +374,17 @@
   .detail-section-body { font-size: 12px; color: var(--text); background: var(--bg); border-radius: 4px; padding: 10px 12px; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow-y: auto; line-height: 1.5; }
   .detail-section-body.empty { color: var(--text-dim); font-style: italic; }
   .detail-footer { padding: 12px 20px; display: flex; gap: 8px; justify-content: flex-end; border-top: 1px solid var(--border); }
+  .attach-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .attach-btn { cursor: pointer; padding: 3px 10px; border-radius: 4px; font-size: 11px; border: 1px dashed var(--border); color: var(--text-dim); background: transparent; user-select: none; transition: border-color .15s, color .15s; font-family: inherit; }
+  .attach-btn:hover { border-color: var(--accent-dim); color: var(--text); }
+  .attach-list { display: flex; flex-wrap: wrap; gap: 5px; }
+  .attach-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 10px; font-size: 11px; background: rgba(255,255,255,0.05); border: 1px solid var(--border); }
+  .attach-chip a { color: var(--text); text-decoration: none; }
+  .attach-chip a:hover { color: var(--accent); }
+  .attach-remove { background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 0 0 2px; }
+  .attach-remove:hover { color: red; }
+  .attach-chip-link { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; background: rgba(255,255,255,0.05); border: 1px solid var(--border); color: var(--text); text-decoration: none; margin: 2px 2px 0 0; }
+  .attach-chip-link:hover { color: var(--accent); border-color: var(--accent-dim); }
 </style>
 </head>
 <body>
@@ -248,8 +396,9 @@
     <div class="stat-chip">Skills <span>{{ stats.total }}</span></div>
     <div class="stat-chip">Schedulable <span>{{ stats.schedulable }}</span></div>
     <div class="stat-chip">Runs <span>{{ stats.total_runs }}</span></div>
+    <div class="stat-chip" id="runtime-chip">Runtime <span>—</span></div>
     {% if stats.errors > 0 %}
-    <div class="stat-chip" style="border-color: var(--red)">Errors <span style="color:var(--red)">{{ stats.errors }}</span></div>
+    <button class="stat-chip" style="border-color: var(--red)" onclick="openLatestError()" title="Open latest error">Errors <span style="color:var(--red)">{{ stats.errors }}</span></button>
     {% endif %}
     <div class="header-right">{{ now }}</div>
   </header>
@@ -335,58 +484,73 @@
     <div class="job-board" id="job-board">
       <div class="job-board-header">
         <div class="job-board-title">◈ Job Board</div>
-        <div class="job-board-meta" id="job-board-meta">loading…</div>
-        <button class="trash-toggle" id="trash-toggle" onclick="toggleTrash()" title="Show archived runs">🗑 <span id="trash-count">—</span></button>
+        <div class="linear-selector" id="team-selector" style="position:relative;margin-left:8px">
+          <button class="linear-selector-btn" id="team-selector-btn" onclick="toggleTeamDropdown()">⬡ Team</button>
+          <div class="linear-dropdown" id="team-dropdown"></div>
+        </div>
+    <div class="job-board-meta" id="job-board-meta" style="margin-left:8px">loading…</div>
+        <button class="trash-toggle" id="cancelled-count-chip" title="Toggle canceled issues" style="margin-left:8px" onclick="toggleTrash()">🗑 <span id="trash-count">0</span></button>
       </div>
       <div class="job-board-cols" id="job-board-cols">
         <!-- columns built by JS -->
       </div>
       <div class="trash-panel" id="trash-panel" style="display:none">
         <div class="trash-panel-header">
-          <span>Archived <span id="trash-panel-count"></span></span>
+          <span>Canceled <span id="trash-panel-count"></span></span>
           <button onclick="toggleTrash()" title="Hide">✕</button>
         </div>
         <div class="trash-cards" id="trash-cards"></div>
       </div>
     </div>
 
-    <!-- Agent toggle — above skills, switch when quota changes -->
-    <div style="display:flex; align-items:center; gap:12px; margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--border);">
-      <div class="agent-toggle">
-        <button class="agent-btn active" id="agent-claude" onclick="setAgent('claude')">◆ Claude</button>
-        <button class="agent-btn" id="agent-codex" onclick="setAgent('codex')">✦ Codex</button>
+    <!-- Skill panel -->
+    <section class="skill-panel" id="skill-panel">
+      <div class="skill-panel-header">
+        <div class="skill-panel-title">Skill Panel</div>
+        <div class="skill-panel-subtitle">Active agent controls skill dispatch and terminal injection</div>
       </div>
-      <span style="font-size:11px;color:var(--text-dim)">Active agent for skill cards &amp; terminal injection</span>
-    </div>
 
-    <!-- Skill stacks -->
-    {% for stack, skills in stacks.items() %}
-    <div class="stack-section">
-      <div class="stack-label">{{ stack }}</div>
-      <div class="skill-grid">
-        {% for skill in skills %}
-        <div class="skill-card {% if skill.schedule_eligible %}schedulable{% endif %}"
-             id="card-{{ skill.name }}"
-             data-agents="{{ skill.agents | join(',') }}"
-             title="Click: inject skill command · Alt/Shift-click: trigger phrase"
-             onclick='selectSkill(event, {{ skill.name | tojson }}, {{ (skill.trigger_phrases[0] if skill.trigger_phrases else skill.name) | tojson }})'>
-          <div class="skill-name">{{ skill.name.replace('llm-wiki-', '').replace('-', ' ').upper() }}</div>
-          <div class="skill-desc">{{ skill.purpose[:80] }}</div>
-          <div class="skill-meta">
-            {% set risk = skill.security.risk_level if skill.security else 'write' %}
-            <span class="badge risk-{{ risk }}">{{ risk }}</span>
-            {% if skill.security and skill.security.confirmation_required %}
-            <span class="badge risk-destructive" title="{{ skill.security.reason }}">confirm</span>
-            {% endif %}
-            {% if skill.schedule_eligible and skill.entrypoint %}
-            <span class="badge sched">schedulable</span>
-            {% endif %}
+      <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid var(--border);">
+        <div class="agent-toggle">
+          <button class="agent-btn active" id="agent-claude" onclick="setAgent('claude')">◆ Claude</button>
+          <button class="agent-btn" id="agent-codex" onclick="setAgent('codex')">✦ Codex</button>
+        </div>
+        <span style="font-size:11px;color:var(--text-dim)">Active agent for skill cards &amp; terminal injection</span>
+      </div>
+
+      <!-- Skill stacks -->
+      <div id="skill-panel-content">
+        {% for stack, skills in stacks.items() %}
+        <div class="stack-section">
+          <div class="stack-label">{{ stack }}</div>
+          <div class="skill-grid">
+            {% for skill in skills %}
+            <div class="skill-card {% if skill.schedule_eligible %}schedulable{% endif %}"
+                 id="card-{{ skill.name }}"
+                 data-agents="{{ skill.agents | join(',') }}"
+                 data-skill-name="{{ skill.name }}"
+                 data-skill-trigger="{{ (skill.trigger_phrases[0] if skill.trigger_phrases else skill.name) }}"
+                 title="Click: inject skill command · Alt/Shift-click: trigger phrase"
+                 >
+              <div class="skill-name">{{ skill.name.replace('llm-wiki-', '').replace('-', ' ').upper() }}</div>
+              <div class="skill-desc">{{ skill.purpose[:80] }}</div>
+              <div class="skill-meta">
+                {% set risk = skill.security.risk_level if skill.security else 'write' %}
+                <span class="badge risk-{{ risk }}">{{ risk }}</span>
+                {% if skill.security and skill.security.confirmation_required %}
+                <span class="badge risk-destructive" title="{{ skill.security.reason }}">confirm</span>
+                {% endif %}
+                {% if skill.schedule_eligible and skill.entrypoint %}
+                <span class="badge sched">schedulable</span>
+                {% endif %}
+              </div>
+            </div>
+            {% endfor %}
           </div>
         </div>
         {% endfor %}
       </div>
-    </div>
-    {% endfor %}
+    </section>
 
     <!-- Terminal — at bottom -->
     <div class="term-container">
@@ -412,6 +576,40 @@
       <button class="detail-close" onclick="closeDetailModal()">✕ Close</button>
     </div>
     <div class="detail-meta" id="detail-meta"></div>
+    <div class="detail-section" id="linear-edit-section" style="display:none">
+      <div class="detail-section-label">◈ Linear Issue</div>
+      <div class="linear-edit-field">
+        <div class="linear-edit-label">Title</div>
+        <input class="linear-edit-input" id="linear-edit-title" type="text" placeholder="Issue title">
+      </div>
+      <div class="linear-edit-field">
+        <div class="linear-edit-label">Description</div>
+        <textarea class="linear-edit-input" id="linear-edit-desc" rows="4" placeholder="Issue description"></textarea>
+      </div>
+      <div class="linear-edit-field">
+        <div class="linear-edit-label">Model</div>
+        <div class="new-issue-agent-row">
+          <div class="agent-toggle" aria-label="Issue preferred agent">
+            <button type="button" class="agent-btn active" id="linear-edit-agent-claude" onclick="setDetailIssueAgent('claude',{dispatch:true})">◆ Claude</button>
+            <button type="button" class="agent-btn" id="linear-edit-agent-codex" onclick="setDetailIssueAgent('codex',{dispatch:true})">✦ Codex</button>
+          </div>
+          <span class="new-issue-agent-hint" id="linear-edit-agent-hint">Preferred agent for dispatch</span>
+        </div>
+      </div>
+      <div class="linear-edit-field">
+        <div class="linear-edit-label">State</div>
+        <select class="linear-edit-select" id="linear-edit-state"></select>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+        <button class="linear-save-btn" id="linear-save-btn" onclick="saveLinearIssue()">Save to Linear</button>
+        <a id="linear-issue-link" href="#" target="_blank" style="font-size:11px;color:var(--accent);text-decoration:none;display:none">↗ Open in Linear</a>
+        <span class="linear-edit-status" id="linear-edit-status"></span>
+      </div>
+    </div>
+    <div class="detail-section" id="detail-history-section" style="display:none">
+      <div class="detail-section-label">Previous Attempts <span id="detail-history-count" style="font-weight:400;color:var(--text-dim)"></span></div>
+      <div id="detail-history-list"></div>
+    </div>
     <div class="detail-section" id="detail-prompt-section">
       <div class="detail-section-label">Prompt / Command</div>
       <div class="detail-section-body" id="detail-prompt"></div>
@@ -428,8 +626,31 @@
       <div class="detail-section-label">Output Path</div>
       <div class="detail-section-body" id="detail-path"></div>
     </div>
+    <div class="detail-section" id="detail-reply-section" style="display:none">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <div class="detail-section-label" style="margin-bottom:0">Comment / Feedback</div>
+        <button id="mic-btn" onclick="toggleMic()" title="Voice input (Web Speech API)" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:14px;padding:2px 8px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
+      </div>
+      <textarea class="detail-reply-input" id="detail-reply-input" placeholder="Add feedback or instructions for the next run…" rows="3"></textarea>
+      <div class="attach-bar">
+        <label class="attach-btn" for="reply-files">📎 Attach file</label>
+        <input type="file" id="reply-files" multiple style="display:none" onchange="onReplyFilesChange(this)">
+        <div class="attach-list" id="reply-attach-list"></div>
+      </div>
+      <div class="detail-reply-status" id="detail-reply-status"></div>
+      <div id="mic-status" style="font-size:10px;color:var(--text-dim);margin-top:3px;display:none"></div>
+    </div>
     <div class="detail-footer">
-      <button class="job-btn retry" id="detail-retry-btn" onclick="retryFromDetail()">↺ Retry</button>
+      <button class="job-btn" id="detail-approve-btn" onclick="approveRun()" style="display:none;background:var(--green);border-color:var(--green);color:#111">✓ Approve → Done</button>
+      <button class="job-btn" id="detail-comment-btn" onclick="commentToLinear()" style="display:none">↳ Comment to Linear</button>
+      <div class="job-btn-group" id="detail-dispatch-group" style="display:none;margin-top:0">
+        <button class="job-btn retry-claude" id="detail-dispatch-claude" onclick="dispatchFromDetail('claude')">▶ Claude</button>
+        <button class="job-btn retry-codex" id="detail-dispatch-codex" onclick="dispatchFromDetail('codex')">▶ Codex</button>
+      </div>
+      <div class="job-btn-group" id="detail-retry-group" style="display:none;margin-top:0">
+        <button class="job-btn retry-claude" id="detail-retry-claude" onclick="retryFromDetail('claude')">↺ Claude</button>
+        <button class="job-btn retry-codex" id="detail-retry-codex" onclick="retryFromDetail('codex')">↺ Codex</button>
+      </div>
     </div>
   </div>
 </div>
@@ -447,9 +668,17 @@
   </div>
 </div>
 
+<div id="page-data"
+     style="display:none"
+     data-chart-data='{{ chart_data | tojson | forceescape }}'
+     data-error-runs='{{ stats.error_runs | tojson | forceescape }}'
+     data-registry='{{ registry | tojson | forceescape }}'></div>
+
 <script>
 // Activity chart
-const chartData = {{ chart_data | tojson }};
+const pageDataEl = document.getElementById('page-data');
+const chartData = JSON.parse(pageDataEl?.dataset.chartData || '{"labels":[],"values":[]}');
+const errorRuns = JSON.parse(pageDataEl?.dataset.errorRuns || '[]');
 new Chart(document.getElementById('activityChart'), {
   type: 'line',
   data: {
@@ -476,7 +705,7 @@ new Chart(document.getElementById('activityChart'), {
 });
 
 // Registry
-const registry = {{ registry | tojson }};
+let registry = JSON.parse(pageDataEl?.dataset.registry || '{}');
 
 // Agent
 let selectedAgent = 'claude';
@@ -523,6 +752,73 @@ function initPaceMarkers() {
   });
 }
 
+function _renderSkillPanel(reg) {
+  const container = document.getElementById('skill-panel-content');
+  if (!container) return;
+  const grouped = new Map();
+  Object.entries(reg || {}).forEach(([name, entry]) => {
+    const stack = entry.stack || 'uncategorized';
+    if (!grouped.has(stack)) grouped.set(stack, []);
+    grouped.get(stack).push([name, entry]);
+  });
+  if (!grouped.size) {
+    container.innerHTML = '<div class="job-board-empty">No skills in this registry.</div>';
+    return;
+  }
+  let html = '';
+  for (const [stack, skills] of grouped.entries()) {
+    html += `<div class="stack-section"><div class="stack-label">${_esc(stack)}</div><div class="skill-grid">`;
+    for (const [name, entry] of skills) {
+      const trigger = (entry.trigger_phrases && entry.trigger_phrases.length) ? entry.trigger_phrases[0] : name;
+      const risk = entry.security?.risk_level || 'write';
+      const sched = entry.schedule_eligible && entry.entrypoint
+        ? '<span class="badge sched">schedulable</span>'
+        : '';
+      const confirm = entry.security?.confirmation_required
+        ? `<span class="badge risk-destructive" title="${_esc(entry.security?.reason || '')}">confirm</span>`
+        : '';
+      const agents = (entry.agents || ['claude']).join(',');
+      html += `
+        <div class="skill-card ${entry.schedule_eligible ? 'schedulable' : ''}"
+             id="card-${_esc(name)}"
+             data-agents="${_esc(agents)}"
+             data-skill-name="${_esc(name)}"
+             data-skill-trigger="${_esc(trigger)}"
+             title="Click: inject skill command · Alt/Shift-click: trigger phrase"
+             >
+          <div class="skill-name">${_esc(String(name).replace('llm-wiki-', '').replace(/-/g, ' ').toUpperCase())}</div>
+          <div class="skill-desc">${_esc((entry.purpose || '').slice(0, 80))}</div>
+          <div class="skill-meta">
+            <span class="badge risk-${_esc(risk)}">${_esc(risk)}</span>
+            ${confirm}
+            ${sched}
+          </div>
+        </div>`;
+    }
+    html += '</div></div>';
+  }
+  container.innerHTML = html;
+  if (selectedSkill) {
+    const active = document.getElementById('card-' + selectedSkill);
+    if (active) active.classList.add('active');
+    else selectedSkill = null;
+  }
+  document.querySelectorAll('.skill-card').forEach(card => {
+    const agents = (card.dataset.agents || 'claude').split(',');
+    if (!agents.includes(selectedAgent)) card.classList.add('agent-disabled');
+    else card.classList.remove('agent-disabled');
+  });
+}
+
+async function _refreshRegistry(agent) {
+  try {
+    const res = await fetch('/api/registry?agent=' + encodeURIComponent(agent));
+    if (!res.ok) return;
+    registry = await res.json();
+    _renderSkillPanel(registry);
+  } catch (_) {}
+}
+
 async function updateWindows(agent) {
   try {
     const res = await fetch('/api/windows?agent=' + agent);
@@ -564,23 +860,46 @@ async function updateWindows(agent) {
   } catch (_) {}
 }
 
-function setAgent(agent) {
+async function setAgent(agent) {
   selectedAgent = agent;
   document.getElementById('agent-claude').classList.toggle('active', agent === 'claude');
   document.getElementById('agent-codex').classList.toggle('active', agent === 'codex');
   updateWindows(agent);
-  document.querySelectorAll('.skill-card').forEach(card => {
-    const agents = (card.dataset.agents || 'claude').split(',');
-    if (agents.includes(agent)) {
-      card.classList.remove('agent-disabled');
-    } else {
-      card.classList.add('agent-disabled');
-      if (selectedSkill && card.id === 'card-' + selectedSkill) {
-        card.classList.remove('active');
-        selectedSkill = null;
-      }
+  await _refreshRegistry(agent);
+  try {
+    await fetch('/api/config', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_backend: agent }),
+    });
+  } catch (_) {}
+}
+
+async function _initAgentFromConfig() {
+  try {
+    const res = await fetch('/api/config');
+    const cfg = await res.json();
+    const backend = cfg.agent_backend || 'claude';
+    if (backend !== selectedAgent) setAgent(backend);
+    if (cfg.linear_configured) _linearConfigured = true;
+    if (cfg.board_col_limit) _colLimit = cfg.board_col_limit;
+    if (cfg.linear_team_id) _currentTeamId = cfg.linear_team_id;
+    _updateRuntimeChip();
+    if (_linearConfigured) _initTeamSelector();
+    return cfg;
+  } catch (_) { return null; }
+}
+
+async function _updateRuntimeChip() {
+  try {
+    const res = await fetch('/api/runtime');
+    const d = await res.json();
+    const chip = document.getElementById('runtime-chip');
+    if (chip && d.total_s != null) {
+      const s = Math.round(d.total_s);
+      chip.querySelector('span').textContent = s < 3600 ? Math.round(s/60) + 'm' : (s/3600).toFixed(1) + 'h';
     }
-  });
+  } catch (_) {}
 }
 
 // Skill selection
@@ -607,43 +926,54 @@ function openModal(skill, onConfirm) {
 // ── Job Board — kanban columns ──────────────────────────────────────────────
 
 let _detailRunId = null;
+let _detailModalLoadSeq = 0;
+let _boardDragState = null;
 
 const JOB_COLS = [
-  { key: 'backlog', label: 'Backlog',      states: ['sent'],                       dotClass: 'backlog', droppable: false },
+  { key: 'backlog', label: 'Backlog',      states: ['backlog', 'sent'],           dotClass: 'backlog', droppable: false },
   { key: 'todo',    label: 'Todo',         states: ['todo'],                       dotClass: 'todo',    droppable: true, dropStatus: 'todo'   },
-  { key: 'running', label: 'In Progress',  states: ['running'],                    dotClass: 'running', droppable: false },
-  { key: 'review',  label: 'Human Review', states: ['failed', 'error', 'timeout'], dotClass: 'review',  droppable: true, dropStatus: 'failed' },
+  { key: 'in_progress', label: 'In Progress',  states: ['in_progress'],                dotClass: 'running', droppable: false },
+  { key: 'in_review',  label: 'In review', states: ['in_review'],                    dotClass: 'review',  droppable: false },
+  { key: 'done',    label: 'Done',         states: ['done'],                       dotClass: 'done',    droppable: false },
 ];
 
-const HIDDEN_COLS = [
-  { key: 'rework',    label: 'Rework',     states: ['rework'],     dotClass: 'rework',    droppable: true, dropStatus: 'rework'    },
-  { key: 'merging',   label: 'Merging',    states: ['merging'],    dotClass: 'merging',   droppable: true, dropStatus: 'merging'   },
-  { key: 'done',      label: 'Done',       states: ['success'],    dotClass: 'done',      droppable: true, dropStatus: 'success'   },
-  { key: 'cancelled', label: 'Canceled',   states: ['cancelled'],  dotClass: 'cancelled', droppable: true, dropStatus: 'cancelled' },
-  { key: 'duplicate', label: 'Duplicated', states: ['duplicate'],  dotClass: 'duplicate', droppable: true, dropStatus: 'duplicate' },
-];
+const HIDDEN_COLS = [];
 
 const ALL_COLS = [...JOB_COLS, ...HIDDEN_COLS];
+const LINEAR_STATE_BY_COL_KEY = {
+  backlog: 'Backlog',
+  todo: 'Todo',
+  in_progress: 'In Progress',
+  in_review: 'In Review',
+  done: 'Done',
+};
 
 function _stateBadgeHtml(state) {
   const dot = state === 'running' ? '<span class="pulse-dot"></span>' : '';
   const labels = {
     running: 'Running', success: 'Done', failed: 'Failed', timeout: 'Timeout',
-    sent: 'Sent', error: 'Error', todo: 'Todo', rework: 'Rework',
+    sent: 'Sent', backlog: 'Backlog', error: 'Error', todo: 'Todo', rework: 'Rework',
     merging: 'Merging', cancelled: 'Canceled', duplicate: 'Duplicated',
+    stalled: 'Stalled', queued: 'Queued', review: 'In review',
+    in_progress: 'In Progress', in_review: 'In review', done: 'Done',
   };
   return `<span class="state-badge ${state}">${dot}${labels[state] || state}</span>`;
 }
 
 function _buildCol(col, items) {
+  const isTodo = col.key === 'todo';
   const colEl = document.createElement('div');
   colEl.className = 'job-col';
   colEl.dataset.colKey = col.key;
+  const addBtn = isTodo
+    ? `<button type="button" class="col-add-btn" onclick="openNewIssueModal()" title="New task">+</button>`
+    : '';
   colEl.innerHTML = `
     <div class="job-col-header">
       <div class="job-col-dot ${col.dotClass}"></div>
       <span class="job-col-title">${col.label}</span>
       <span class="job-col-count">${items.length}</span>
+      ${addBtn}
     </div>
     <div class="job-col-body"></div>
   `;
@@ -651,40 +981,337 @@ function _buildCol(col, items) {
   if (items.length === 0) {
     body.innerHTML = '<div class="job-col-empty">No items</div>';
   } else {
-    items.slice(0, 15).forEach(r => body.appendChild(_buildColCard(r)));
+    items.slice(0, _colLimit).forEach(r => body.appendChild(_buildColCard(r)));
   }
-  if (col.droppable) {
-    body.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      body.style.outline = '2px solid var(--accent)';
-      body.style.borderRadius = '6px';
-    });
-    body.addEventListener('dragleave', () => { body.style.outline = ''; });
-    body.addEventListener('drop', async (e) => {
-      e.preventDefault();
-      body.style.outline = '';
-      const run_id = e.dataTransfer.getData('text/plain');
-      if (!run_id) return;
-      await fetch(`/api/runs/${run_id}/status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: col.dropStatus }),
-      });
-      refreshJobBoard();
-    });
-  }
+  const canDropHere = () => {
+    const payload = _boardDragState;
+    const canDropLinear = !!payload && payload.kind === 'linear_issue' && !!LINEAR_STATE_BY_COL_KEY[col.key];
+    const canDropRun = !!payload && payload.kind === 'run' && col.droppable;
+    return canDropLinear || canDropRun;
+  };
+  const setDragOver = (e) => {
+    if (!canDropHere()) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    colEl.classList.add('drag-over');
+    body.classList.add('drag-over');
+  };
+  const clearDragOver = () => {
+    colEl.classList.remove('drag-over');
+    body.classList.remove('drag-over');
+  };
+  colEl.addEventListener('dragover', setDragOver);
+  colEl.addEventListener('dragenter', setDragOver);
+  colEl.addEventListener('dragleave', clearDragOver);
+  colEl.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    clearDragOver();
+    const payload = _boardDragState || _readBoardDragPayload(e);
+    if (!payload) return;
+    try {
+      if (payload.kind === 'linear_issue' && LINEAR_STATE_BY_COL_KEY[col.key]) {
+        await _moveLinearIssueToColumn(payload.issue_id, LINEAR_STATE_BY_COL_KEY[col.key]);
+        return;
+      }
+      if (payload.kind === 'run' && col.droppable) {
+        await fetch(`/api/runs/${payload.run_id}/status`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: col.dropStatus }),
+        });
+        refreshJobBoard();
+      }
+    } finally {
+      _boardDragState = null;
+    }
+  });
   return colEl;
 }
 
-let _hiddenColsOpen = false;
+let _colLimit = 15;
+let _boardItemsByRunId = {};
+let _trashOpen = false;
+let _cancelledItems = [];
+let _pendingBoardRefresh = false;
+let _detailLinearInitial = null;
+let _detailLinearUpdatedAt = '';
 
-function toggleHiddenCols() {
-  _hiddenColsOpen = !_hiddenColsOpen;
-  const group = document.getElementById('hidden-cols-group');
-  const arrow = document.getElementById('hidden-sep-arrow');
-  if (group) group.style.display = _hiddenColsOpen ? 'contents' : 'none';
-  if (arrow) arrow.textContent = _hiddenColsOpen ? '◀' : '▶';
+function _safeLocalStorage() {
+  try { return window.localStorage; } catch (_) { return null; }
+}
+
+function _storageGet(key, fallback = '') {
+  const store = _safeLocalStorage();
+  if (!store) return fallback;
+  try { return store.getItem(key) ?? fallback; } catch (_) { return fallback; }
+}
+
+function _storageSet(key, value) {
+  const store = _safeLocalStorage();
+  if (!store) return;
+  try { store.setItem(key, value); } catch (_) {}
+}
+
+function _storageRemove(key) {
+  const store = _safeLocalStorage();
+  if (!store) return;
+  try { store.removeItem(key); } catch (_) {}
+}
+
+function _isModalOpen(id) {
+  return !!document.getElementById(id)?.classList.contains('open');
+}
+
+function _currentLinearDraftKey() {
+  return _detailLinearIssueId ? `agenticos.draft.linear.${_detailLinearIssueId}` : '';
+}
+
+function _currentReplyDraftKey() {
+  if (_detailLinearIssueId) return `agenticos.draft.reply.linear.${_detailLinearIssueId}`;
+  if (_detailRunId) return `agenticos.draft.reply.run.${_detailRunId}`;
+  return '';
+}
+
+function _saveDraft(key, value) {
+  if (!key) return;
+  _storageSet(key, value);
+}
+
+function _loadDraft(key, fallback = '') {
+  return key ? _storageGet(key, fallback) : fallback;
+}
+
+function _clearDraft(key) {
+  if (!key) return;
+  _storageRemove(key);
+}
+
+function _getDetailReplyValue() {
+  return document.getElementById('detail-reply-input')?.value || '';
+}
+
+function _setDetailReplyValue(value) {
+  const el = document.getElementById('detail-reply-input');
+  if (el) el.value = value;
+}
+
+function _setDetailReplyStatus(text = '') {
+  const el = document.getElementById('detail-reply-status');
+  if (el) el.textContent = text;
+}
+
+function _getNewIssueDraft() {
+  return {
+    title: document.getElementById('new-issue-title')?.value || '',
+    description: document.getElementById('new-issue-desc')?.value || '',
+  };
+}
+
+function _readBoardDragPayload(e) {
+  const raw = e.dataTransfer.getData('application/x-agenticos-board-item')
+    || e.dataTransfer.getData('text/plain');
+  if (!raw) return null;
+  if (raw.startsWith('linear_issue:')) {
+    return { kind: 'linear_issue', issue_id: raw.slice('linear_issue:'.length) };
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && parsed.kind) return parsed;
+  } catch (_) {}
+  return { kind: 'run', run_id: raw };
+}
+
+async function _moveLinearIssueToColumn(issueId, stateName) {
+  if (!issueId || !stateName) return;
+  try {
+    const res = await fetch(`/api/linear/issues/${issueId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state_name: stateName }),
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'move failed');
+    if (_detailLinearIssueId === issueId && _isModalOpen('detail-modal')) {
+      _loadLinearIssueIntoModal(issueId, _boardItemsByRunId[`linear-${issueId}`] || null);
+    }
+    refreshJobBoard();
+  } catch (err) {
+    console.error('Linear issue move failed:', err);
+  }
+}
+
+function _saveNewIssueDraft() {
+  const draft = _getNewIssueDraft();
+  _saveDraft('agenticos.draft.new_issue.title', draft.title);
+  _saveDraft('agenticos.draft.new_issue.description', draft.description);
+  _saveDraft('agenticos.draft.new_issue.agent', _newIssueAgent);
+  _saveDraft('agenticos.draft.new_issue.attachments', JSON.stringify(_newTaskAttachments));
+}
+
+function _restoreNewIssueDraft() {
+  const titleEl = document.getElementById('new-issue-title');
+  const descEl = document.getElementById('new-issue-desc');
+  if (titleEl) titleEl.value = _loadDraft('agenticos.draft.new_issue.title');
+  if (descEl) descEl.value = _loadDraft('agenticos.draft.new_issue.description');
+  setNewIssueAgent(_loadDraft('agenticos.draft.new_issue.agent', selectedAgent));
+  try {
+    const restored = JSON.parse(_loadDraft('agenticos.draft.new_issue.attachments', '[]'));
+    _newTaskAttachments = Array.isArray(restored)
+      ? restored.filter(a => a && typeof a === 'object' && a.url)
+      : [];
+  } catch (_) {
+    _newTaskAttachments = [];
+  }
+  _renderAttachList('new-task-attach-list', _newTaskAttachments);
+}
+
+function _clearNewIssueDraft() {
+  _clearDraft('agenticos.draft.new_issue.title');
+  _clearDraft('agenticos.draft.new_issue.description');
+  _clearDraft('agenticos.draft.new_issue.agent');
+  _clearDraft('agenticos.draft.new_issue.attachments');
+}
+
+function _saveReplyDraft() {
+  const key = _currentReplyDraftKey();
+  if (!key) return;
+  _saveDraft(key, JSON.stringify({
+    value: _getDetailReplyValue(),
+    issue_updated_at: _detailLinearUpdatedAt || '',
+    saved_at: Date.now(),
+  }));
+  _renderDetailReplyStatus();
+}
+
+function _readReplyDraft() {
+  const raw = _loadDraft(_currentReplyDraftKey());
+  if (!raw) return { value: '', issue_updated_at: '' };
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object' && 'value' in parsed) {
+      return {
+        value: parsed.value || '',
+        issue_updated_at: parsed.issue_updated_at || '',
+      };
+    }
+  } catch (_) {}
+  return { value: raw, issue_updated_at: '' };
+}
+
+function _restoreReplyDraft() {
+  const draft = _readReplyDraft();
+  if (_detailLinearIssueId && _detailLinearUpdatedAt && draft.issue_updated_at !== _detailLinearUpdatedAt) {
+    _clearReplyDraft();
+    _setDetailReplyValue('');
+    _renderDetailReplyStatus();
+    return;
+  }
+  _setDetailReplyValue(draft.value);
+  _renderDetailReplyStatus();
+}
+
+function _clearReplyDraft() {
+  _clearDraft(_currentReplyDraftKey());
+}
+
+function _clearReplyDraftForIssue(issueId) {
+  if (!issueId) return;
+  _clearDraft(`agenticos.draft.reply.linear.${issueId}`);
+  if (_detailLinearIssueId === issueId && !_detailReplyDirty()) {
+    _setDetailReplyValue('');
+    _replyAttachments = [];
+    _renderAttachList('reply-attach-list', _replyAttachments);
+    _renderDetailReplyStatus();
+  }
+}
+
+function _saveLinearDraft() {
+  const key = _currentLinearDraftKey();
+  if (!key) return;
+  const payload = {
+    title: document.getElementById('linear-edit-title')?.value || '',
+    description: document.getElementById('linear-edit-desc')?.value || '',
+    state: document.getElementById('linear-edit-state')?.value || '',
+    preferred_agent: _detailPreferredAgent || 'claude',
+  };
+  _saveDraft(key, JSON.stringify(payload));
+  _renderDetailReplyStatus(_linearStateToBoard(document.getElementById('linear-edit-state')?.value || '') === 'in_review');
+}
+
+function _restoreLinearDraft(issue) {
+  const key = _currentLinearDraftKey();
+  const fallback = {
+    title: issue.title || '',
+    description: issue.description || '',
+    state: issue.state || '',
+    preferred_agent: issue.preferred_agent || 'claude',
+  };
+  let draft = fallback;
+  const raw = _loadDraft(key);
+  if (raw) {
+    try { draft = { ...fallback, ...JSON.parse(raw) }; } catch (_) {}
+  }
+  document.getElementById('linear-edit-title').value = draft.title;
+  document.getElementById('linear-edit-desc').value = draft.description;
+  setDetailIssueAgent(draft.preferred_agent || 'claude');
+  return draft;
+}
+
+function _clearLinearDraft(issueId = _detailLinearIssueId) {
+  if (!issueId) return;
+  _clearDraft(`agenticos.draft.linear.${issueId}`);
+}
+
+function _detailLinearDirty() {
+  if (!_detailLinearInitial || !_detailLinearIssueId || !_isModalOpen('detail-modal')) return false;
+  const title = document.getElementById('linear-edit-title')?.value || '';
+  const description = document.getElementById('linear-edit-desc')?.value || '';
+  const state = document.getElementById('linear-edit-state')?.value || '';
+  return title !== (_detailLinearInitial.title || '')
+    || description !== (_detailLinearInitial.description || '')
+    || state !== (_detailLinearInitial.state || '')
+    || (_detailPreferredAgent || 'claude') !== (_detailLinearInitial.preferred_agent || 'claude');
+}
+
+function _newIssueDirty() {
+  if (!_isModalOpen('new-issue-modal')) return false;
+  const draft = _getNewIssueDraft();
+  return !!(draft.title.trim() || draft.description.trim() || _newTaskAttachments.length);
+}
+
+function _detailReplyDirty() {
+  return _isModalOpen('detail-modal') && !!(_getDetailReplyValue().trim() || _replyAttachments.length);
+}
+
+function _replyDraftIsCurrentAndValid(isReview = false) {
+  if (!isReview || !_isModalOpen('detail-modal') || !_detailLinearIssueId || !_detailLinearUpdatedAt) return false;
+  const draft = _readReplyDraft();
+  return !!draft.value.trim() && draft.issue_updated_at === _detailLinearUpdatedAt;
+}
+
+function _renderDetailReplyStatus(isReview = false) {
+  _setDetailReplyStatus(_replyDraftIsCurrentAndValid(isReview) ? '当前有草稿（未提交）' : '');
+}
+
+// Track IME composition across all inputs — board refresh must never fire mid-composition
+let _imeComposing = false;
+document.addEventListener('compositionstart', () => { _imeComposing = true; });
+document.addEventListener('compositionend',   () => { _imeComposing = false; });
+
+function _anyModalInputFocused() {
+  const el = document.activeElement;
+  if (!el || el === document.body) return false;
+  return !!(el.closest('#new-issue-modal') || el.closest('#detail-modal'));
+}
+
+function _shouldDeferBoardRefresh() {
+  return _imeComposing || _anyModalInputFocused() || _newIssueDirty() || _detailReplyDirty() || _detailLinearDirty();
+}
+
+function _flushPendingBoardRefresh() {
+  if (!_pendingBoardRefresh || _shouldDeferBoardRefresh()) return;
+  _pendingBoardRefresh = false;
+  refreshJobBoard(true);
 }
 
 function _shortId(run_id) {
@@ -697,113 +1324,343 @@ function _esc(str) {
   return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+function _normalizeErrorText(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  const lines = text.split(/\r?\n/);
+  const noiseLine = /^(OpenAI Codex v\d|--------|workdir:|model:|provider:|approval:|sandbox:|reasoning effort:|reasoning summaries:|session id:|user$|codex$|exec$|succeeded in|succeeded$|succeeded with|tokens used$)/i;
+  const realLine = /(^|\b)(Traceback \(most recent call last\)|SyntaxError:|ReferenceError:|TypeError:|RangeError:|AssertionError:|Error:|Exception:|timed out after|timed out\b|Command '\[|Command ")/i;
+  let start = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i].trim();
+    if (!line || noiseLine.test(line)) continue;
+    if (realLine.test(line)) {
+      start = i;
+      break;
+    }
+  }
+  if (start < 0) return '';
+  return lines.slice(start).join('\n').trim();
+}
+
+async function openLatestError() {
+  if (!errorRuns.length) return;
+  for (const candidate of errorRuns) {
+    if (!candidate.run_id) continue;
+    try {
+      const res = await fetch(`/api/runs/${candidate.run_id}`);
+      if (!res.ok) continue;
+      const detail = await res.json();
+      if (_normalizeErrorText(detail.error)) {
+        openDetailModal(candidate.run_id);
+        return;
+      }
+    } catch (_) {}
+  }
+  const latest = errorRuns.find(r => r.run_id) || errorRuns[0];
+  if (latest && latest.run_id) openDetailModal(latest.run_id);
+}
+
+function _runTimeMs(run) {
+  const raw = run.started_at || run.created_at || '';
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+function _preferRun(candidate, current) {
+  const candidateRunning = (candidate.status || candidate.state) === 'running';
+  const currentRunning = (current.status || current.state) === 'running';
+  if (candidateRunning !== currentRunning) return candidateRunning;
+  const candidateAttempt = Number(candidate.attempt || 0);
+  const currentAttempt = Number(current.attempt || 0);
+  if (candidateAttempt !== currentAttempt) return candidateAttempt > currentAttempt;
+  return _runTimeMs(candidate) >= _runTimeMs(current);
+}
+
+function _latestLinearRuns(items) {
+  const unlinked = [];
+  const byIssue = new Map();
+  items.forEach(run => {
+    const issueId = run.linear_issue_id;
+    if (!issueId) {
+      unlinked.push(run);
+      return;
+    }
+    const current = byIssue.get(issueId);
+    if (!current || _preferRun(run, current)) byIssue.set(issueId, run);
+  });
+  return unlinked.concat(Array.from(byIssue.values()));
+}
+
+// run_progress state: run_id -> {snippet, turn}
+const _runProgress = {};
+
 function _buildColCard(run) {
-  const state = run.status || run.state || 'unknown';
+  const state = run._boardStatus || run.status || run.state || 'unknown';
   const card = document.createElement('div');
   card.className = 'job-card';
   card.dataset.runId = run.run_id || '';
+  if (run._is_linear_issue) {
+    card.draggable = true;
+    card.addEventListener('dragstart', (e) => {
+      _boardDragState = {
+        kind: 'linear_issue',
+        issue_id: run.linear_issue_id,
+      };
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('application/x-agenticos-board-item', JSON.stringify({
+        kind: 'linear_issue',
+        issue_id: run.linear_issue_id,
+      }));
+      e.dataTransfer.setData('text/plain', `linear_issue:${run.linear_issue_id || run.run_id || ''}`);
+      card.classList.add('dragging');
+    });
+    card.addEventListener('dragend', () => {
+      card.classList.remove('dragging');
+      _boardDragState = null;
+      document.querySelectorAll('.job-col.drag-over, .job-col-body.drag-over').forEach(el => el.classList.remove('drag-over'));
+    });
+  }
   const prompt = (run.prompt || '').trim();
   const when = run.when || '';
   const dur = run.duration || '';
-  const canRetry = state !== 'running' && state !== 'sent';
-  const isDraggable = state !== 'running';
+  const latestRunStatus = run.latest_run_status || run.status || '';
+  const isRunning = latestRunStatus === 'running';
+  const canRetry = !isRunning && !!run.latest_run_id;
+  const isDraggable = false;
+  const attempt = run.attempt || 0;
+  const startedAt = run.started_at || '';
+  const progress = _runProgress[run.latest_run_id || run.run_id] || {};
+
+  const elapsedHtml = isRunning && startedAt
+    ? `<span class="job-card-elapsed" data-started="${_esc(startedAt)}" data-run-id="${_esc(run.latest_run_id || run.run_id)}">0s</span>`
+    : '';
+  const turnHtml = isRunning && progress.turn ? `<span class="job-card-turn"> · T:${progress.turn}</span>` : '';
+  const statusLineHtml = isRunning && progress.snippet
+    ? `<div class="job-card-status-line">${_esc(progress.snippet)}</div>` : '';
+  const attemptHtml = attempt > 0 ? `<span class="job-card-attempt">↺${attempt}</span> ` : '';
+  const tokensHtml = (run.input_tokens || run.output_tokens)
+    ? `<span style="font-size:10px;color:var(--text-dim)">${_fmt((run.input_tokens||0)+(run.output_tokens||0))} tok</span>` : '';
+  const modelLabel = run.model === 'codex' ? 'gpt-5.4-mini' : (run.model || '');
+  const modelBadge = modelLabel ? `<span class="model-badge">Run model: ${_esc(modelLabel)}</span>` : '';
+  const pa = run.preferred_agent || '';
+  const paLabel = pa === 'claude' ? 'CLAUDE' : pa === 'codex' ? 'CODEX' : '·';
+  const paClass = pa || 'none';
+  const agentLocked = isRunning || state === 'in_progress';
+  const agentBadge = run._is_linear_issue
+    ? `<span class="agent-badge ${_esc(paClass)}${agentLocked ? ' locked' : ''}" title="${agentLocked ? 'Agent locked while in progress' : 'Click to toggle agent'}" ${agentLocked ? '' : `onclick="event.stopPropagation();setIssueAgent('${_esc(run.linear_issue_id)}','${_esc(pa)}')"`}>${_esc(paLabel)}</span>`
+    : '';
+  const todoAgentToggle = run._is_linear_issue && state === 'todo'
+    ? `<div class="todo-agent-toggle" aria-label="Run with agent">
+         <button type="button" class="todo-run-btn claude${pa === 'claude' ? ' selected' : ''}" title="Run with Claude" onclick="event.stopPropagation();triggerLinearIssueWithAgent('${_esc(run.linear_issue_id)}','claude')">▶ Claude</button>
+         <button type="button" class="todo-run-btn codex${pa === 'codex' ? ' selected' : ''}" title="Run with Codex" onclick="event.stopPropagation();triggerLinearIssueWithAgent('${_esc(run.linear_issue_id)}','codex')">▶ Codex</button>
+       </div>`
+    : '';
+  const issueLabel = run.skill || run.identifier || '?';
+  const issueTitle = run.title || prompt || '';
+  const metaAgentHtml = run._is_linear_issue && state !== 'todo' ? agentBadge : '';
+  const metaHtml = modelBadge || metaAgentHtml ? `<div class="job-card-meta">${modelBadge}${metaAgentHtml}</div>` : '';
+  const footerControlsHtml = run._is_linear_issue && state === 'todo' ? todoAgentToggle : '';
+
   card.innerHTML = `
-    <button class="job-card-dismiss" title="Archive" onclick="event.stopPropagation();archiveRun('${run.run_id}')">✕</button>
-    <div class="job-card-id">${_esc(_shortId(run.run_id))}</div>
-    <div class="job-card-title">${_esc((run.skill || '?').toUpperCase())}</div>
+    <div class="job-card-id">${attemptHtml}${_esc(issueLabel)}</div>
+    ${metaHtml}
+    <div class="job-card-title">${_esc(issueTitle)}</div>
     ${prompt ? `<div class="job-card-prompt">${_esc(prompt)}</div>` : ''}
+    ${statusLineHtml}
     <div class="job-card-footer">
-      <span>${when ? 'Updated ' + _esc(when) : '—'}</span>
-      <span class="job-card-dur">${_esc(dur)}</span>
+      <span>${isRunning ? elapsedHtml + turnHtml : (when ? 'Updated ' + _esc(when) : '—')}</span>
+      <div class="job-card-dur">${tokensHtml || _esc(dur)}${footerControlsHtml ? ` ${footerControlsHtml}` : ''}</div>
     </div>
   `;
+  if (isRunning) {
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'cancel-btn';
+    cancelBtn.textContent = '✕ Cancel';
+    cancelBtn.onclick = (e) => { e.stopPropagation(); cancelRun(run.run_id); };
+    card.appendChild(cancelBtn);
+  }
+  if (run.linear_issue_id && state !== 'cancelled') {
+    const dismissBtn = document.createElement('button');
+    dismissBtn.className = 'job-card-dismiss';
+    dismissBtn.textContent = '✕';
+    dismissBtn.title = 'Cancel issue';
+    dismissBtn.onclick = (e) => { e.stopPropagation(); cancelLinearIssueById(run.linear_issue_id); };
+    card.appendChild(dismissBtn);
+  }
   if (canRetry) {
-    const btn = document.createElement('button');
-    btn.className = 'job-btn retry';
-    btn.textContent = '↺ Retry';
-    btn.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id); };
-    card.appendChild(btn);
+    const lockedAgent = run.preferred_agent || null;
+    const group = document.createElement('div');
+    group.className = 'job-btn-group';
+    if (!lockedAgent || lockedAgent === 'claude') {
+      const btnC = document.createElement('button');
+      btnC.className = 'job-btn retry-claude';
+      btnC.textContent = '↺ Claude';
+      btnC.title = 'Continue with Claude';
+      btnC.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, 'claude'); };
+      group.appendChild(btnC);
+    }
+    if (!lockedAgent || lockedAgent === 'codex') {
+      const btnX = document.createElement('button');
+      btnX.className = 'job-btn retry-codex';
+      btnX.textContent = '↺ Codex';
+      btnX.title = 'Continue with Codex';
+      btnX.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, 'codex'); };
+      group.appendChild(btnX);
+    }
+    card.appendChild(group);
   }
   card.addEventListener('click', (e) => {
-    if (e.target.classList.contains('job-btn')) return;
+    if (e.target.classList.contains('job-btn') || e.target.classList.contains('cancel-btn')) return;
     openDetailModal(run.run_id);
   });
-  if (isDraggable) {
-    card.draggable = true;
-    card.addEventListener('dragstart', (e) => {
-      e.dataTransfer.setData('text/plain', run.run_id);
-      e.dataTransfer.effectAllowed = 'move';
-      card.style.opacity = '0.45';
-    });
-    card.addEventListener('dragend', () => { card.style.opacity = ''; });
-  }
   return card;
 }
 
-async function refreshJobBoard() {
+async function cancelRun(run_id) {
+  if (!run_id) return;
   try {
-    const [runningRes, recentRes] = await Promise.all([
-      fetch('/api/runs?state=running'),
-      fetch('/api/runs?limit=40'),
-    ]);
-    const running = await runningRes.json();
-    const recent  = await recentRes.json();
+    await fetch(`/api/runs/${run_id}`, { method: 'DELETE' });
+    delete _runProgress[run_id];
+    refreshJobBoard();
+  } catch (err) {
+    console.error('Cancel failed:', err);
+  }
+}
 
-    const seen = new Set();
-    const all = [];
-    for (const r of running) {
-      if (r.run_id && !seen.has(r.run_id)) { seen.add(r.run_id); all.push({...r, status: 'running'}); }
-    }
-    for (const r of recent) {
-      if (r.run_id && !seen.has(r.run_id)) { seen.add(r.run_id); all.push(r); }
-    }
+async function setIssueAgent(issueId, currentAgent) {
+  if (!issueId) return;
+  const next = currentAgent === 'claude' ? 'codex' : 'claude';
+  return setLinearIssuePreferredAgent(issueId, next);
+}
+
+async function setLinearIssuePreferredAgent(issueId, next) {
+  if (!issueId) return;
+  const agent = next === 'codex' ? 'codex' : 'claude';
+  try {
+    await fetch(`/api/linear/issues/${issueId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preferred_agent: agent }),
+    });
+    refreshJobBoard();
+  } catch (err) {
+    console.error('setLinearIssuePreferredAgent failed:', err);
+  }
+}
+
+async function triggerLinearIssueWithAgent(issueId, agent, { refresh = true } = {}) {
+  if (!issueId) return;
+  const agentVal = agent === 'codex' ? 'codex' : 'claude';
+  try {
+    await fetch(`/api/linear/issues/${issueId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preferred_agent: agentVal, state_name: 'In Progress' }),
+    });
+    if (refresh) refreshJobBoard();
+  } catch (err) {
+    console.error('triggerLinearIssueWithAgent failed:', err);
+  }
+}
+
+function _tickElapsedTimers() {
+  document.querySelectorAll('[data-started][data-run-id]').forEach(el => {
+    const started = new Date(el.dataset.started);
+    if (isNaN(started)) return;
+    const elapsed = Math.floor((Date.now() - started) / 1000);
+    if (elapsed < 60) el.textContent = elapsed + 's';
+    else if (elapsed < 3600) el.textContent = Math.floor(elapsed/60) + 'm ' + (elapsed%60) + 's';
+    else el.textContent = Math.floor(elapsed/3600) + 'h ' + Math.floor((elapsed%3600)/60) + 'm';
+  });
+}
+setInterval(_tickElapsedTimers, 1000);
+
+let _linearConfigured = false;
+
+async function refreshJobBoard(force = false) {
+  if (!force && _shouldDeferBoardRefresh()) {
+    _pendingBoardRefresh = true;
+    return;
+  }
+  try {
+    const fetches = [fetch('/api/runs?state=running'), fetch('/api/runs?limit=80')];
+    if (_linearConfigured) fetches.push(fetch('/api/linear/issues'));
+    const results = await Promise.all(fetches);
+    const running = await results[0].json();
+    const recent = await results[1].json();
+    const linearIssues = _linearConfigured && results[2] ? await results[2].json() : [];
+
+    const latestRuns = _latestLinearRuns([
+      ...running.map(r => ({ ...r, status: 'running' })),
+      ...recent.filter(r => r.linear_issue_id),
+    ]);
+    const latestRunByIssue = new Map();
+    latestRuns.forEach(run => {
+      if (run.linear_issue_id) latestRunByIssue.set(run.linear_issue_id, run);
+    });
+
+    let all = linearIssues.map(issue => {
+      const latest = latestRunByIssue.get(issue.id);
+      const boardStatus = _linearStateToBoard(issue.state);
+      if (boardStatus !== 'in_review') {
+        _clearReplyDraftForIssue(issue.id);
+      }
+      return {
+        run_id: latest?.run_id || ('linear-' + issue.id),
+        latest_run_id: latest?.run_id || '',
+        latest_run_status: latest?.status || '',
+        linear_issue_id: issue.id,
+        linear_url: issue.url,
+        identifier: issue.identifier,
+        skill: issue.identifier,
+        title: issue.title,
+        prompt: issue.title,
+        status: boardStatus,
+        _boardStatus: boardStatus,
+        started_at: latest?.started_at || issue.created_at,
+        when: latest?.when || '',
+        duration: latest?.duration || '',
+        attempt: latest?.attempt || 0,
+        model: latest?.model === 'codex'
+          ? 'gpt-5.4-mini'
+          : (latest?.model || (latest?.agent === 'codex' ? 'gpt-5.4-mini' : '')),
+        agent: latest?.agent || '',
+        preferred_agent: issue.preferred_agent || '',
+        input_tokens: latest?.input_tokens || 0,
+        output_tokens: latest?.output_tokens || 0,
+        _is_linear_issue: true,
+      };
+    });
+
+    _boardItemsByRunId = {};
+    all.forEach(item => { _boardItemsByRunId[item.run_id] = item; });
 
     const byCol = {};
     ALL_COLS.forEach(c => { byCol[c.key] = []; });
     all.forEach(r => {
-      const state = r.status || r.state || 'unknown';
+      const state = r._boardStatus || r.status || r.state || 'unknown';
       const col = ALL_COLS.find(c => c.states.includes(state));
       if (col) byCol[col.key].push(r);
     });
+    _cancelledItems = all.filter(r => (r._boardStatus || r.status || r.state || 'unknown') === 'cancelled');
 
     const container = document.getElementById('job-board-cols');
     if (!container) return;
 
-    const runningCount = byCol['running']?.length || 0;
+    const runningCount = byCol['in_progress']?.length || 0;
     document.getElementById('job-board-meta').textContent =
-      runningCount > 0 ? `${runningCount} running · ${all.length} total` : `${all.length} runs`;
+      runningCount > 0 ? `${runningCount} in progress · ${all.length} total tasks` : `${all.length} total tasks`;
 
     const frag = document.createDocumentFragment();
-
-    // Visible columns
     JOB_COLS.forEach(col => frag.appendChild(_buildCol(col, byCol[col.key] || [])));
-
-    // Hidden separator
-    const sep = document.createElement('div');
-    sep.className = 'hidden-sep';
-    sep.id = 'hidden-cols-sep';
-    sep.style.opacity = _hiddenColsOpen ? '1' : '0.5';
-    sep.onclick = toggleHiddenCols;
-    sep.innerHTML = `
-      <div class="hidden-sep-arrow" id="hidden-sep-arrow">${_hiddenColsOpen ? '◀' : '▶'}</div>
-      <div class="hidden-sep-label">HIDDEN</div>
-      ${HIDDEN_COLS.map(c => `
-        <div class="hidden-sep-badge" title="${c.label}">
-          <div class="hidden-sep-dot ${c.dotClass}"></div>
-          <span>${byCol[c.key]?.length || 0}</span>
-        </div>
-      `).join('')}
-    `;
-    frag.appendChild(sep);
-
-    // Hidden columns group — display:contents makes children direct flex items
-    const group = document.createElement('div');
-    group.id = 'hidden-cols-group';
-    group.style.display = _hiddenColsOpen ? 'contents' : 'none';
-    HIDDEN_COLS.forEach(col => group.appendChild(_buildCol(col, byCol[col.key] || [])));
-    frag.appendChild(group);
-
     container.replaceChildren(frag);
+
+    const cancelledChip = document.getElementById('cancelled-count-chip');
+    const trashCount = document.getElementById('trash-count');
+    if (trashCount) trashCount.textContent = String(_cancelledItems.length);
+    if (cancelledChip) cancelledChip.classList.toggle('open', _trashOpen);
+    if (_trashOpen) renderTrash(_cancelledItems);
   } catch (_) {}
 }
 
@@ -811,42 +1668,22 @@ function updateJobCardState(run_id, state) {
   setTimeout(refreshJobBoard, state === 'running' ? 0 : 600);
 }
 
-async function archiveRun(run_id) {
-  if (!run_id) return;
-  await fetch(`/api/runs/${run_id}/status`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status: 'archived' }),
-  });
-  refreshJobBoard();
-  refreshTrashCount();
-}
-
-let _trashOpen = false;
-
-async function refreshTrashCount() {
-  try {
-    const res = await fetch('/api/runs?state=archived&limit=200');
-    const runs = await res.json();
-    const n = runs.length;
-    document.getElementById('trash-count').textContent = n > 0 ? n : '—';
-    if (_trashOpen) renderTrash(runs);
-  } catch (_) {}
-}
-
 function toggleTrash() {
   _trashOpen = !_trashOpen;
-  document.getElementById('trash-panel').style.display = _trashOpen ? '' : 'none';
-  if (_trashOpen) refreshTrashCount();
+  const panel = document.getElementById('trash-panel');
+  const chip = document.getElementById('cancelled-count-chip');
+  if (panel) panel.style.display = _trashOpen ? '' : 'none';
+  if (chip) chip.classList.toggle('open', _trashOpen);
+  if (_trashOpen) renderTrash(_cancelledItems);
 }
 
 function renderTrash(runs) {
   const container = document.getElementById('trash-cards');
   const countEl = document.getElementById('trash-panel-count');
-  if (!container) return;
+  if (!container || !countEl) return;
   countEl.textContent = `(${runs.length})`;
   if (!runs.length) {
-    container.innerHTML = '<span style="font-size:12px;color:var(--text-dim)">Empty.</span>';
+    container.innerHTML = '<span style="font-size:12px;color:var(--text-dim)">No canceled issues.</span>';
     return;
   }
   const frag = document.createDocumentFragment();
@@ -854,42 +1691,80 @@ function renderTrash(runs) {
     const card = document.createElement('div');
     card.className = 'trash-card';
     card.innerHTML = `
-      <div class="trash-card-id">${_esc(_shortId(r.run_id))}</div>
-      <div class="trash-card-title">${_esc((r.skill || '?').toUpperCase())}</div>
-      <div class="trash-card-meta">${r.when || '—'} · ${r.prev_status || '?'}</div>
-      <button class="job-btn" onclick="restoreRun('${r.run_id}')">↩ Restore</button>
+      <div class="trash-card-id">${_esc(r.identifier || r.skill || _shortId(r.run_id))}</div>
+      <div class="trash-card-title">${_esc(r.title || r.prompt || 'Untitled')}</div>
+      <div class="trash-card-meta">${_esc(r.when || '—')}</div>
+      <div>${_stateBadgeHtml('cancelled')}</div>
     `;
+    card.addEventListener('click', () => openDetailModal(r.run_id));
     frag.appendChild(card);
   });
   container.replaceChildren(frag);
 }
 
-async function restoreRun(run_id) {
-  await fetch(`/api/runs/${run_id}/restore`, { method: 'POST' });
-  refreshJobBoard();
-  refreshTrashCount();
-}
-
 async function openDetailModal(run_id) {
   if (!run_id) return;
+  const requestSeq = ++_detailModalLoadSeq;
+  const boardItem = _boardItemsByRunId[run_id] || null;
   _detailRunId = run_id;
-  // Show modal with loading state
+  _detailLinearIssueId = null;
+  _detailLinearInitial = null;
+  _detailLinearUpdatedAt = '';
   document.getElementById('detail-modal').classList.add('open');
   document.getElementById('detail-skill').textContent = '…';
   document.getElementById('detail-meta').textContent = '';
-  document.getElementById('detail-output').textContent = 'Loading…';
-  document.getElementById('detail-output').classList.remove('empty');
+  document.getElementById('detail-prompt').textContent = '';
+  document.getElementById('detail-prompt').classList.add('empty');
+  document.getElementById('detail-output').textContent = '';
+  document.getElementById('detail-output').classList.add('empty');
   document.getElementById('detail-error-section').style.display = 'none';
   document.getElementById('detail-path-section').style.display = 'none';
+  document.getElementById('linear-edit-section').style.display = 'none';
+  document.getElementById('linear-edit-status').textContent = '';
+  document.getElementById('linear-issue-link').style.display = 'none';
+  document.getElementById('detail-state-badge').innerHTML = '';
+  document.getElementById('detail-retry-group').style.display = 'none';
+  document.getElementById('detail-dispatch-group').style.display = 'none';
+  document.getElementById('detail-approve-btn').style.display = 'none';
+  document.getElementById('detail-comment-btn').style.display = 'none';
+  document.getElementById('detail-reply-section').style.display = 'none';
+  document.getElementById('detail-history-section').style.display = 'none';
+  document.getElementById('detail-history-list').innerHTML = '';
+  document.getElementById('detail-history-count').textContent = '';
+  _setDetailReplyValue('');
+  _setDetailReplyStatus('');
+  _replyAttachments = [];
+  _renderAttachList('reply-attach-list', _replyAttachments);
 
+  // Virtual Linear card — no run record yet, show issue details directly
+  if (run_id.startsWith('linear-')) {
+    const issueId = run_id.slice(7);
+    if (requestSeq !== _detailModalLoadSeq || _detailRunId !== run_id || !_isModalOpen('detail-modal')) return;
+    _detailLinearIssueId = issueId;
+    document.getElementById('detail-meta').textContent = 'Linear issue';
+    document.getElementById('detail-prompt').textContent = 'No local prompt yet.';
+    document.getElementById('detail-prompt').classList.remove('empty');
+    document.getElementById('detail-output').textContent = 'This board mirrors the Linear issue directly. Edit state below or add a comment.';
+    document.getElementById('detail-output').classList.remove('empty');
+    document.getElementById('detail-reply-section').style.display = '';
+    document.getElementById('detail-comment-btn').style.display = '';
+    const isTodoVirtual = (boardItem?._boardStatus || '') === 'todo';
+    document.getElementById('detail-dispatch-group').style.display = isTodoVirtual ? 'inline-flex' : 'none';
+    if (_linearConfigured) _loadLinearIssueIntoModal(issueId, boardItem);
+    return;
+  }
+
+  document.getElementById('detail-output').textContent = 'Loading…';
+  document.getElementById('detail-output').classList.remove('empty');
   try {
     const res = await fetch(`/api/runs/${run_id}`);
     if (!res.ok) throw new Error('not found');
     const r = await res.json();
-    const state = r.status || 'unknown';
+    if (requestSeq !== _detailModalLoadSeq || _detailRunId !== run_id || !_isModalOpen('detail-modal')) return;
+    const state = boardItem?._boardStatus || r.status || 'unknown';
 
     document.getElementById('detail-state-badge').innerHTML = _stateBadgeHtml(state);
-    document.getElementById('detail-skill').textContent = (r.skill || '?').toUpperCase();
+    document.getElementById('detail-skill').textContent = boardItem?.identifier || (r.skill || '?').toUpperCase();
 
     const started = r.started_at ? new Date(r.started_at).toLocaleString() : '—';
     const dur = r.duration_s != null ? `${r.duration_s}s` : '—';
@@ -906,7 +1781,7 @@ async function openDetailModal(run_id) {
     outputEl.textContent = output || '(no output)';
     outputEl.classList.toggle('empty', !output);
 
-    const error = (r.error || '').trim();
+    const error = _normalizeErrorText(r.error);
     if (error) {
       document.getElementById('detail-error').textContent = error;
       document.getElementById('detail-error-section').style.display = '';
@@ -918,35 +1793,166 @@ async function openDetailModal(run_id) {
       document.getElementById('detail-path-section').style.display = '';
     }
 
-    const canRetry = state !== 'running' && state !== 'sent';
-    document.getElementById('detail-retry-btn').style.display = canRetry ? '' : 'none';
+    const canRetry = !!r.linear_issue_id && state !== 'done' && state !== 'cancelled' && r.status !== 'running';
+    document.getElementById('detail-retry-group').style.display = canRetry ? 'inline-flex' : 'none';
+    if (canRetry) _updateDetailRetryLock(r.preferred_agent || r.agent || null);
+
+    const isTodo = state === 'todo';
+    document.getElementById('detail-dispatch-group').style.display = (isTodo && r.linear_issue_id) ? 'inline-flex' : 'none';
+
+    const isReview = state === 'in_review';
+    document.getElementById('detail-approve-btn').style.display = isReview ? '' : 'none';
+    document.getElementById('detail-comment-btn').style.display = r.linear_issue_id ? '' : 'none';
+    document.getElementById('detail-reply-section').style.display = r.linear_issue_id ? '' : 'none';
+    _detailLinearIssueId = r.linear_issue_id || null;
+    if (isReview) {
+      _restoreReplyDraft();
+    } else if (_detailLinearIssueId) {
+      _clearReplyDraftForIssue(_detailLinearIssueId);
+    }
+    _renderDetailReplyStatus(isReview);
+
+    // Load Linear issue if linked
+    if (_linearConfigured && r.linear_issue_id) {
+      _loadLinearIssueIntoModal(r.linear_issue_id, boardItem);
+    }
+
+    // Fetch previous attempts for this Linear issue or retry chain.
+    if (r.linear_issue_id || r.parent_run_id || r.attempt > 0) {
+      try {
+        const histRes = await fetch(`/api/runs/${run_id}/history`);
+        if (histRes.ok) {
+          const history = await histRes.json();
+          if (requestSeq !== _detailModalLoadSeq || _detailRunId !== run_id || !_isModalOpen('detail-modal')) return;
+          _renderHistory(history, run_id);
+        }
+      } catch (_) {}
+    }
   } catch (err) {
+    if (requestSeq !== _detailModalLoadSeq || _detailRunId !== run_id || !_isModalOpen('detail-modal')) return;
     document.getElementById('detail-output').textContent = `Error loading run: ${err}`;
   }
 }
 
 function closeDetailModal() {
+  _detailModalLoadSeq++;
+  _detailLinearLoadSeq++;
   document.getElementById('detail-modal').classList.remove('open');
   _detailRunId = null;
+  _detailLinearIssueId = null;
+  _detailLinearInitial = null;
+  _detailLinearUpdatedAt = '';
+  _setDetailReplyValue('');
+  _setDetailReplyStatus('');
+  _replyAttachments = [];
+  _renderAttachList('reply-attach-list', _replyAttachments);
+  _flushPendingBoardRefresh();
 }
 
-async function retryRun(run_id) {
-  if (!run_id) return;
+function _updateDetailRetryLock(lockedAgent) {
+  const retryGroup = document.getElementById('detail-retry-group');
+  if (!retryGroup || retryGroup.style.display === 'none') return;
+  const btnC = document.getElementById('detail-retry-claude');
+  const btnX = document.getElementById('detail-retry-codex');
+  if (btnC) btnC.style.display = (!lockedAgent || lockedAgent === 'claude') ? '' : 'none';
+  if (btnX) btnX.style.display = (!lockedAgent || lockedAgent === 'codex') ? '' : 'none';
+}
+
+async function dispatchFromDetail(agent) {
+  if (!_detailLinearIssueId) return;
+  const linearIssueId = _detailLinearIssueId;
   try {
-    const res = await fetch(`/api/runs/${run_id}/retry`, { method: 'POST' });
+    await _commentReplyToLinear(linearIssueId);
+    _clearReplyComposer();
+    await triggerLinearIssueWithAgent(linearIssueId, agent, { refresh: false });
+    refreshJobBoard();
+    closeDetailModal();
+  } catch (err) {
+    alert('Dispatch error: ' + err);
+  }
+}
+
+async function retryRun(run_id, agent = 'claude', reply = '', attachments = []) {
+  if (!run_id) return;
+  const boardItem = _boardItemsByRunId[run_id] || null;
+  const targetRunId = boardItem?.latest_run_id || run_id;
+  if (targetRunId.startsWith('linear-')) { alert('No previous run to continue yet. Move the issue to In Progress first.'); return; }
+  try {
+    const body = JSON.stringify({ agent, reply, attachments });
+    const res = await fetch(`/api/runs/${targetRunId}/retry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
     const data = await res.json();
     if (!data.ok) { alert('Retry failed: ' + (data.error || 'unknown')); return; }
-    const command = selectedAgent === 'codex' ? `$${data.skill} ` : `/${data.skill} `;
-    socket.emit('skill_selected', { skill: data.skill, phrase: command });
-    injectCommand(command + (data.prompt || ''));
     closeDetailModal();
+    refreshJobBoard();
   } catch (err) {
     alert('Retry error: ' + err);
   }
 }
 
-function retryFromDetail() {
-  if (_detailRunId) retryRun(_detailRunId);
+function retryFromDetail(agent = 'claude') {
+  if (!_detailRunId) return;
+  const reply = (document.getElementById('detail-reply-input')?.value || '').trim();
+  retryRun(_detailRunId, agent, reply, _replyAttachments);
+  _replyAttachments = [];
+  _renderAttachList('reply-attach-list', _replyAttachments);
+}
+
+async function approveRun() {
+  if (!_detailRunId) return;
+  const boardItem = _boardItemsByRunId[_detailRunId] || null;
+  const linearIssueId = boardItem?.linear_issue_id || _detailLinearIssueId;
+  try {
+    if (!linearIssueId) throw new Error('No linked Linear issue');
+    await fetch(`/api/linear/issues/${linearIssueId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state_name: 'Done' }),
+    });
+    closeDetailModal();
+    refreshJobBoard();
+  } catch (err) { alert('Approve error: ' + err); }
+}
+
+async function _commentReplyToLinear(linearIssueId) {
+  const feedback = (document.getElementById('detail-reply-input')?.value || '').trim();
+  if (!feedback && !_replyAttachments.length) return false;
+  const res = await fetch(`/api/linear/issues/${linearIssueId}/comment`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: 'Human Feedback',
+      feedback,
+      attachments: _replyAttachments,
+    }),
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.error || 'comment failed');
+  return true;
+}
+
+function _clearReplyComposer() {
+  _setDetailReplyValue('');
+  _clearReplyDraft();
+  _replyAttachments = [];
+  _renderAttachList('reply-attach-list', _replyAttachments);
+  _renderDetailReplyStatus(true);
+}
+
+async function commentToLinear() {
+  const linearIssueId = _detailLinearIssueId || _boardItemsByRunId[_detailRunId]?.linear_issue_id;
+  if (!linearIssueId) return;
+  try {
+    const sent = await _commentReplyToLinear(linearIssueId);
+    if (!sent) return;
+    _clearReplyComposer();
+    if (_linearConfigured) _loadLinearIssueIntoModal(linearIssueId, _boardItemsByRunId[_detailRunId] || null);
+  } catch (err) {
+    alert('Comment error: ' + err);
+  }
 }
 
 // Close detail modal on backdrop click
@@ -954,13 +1960,489 @@ document.getElementById('detail-modal').addEventListener('click', function(e) {
   if (e.target === this) closeDetailModal();
 });
 
+// Close team dropdown on outside click
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#team-selector')) {
+    _teamDropdownOpen = false;
+    const dd = document.getElementById('team-dropdown');
+    if (dd) dd.classList.remove('open');
+  }
+});
+
+// ── Linear team selector ────────────────────────────────────────────────────
+let _linearTeams = [];
+let _currentTeamId = '';
+let _teamDropdownOpen = false;
+
+async function _initTeamSelector() {
+  if (!_linearConfigured) return;
+  try {
+    const res = await fetch('/api/linear/teams');
+    _linearTeams = await res.json();
+    if (!Array.isArray(_linearTeams) || !_linearTeams.length) return;
+    const sel = document.getElementById('team-selector');
+    if (sel) sel.classList.add('visible');
+    _renderTeamDropdown();
+    const current = _linearTeams.find(t => t.id === _currentTeamId);
+    const btn = document.getElementById('team-selector-btn');
+    if (btn) btn.textContent = '⬡ ' + (current ? current.name : 'All Teams');
+  } catch (_) {}
+}
+
+function _renderTeamDropdown() {
+  const dd = document.getElementById('team-dropdown');
+  if (!dd) return;
+  dd.innerHTML = '';
+  // "All teams" option
+  const all = document.createElement('div');
+  all.className = 'linear-dropdown-item' + (!_currentTeamId ? ' active' : '');
+  all.textContent = 'All Teams';
+  all.onclick = () => selectLinearTeam('', 'All Teams');
+  dd.appendChild(all);
+  _linearTeams.forEach(t => {
+    const item = document.createElement('div');
+    item.className = 'linear-dropdown-item' + (t.id === _currentTeamId ? ' active' : '');
+    item.textContent = t.name + (t.key ? ` (${t.key})` : '');
+    item.onclick = () => selectLinearTeam(t.id, t.name);
+    dd.appendChild(item);
+  });
+}
+
+function toggleTeamDropdown() {
+  _teamDropdownOpen = !_teamDropdownOpen;
+  const dd = document.getElementById('team-dropdown');
+  if (dd) dd.classList.toggle('open', _teamDropdownOpen);
+}
+
+async function selectLinearTeam(team_id, name) {
+  _currentTeamId = team_id;
+  _teamDropdownOpen = false;
+  const dd = document.getElementById('team-dropdown');
+  if (dd) dd.classList.remove('open');
+  const btn = document.getElementById('team-selector-btn');
+  if (btn) btn.textContent = '⬡ ' + (name || 'All Teams');
+  try {
+    await fetch('/api/config', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ linear_team_id: team_id }),
+    });
+    _renderTeamDropdown();
+    refreshJobBoard();
+  } catch (_) {}
+}
+
+// ── Linear issue detail + edit ───────────────────────────────────────────────
+let _detailLinearIssueId = null;
+let _detailLinearStates = [];
+let _detailPreferredAgent = 'claude';
+let _detailLinearLoadSeq = 0;
+
+function _setLinearEditDisabled(disabled) {
+  document.getElementById('linear-edit-title')?.toggleAttribute('disabled', disabled);
+  document.getElementById('linear-edit-desc')?.toggleAttribute('disabled', disabled);
+  document.getElementById('linear-edit-state')?.toggleAttribute('disabled', disabled);
+  document.getElementById('linear-save-btn')?.toggleAttribute('disabled', disabled);
+}
+
+function setDetailIssueAgent(agent, { dispatch = false } = {}) {
+  _detailPreferredAgent = agent === 'codex' ? 'codex' : 'claude';
+  document.getElementById('linear-edit-agent-claude')?.classList.toggle('active', _detailPreferredAgent === 'claude');
+  document.getElementById('linear-edit-agent-codex')?.classList.toggle('active', _detailPreferredAgent === 'codex');
+  _updateDetailRetryLock(_detailPreferredAgent);
+  _saveLinearDraft();
+  // dispatch=true only when user clicks the button; skip on programmatic load
+  if (dispatch) {
+    const boardItem = _boardItemsByRunId[_detailRunId] || null;
+    const boardStatus = boardItem?._boardStatus || _linearStateToBoard(document.getElementById('linear-edit-state')?.value || '');
+    if (boardStatus === 'todo' && _detailLinearIssueId) {
+      void dispatchFromDetail(_detailPreferredAgent);
+    }
+  }
+}
+
+async function _loadLinearIssueIntoModal(linear_issue_id, boardItem = null) {
+  const requestSeq = ++_detailLinearLoadSeq;
+  const preserveExistingDraft =
+    _detailLinearIssueId === linear_issue_id && _isModalOpen('detail-modal') && _detailLinearDirty();
+  const currentDraft = preserveExistingDraft ? {
+    title: document.getElementById('linear-edit-title')?.value || '',
+    description: document.getElementById('linear-edit-desc')?.value || '',
+    state: document.getElementById('linear-edit-state')?.value || '',
+    preferred_agent: _detailPreferredAgent || 'claude',
+  } : null;
+  _detailLinearIssueId = linear_issue_id;
+  const section = document.getElementById('linear-edit-section');
+  if (!section) return;
+  section.style.display = '';
+  const status = document.getElementById('linear-edit-status');
+  if (status) status.textContent = 'Loading…';
+  if (!preserveExistingDraft) {
+    document.getElementById('linear-edit-title').value = '';
+    document.getElementById('linear-edit-desc').value = '';
+    document.getElementById('linear-edit-state').innerHTML = '';
+    _detailPreferredAgent = 'claude';
+    document.getElementById('linear-edit-agent-claude')?.classList.add('active');
+    document.getElementById('linear-edit-agent-codex')?.classList.remove('active');
+    _setLinearEditDisabled(true);
+  }
+  try {
+    const res = await fetch(`/api/linear/issues/${linear_issue_id}`);
+    if (!res.ok) throw new Error('not found');
+    const issue = await res.json();
+    if (requestSeq !== _detailLinearLoadSeq || _detailLinearIssueId !== linear_issue_id || !_isModalOpen('detail-modal')) return;
+    _detailLinearUpdatedAt = issue.updated_at || '';
+
+    // Populate state dropdown
+    _detailLinearStates = issue.team_states || [];
+    const stateEl = document.getElementById('linear-edit-state');
+    stateEl.innerHTML = '';
+    _detailLinearStates.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s.name;
+      opt.textContent = s.name;
+      if (s.name === issue.state) opt.selected = true;
+      stateEl.appendChild(opt);
+    });
+    const draft = preserveExistingDraft ? currentDraft : _restoreLinearDraft(issue);
+    if (_linearStateToBoard(issue.state) === 'in_review') {
+      if (_detailReplyDirty()) {
+        _saveReplyDraft();
+      } else {
+        _restoreReplyDraft();
+      }
+    } else {
+      _clearReplyDraftForIssue(linear_issue_id);
+    }
+    if (preserveExistingDraft) {
+      document.getElementById('linear-edit-title').value = currentDraft.title;
+      document.getElementById('linear-edit-desc').value = currentDraft.description;
+      setDetailIssueAgent(currentDraft.preferred_agent || issue.preferred_agent || 'claude');
+    }
+    _updateDetailRetryLock(issue.preferred_agent || boardItem?.agent || null);
+    if (draft.state) stateEl.value = draft.state;
+    _detailLinearInitial = {
+      title: issue.title || '',
+      description: issue.description || '',
+      state: issue.state || '',
+      preferred_agent: issue.preferred_agent || 'claude',
+    };
+
+    // Update modal header with issue title if this is a virtual card
+    if (_detailRunId && (_detailRunId.startsWith('linear-') || boardItem)) {
+      document.getElementById('detail-skill').textContent = (issue.identifier || '') + (issue.title ? ' · ' + issue.title : '');
+      document.getElementById('detail-state-badge').innerHTML = _stateBadgeHtml(_linearStateToBoard(issue.state));
+    }
+
+    // Show dispatch hint when issue is in Todo state
+    const isTodo = _linearStateToBoard(issue.state) === 'todo';
+    const hint = document.getElementById('linear-edit-agent-hint');
+    if (hint) hint.textContent = isTodo ? '▶ Click to dispatch agent' : 'Preferred agent for dispatch';
+
+    const link = document.getElementById('linear-issue-link');
+    if (link && issue.url) {
+      link.href = issue.url;
+      link.textContent = '↗ ' + (issue.identifier || 'Open in Linear');
+      link.style.display = '';
+    }
+    if (status) status.textContent = '';
+    _setLinearEditDisabled(false);
+  } catch (err) {
+    if (status) status.textContent = 'Failed to load issue';
+    if (requestSeq === _detailLinearLoadSeq) _setLinearEditDisabled(false);
+  }
+}
+
+async function saveLinearIssue() {
+  if (!_detailLinearIssueId) return;
+  const btn = document.getElementById('linear-save-btn');
+  const status = document.getElementById('linear-edit-status');
+  if (btn) btn.disabled = true;
+  if (status) status.textContent = 'Saving…';
+  try {
+    const res = await fetch(`/api/linear/issues/${_detailLinearIssueId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: document.getElementById('linear-edit-title').value,
+        description: document.getElementById('linear-edit-desc').value,
+        state_name: document.getElementById('linear-edit-state').value,
+        preferred_agent: _detailPreferredAgent,
+      }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      _clearLinearDraft();
+      _detailLinearInitial = {
+        title: document.getElementById('linear-edit-title').value,
+        description: document.getElementById('linear-edit-desc').value,
+        state: document.getElementById('linear-edit-state').value,
+        preferred_agent: _detailPreferredAgent,
+      };
+      if (status) { status.textContent = '✓ Saved'; status.style.color = 'var(--green)'; }
+      setTimeout(() => { if (status) { status.textContent = ''; status.style.color = ''; } }, 2000);
+      refreshJobBoard();
+    } else {
+      if (status) { status.textContent = 'Error: ' + (data.error || 'failed'); status.style.color = 'var(--red)'; }
+    }
+  } catch (err) {
+    if (status) { status.textContent = 'Error: ' + err; status.style.color = 'var(--red)'; }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function _renderHistory(chain, currentRunId) {
+  const section = document.getElementById('detail-history-section');
+  const list = document.getElementById('detail-history-list');
+  const countEl = document.getElementById('detail-history-count');
+  if (!section || !list) return;
+  const prior = chain.filter(r => r.run_id !== currentRunId);
+  if (!prior.length) { section.style.display = 'none'; return; }
+  section.style.display = '';
+  if (countEl) countEl.textContent = `(${prior.length})`;
+  list.innerHTML = '';
+  prior.forEach((r, i) => {
+    const attemptNum = r.attempt > 0 ? r.attempt : i + 1;
+    const started = r.started_at ? new Date(r.started_at).toLocaleString() : '—';
+    const dur = r.duration_s != null ? `${r.duration_s}s` : '';
+    const prompt = (r.prompt || '').trim();
+    const output = (r.output || '').trim();
+    const error = _normalizeErrorText(r.error);
+    const item = document.createElement('div');
+    item.className = 'attempt-item';
+    const bodyId = `attempt-body-${i}`;
+    const togId = `attempt-tog-${i}`;
+    item.innerHTML = `
+      <div class="attempt-header" onclick="
+        const b=document.getElementById('${bodyId}');
+        b.classList.toggle('open');
+        document.getElementById('${togId}').textContent=b.classList.contains('open')?'▲':'▼';
+      ">
+        ${_stateBadgeHtml(r.status || 'unknown')}
+        <span>Attempt ${attemptNum}</span>
+        <span style="font-size:10px;color:var(--text-dim)">${_esc(started)}${dur ? ' · ' + _esc(dur) : ''}</span>
+        <span class="attempt-toggle" id="${togId}">▼</span>
+      </div>
+      <div class="attempt-body" id="${bodyId}">
+        ${prompt ? `<div class="attempt-sub-label">Prompt</div><div class="attempt-content">${_esc(prompt)}</div>` : ''}
+        ${output ? `<div class="attempt-sub-label">Output</div><div class="attempt-content">${_esc(output)}</div>` : ''}
+        ${error  ? `<div class="attempt-sub-label">Error</div><div class="attempt-content err">${_esc(error)}</div>` : ''}
+      </div>
+    `;
+    list.appendChild(item);
+  });
+}
+
+async function cancelLinearIssue() {
+  if (!_detailLinearIssueId) return;
+  const btn = document.getElementById('detail-cancel-btn');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(`/api/linear/issues/${_detailLinearIssueId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state_name: 'Canceled' }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      closeDetailModal();
+      refreshJobBoard();
+    } else {
+      alert('Cancel failed: ' + (data.error || 'unknown'));
+      if (btn) btn.disabled = false;
+    }
+  } catch (err) {
+    alert('Cancel error: ' + err);
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function cancelLinearIssueById(issueId) {
+  if (!issueId) return;
+  try {
+    const res = await fetch(`/api/linear/issues/${issueId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state_name: 'Canceled' }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      refreshJobBoard();
+    } else {
+      alert('Cancel failed: ' + (data.error || 'unknown'));
+    }
+  } catch (err) {
+    alert('Cancel error: ' + err);
+  }
+}
+
+function _linearStateToBoard(linearState) {
+  const key = String(linearState || '').trim().replace(/\s+/g, ' ').toLowerCase();
+  const map = {
+    'backlog': 'backlog',
+    'todo': 'todo',
+    'in progress': 'in_progress',
+    'in review': 'in_review',
+    'done': 'done',
+    'canceled': 'cancelled',
+    'cancelled': 'cancelled',
+    'duplicate': 'duplicate',
+  };
+  return map[key] || 'todo';
+}
+
+// ── Voice input (Web Speech API) ────────────────────────────────────────────
+let _micRecognition = null;
+let _micTargetId = null;
+let _micBtnId = null;
+let _micStatusId = null;
+let _micTranscriptBase = '';
+let _micFinalTranscript = '';
+let _micInterimTranscript = '';
+let _micLastRenderedValue = '';
+
+function _normalizeSpeechSegment(text, { final = false } = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+
+  if (!final) return raw;
+  if (/[。！？!?．.!…~～]$/.test(raw)) return raw;
+
+  const questionLike = /(吗|么|呢|吧|是不是|对不对|好不好|行不行|可不可以|能不能|要不要)$/;
+  return `${raw}${questionLike.test(raw) ? '？' : '。'}`;
+}
+
+function _appendSpeechSegment(baseText, segment, { final = false } = {}) {
+  const chunk = _normalizeSpeechSegment(segment, { final });
+  if (!chunk) return baseText || '';
+  return `${baseText || ''}${chunk}`;
+}
+
+function _renderMicTranscript(targetId) {
+  const ta = document.getElementById(targetId);
+  if (!ta) return;
+  const value = `${_micTranscriptBase || ''}${_micFinalTranscript || ''}${_micInterimTranscript || ''}`;
+  ta.value = value;
+  _micLastRenderedValue = value;
+}
+
+function toggleMic() {
+  toggleMicFor('detail-reply-input', 'mic-btn', 'mic-status');
+}
+
+function toggleMicFor(targetId, btnId, statusId) {
+  if (_micRecognition) {
+    const activeBtnId = _micBtnId;
+    _stopMic();
+    // If same button clicked again while active, just stop
+    if (activeBtnId === btnId) return;
+  }
+  _startMic(targetId, btnId, statusId);
+}
+
+function _startMic(targetId, btnId, statusId) {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const stEl = document.getElementById(statusId);
+  if (!SR) {
+    if (stEl) { stEl.style.display = ''; stEl.textContent = 'Speech API not supported'; }
+    return;
+  }
+  _micTargetId = targetId;
+  _micBtnId = btnId;
+  _micStatusId = statusId;
+  const rec = new SR();
+  rec.continuous = true;
+  rec.interimResults = true;
+  rec.lang = 'zh-CN';
+  _micRecognition = rec;
+  const currentValue = (document.getElementById(targetId) || {}).value || '';
+  _micTranscriptBase = currentValue;
+  _micFinalTranscript = '';
+  _micInterimTranscript = '';
+  _micLastRenderedValue = currentValue;
+
+  rec.onstart = () => {
+    const btn = document.getElementById(btnId);
+    if (btn) { btn.style.color = 'var(--red)'; btn.style.borderColor = 'var(--red)'; btn.textContent = '⏹'; }
+    if (stEl) { stEl.style.display = ''; stEl.textContent = '● Listening…'; stEl.style.color = 'var(--red)'; }
+  };
+
+  rec.onresult = (e) => {
+    if (!_micRecognition || _micTargetId !== targetId) return;
+    let interim = '';
+    let finalChunk = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) {
+        finalChunk = _appendSpeechSegment(finalChunk, e.results[i][0].transcript, { final: true });
+      } else {
+        interim = _appendSpeechSegment(interim, e.results[i][0].transcript);
+      }
+    }
+    if (finalChunk) _micFinalTranscript += finalChunk;
+    _micInterimTranscript = interim;
+    _renderMicTranscript(targetId);
+    if (stEl) stEl.textContent = interim ? `● ${interim}` : '● Listening…';
+  };
+
+  rec.onerror = (e) => {
+    if (stEl) { stEl.textContent = `Mic error: ${e.error}`; stEl.style.color = 'var(--red)'; }
+    _stopMic();
+  };
+
+  rec.onend = () => { _stopMic(); };
+  rec.start();
+}
+
+function _stopMic() {
+  if (_micRecognition) { try { _micRecognition.stop(); } catch (_) {} _micRecognition = null; }
+  const btn = document.getElementById(_micBtnId);
+  if (btn) { btn.style.color = ''; btn.style.borderColor = ''; btn.textContent = '🎙'; }
+  const st = document.getElementById(_micStatusId);
+  if (st) { st.style.display = 'none'; st.style.color = ''; }
+  _micTargetId = _micBtnId = _micStatusId = null;
+  _micTranscriptBase = '';
+  _micFinalTranscript = '';
+  _micInterimTranscript = '';
+  _micLastRenderedValue = '';
+}
+
+function _handleReplyInput() {
+  _saveReplyDraft();
+  if (_micRecognition && _micTargetId === 'detail-reply-input') {
+    const current = _getDetailReplyValue();
+    if (current !== _micLastRenderedValue) {
+      _stopMic();
+    }
+  }
+}
+
+function _bindDraftPersistence() {
+  document.getElementById('new-issue-title')?.addEventListener('input', _saveNewIssueDraft);
+  document.getElementById('new-issue-desc')?.addEventListener('input', _saveNewIssueDraft);
+  document.getElementById('detail-reply-input')?.addEventListener('input', _handleReplyInput);
+  document.getElementById('linear-edit-title')?.addEventListener('input', _saveLinearDraft);
+  document.getElementById('linear-edit-desc')?.addEventListener('input', _saveLinearDraft);
+  document.getElementById('linear-edit-state')?.addEventListener('change', _saveLinearDraft);
+}
+
+// Stop mic when modals close
+const _origClose = closeDetailModal;
+closeDetailModal = function() { _stopMic(); _origClose(); };
+
 // Initial load + polling
+_initAgentFromConfig().then(cfg => {
+  if (cfg && cfg.linear_configured) _linearConfigured = true;
+});
 refreshJobBoard();
-refreshTrashCount();
 updateWindows(selectedAgent);
 initPaceMarkers();
+_initAgentFromConfig();
+_bindDraftPersistence();
 setInterval(refreshJobBoard, 15000);
+setInterval(_flushPendingBoardRefresh, 1000);
 setInterval(() => updateWindows(selectedAgent), 60000);
+setInterval(_updateRuntimeChip, 30000);
 setInterval(() => {
   document.querySelectorAll('.win-pace-marker').forEach(marker => {
     const resetsAt = parseFloat(marker.dataset.resetsAt);
@@ -1017,7 +2499,30 @@ socket.on('run_logged', () => { refreshJobBoard(); });
 
 socket.on('run_state_change', (data) => {
   if (data.run_id && data.state) {
+    if (data.state !== 'running') delete _runProgress[data.run_id];
     updateJobCardState(data.run_id, data.state);
+  }
+});
+
+socket.on('linear_issues_updated', () => { if (_linearConfigured) refreshJobBoard(); });
+
+socket.on('run_progress', (data) => {
+  if (!data.run_id) return;
+  _runProgress[data.run_id] = { snippet: data.snippet || '', turn: data.turn || 0 };
+  // Update status line live without full board refresh
+  const card = document.querySelector(`[data-run-id="${data.run_id}"]`);
+  if (card) {
+    let sl = card.querySelector('.job-card-status-line');
+    if (!sl) {
+      sl = document.createElement('div');
+      sl.className = 'job-card-status-line';
+      const prompt = card.querySelector('.job-card-prompt');
+      if (prompt) prompt.after(sl);
+      else card.querySelector('.job-card-footer')?.before(sl);
+    }
+    sl.textContent = data.snippet || '';
+    const turnEl = card.querySelector('.job-card-turn');
+    if (turnEl) turnEl.textContent = ` · T:${data.turn}`;
   }
 });
 
@@ -1067,6 +2572,16 @@ function selectSkill(event, name, phrase) {
 }
 function clearPrompt() { clearTerm(); }
 
+const skillPanelContent = document.getElementById('skill-panel-content');
+skillPanelContent?.addEventListener('click', (event) => {
+  const card = event.target.closest('.skill-card');
+  if (!card || !skillPanelContent.contains(card)) return;
+  const name = card.dataset.skillName || '';
+  if (!name) return;
+  const phrase = card.dataset.skillTrigger || name;
+  selectSkill(event, name, phrase);
+});
+
 // Drag-and-drop file → inject server path into PTY
 terminalEl.addEventListener('dragover', (e) => {
   e.preventDefault();
@@ -1088,6 +2603,175 @@ terminalEl.addEventListener('drop', async (e) => {
     } catch (err) { term.write(`\r\n[upload error: ${err}]\r\n`); }
   }
 });
+</script>
+
+<!-- New issue modal -->
+<div class="new-issue-modal-bg" id="new-issue-modal">
+  <div class="new-issue-modal">
+    <h3>+ New Task</h3>
+    <div class="new-issue-field">
+      <div class="new-issue-label">Title</div>
+      <input class="new-issue-input" id="new-issue-title" type="text" placeholder="Task title…" autocomplete="off">
+    </div>
+    <div class="new-issue-field">
+      <div class="new-issue-label">Run With</div>
+      <div class="new-issue-agent-row">
+        <div class="agent-toggle" aria-label="New task agent">
+          <button type="button" class="agent-btn active" id="new-issue-agent-claude" onclick="setNewIssueAgent('claude')">◆ Claude</button>
+          <button type="button" class="agent-btn" id="new-issue-agent-codex" onclick="setNewIssueAgent('codex')">✦ Codex</button>
+        </div>
+        <span class="new-issue-agent-hint">Preferred agent for first dispatch</span>
+      </div>
+    </div>
+    <div class="new-issue-field">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
+        <div class="new-issue-label" style="margin-bottom:0">Description (optional)</div>
+        <button id="mic-btn-desc" onclick="toggleMicFor('new-issue-desc','mic-btn-desc','mic-status-desc')" title="Voice input" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:13px;padding:1px 7px;border-radius:4px;cursor:pointer;font-family:inherit">🎙</button>
+      </div>
+      <textarea class="new-issue-input" id="new-issue-desc" placeholder="Details…"></textarea>
+      <div class="attach-bar">
+        <label class="attach-btn" for="new-task-files">📎 Attach file</label>
+        <input type="file" id="new-task-files" multiple style="display:none" onchange="onNewTaskFilesChange(this)">
+        <div class="attach-list" id="new-task-attach-list"></div>
+      </div>
+      <div id="mic-status-desc" style="font-size:10px;color:var(--text-dim);margin-top:2px;display:none"></div>
+    </div>
+    <div class="new-issue-actions">
+      <span class="new-issue-status" id="new-issue-status"></span>
+      <button type="button" class="new-issue-cancel" onclick="closeNewIssueModal()">Cancel</button>
+      <button type="button" class="new-issue-submit" id="new-issue-submit" onclick="submitNewIssue()">Create in Linear</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let _newTaskAttachments = [];
+let _replyAttachments = [];
+let _newIssueAgent = 'claude';
+let _newIssueFocusTimer = null;
+
+function setNewIssueAgent(agent) {
+  _newIssueAgent = agent === 'codex' ? 'codex' : 'claude';
+  document.getElementById('new-issue-agent-claude')?.classList.toggle('active', _newIssueAgent === 'claude');
+  document.getElementById('new-issue-agent-codex')?.classList.toggle('active', _newIssueAgent === 'codex');
+  _saveDraft('agenticos.draft.new_issue.agent', _newIssueAgent);
+}
+
+function openNewIssueModal(event) {
+  if (event) event.preventDefault();
+  _restoreNewIssueDraft();
+  document.getElementById('new-issue-status').textContent = '';
+  document.getElementById('new-issue-submit').disabled = false;
+  document.getElementById('new-issue-modal').classList.add('open');
+  if (_newIssueFocusTimer) clearTimeout(_newIssueFocusTimer);
+  _newIssueFocusTimer = setTimeout(() => {
+    _newIssueFocusTimer = null;
+    const modal = document.getElementById('new-issue-modal');
+    const title = document.getElementById('new-issue-title');
+    if (!modal || !title || !modal.classList.contains('open')) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active.closest('#new-issue-modal')) return;
+    title.focus();
+  }, 50);
+}
+
+function closeNewIssueModal() {
+  if (typeof _stopMic === 'function') _stopMic();
+  if (_newIssueFocusTimer) {
+    clearTimeout(_newIssueFocusTimer);
+    _newIssueFocusTimer = null;
+  }
+  _newTaskAttachments = [];
+  document.getElementById('new-issue-modal').classList.remove('open');
+  if (document.activeElement && document.activeElement.closest('#new-issue-modal')) {
+    document.activeElement.blur();
+  }
+  _flushPendingBoardRefresh();
+}
+
+document.getElementById('new-issue-modal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('new-issue-modal')) closeNewIssueModal();
+});
+
+let _newIssueTitleComposing = false;
+const _newIssueTitleEl = document.getElementById('new-issue-title');
+_newIssueTitleEl?.addEventListener('compositionstart', () => { _newIssueTitleComposing = true; });
+_newIssueTitleEl?.addEventListener('compositionend', () => { _newIssueTitleComposing = false; });
+_newIssueTitleEl?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.isComposing || _newIssueTitleComposing) return;
+    e.preventDefault();
+    submitNewIssue();
+  }
+  if (e.key === 'Escape' && !e.isComposing && !_newIssueTitleComposing) closeNewIssueModal();
+});
+
+// Attachment state
+async function _uploadBoardFile(file) {
+  const fd = new FormData(); fd.append('file', file);
+  const resp = await fetch('/api/board/upload', { method: 'POST', body: fd });
+  return resp.ok ? resp.json() : null;
+}
+function _renderAttachList(listId, attachments) {
+  const el = document.getElementById(listId);
+  if (!el) return;
+  el.innerHTML = attachments.map((a, i) =>
+    `<span class="attach-chip"><a href="${a.url}" target="_blank">${(a.name || '')}</a><button class="attach-remove" onclick="_removeAttach('${listId}', ${i})">×</button></span>`
+  ).join('');
+}
+function _removeAttach(listId, idx) {
+  if (listId === 'new-task-attach-list') { _newTaskAttachments.splice(idx, 1); _renderAttachList(listId, _newTaskAttachments); }
+  else { _replyAttachments.splice(idx, 1); _renderAttachList(listId, _replyAttachments); }
+}
+async function onNewTaskFilesChange(input) {
+  for (const file of Array.from(input.files)) {
+    const result = await _uploadBoardFile(file);
+    if (result && result.url) _newTaskAttachments.push(result);
+  }
+  _renderAttachList('new-task-attach-list', _newTaskAttachments);
+  _saveNewIssueDraft();
+  input.value = '';
+}
+async function onReplyFilesChange(input) {
+  for (const file of Array.from(input.files)) {
+    const result = await _uploadBoardFile(file);
+    if (result && result.url) _replyAttachments.push(result);
+  }
+  _renderAttachList('reply-attach-list', _replyAttachments);
+  input.value = '';
+}
+
+async function submitNewIssue() {
+  const title = document.getElementById('new-issue-title').value.trim();
+  if (!title) { document.getElementById('new-issue-title').focus(); return; }
+  const desc  = document.getElementById('new-issue-desc').value.trim();
+  const btn   = document.getElementById('new-issue-submit');
+  const status = document.getElementById('new-issue-status');
+  btn.disabled = true;
+  status.textContent = 'Creating…';
+  try {
+    const res = await fetch('/api/linear/issues', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, description: desc, team_id: _currentTeamId, attachments: _newTaskAttachments, agent: _newIssueAgent }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      _clearNewIssueDraft();
+      _newTaskAttachments = [];
+      _renderAttachList('new-task-attach-list', _newTaskAttachments);
+      closeNewIssueModal();
+      _pendingBoardRefresh = false;
+      setTimeout(() => refreshJobBoard(true), 500);
+    } else {
+      status.textContent = data.error || 'Failed';
+      btn.disabled = false;
+    }
+  } catch (err) {
+    status.textContent = 'Error: ' + err;
+    btn.disabled = false;
+  }
+}
 </script>
 </body>
 </html>

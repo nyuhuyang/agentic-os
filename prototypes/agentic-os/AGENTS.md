@@ -2,6 +2,38 @@
 
 > Single-host web dashboard and CLI job runner for AI skill executions and token budget monitoring.
 
+## Critical Token Budget Rule
+
+For small bug-fix tasks, do not read project-level documents by default.
+
+Forbidden unless explicitly requested:
+
+- `SPEC.md`
+- `TODO.md`
+- `ARCHITECTURE.md`
+- `CONTEXT.md`
+- `README.md`
+- `docs/**`
+- `outputs/**`
+- historical logs
+- long markdown files
+
+Small bug-fix workflow:
+
+1. Read only the user's task.
+2. Search only the most likely implementation files.
+3. Open only narrow line ranges around matched symbols.
+4. Make the smallest relevant patch.
+5. Validate with targeted checks.
+
+For Job Board UI tasks, default scope is:
+
+- `runner/templates/index.html`
+- `runner/app.py`
+- `runner/linear_client.py` only if Linear API behavior is involved
+
+Do not read `SPEC.md` or `TODO.md` for UI polish, button, column, count, modal, card, or recycle-bin tasks unless the user explicitly asks for spec or roadmap work.
+
 ## Quick Start
 
 ```bash
