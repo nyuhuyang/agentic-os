@@ -2218,22 +2218,6 @@ def api_config_patch():
     return jsonify({"ok": True})
 
 
-@app.route("/api/linear/teams")
-def api_linear_teams():
-    cfg = _load_workflow_config()
-    tracker = cfg.get("tracker", {})
-    api_key = tracker.get("api_key", "")
-    if api_key.startswith("$"):
-        api_key = os.environ.get(api_key[1:], "")
-    if not api_key:
-        return jsonify([])
-    try:
-        from linear_client import LinearClient
-        client = LinearClient(api_key, tracker.get("project_slug", ""))
-        return jsonify(client.fetch_teams())
-    except Exception as e:
-        logger.error("fetch_teams error: %s", e)
-        return jsonify([])
 
 
 # ── Module capabilities ─────────────────────────────────────────────────
@@ -2269,266 +2253,12 @@ def api_runtime():
     return jsonify({"total_s": round(total_s, 1)})
 
 
-@app.route("/api/linear/issues")
-def api_linear_issues():
-    linear_mod = _module_registry.get("linear")
-    if linear_mod and linear_mod._capability.get("available"):
-        # Use module-level tracker (Linear or LocalTracker)
-        cap = linear_mod._capability
-        if cap.get("type") == "linear":
-            # Linear mode: fetch live + merge cache
-            cfg = _load_workflow_config()
-            tracker = cfg.get("tracker", {})
-            api_key = tracker.get("api_key", "")
-            if api_key.startswith("$"):
-                api_key = os.environ.get(api_key[1:], "")
-            if api_key and tracker.get("kind") == "linear":
-                try:
-                    from linear_client import LinearClient
-                    client = LinearClient(api_key, tracker.get("project_slug", ""))
-                    team_id = tracker.get("team_id", "") or None
-                    live_issues = client.fetch_issues(_linear_poll_states(tracker), team_id=team_id)
-                    _linear_issues_cache.clear()
-                    for issue in live_issues:
-                        _linear_issues_cache[issue["id"]] = _normalize_linear_issue(issue)
-                except Exception as e:
-                    logger.warning("linear issues live refresh failed: %s", e)
-            return jsonify(list(_linear_issues_cache.values()))
-        else:
-            # Local tracker mode
-            tracker = linear_mod.get_local_tracker()
-            cfg = _load_workflow_config()
-            tcfg = cfg.get("tracker", {})
-            states = _linear_poll_states(tcfg)
-            issues = tracker.fetch_issues(states)
-            return jsonify(issues)
-    return jsonify([])
 
 
-@app.route("/api/linear/issues", methods=["POST"])
-def api_linear_create_issue():
-    data = request.get_json(silent=True) or {}
-    title = (data.get("title") or "").strip()
-    if not title:
-        return jsonify({"error": "title required"}), 400
-    description = (data.get("description") or "").strip()
-    preferred_agent = (data.get("agent") or "").strip().lower()
-    if preferred_agent not in {"claude", "codex", "deepseek"}:
-        preferred_agent = None
-    attachments = data.get("attachments") or []
-    if attachments:
-        attach_lines = "\n".join(
-            "- [" + a.get("name", a.get("filename", "")) + "](" + a.get("url", "") + ")"
-            for a in attachments
-        )
-        if description:
-            description = description + "\n\n**Attachments:**\n" + attach_lines
-        else:
-            description = "**Attachments:**\n" + attach_lines
-    description = _compose_issue_description(description, preferred_agent)
-    team_id = (data.get("team_id") or "").strip()
-
-    linear_mod = _module_registry.get("linear")
-    cap = linear_mod._capability if linear_mod else {}
-    is_local = cap.get("type") == "local" if cap else True
-
-    if is_local:
-        # Local tracker mode
-        tracker = linear_mod.get_local_tracker()
-        issue = tracker.create_issue(title, description, preferred_agent=preferred_agent)
-        normalized = dict(issue)
-        _linear_issues_cache[issue["id"]] = normalized
-        socketio.emit("linear_issues_updated", {"count": len(_linear_issues_cache)})
-        return jsonify({"ok": True, "issue": normalized})
-
-    # Linear mode
-    cfg = _load_workflow_config()
-    tracker_cfg = cfg.get("tracker", {})
-    api_key = tracker_cfg.get("api_key", "")
-    if api_key.startswith("$"):
-        api_key = os.environ.get(api_key[1:], "")
-    if not team_id:
-        team_id = tracker_cfg.get("team_id", "")
-
-    if not api_key:
-        return jsonify({"error": "Linear not configured"}), 503
-    if not team_id:
-        return jsonify({"error": "team_id required"}), 400
-
-    try:
-        from linear_client import LinearClient
-        client = LinearClient(api_key, tracker_cfg.get("project_slug", ""))
-        issue = client.create_issue(team_id, title, description, state_name="Todo")
-        if not issue:
-            return jsonify({"error": "Linear create failed"}), 500
-        # Inject into cache immediately so board updates before next poll
-        normalized = _normalize_linear_issue({
-            "id": issue["id"],
-            "identifier": issue.get("identifier", ""),
-            "title": issue.get("title", ""),
-            "description": description,
-            "priority": 0,
-            "state": (issue.get("state") or {}).get("name", "Todo"),
-            "url": issue.get("url", ""),
-            "assignee": "",
-            "labels": [],
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        })
-        _linear_issues_cache[issue["id"]] = normalized
-        if normalized.get("preferred_agent"):
-            _post_linear_comment(issue["id"], _issue_agent_comment_body(normalized["preferred_agent"]))
-        socketio.emit("linear_issues_updated", {"count": len(_linear_issues_cache)})
-        return jsonify({"ok": True, "issue": normalized})
-    except Exception as e:
-        logger.error("create_issue error: %s", e)
-        return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/linear/projects")
-def api_linear_projects():
-    cfg = _load_workflow_config()
-    tracker = cfg.get("tracker", {})
-    api_key = tracker.get("api_key", "")
-    if api_key.startswith("$"):
-        api_key = os.environ.get(api_key[1:], "")
-    if not api_key:
-        return jsonify([])
-    try:
-        from linear_client import LinearClient
-        client = LinearClient(api_key, tracker.get("project_slug", ""))
-        return jsonify(client.fetch_projects())
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/linear/issues/<issue_id>")
-def api_linear_issue_detail(issue_id: str):
-    cfg = _load_workflow_config()
-    tracker = cfg.get("tracker", {})
-    api_key = tracker.get("api_key", "")
-    if api_key.startswith("$"):
-        api_key = os.environ.get(api_key[1:], "")
-    if not api_key:
-        return jsonify({"error": "not configured"}), 400
-    try:
-        from linear_client import LinearClient
-        client = LinearClient(api_key, tracker.get("project_slug", ""))
-        issue = client.fetch_issue(issue_id)
-        if not issue:
-            return jsonify({"error": "not found"}), 404
-        return jsonify(_normalize_linear_issue(issue))
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/linear/issues/<issue_id>", methods=["PATCH"])
-def api_linear_issue_update(issue_id: str):
-    data = request.get_json(silent=True) or {}
-    cfg = _load_workflow_config()
-    tracker = cfg.get("tracker", {})
-    api_key = tracker.get("api_key", "")
-    if api_key.startswith("$"):
-        api_key = os.environ.get(api_key[1:], "")
-    if not api_key:
-        return jsonify({"error": "not configured"}), 400
-    try:
-        from linear_client import LinearClient
-        client = LinearClient(api_key, tracker.get("project_slug", ""))
-        existing = client.fetch_issue(issue_id)
-        if not existing:
-            return jsonify({"error": "not found"}), 404
-        existing_preferred_agent = (
-            existing.get("preferred_agent")
-            or _extract_issue_agent(existing.get("description", ""))
-            or ""
-        ).strip().lower()
-        preferred_agent = (data.get("preferred_agent") or existing_preferred_agent or "").strip().lower()
-        if preferred_agent not in {"claude", "codex", "deepseek"}:
-            preferred_agent = None
-        state_name = data.get("state_name")
-        state_name = (state_name.strip() if isinstance(state_name, str) else state_name)
-        description = data.get("description")
-        if description is not None:
-            description = _compose_issue_description(str(description), preferred_agent)
-        elif "preferred_agent" in data:
-            description = _compose_issue_description(
-                _strip_issue_metadata(existing.get("description", "")),
-                preferred_agent,
-            )
-        updated = client.update_issue(
-            issue_id,
-            title=data.get("title"),
-            description=description,
-            state_name=state_name,
-        )
-        if updated:
-            # Refresh cache entry
-            issue = client.fetch_issue(issue_id)
-            if issue:
-                normalized = _normalize_linear_issue(issue)
-                _linear_issues_cache[issue_id] = normalized
-                if (
-                    "preferred_agent" in data
-                    and normalized.get("preferred_agent")
-                    and normalized.get("preferred_agent") != existing_preferred_agent
-                ):
-                    _post_linear_comment(
-                        issue_id,
-                        _issue_agent_comment_body(
-                            normalized["preferred_agent"],
-                            previous_agent=existing_preferred_agent or None,
-                        ),
-                    )
-                if _is_linear_in_progress(normalized.get("state")) and not _linear_issue_is_running(issue_id):
-                    _linear_dispatched.pop(issue_id, None)
-                    threading.Thread(
-                        target=_linear_dispatch_issue,
-                        args=(normalized, cfg),
-                        daemon=True,
-                    ).start()
-                return jsonify({"ok": True, "issue": normalized})
-            return jsonify({"ok": True, "issue": updated})
-        return jsonify({"ok": False, "error": "update failed"}), 400
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/linear/issues/<issue_id>/comment", methods=["POST"])
-def api_linear_issue_comment(issue_id: str):
-    data = request.get_json(silent=True) or {}
-    feedback = (data.get("feedback") or "").strip()
-    prompt = (data.get("prompt") or "").strip()
-    output = (data.get("output") or "").strip()
-    error = (data.get("error") or "").strip()
-    attachments = data.get("attachments") or []
-    title = (data.get("title") or "AgenticOS Comment").strip()
-    body = _linear_comment_body(
-        title=title,
-        feedback=feedback,
-        prompt=prompt,
-        output=output,
-        error=error,
-        attachments=attachments,
-    )
-    if not body:
-        return jsonify({"ok": False, "error": "empty comment"}), 400
-    if not _post_linear_comment(issue_id, body):
-        return jsonify({"ok": False, "error": "comment sync failed"}), 500
-    return jsonify({"ok": True})
-
-
-@app.route("/api/linear/config")
-def api_linear_config():
-    cfg = _load_workflow_config()
-    tracker = cfg.get("tracker", {})
-    return jsonify({
-        "kind": tracker.get("kind", ""),
-        "project_slug": tracker.get("project_slug", ""),
-        "active_states": tracker.get("active_states", []),
-        "terminal_states": tracker.get("terminal_states", []),
-        "configured": bool(tracker.get("api_key") and tracker.get("project_slug")),
-    })
 
 
 @app.route("/api/windows")
@@ -2656,6 +2386,8 @@ def _init_modules() -> None:
     # Register routes (app is already created at this point)
     _mod_reg.init_routes(app)
     _mod_reg.init_socketio(socketio)
+    # Start background threads for available modules
+    _mod_reg.init_background(app, socketio)
 
 
 def main() -> None:
@@ -2670,8 +2402,8 @@ def main() -> None:
     _load_dismissed()
     _init_modules()
     threading.Thread(target=_stall_detection_loop, daemon=True).start()
-    if _module_registry.is_available("linear"):
-        threading.Thread(target=_linear_polling_loop, daemon=True).start()
+    # Linear polling started via ModuleRegistry.init_background()
+    
     if _HAS_DEEPSEEK_MONITOR:
         threading.Thread(target=_deepseek_polling_loop, daemon=True).start()
     socketio.run(app, host=args.host, port=args.port, debug=args.debug, allow_unsafe_werkzeug=True)
