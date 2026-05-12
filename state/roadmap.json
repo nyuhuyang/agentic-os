@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "updated_at": "2026-05-12",
+  "active": [
+    {
+      "id": "p10",
+      "title": "Modular Architecture — 可插拔模块系统",
+      "status": "active",
+      "notes": "核心拆分 + Agent/集成模块化 + 前端动态渲染 + 安装系统。Phase 1 下一步开始。"
+    },
+    {
+      "id": "p6",
+      "title": "Structured Operational Memory + Architecture Index",
+      "status": "active",
+      "notes": "render_roadmap_md.py bugs fixed; remaining: initialState bootstrap, verify generated docs."
+    },
+    {
+      "id": "p9",
+      "title": "DeepSeek Shell Execution via MCP",
+      "status": "planned",
+      "notes": "Research: can deepseek exec mode get real shell tools via MCP? Blocked by option-2 workaround."
+    }
+  ],
+  "completed": [
+    {"id": "p1", "title": "Live elapsed timer, cancel, retry/queued state", "status": "completed"},
+    {"id": "p2", "title": "Attempt tracking, retry backoff, stall detection", "status": "completed"},
+    {"id": "p3", "title": "Per-run token count, aggregate runtime panel", "status": "completed"},
+    {"id": "p4", "title": "Attempt badge, stale sent cleanup, column card limit", "status": "completed"},
+    {"id": "p5", "title": "Linear sync — polling, dispatch, bidirectional state push", "status": "completed"},
+    {"id": "p7", "title": "Aider / DeepSeek Third Backend", "status": "completed", "notes": "All 4 phases done 2026-05-11. Backend + 3-way UI toggle + telemetry + ADR."},
+    {"id": "p8", "title": "Migrate Aider → DeepSeek TUI", "status": "completed", "notes": "DeepSeek TUI installed, validated on real task, workflow docs updated, aider config retired."}
+  ],
+  "backlog": [
+    {"id": "backlog-1", "title": "Reduce agent token waste from repo-wide exploration", "status": "backlog"},
+    {"id": "backlog-2", "title": "Controlled autonomy / layered permissions", "status": "backlog"}
+  ],
+  "deferred": []
+}
