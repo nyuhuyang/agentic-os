@@ -1,6 +1,6 @@
 # P8 — Migrate from Aider to DeepSeek TUI
 
-**Status:** Completed (archived to docs/exec-plans/completed/)  
+**Status:** Complete  
 **Started:** 2026-05-11
 **Owner:** AgenticOS
 
