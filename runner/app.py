@@ -28,9 +28,6 @@ logger = logging.getLogger(__name__)
 
 import fcntl
 import os
-import pty
-import select
-import struct
 import termios
 import threading
 
@@ -83,6 +80,7 @@ except ImportError:
 # ── Module registry ────────────────────────────────────────────────────────
 from runner.core.module_registry import registry as _module_registry
 from runner.modules import discover_all as _discover_modules
+from runner.core.registry_loader import load_registry as _load_registry, python_path as _python_path, set_paths as _set_registry_paths
 _AVAILABLE_MODULES: list[str] = []
 
 MASTER_REGISTRY_JSON = Path(os.environ.get("REGISTRY_JSON", str(WORKSPACE_ROOT / ".codex" / "registry.json")))
@@ -115,133 +113,17 @@ AI_RUN_TIMEOUT_S = int(os.environ.get("AI_RUN_TIMEOUT_S", "1800"))  # 30 min def
 app = Flask(__name__, template_folder="templates")
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# ── PTY sessions ────────────────────────────────────────────────────────────
-_pty_sessions: dict[str, int] = {}   # sid -> fd
-_pty_input_buffers: dict[str, str] = {}
-_pending_skill_handoffs: dict[str, dict[str, str]] = {}
+# Initialize registry_loader paths
+_set_registry_paths(_PROTO, VENV_PYTHON, MASTER_REGISTRY_JSON,
+                    CLAUDE_REGISTRY_JSON, CLAUDE_REGISTRY_MD)
 
-
-def _pty_read_loop(sid: str, fd: int) -> None:
-    while True:
-        try:
-            r, _, _ = select.select([fd], [], [], 0.1)
-            if r:
-                data = os.read(fd, 1024).decode("utf-8", errors="replace")
-                socketio.emit("pty_output", {"data": data}, to=sid)
-        except OSError:
-            break
-    _pty_sessions.pop(sid, None)
-
-
-def _record_pending_handoff(sid: str, line: str) -> None:
-    pending = _pending_skill_handoffs.pop(sid, None)
-    if not pending:
-        return
-    command = line.strip()
-    if not command:
-        return
-    started_at = datetime.now(timezone.utc).isoformat()
-    run_id = pending.get("run_id") or str(uuid.uuid4())
-    _write_run_log(
-        pending["skill"],
-        "sent",
-        started_at,
-        0.0,
-        prompt=command,
-        output="dispatched to terminal",
-        run_id=run_id,
-    )
-    socketio.emit("run_logged", {"skill": pending["skill"], "run_id": run_id}, to=sid)
-
-
-def _track_pty_input(sid: str, text: str) -> None:
-    buf = _pty_input_buffers.get(sid, "")
-    for ch in text:
-        if ch in ("\r", "\n"):
-            _record_pending_handoff(sid, buf)
-            buf = ""
-        elif ch in ("\x7f", "\b"):
-            buf = buf[:-1]
-        elif ch == "\x1b":
-            continue
-        elif ch.isprintable() or ch == "\t":
-            buf += ch
-    _pty_input_buffers[sid] = buf
-
-
-@socketio.on("pty_start")
-def pty_start(data):
-    sid = request.sid
-    shell = os.environ.get("SHELL", "/bin/bash")
-    cols = data.get("cols", 120)
-    rows = data.get("rows", 24)
-    env = os.environ.copy()
-    env["TERM"] = "xterm-256color"
-    env["COLORTERM"] = "truecolor"
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.chdir(str(ROOT))
-        os.execvpe(shell, [shell], env)
-    else:
-        _pty_sessions[sid] = fd
-        _pty_input_buffers[sid] = ""
-        _set_winsize(fd, rows, cols)
-        threading.Thread(target=_pty_read_loop, args=(sid, fd), daemon=True).start()
-
-
-@socketio.on("pty_input")
-def pty_input(data):
-    fd = _pty_sessions.get(request.sid)
-    if fd is not None:
-        text = data["data"]
-        _track_pty_input(request.sid, text)
-        os.write(fd, text.encode())
-
-
-@socketio.on("skill_selected")
-def skill_selected(data):
-    skill = (data or {}).get("skill", "").strip()
-    phrase = (data or {}).get("phrase", "").strip()
-    if not skill:
-        return
-    run_id = str(uuid.uuid4())
-    _pending_skill_handoffs[request.sid] = {"skill": skill, "phrase": phrase, "run_id": run_id}
-
-
-@socketio.on("pty_resize")
-def pty_resize(data):
-    fd = _pty_sessions.get(request.sid)
-    if fd is not None:
-        _set_winsize(fd, data.get("rows", 24), data.get("cols", 120))
-
-
-@socketio.on("disconnect")
-def pty_disconnect():
-    _pty_sessions.pop(request.sid, None)
-    _pty_input_buffers.pop(request.sid, None)
-    _pending_skill_handoffs.pop(request.sid, None)
-
-
-def _set_winsize(fd: int, rows: int, cols: int) -> None:
-    try:
-        winsize = struct.pack("HHHH", rows, cols, 0, 0)
-        fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
-    except Exception:
-        pass
-
-
-# ---------------------------------------------------------------------------
 # Data loaders
 # ---------------------------------------------------------------------------
-
-def _python() -> str:
-    return str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
-
 
 WORKFLOW_MD = _PROTO / "WORKFLOW.md"
 
 
-def _read_registry_json(path: Path) -> dict[str, dict]:
+def read_registry_json(path: Path) -> dict[str, dict]:
     if not path.exists():
         return {}
     try:
@@ -252,83 +134,10 @@ def _read_registry_json(path: Path) -> dict[str, dict]:
         return {}
 
 
-def _registry_md_text(registry: dict[str, dict]) -> str:
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    lines = [
-        "# Skill Registry",
-        "",
-        f"Generated: {now} · {len(registry)} skills",
-        "",
-        "| Skill | Stack | Risk | Confirm? | Exec mode | Schedulable | Entrypoint |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
-    ]
-    for name, entry in sorted(registry.items()):
-        sec = entry.get("security", {})
-        schedulable = "yes" if entry.get("schedule_eligible") else "—"
-        ep = f"`{entry['entrypoint']}`" if entry.get("entrypoint") else "—"
-        confirm = "**yes**" if sec.get("confirmation_required") else "—"
-        lines.append(
-            f"| `{name}` | {entry.get('stack', 'uncategorized')} | {sec.get('risk_level', '?')} | {confirm} | {entry.get('execution_mode', 'local_only')} | {schedulable} | {ep} |"
-        )
-
-    lines += ["", "## Stack summary", "", "| Stack | Skills |", "| --- | --- |"]
-    stacks: dict[str, list[str]] = {}
-    for name, entry in registry.items():
-        stacks.setdefault(entry.get("stack", "uncategorized"), []).append(name)
-    for stack, skills in sorted(stacks.items()):
-        lines.append(f"| {stack} | {', '.join(f'`{s}`' for s in sorted(skills))} |")
-
-    lines += ["", "## Schedulable skills", ""]
-    schedulable = {n: e for n, e in registry.items() if e.get("schedule_eligible")}
-    if schedulable:
-        for name, entry in sorted(schedulable.items()):
-            ep = entry.get("entrypoint") or "no script (AI-only)"
-            lines.append(f"- **`{name}`** ({entry.get('execution_mode', 'local_only')}) — {ep}")
-    else:
-        lines.append("No schedulable skills registered yet.")
-    return "\n".join(lines) + "\n"
 
 
-def _filter_registry_for_agent(agent: str | None) -> dict[str, dict]:
-    agent = (agent or "").strip().lower()
-    registry = _read_registry_json(MASTER_REGISTRY_JSON)
-    if not agent:
-        return registry
-    return {
-        name: entry
-        for name, entry in registry.items()
-        if agent in (entry.get("agents") or [])
-    }
 
 
-def _ensure_claude_registry() -> dict[str, dict]:
-    registry = _filter_registry_for_agent("claude")
-    CLAUDE_REGISTRY_JSON.parent.mkdir(parents=True, exist_ok=True)
-    CLAUDE_REGISTRY_JSON.write_text(
-        json.dumps(
-            {
-                "generated_at": datetime.now(timezone.utc).isoformat(),
-                "skill_count": len(registry),
-                "skills": registry,
-            },
-            indent=2,
-            ensure_ascii=False,
-        ) + "\n",
-        encoding="utf-8",
-    )
-    CLAUDE_REGISTRY_MD.write_text(_registry_md_text(registry), encoding="utf-8")
-    return registry
-
-
-def load_registry(agent: str | None = None) -> dict[str, dict]:
-    agent = (agent or "").strip().lower()
-    if agent == "claude":
-        return _ensure_claude_registry()
-    if agent == "codex":
-        return _filter_registry_for_agent("codex")
-    if agent == "deepseek":
-        return _filter_registry_for_agent("deepseek")
-    return _read_registry_json(MASTER_REGISTRY_JSON)
 
 
 def _load_workflow_config() -> dict:
@@ -382,34 +191,6 @@ def _archive_stale_sent() -> None:
             f.write("\n".join(appended) + "\n")
 
 
-def _stall_detection_loop() -> None:
-    last_cleanup = 0.0
-    while True:
-        time.sleep(30)
-        now = time.monotonic()
-        for run_id, job in list(_running_jobs.items()):
-            last = job.get("last_progress_at", now)
-            if now - last > STALL_TIMEOUT_S:
-                skill = job.get("skill", "unknown")
-                started_at = job.get("started_at", datetime.now(timezone.utc).isoformat())
-                _running_jobs.pop(run_id, None)
-                proc = _running_procs.pop(run_id, None)
-                if proc:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-                _write_run_log(skill, "stalled", started_at, 0.0,
-                               prompt=job.get("prompt", ""), error="stalled", run_id=run_id,
-                               linear_issue_id=job.get("linear_issue_id"))
-                socketio.emit("run_state_change", {"run_id": run_id, "state": "stalled", "skill": skill})
-
-        # Auto-archive stale sent records older than 24h (runs once per hour)
-        if time.monotonic() - last_cleanup > 3600:
-            last_cleanup = time.monotonic()
-            _archive_stale_sent()
-
-
 # Linear issue cache: issue_id -> normalized issue dict
 _linear_issues_cache: dict[str, dict] = {}
 # Track which In Progress issues have been dispatched: issue_id -> run_id
@@ -453,125 +234,15 @@ def _latest_linear_runs(include_archived: bool = True) -> dict[str, dict]:
     return latest
 
 
-def _refresh_linear_dispatches_from_log() -> None:
-    """Warm the duplicate-dispatch guard after server restarts.
-
-    The in-memory guard must survive until the issue leaves In Progress again;
-    otherwise a finished run can be redispatched immediately while Linear is
-    still on the same issue state.
-    """
-    for issue_id, run in _latest_linear_runs(include_archived=True).items():
-        run_id = run.get("run_id")
-        if run_id and issue_id not in _linear_dispatched:
-            _linear_dispatched[issue_id] = run_id
 
 
-def _linear_issue_is_running(issue_id: str) -> bool:
-    return any(
-        job.get("linear_issue_id") == issue_id and job.get("state") == "running"
-        for job in _running_jobs.values()
-    )
 
 
-def _linear_poll_states(tracker: dict) -> list[str]:
-    active_states = list(tracker.get("active_states", ["Todo", "In Progress", "In Review"]))
-    if "Backlog" not in active_states:
-        active_states.insert(0, "Backlog")
-    if "In Review" not in active_states:
-        active_states.append("In Review")
-    terminal_states = list(tracker.get("terminal_states", ["Done", "Canceled", "Duplicate"]))
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for state in active_states + terminal_states:
-        # Linear is the source of truth for board contents. Poll all configured
-        # states even if an older workflow file still marks some as "hidden".
-        if state not in seen:
-            seen.add(state)
-            ordered.append(state)
-    return ordered
 
 
-def _linear_state_key(state: str | None) -> str:
-    return re.sub(r"\s+", " ", (state or "").strip()).lower()
 
 
-def _is_linear_in_progress(state: str | None) -> bool:
-    return _linear_state_key(state) == "in progress"
 
-
-def _resolve_linear_state_name(issue: dict | None, target_state_key: str) -> str | None:
-    """Return the real Linear state name for a normalized target key."""
-    if not issue:
-        return None
-
-    target_state_key = _linear_state_key(target_state_key)
-    states = issue.get("team_states") or []
-    for state in states:
-        name = (state.get("name") or "").strip()
-        if name and _linear_state_key(name) == target_state_key:
-            return name
-
-    current_state = (issue.get("state") or "").strip()
-    if current_state and _linear_state_key(current_state) == target_state_key:
-        return current_state
-
-    return {
-        "todo": "Todo",
-        "in progress": "In Progress",
-        "in review": "In Review",
-        "done": "Done",
-        "canceled": "Canceled",
-        "duplicate": "Duplicate",
-    }.get(target_state_key)
-
-
-_ISSUE_AGENT_MARKER_RE = re.compile(r"<!--\s*agent_backend:\s*(claude|codex|aider|deepseek)\s*-->\s*", re.IGNORECASE)
-_LINEAR_COMMENT_MUTATION = """
-mutation AgenticOSCommentCreate($issueId: String!, $body: String!) {
-  commentCreate(input: { issueId: $issueId, body: $body }) {
-    success
-    comment { id createdAt body }
-  }
-}
-"""
-
-
-def _extract_issue_agent(description: str | None) -> str | None:
-    if not description:
-        return None
-    match = _ISSUE_AGENT_MARKER_RE.search(description)
-    if not match:
-        return None
-    return (match.group(1) or "").lower() or None
-
-
-def _strip_issue_metadata(description: str | None) -> str:
-    if not description:
-        return ""
-    return _ISSUE_AGENT_MARKER_RE.sub("", description).strip()
-
-
-def _compose_issue_description(description: str, preferred_agent: str | None) -> str:
-    base = (description or "").strip()
-    if preferred_agent in {"claude", "codex", "deepseek"}:
-        marker = f"<!-- agent_backend: {preferred_agent} -->"
-        return f"{base}\n\n{marker}" if base else marker
-    return base
-
-
-def _normalize_linear_issue(issue: dict) -> dict:
-    normalized = dict(issue or {})
-    raw_description = normalized.get("description", "") or ""
-    normalized["preferred_agent"] = _extract_issue_agent(raw_description)
-    normalized["description"] = _strip_issue_metadata(raw_description)
-    return normalized
-
-
-def _linear_api_key_from_cfg(tracker: dict) -> str:
-    api_key = tracker.get("api_key", "")
-    if api_key.startswith("$"):
-        api_key = os.environ.get(api_key[1:], "")
-    return api_key
 
 
 def _extract_real_errors(stderr_s: str) -> str:
@@ -672,191 +343,7 @@ def _locked_task_agent(original: dict, requested_agent: str | None = None) -> tu
     return locked_agent, None
 
 
-def _linear_dispatch_issue(issue: dict, cfg: dict) -> None:
-    """Select skill via Claude routing call and dispatch against a Linear issue."""
-    issue_id = issue["id"]
-    if issue_id in _linear_dispatched:
-        return  # already dispatched
 
-    agent_cfg = cfg.get("agent", {})
-    backend = issue.get("preferred_agent") or agent_cfg.get("backend", "claude")
-    registry = load_registry(backend)
-    skill_list = "\n".join(
-        f"- {name}: {entry.get('purpose', '')[:100]}"
-        for name, entry in registry.items()
-    )
-    routing_prompt = (
-        f"Given this issue, return only the skill name that best matches.\n\n"
-        f"Issue: {issue['identifier']} — {issue['title']}\n"
-        f"{(issue.get('description') or '')[:500]}\n\n"
-        f"Available skills:\n{skill_list}\n\n"
-        f"Return exactly one skill name, nothing else."
-    )
-    try:
-        result = subprocess.run(
-            _ai_command(backend, routing_prompt, output_format="text"),
-            cwd=str(ROOT),
-            capture_output=True, text=True, timeout=60,
-        )
-        selected_skill = _extract_skill_name(result.stdout or "", registry)
-    except Exception:
-        selected_skill = "_prompt"
-
-    run_id = str(uuid.uuid4())
-    started_at = datetime.now(timezone.utc).isoformat()
-    t0 = time.monotonic()
-    prompt = f"{issue['identifier']}: {issue['title']}\n\n{_strip_issue_metadata(issue.get('description') or '')}"
-
-    _linear_dispatched[issue_id] = run_id
-    _running_jobs[run_id] = {
-        "run_id": run_id, "skill": selected_skill, "started_at": started_at,
-        "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(),
-        "linear_issue_id": issue_id,
-        "agent": backend,
-    }
-    _push_linear_state_async(issue_id, "running")
-    socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": selected_skill})
-
-    entry = registry.get(selected_skill, {})
-    if entry.get("schedule_eligible") and entry.get("entrypoint"):
-        cmd = [_python(), str(RUNNER), selected_skill]
-    else:
-        cmd = _ai_command(backend, prompt, output_format="json")
-
-    if backend == "deepseek" and _HAS_DEEPSEEK_AGENT:
-        # DeepSeek agent with tools — direct API + tool loop
-        try:
-            agent_result = _deepseek_agent_dispatch(prompt, run_id)
-            dur = agent_result.get("duration_s", 0.0)
-            output = agent_result.get("output", "")
-            input_tokens = agent_result.get("input_tokens")
-            output_tokens = agent_result.get("output_tokens")
-            parsed_model = agent_result.get("model")
-            error_s = agent_result.get("error", "")
-            _running_jobs.pop(run_id, None)
-            final_state = "review"
-            _write_run_log(
-                selected_skill, final_state, started_at, dur,
-                prompt=prompt, output=output, error=error_s, run_id=run_id,
-                linear_issue_id=issue_id, selected_skill=selected_skill,
-                input_tokens=input_tokens, output_tokens=output_tokens,
-                agent=backend, model=parsed_model or _agent_model(backend, cfg),
-                task_id=run_id,
-            )
-            _push_linear_state_async(issue_id, final_state)
-            _post_linear_comment(
-                issue_id,
-                _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output, error=error_s),
-            )
-            socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": selected_skill})
-            socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
-        except Exception as e:
-            _running_jobs.pop(run_id, None)
-            _write_run_log(selected_skill, "error", started_at, 0.0, prompt=prompt, error=str(e),
-                           run_id=run_id, linear_issue_id=issue_id, agent=backend)
-            _post_linear_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
-            socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": selected_skill})
-    else:
-        # Claude / Codex — subprocess dispatch
-        try:
-            proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            _running_procs[run_id] = proc
-            stdout_b, stderr_b = proc.communicate(timeout=AI_RUN_TIMEOUT_S)
-            dur = time.monotonic() - t0
-            ok = proc.returncode == 0
-            stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
-            stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
-            error_s = _extract_real_errors(stderr_s)
-            output, input_tokens, output_tokens, parsed_model = _parse_agent_output(backend, stdout_s)
-            _running_jobs.pop(run_id, None)
-            _running_procs.pop(run_id, None)
-            final_state = "review"
-            _write_run_log(
-                selected_skill, final_state, started_at, dur,
-                prompt=prompt, output=output, error=error_s, run_id=run_id,
-                linear_issue_id=issue_id, selected_skill=selected_skill,
-                input_tokens=input_tokens, output_tokens=output_tokens,
-                agent=backend, model=parsed_model or _agent_model(backend, cfg),
-                task_id=run_id,
-            )
-            _push_linear_state_async(issue_id, final_state)
-            _post_linear_comment(issue_id, _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output, error=error_s))
-            socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": selected_skill})
-            socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
-        except subprocess.TimeoutExpired:
-            dur = time.monotonic() - t0
-            proc = _running_procs.pop(run_id, None)
-            if proc: proc.kill()
-            _running_jobs.pop(run_id, None)
-            msg = f"Timed out after {AI_RUN_TIMEOUT_S}s"
-            _write_run_log(selected_skill, "timeout", started_at, dur, prompt=prompt, error=msg,
-                           run_id=run_id, linear_issue_id=issue_id, agent=backend)
-            _post_linear_comment(issue_id, _linear_comment_body(title="AgenticOS Run Timeout", prompt=prompt, error=msg))
-            socketio.emit("run_state_change", {"run_id": run_id, "state": "timeout", "skill": selected_skill})
-        except Exception as e:
-            _running_procs.pop(run_id, None)
-            _running_jobs.pop(run_id, None)
-            _write_run_log(selected_skill, "error", started_at, 0.0, prompt=prompt, error=str(e),
-                           run_id=run_id, linear_issue_id=issue_id, agent=backend)
-            _post_linear_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
-            socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": selected_skill})
-
-
-def _linear_polling_loop() -> None:
-    from linear_client import LinearClient
-    global _linear_dispatches_warmed
-    while True:
-        try:
-            cfg = _load_workflow_config()
-            tracker = cfg.get("tracker", {})
-            if tracker.get("kind") != "linear":
-                time.sleep(30)
-                continue
-            api_key = tracker.get("api_key", "")
-            if api_key.startswith("$"):
-                api_key = os.environ.get(api_key[1:], "")
-            project_slug = tracker.get("project_slug", "")
-            team_id = tracker.get("team_id", "")
-            if not api_key:
-                time.sleep(30)
-                continue
-
-            interval_ms = cfg.get("polling", {}).get("interval_ms", 5000)
-
-            client = LinearClient(api_key, project_slug)
-            issues = client.fetch_issues(_linear_poll_states(tracker), team_id=team_id or None)
-            if not _linear_dispatches_warmed:
-                _refresh_linear_dispatches_from_log()
-                _linear_dispatches_warmed = True
-
-            new_cache: dict[str, dict] = {}
-            in_progress_ids: set[str] = set()
-            for issue in issues:
-                issue_id = issue["id"]
-                new_cache[issue_id] = _normalize_linear_issue(issue)
-
-                # Auto-dispatch In Progress issues
-                if _is_linear_in_progress(issue.get("state")):
-                    in_progress_ids.add(issue_id)
-                    if issue_id not in _linear_dispatched and not _linear_issue_is_running(issue_id):
-                        threading.Thread(
-                            target=_linear_dispatch_issue,
-                            args=(issue, cfg),
-                            daemon=True,
-                        ).start()
-
-            for issue_id in list(_linear_dispatched):
-                if issue_id not in in_progress_ids and not _linear_issue_is_running(issue_id):
-                    _linear_dispatched.pop(issue_id, None)
-
-            _linear_issues_cache.clear()
-            _linear_issues_cache.update(new_cache)
-            socketio.emit("linear_issues_updated", {"count": len(new_cache)})
-
-        except Exception as e:
-            logger.error("Linear polling error: %s", e)
-
-        time.sleep(max(1, interval_ms / 1000))
 
 
 def _load_task_state() -> dict:
@@ -1261,7 +748,7 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
 def index():
     cfg = _load_workflow_config()
     active_agent = cfg.get("agent", {}).get("backend", "claude")
-    registry = load_registry(active_agent)
+    registry = _load_registry(active_agent)
     state = load_state()
     all_runs = load_runs(100)
 
@@ -1349,56 +836,6 @@ def index():
     )
 
 
-BOARD_UPLOADS_DIR = _PROTO / "outputs" / "board_uploads"
-
-
-@app.route("/api/board/upload", methods=["POST"])
-def api_board_upload():
-    if "file" not in request.files:
-        return jsonify({"error": "no file"}), 400
-    f = request.files["file"]
-    if not f.filename:
-        return jsonify({"error": "empty filename"}), 400
-    from werkzeug.utils import secure_filename
-    original_name = f.filename
-    filename = secure_filename(original_name)
-    BOARD_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    dest = BOARD_UPLOADS_DIR / filename
-    counter = 1
-    while dest.exists():
-        dest = BOARD_UPLOADS_DIR / f"{dest.stem}_{counter}{dest.suffix}"
-        counter += 1
-    f.save(str(dest))
-    return jsonify({"name": original_name, "filename": dest.name, "url": f"/api/board/uploads/{dest.name}"})
-
-
-@app.route("/api/board/uploads/<path:filename>")
-def api_board_uploads_serve(filename):
-    from werkzeug.utils import secure_filename
-    from flask import send_from_directory
-    safe = secure_filename(filename)
-    return send_from_directory(str(BOARD_UPLOADS_DIR), safe)
-
-
-UPLOADS_DIR = _PROTO / "outputs" / "uploads"
-
-
-@app.route("/upload", methods=["POST"])
-def upload_file():
-    if "file" not in request.files:
-        return jsonify({"error": "no file"}), 400
-    f = request.files["file"]
-    if not f.filename:
-        return jsonify({"error": "empty filename"}), 400
-    from werkzeug.utils import secure_filename
-    filename = secure_filename(f.filename)
-    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    dest = UPLOADS_DIR / filename
-    counter = 1
-    while dest.exists():
-        dest = UPLOADS_DIR / f"{dest.stem}_{counter}{dest.suffix}"
-        counter += 1
-    f.save(str(dest))
     return jsonify({"path": str(dest)})
 
 
@@ -1544,7 +981,7 @@ def run():
 
     # Guard: reject if skill doesn't support selected agent
     if skill:
-        registry = load_registry(agent)
+        registry = _load_registry(agent)
         entry = registry.get(skill, {})
         allowed_agents = entry.get("agents", ["claude"])
         if agent not in allowed_agents:
@@ -1559,7 +996,7 @@ def run():
             socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill})
             try:
                 proc = subprocess.Popen(
-                    [_python(), str(RUNNER), skill],
+                    [_python_path(), str(RUNNER), skill],
                     cwd=str(ROOT),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -1707,7 +1144,7 @@ def api_state():
 @app.route("/api/registry")
 def api_registry():
     agent = (request.args.get("agent") or _load_workflow_config().get("agent", {}).get("backend", "claude")).strip().lower()
-    return jsonify(load_registry(agent))
+    return jsonify(_load_registry(agent))
 
 
 @app.route("/stream")
@@ -1734,10 +1171,10 @@ def stream():
         yield _sse({"type": "start", "run_id": run_id})
 
         # Schedule-eligible entrypoint path
-        registry = load_registry(agent)
+        registry = _load_registry(agent)
         entry = registry.get(skill, {})
         if entry.get("schedule_eligible") and entry.get("entrypoint"):
-            cmd = [str(_python()), str(RUNNER), skill]
+            cmd = [str(_python_path()), str(RUNNER), skill]
         else:
             cmd = _ai_command(agent, prompt, output_format="text")
 
@@ -2013,7 +1450,7 @@ def api_run_retry(run_id: str):
     if agent_error:
         return jsonify({"ok": False, "error": agent_error, "agent": locked_agent}), 400
     agent = locked_agent or agent_override or original.get("agent") or cfg.get("agent", {}).get("backend", "claude")
-    registry = load_registry(agent)
+    registry = _load_registry(agent)
     entry = registry.get(skill, {})
 
     if linear_issue_id:
@@ -2074,7 +1511,7 @@ def api_run_retry(run_id: str):
                 # Claude / Codex — subprocess dispatch
                 try:
                     if entry.get("schedule_eligible") and entry.get("entrypoint"):
-                        cmd = [_python(), str(RUNNER), skill]
+                        cmd = [_python_path(), str(RUNNER), skill]
                     else:
                         cmd = _ai_command(agent, prompt, output_format="json")
                     proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -2401,8 +1838,7 @@ def main() -> None:
     _migrate_legacy_state()
     _load_dismissed()
     _init_modules()
-    threading.Thread(target=_stall_detection_loop, daemon=True).start()
-    # Linear polling started via ModuleRegistry.init_background()
+    # Linear + Stall Detection polling started via ModuleRegistry.init_background()
     
     if _HAS_DEEPSEEK_MONITOR:
         threading.Thread(target=_deepseek_polling_loop, daemon=True).start()
