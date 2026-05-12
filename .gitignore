@@ -17,9 +17,10 @@
 
 # Agent tools
 .aider*
+.claude/
 
 # Generated / runtime
 graphify-out/
 .playwright-mcp/
-outputs/board_uploads/
+outputs/
 state/
