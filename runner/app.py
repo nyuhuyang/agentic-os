@@ -71,6 +71,12 @@ try:
 except ImportError:
     _deepseek_monitor = None  # type: ignore[assignment]
     _HAS_DEEPSEEK_MONITOR = False
+
+# ── Module registry ────────────────────────────────────────────────────────
+from runner.core.module_registry import registry as _module_registry
+from runner.modules import discover_all as _discover_modules
+_AVAILABLE_MODULES: list[str] = []
+
 MASTER_REGISTRY_JSON = Path(os.environ.get("REGISTRY_JSON", str(WORKSPACE_ROOT / ".codex" / "registry.json")))
 CLAUDE_REGISTRY_JSON = WORKSPACE_ROOT / ".claude" / "registry.json"
 CLAUDE_REGISTRY_MD = WORKSPACE_ROOT / ".claude" / "registry.md"
@@ -2189,6 +2195,18 @@ def api_linear_teams():
         return jsonify([])
 
 
+# ── Module capabilities ─────────────────────────────────────────────────
+
+
+@app.route("/api/capabilities")
+def api_capabilities():
+    """Return all module capabilities for frontend dynamic rendering."""
+    return jsonify(_module_registry.get_capabilities())
+
+
+# ── Runtime stats ──────────────────────────────────────────────────────────
+
+
 @app.route("/api/runtime")
 def api_runtime():
     total_s = 0.0
@@ -2583,6 +2601,27 @@ def _deepseek_polling_loop() -> None:
         _time.sleep(120)
 
 
+def _init_modules() -> None:
+    """Initialize the module registry: discover, check capabilities, register routes."""
+    global _AVAILABLE_MODULES
+    from runner.core.module_registry import registry as _mod_reg
+    from runner.modules import discover_all
+
+    # Discover modules in runner/modules/
+    discovered = discover_all()
+    if discovered:
+        logger.info("Discovered modules: %s", ", ".join(discovered))
+
+    # Check capabilities for all registered modules
+    _AVAILABLE_MODULES = _mod_reg.load_all()
+    if _AVAILABLE_MODULES:
+        logger.info("Available modules: %s", ", ".join(_AVAILABLE_MODULES))
+
+    # Register routes (app is already created at this point)
+    _mod_reg.init_routes(app)
+    _mod_reg.init_socketio(socketio)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="AgenticOS web dashboard.")
     parser.add_argument("--port", type=int, default=8510)
@@ -2593,6 +2632,7 @@ def main() -> None:
     print(f"AgenticOS dashboard → http://{args.host}:{args.port}")
     _migrate_legacy_state()
     _load_dismissed()
+    _init_modules()
     threading.Thread(target=_stall_detection_loop, daemon=True).start()
     threading.Thread(target=_linear_polling_loop, daemon=True).start()
     if _HAS_DEEPSEEK_MONITOR:

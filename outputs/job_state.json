@@ -1,0 +1,52 @@
+{
+  "_prompt": {
+    "status": "review",
+    "last_run": "2026-05-12T11:48:32.919228+00:00",
+    "duration_s": 5.17
+  },
+  "unknown": {
+    "status": "cancelled",
+    "last_run": "2026-05-12T02:56:32.472205+00:00",
+    "duration_s": 0.0
+  },
+  "skill-creator": {
+    "status": "review",
+    "last_run": "2026-05-11T16:40:45.531584+00:00",
+    "duration_s": 90.74
+  },
+  "skill-registry": {
+    "status": "review",
+    "last_run": "2026-05-10T01:25:52.620389+00:00",
+    "duration_s": 0.05
+  },
+  "web-prototype": {
+    "status": "review",
+    "last_run": "2026-05-10T01:25:53.344474+00:00",
+    "duration_s": 11.27
+  },
+  "critique": {
+    "status": "review",
+    "last_run": "2026-05-12T02:56:28.391354+00:00",
+    "duration_s": 4.06
+  },
+  "llm-wiki-ingest": {
+    "status": "review",
+    "last_run": "2026-05-11T02:46:22.398919+00:00",
+    "duration_s": 61.63
+  },
+  "dashboard": {
+    "status": "review",
+    "last_run": "2026-05-12T00:49:11.967383+00:00",
+    "duration_s": 53.23
+  },
+  "llm-wiki-save": {
+    "status": "review",
+    "last_run": "2026-05-11T16:29:51.079599+00:00",
+    "duration_s": 129.8
+  },
+  "llm-wiki-query": {
+    "status": "sent",
+    "last_run": "2026-05-11T03:14:01.542318+00:00",
+    "duration_s": 0.0
+  }
+}
