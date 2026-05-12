@@ -167,6 +167,7 @@ class ModuleRegistry:
                 "stt": {"available": true, "backends": ["browser", "openai"]},
             }
         """
+        backend_names: list[str] = []
         result: dict[str, Any] = {
             "modules": {},
             "available": [],
@@ -178,8 +179,11 @@ class ModuleRegistry:
             result["modules"][name] = cap
             if cap.get("available"):
                 result["available"].append(name)
+                if "backend" in cap:
+                    backend_names.append(name)
             else:
                 result["disabled"].append(name)
+        result["backends"] = backend_names
         return result
 
     def init_background(self, app, socketio) -> None:

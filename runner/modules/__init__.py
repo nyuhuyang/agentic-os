@@ -7,19 +7,25 @@
         stt/           — 语音转文字（多后端）
         pty/           — PTY 终端模块（未来单独拆分）
 
-每个模块包定义自己的 `AgenticModule` 子类，被发现后自动注册。
+每个模块包在 __init__.py 中显式注册到全局 ModuleRegistry。
 """
-
-from pathlib import Path
 
 from runner.core.module_registry import registry
 
-_MODULES_DIR = Path(__file__).resolve().parent
-
 
 def discover_all() -> list[str]:
-    """扫描 runner/modules/ 目录，自动发现并注册所有模块。
+    """导入所有模块包，触发显式注册。
 
-    返回新发现的模块名列表。
+    模块在各自的 __init__.py 中调用 registry.register() 进行注册。
+    discover_all() 遍历并导入它们，然后执行能力检测。
+
+    返回本次调用中新注册的模块名列表。
     """
-    return registry.discover(paths=[_MODULES_DIR])
+    before = set(registry.modules.keys())
+
+    # 按顺序导入各模块（依赖顺序：先 backends 后 features）
+    import runner.modules.backends  # noqa: F401  — registers claude/codex/deepseek
+    import runner.modules.linear    # noqa: F401  — registers linear
+
+    after = set(registry.modules.keys())
+    return list(after - before)

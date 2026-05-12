@@ -962,7 +962,40 @@ async function _initAgentFromConfig() {
   } catch (_) { return null; }
 }
 
+async function _initBackends() {
+  await _fetchCapabilities();
+  const cfg = await _initAgentFromConfig();
+  return cfg;
+}
+
 let _trackerType = 'none';
+let _availableBackends = ['claude', 'codex', 'deepseek'];
+
+function _updateAgentVisibility() {
+  for (const agent of ['claude', 'codex', 'deepseek']) {
+    const visible = _availableBackends.includes(agent);
+    const toggle = document.getElementById('agent-' + agent);
+    const newToggle = document.getElementById('new-issue-agent-' + agent);
+    if (toggle) toggle.style.display = visible ? '' : 'none';
+    if (newToggle) newToggle.style.display = visible ? '' : 'none';
+  }
+  // If current selectedAgent is not available, fallback to first available
+  if (!_availableBackends.includes(selectedAgent) && _availableBackends.length > 0) {
+    setAgent(_availableBackends[0]);
+  }
+}
+
+async function _fetchCapabilities() {
+  try {
+    const res = await fetch('/api/capabilities');
+    const caps = await res.json();
+    if (caps.backends && caps.backends.length > 0) {
+      _availableBackends = caps.backends;
+      _updateAgentVisibility();
+    }
+    return caps;
+  } catch (_) { return null; }
+}
 
 function _updateTrackerLabel() {
   const label = document.getElementById('linear-section-label');
@@ -2669,13 +2702,12 @@ const _origClose = closeDetailModal;
 closeDetailModal = function() { _stopMic(); _origClose(); };
 
 // Initial load + polling
-_initAgentFromConfig().then(cfg => {
+_initBackends().then(cfg => {
   if (cfg && cfg.linear_configured) _linearConfigured = true;
 });
 refreshJobBoard();
 updateWindows();
 initPaceMarkers();
-_initAgentFromConfig();
 _bindDraftPersistence();
 setInterval(refreshJobBoard, 15000);
 setInterval(_flushPendingBoardRefresh, 1000);

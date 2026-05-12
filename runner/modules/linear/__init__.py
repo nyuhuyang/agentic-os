@@ -189,5 +189,8 @@ class LinearModule(AgenticModule):
 
 # ── Module registration ────────────────────────────────────────────────────
 
+from runner.core.module_registry import registry
+
 module = LinearModule()
+registry.register(module)
 """Exported instance for module discovery."""
