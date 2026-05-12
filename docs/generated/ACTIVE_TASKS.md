@@ -1,22 +1,23 @@
 # Active Tasks
 
-## P11 — 共享配置协议：Symphony/Elixir 兼容
-**Status:** planned
+## P11 — Agent 后端统一 Dispatch + DeepSeek 全功能集成
+**Status:** active
 
-让 Symphony（外部 Elixir/Phoenix LiveView 协调器）通过 agentic-os 的 `/api/capabilities` 接口动态发现可用 Agent 后端，并通过 `POST /run` 统一 dispatch。
+在 P10 模块化基础上，完成 DeepSeek 后端全功能集成（dispatch/polling 移入模块）和 Symphony 共享配置协议（config_changed WebSocket 事件）。
 
-### 关键交付
-- `/api/capabilities` 的 `backends` 列表可供 Symphony 动态读取
-- WORKFLOW.md 中的 `agent.backend` 修改后，Symphony 能感知到变化
-- Symphony 通过 agentic-os `POST /run` dispatch，不直接调用 agent CLI
-- Symphony 展示不可用的 Agent 后端时显示禁用状态（同前端 dashboard）
+### Phase 1 — DeepSeek dispatch 集成
+- [ ] _execute_deepseek_commands() → DeepSeekModule.execute_commands()
+- [ ] _deepseek_agent_dispatch() → DeepSeekModule.dispatch()
+- [ ] _deepseek_polling_loop → DeepSeekModule.start_background()
 
-### 状态
-- `/api/capabilities` 已返回 `backends` 列表 ✅（P10 已交付）
-- WORKFLOW.md `agent.backend` 热同步 — 待定
-- Symphony dispatch 适配 — 待定
+### Phase 2 — Symphony 共享配置协议
+- [ ] PATCH /api/config 触发 config_changed WS 事件
+- [ ] /api/capabilities 增加 selected 字段
 
-详细计划见 `docs/exec-plans/active/p11-shared-config-protocol.md`
+### Phase 3 — 消除 app.py 硬编码 agent 启动
+- [ ] 删除 main() 中 _HAS_DEEPSEEK_MONITOR 条件线程
+
+详细计划见 `docs/exec-plans/active/p11-agent-dispatch-deepseek.md`
 
 ## P12 — 测试覆盖
 **Status:** planned
