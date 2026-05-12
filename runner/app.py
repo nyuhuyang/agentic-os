@@ -2579,37 +2579,6 @@ def api_deepseek_refresh():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-# ── Speech-to-Text (OpenAI) ─────────────────────────────────────────────────
-
-
-@app.route("/api/stt", methods=["POST"])
-def api_stt():
-    """Transcribe audio via OpenAI Audio API (whisper-1).
-
-    Requires OPENAI_API_KEY in environment (.env or sourced bashrc).
-    """
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        return jsonify({"error": "OPENAI_API_KEY not set in environment"}), 400
-
-    if "audio" not in request.files:
-        return jsonify({"error": "No audio file provided"}), 400
-
-    audio_file = request.files["audio"]
-
-    try:
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        transcript = client.audio.transcriptions.create(
-            model="whisper-1",
-            file=(audio_file.filename or "recording.webm", audio_file.read(), audio_file.content_type or "audio/webm"),
-            response_format="text",
-        )
-        return jsonify({"text": transcript})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
 def _load_deepseek_usage_from_monitor() -> dict[str, Any]:
     """Load DeepSeek usage via monitor's cached file."""
     from usage_reader import load_deepseek_usage as _load_ds

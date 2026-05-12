@@ -26,6 +26,7 @@ def discover_all() -> list[str]:
     # 按顺序导入各模块（依赖顺序：先 backends 后 features）
     import runner.modules.backends  # noqa: F401  — registers claude/codex/deepseek
     import runner.modules.linear    # noqa: F401  — registers linear
+    import runner.modules.stt       # noqa: F401  — registers stt
 
     after = set(registry.modules.keys())
     return list(after - before)

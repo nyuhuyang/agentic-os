@@ -993,8 +993,34 @@ async function _fetchCapabilities() {
       _availableBackends = caps.backends;
       _updateAgentVisibility();
     }
+    // STT backends from capabilities
+    const sttModule = caps.modules && caps.modules.stt;
+    if (sttModule && sttModule.backends && sttModule.backends.length > 0) {
+      _sttBackends = sttModule.backends;
+      _updateSttSelector();
+    }
     return caps;
   } catch (_) { return null; }
+}
+
+let _sttBackends = ['browser'];
+
+function _updateSttSelector() {
+  const sel = document.getElementById('stt-source');
+  if (!sel) return;
+  const current = sel.value;
+  sel.innerHTML = '';
+  for (const backend of _sttBackends) {
+    const opt = document.createElement('option');
+    opt.value = backend;
+    opt.textContent = backend === 'browser' ? 'Browser STT' : backend === 'openai' ? 'OpenAI' : backend;
+    sel.appendChild(opt);
+  }
+  // Keep current selection if still available
+  if (_sttBackends.includes(current)) sel.value = current;
+  // Update mic button title
+  const btn = document.getElementById('mic-btn');
+  if (btn) btn.title = sel.value === 'openai' ? 'Voice input (OpenAI)' : 'Voice input (Web Speech API)';
 }
 
 function _updateTrackerLabel() {
