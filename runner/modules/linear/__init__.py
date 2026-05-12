@@ -20,14 +20,8 @@ logger = logging.getLogger(__name__)
 _HERE = Path(__file__).resolve().parent
 _PROTO = _HERE.parent.parent.parent          # agentic-os root
 STATE_DIR = _PROTO / "state"
-
-_DOTENV = _PROTO / ".env"
-if _DOTENV.exists():
-    for _line in _DOTENV.read_text().splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            os.environ.setdefault(_k.strip(), _v.strip())
+# .env is loaded by app.py at startup; do NOT re-load here to avoid
+# re-introducing env vars that were explicitly unset for testing.
 
 
 def _load_workflow_config() -> dict:

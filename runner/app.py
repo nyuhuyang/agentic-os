@@ -55,6 +55,7 @@ if _DOTENV.exists():
 ROOT = _PROTO
 
 sys.path.insert(0, str(_HERE))
+sys.path.insert(0, str(_PROTO))  # so "from runner.core.*" imports work
 from usage_reader import (
     compute_stats as _compute_usage,
     compute_windows as _compute_windows,
