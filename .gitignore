@@ -1,13 +1,6 @@
-# Obsidian vault has its own git repo
-obsidian/
-
-# Other workspace dirs - not tracked here
-experiments/
-scratch/
-clients_links/
-
 # Python
-**/.venv/
+.env
+.venv/
 **/__pycache__/
 **/*.pyc
 **/*.pyo
@@ -21,3 +14,12 @@ clients_links/
 .idea/
 .vscode/
 *.swp
+
+# Agent tools
+.aider*
+
+# Generated / runtime
+graphify-out/
+.playwright-mcp/
+outputs/board_uploads/
+state/
