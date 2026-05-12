@@ -56,6 +56,13 @@ ROOT = _PROTO
 
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_PROTO))  # so "from runner.core.*" imports work
+
+try:
+    from deepseek_agent import DeepSeekAgent, run_deepseek_agent as _run_deepseek_agent
+    _HAS_DEEPSEEK_AGENT = True
+except ImportError:
+    _HAS_DEEPSEEK_AGENT = False
+    DeepSeekAgent = None  # type: ignore
 from usage_reader import (
     compute_stats as _compute_usage,
     compute_windows as _compute_windows,
@@ -716,67 +723,83 @@ def _linear_dispatch_issue(issue: dict, cfg: dict) -> None:
     else:
         cmd = _ai_command(backend, prompt, output_format="json")
 
-    try:
-        proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        _running_procs[run_id] = proc
-        stdout_b, stderr_b = proc.communicate(timeout=AI_RUN_TIMEOUT_S)
-        dur = time.monotonic() - t0
-        ok = proc.returncode == 0
-        stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
-        stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
-        error_s = _extract_real_errors(stderr_s)
-        output, input_tokens, output_tokens, parsed_model = _parse_agent_output(backend, stdout_s)
-        if backend == "deepseek":
-            output = _execute_deepseek_commands(output)
-        _running_jobs.pop(run_id, None)
-        _running_procs.pop(run_id, None)
-        # Linear issue remains a single card; completed output is written back as a comment.
-        final_state = "review"
-        _write_run_log(
-            selected_skill, final_state, started_at, dur,
-            prompt=prompt, output=output, error=error_s, run_id=run_id,
-            linear_issue_id=issue_id, selected_skill=selected_skill,
-            input_tokens=input_tokens, output_tokens=output_tokens,
-            agent=backend, model=parsed_model or _agent_model(backend, cfg),
-            task_id=run_id,
-        )
-        _push_linear_state_async(issue_id, final_state)
-        _post_linear_comment(
-            issue_id,
-            _linear_comment_body(
-                title="AgenticOS Run",
-                prompt=prompt,
-                output=output,
-                error=error_s,
-            ),
-        )
-        socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": selected_skill})
-        socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
-    except subprocess.TimeoutExpired:
-        dur = time.monotonic() - t0
-        proc = _running_procs.pop(run_id, None)
-        if proc:
-            proc.kill()
-        _running_jobs.pop(run_id, None)
-        msg = f"Timed out after {AI_RUN_TIMEOUT_S}s"
-        _write_run_log(
-            selected_skill, "timeout", started_at, dur, prompt=prompt, error=msg,
-            run_id=run_id, linear_issue_id=issue_id, agent=backend,
-        )
-        _post_linear_comment(issue_id, _linear_comment_body(title="AgenticOS Run Timeout", prompt=prompt, error=msg))
-        socketio.emit("run_state_change", {"run_id": run_id, "state": "timeout", "skill": selected_skill})
-    except Exception as e:
-        _running_procs.pop(run_id, None)
-        _running_jobs.pop(run_id, None)
-        _write_run_log(
-            selected_skill, "error", started_at, 0.0, prompt=prompt, error=str(e),
-            run_id=run_id, linear_issue_id=issue_id, agent=backend,
-        )
-        _post_linear_comment(
-            issue_id,
-            _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)),
-        )
-        socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": selected_skill})
+    if backend == "deepseek" and _HAS_DEEPSEEK_AGENT:
+        # DeepSeek agent with tools — direct API + tool loop
+        try:
+            agent_result = _deepseek_agent_dispatch(prompt, run_id)
+            dur = agent_result.get("duration_s", 0.0)
+            output = agent_result.get("output", "")
+            input_tokens = agent_result.get("input_tokens")
+            output_tokens = agent_result.get("output_tokens")
+            parsed_model = agent_result.get("model")
+            error_s = agent_result.get("error", "")
+            _running_jobs.pop(run_id, None)
+            final_state = "review"
+            _write_run_log(
+                selected_skill, final_state, started_at, dur,
+                prompt=prompt, output=output, error=error_s, run_id=run_id,
+                linear_issue_id=issue_id, selected_skill=selected_skill,
+                input_tokens=input_tokens, output_tokens=output_tokens,
+                agent=backend, model=parsed_model or _agent_model(backend, cfg),
+                task_id=run_id,
+            )
+            _push_linear_state_async(issue_id, final_state)
+            _post_linear_comment(
+                issue_id,
+                _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output, error=error_s),
+            )
+            socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": selected_skill})
+            socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
+        except Exception as e:
+            _running_jobs.pop(run_id, None)
+            _write_run_log(selected_skill, "error", started_at, 0.0, prompt=prompt, error=str(e),
+                           run_id=run_id, linear_issue_id=issue_id, agent=backend)
+            _post_linear_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
+            socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": selected_skill})
+    else:
+        # Claude / Codex — subprocess dispatch
+        try:
+            proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            _running_procs[run_id] = proc
+            stdout_b, stderr_b = proc.communicate(timeout=AI_RUN_TIMEOUT_S)
+            dur = time.monotonic() - t0
+            ok = proc.returncode == 0
+            stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
+            stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
+            error_s = _extract_real_errors(stderr_s)
+            output, input_tokens, output_tokens, parsed_model = _parse_agent_output(backend, stdout_s)
+            _running_jobs.pop(run_id, None)
+            _running_procs.pop(run_id, None)
+            final_state = "review"
+            _write_run_log(
+                selected_skill, final_state, started_at, dur,
+                prompt=prompt, output=output, error=error_s, run_id=run_id,
+                linear_issue_id=issue_id, selected_skill=selected_skill,
+                input_tokens=input_tokens, output_tokens=output_tokens,
+                agent=backend, model=parsed_model or _agent_model(backend, cfg),
+                task_id=run_id,
+            )
+            _push_linear_state_async(issue_id, final_state)
+            _post_linear_comment(issue_id, _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output, error=error_s))
+            socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": selected_skill})
+            socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
+        except subprocess.TimeoutExpired:
+            dur = time.monotonic() - t0
+            proc = _running_procs.pop(run_id, None)
+            if proc: proc.kill()
+            _running_jobs.pop(run_id, None)
+            msg = f"Timed out after {AI_RUN_TIMEOUT_S}s"
+            _write_run_log(selected_skill, "timeout", started_at, dur, prompt=prompt, error=msg,
+                           run_id=run_id, linear_issue_id=issue_id, agent=backend)
+            _post_linear_comment(issue_id, _linear_comment_body(title="AgenticOS Run Timeout", prompt=prompt, error=msg))
+            socketio.emit("run_state_change", {"run_id": run_id, "state": "timeout", "skill": selected_skill})
+        except Exception as e:
+            _running_procs.pop(run_id, None)
+            _running_jobs.pop(run_id, None)
+            _write_run_log(selected_skill, "error", started_at, 0.0, prompt=prompt, error=str(e),
+                           run_id=run_id, linear_issue_id=issue_id, agent=backend)
+            _post_linear_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
+            socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": selected_skill})
 
 
 def _linear_polling_loop() -> None:
@@ -1383,8 +1406,6 @@ def _ai_cli(agent: str) -> list[str]:
     """Return the CLI command prefix for the selected agent."""
     if agent == "codex":
         return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
-    if agent == "deepseek":
-        return ["deepseek", "--model", "deepseek-v4-flash", "--yolo"]
     # default: claude
     claude_bin = _PROTO / ".venv" / "bin" / "claude"
     bin_str = str(claude_bin) if claude_bin.exists() else "claude"
@@ -1396,17 +1417,6 @@ def _ai_command(agent: str, prompt: str, output_format: str = "json") -> list[st
     cli = _ai_cli(agent)
     if agent == "claude":
         return cli + [prompt, "--output-format", output_format]
-    if agent == "deepseek":
-        # Instruct DeepSeek to output shell commands in ```bash blocks
-        # so the dashboard can post-process and execute them for real.
-        _ds_suffix = (
-            "\n\n"
-            "Important: For each shell command you intend to run, "
-            "wrap it in a ```bash code block (e.g. ```bash\ncommand\n```). "
-            "Do NOT simulate execution output — just output the command blocks."
-            " The dashboard will execute them and append real results."
-        )
-        return cli + ["--prompt", prompt + _ds_suffix]
     return cli + [prompt]
 
 
@@ -1479,6 +1489,33 @@ def _execute_deepseek_commands(output: str, cwd: str | Path | None = None) -> st
     for start, end, replacement in reversed(blocks):
         output = output[:start] + replacement + output[end:]
     return output
+
+
+def _deepseek_agent_dispatch(
+    prompt: str,
+    run_id: str,
+    socket_room: str | None = None,
+) -> dict:
+    """Run DeepSeek agent with tools. Returns result dict with keys:
+    ok, output, duration_s, input_tokens, output_tokens, model, error."""
+    logger.info("[deepseek_agent] dispatching run_id=%s", run_id)
+    buf: list[str] = []
+
+    def _on_chunk(text: str) -> None:
+        buf.append(text)
+        if socket_room:
+            socketio.emit("run_output", {"run_id": run_id, "text": text}, room=socket_room)
+
+    result = _run_deepseek_agent(
+        prompt,
+        workspace=str(ROOT),
+        stream_callback=_on_chunk,
+    )
+    output = "".join(buf)
+    if result.get("ok") and not output:
+        output = result.get("output", "")
+    result["output"] = output
+    return result
 
 
 def _extract_skill_name(raw: str, registry: dict) -> str:
@@ -1572,67 +1609,91 @@ def run():
     t0 = time.monotonic()
     _running_jobs[run_id] = {"run_id": run_id, "skill": skill_name, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic()}
     socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill_name})
-    try:
-        proc = subprocess.Popen(
-            _ai_command(agent, prompt, output_format="json"),
-            cwd=str(ROOT),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        _running_procs[run_id] = proc
-        stdout_b, stderr_b = proc.communicate(timeout=120)
-        dur = time.monotonic() - t0
-        ok = proc.returncode == 0
-        stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
-        stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
-
-        output, input_tokens, output_tokens, parsed_model = _parse_agent_output(agent, stdout_s)
-        if not output:
-            output = stderr_s
-        if agent == "deepseek":
-            output = _execute_deepseek_commands(output)
-
-        _running_jobs.pop(run_id, None)
-        _running_procs.pop(run_id, None)
-        final_state = "success" if ok else "failed"
-        _write_run_log(skill_name, final_state, started_at, dur,
-                       prompt=prompt, output=output, error="" if ok else stderr_s, run_id=run_id,
-                       input_tokens=input_tokens, output_tokens=output_tokens, agent=agent,
-                       model=parsed_model or _agent_model(agent),
-                       task_id=run_id)
-        socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": skill_name})
-        socketio.emit("run_logged", {"skill": skill_name, "run_id": run_id})
-        return jsonify({
-            "ok": ok,
-            "run_id": run_id,
-            "output": output,
-            "duration_s": round(dur, 2),
-            "skill": skill_name,
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-        })
-    except FileNotFoundError:
-        dur = time.monotonic() - t0
-        _running_procs.pop(run_id, None)
-        _running_jobs.pop(run_id, None)
-        _write_run_log(skill_name, "error", started_at, dur, prompt=prompt, error=f"{agent} CLI not found", run_id=run_id)
-        socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill_name})
-        return jsonify({"ok": False, "error": f"{agent} CLI not found."})
-    except subprocess.TimeoutExpired:
-        dur = time.monotonic() - t0
-        _running_procs.get(run_id) and _running_procs[run_id].kill()
-        _running_procs.pop(run_id, None)
-        _running_jobs.pop(run_id, None)
-        _write_run_log(skill_name, "timeout", started_at, dur, prompt=prompt, error="Timed out after 120s", run_id=run_id)
-        socketio.emit("run_state_change", {"run_id": run_id, "state": "timeout", "skill": skill_name})
-        return jsonify({"ok": False, "error": "Timed out after 120s."})
-    except Exception as e:
-        dur = time.monotonic() - t0
-        _running_procs.pop(run_id, None)
-        _running_jobs.pop(run_id, None)
-        _write_run_log(skill_name, "error", started_at, dur, prompt=prompt, error=str(e), run_id=run_id)
-        socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill_name})
-        return jsonify({"ok": False, "error": str(e)})
+    if agent == "deepseek" and _HAS_DEEPSEEK_AGENT:
+        # DeepSeek agent with tools — direct API + tool loop
+        try:
+            agent_result = _deepseek_agent_dispatch(prompt, run_id)
+            dur = agent_result.get("duration_s", 0.0)
+            output = agent_result.get("output", "")
+            input_tokens = agent_result.get("input_tokens")
+            output_tokens = agent_result.get("output_tokens")
+            parsed_model = agent_result.get("model")
+            error_s = agent_result.get("error", "")
+            ok = agent_result.get("ok", False)
+            _running_jobs.pop(run_id, None)
+            final_state = "success" if ok else "failed"
+            _write_run_log(skill_name, final_state, started_at, dur,
+                           prompt=prompt, output=output, error=error_s, run_id=run_id,
+                           input_tokens=input_tokens, output_tokens=output_tokens, agent=agent,
+                           model=parsed_model or _agent_model(agent),
+                           task_id=run_id)
+            socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": skill_name})
+            socketio.emit("run_logged", {"skill": skill_name, "run_id": run_id})
+            return jsonify({
+                "ok": ok, "run_id": run_id, "output": output,
+                "duration_s": round(dur, 2), "skill": skill_name,
+                "input_tokens": input_tokens, "output_tokens": output_tokens,
+            })
+        except Exception as e:
+            _running_jobs.pop(run_id, None)
+            _write_run_log(skill_name, "error", started_at, 0.0, prompt=prompt, error=str(e), run_id=run_id)
+            socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill_name})
+            return jsonify({"ok": False, "error": str(e)})
+    else:
+        # Claude / Codex — subprocess dispatch
+        try:
+            proc = subprocess.Popen(
+                _ai_command(agent, prompt, output_format="json"),
+                cwd=str(ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            _running_procs[run_id] = proc
+            stdout_b, stderr_b = proc.communicate(timeout=120)
+            dur = time.monotonic() - t0
+            ok = proc.returncode == 0
+            stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
+            stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
+            output, input_tokens, output_tokens, parsed_model = _parse_agent_output(agent, stdout_s)
+            if not output:
+                output = stderr_s
+            _running_jobs.pop(run_id, None)
+            _running_procs.pop(run_id, None)
+            final_state = "success" if ok else "failed"
+            _write_run_log(skill_name, final_state, started_at, dur,
+                           prompt=prompt, output=output, error="" if ok else stderr_s, run_id=run_id,
+                           input_tokens=input_tokens, output_tokens=output_tokens, agent=agent,
+                           model=parsed_model or _agent_model(agent),
+                           task_id=run_id)
+            socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": skill_name})
+            socketio.emit("run_logged", {"skill": skill_name, "run_id": run_id})
+            return jsonify({
+                "ok": ok, "run_id": run_id, "output": output,
+                "duration_s": round(dur, 2), "skill": skill_name,
+                "input_tokens": input_tokens, "output_tokens": output_tokens,
+            })
+        except FileNotFoundError:
+            dur = time.monotonic() - t0
+            _running_procs.pop(run_id, None)
+            _running_jobs.pop(run_id, None)
+            _write_run_log(skill_name, "error", started_at, dur, prompt=prompt, error=f"{agent} CLI not found", run_id=run_id)
+            socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill_name})
+            return jsonify({"ok": False, "error": f"{agent} CLI not found."})
+        except subprocess.TimeoutExpired:
+            dur = time.monotonic() - t0
+            _running_procs.get(run_id) and _running_procs[run_id].kill()
+            _running_procs.pop(run_id, None)
+            _running_jobs.pop(run_id, None)
+            _write_run_log(skill_name, "timeout", started_at, dur, prompt=prompt, error="Timed out after 120s", run_id=run_id)
+            socketio.emit("run_state_change", {"run_id": run_id, "state": "timeout", "skill": skill_name})
+            return jsonify({"ok": False, "error": "Timed out after 120s."})
+        except Exception as e:
+            dur = time.monotonic() - t0
+            _running_procs.pop(run_id, None)
+            _running_jobs.pop(run_id, None)
+            _write_run_log(skill_name, "error", started_at, dur, prompt=prompt, error=str(e), run_id=run_id)
+            socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill_name})
+            return jsonify({"ok": False, "error": str(e)})
 
 
 @app.route("/api/state")
@@ -1976,69 +2037,92 @@ def api_run_retry(run_id: str):
     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "running", "skill": skill})
 
     def _do_retry():
-        try:
-            if entry.get("schedule_eligible") and entry.get("entrypoint"):
-                cmd = [_python(), str(RUNNER), skill]
+            nonlocal agent
+            if agent == "deepseek" and _HAS_DEEPSEEK_AGENT:
+                try:
+                    agent_result = _deepseek_agent_dispatch(prompt, new_run_id)
+                    dur = agent_result.get("duration_s", 0.0)
+                    output = agent_result.get("output", "")
+                    input_tokens = agent_result.get("input_tokens")
+                    output_tokens = agent_result.get("output_tokens")
+                    parsed_model = agent_result.get("model")
+                    error_s = agent_result.get("error", "")
+                    _running_jobs.pop(new_run_id, None)
+                    final_state = "review" if linear_issue_id else ("success" if agent_result.get("ok") else "failed")
+                    _write_run_log(skill, final_state, started_at, dur,
+                                   prompt=prompt, output=output, error=error_s,
+                                   run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
+                                   linear_issue_id=linear_issue_id,
+                                   input_tokens=input_tokens, output_tokens=output_tokens,
+                                   agent=agent, model=parsed_model or _agent_model(agent, cfg),
+                                   task_id=task_id)
+                    if linear_issue_id:
+                        _push_linear_state_async(linear_issue_id, final_state)
+                        _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry", prompt=prompt, output=output, error=error_s))
+                    socketio.emit("run_state_change", {"run_id": new_run_id, "state": final_state, "skill": skill})
+                    socketio.emit("run_logged", {"skill": skill, "run_id": new_run_id})
+                except Exception as e:
+                    _running_jobs.pop(new_run_id, None)
+                    _write_run_log(skill, "error", started_at, 0.0, prompt=prompt, error=str(e),
+                                   run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
+                                   linear_issue_id=linear_issue_id, agent=agent,
+                                   model=_agent_model(agent, cfg), task_id=task_id)
+                    if linear_issue_id:
+                        _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry Error", prompt=prompt, error=str(e)))
+                    socketio.emit("run_state_change", {"run_id": new_run_id, "state": "error", "skill": skill})
             else:
-                cmd = _ai_command(agent, prompt, output_format="json")
-            proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            _running_procs[new_run_id] = proc
-            stdout_b, stderr_b = proc.communicate(timeout=AI_RUN_TIMEOUT_S)
-            dur = time.monotonic() - t0
-            ok = proc.returncode == 0
-            stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
-            stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
-            output, input_tokens, output_tokens, parsed_model = _parse_agent_output(agent, stdout_s)
-            error_s = _extract_real_errors(stderr_s)
-            if not output:
-                output = error_s or stderr_s
-            if agent == "deepseek":
-                output = _execute_deepseek_commands(output)
-            _running_jobs.pop(new_run_id, None)
-            _running_procs.pop(new_run_id, None)
-            # Linear-linked runs stay on the original issue and write back output as a comment.
-            final_state = "review" if linear_issue_id else ("success" if ok else "failed")
-            _write_run_log(skill, final_state, started_at, dur,
-                           prompt=prompt, output=output, error=error_s,
-                           run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
-                           linear_issue_id=linear_issue_id,
-                           input_tokens=input_tokens, output_tokens=output_tokens,
-                           agent=agent, model=parsed_model or _agent_model(agent, cfg),
-                           task_id=task_id)
-            if linear_issue_id:
-                _push_linear_state_async(linear_issue_id, final_state)
-                _post_linear_comment(
-                    linear_issue_id,
-                    _linear_comment_body(
-                        title="AgenticOS Retry",
-                        prompt=prompt,
-                        output=output,
-                        error=error_s,
-                    ),
-                )
-            socketio.emit("run_state_change", {"run_id": new_run_id, "state": final_state, "skill": skill})
-            socketio.emit("run_logged", {"skill": skill, "run_id": new_run_id})
-        except subprocess.TimeoutExpired:
-            dur = time.monotonic() - t0
-            proc = _running_procs.pop(new_run_id, None)
-            if proc:
-                proc.kill()
-            _running_jobs.pop(new_run_id, None)
-            msg = f"Timed out after {AI_RUN_TIMEOUT_S}s"
-            _write_run_log(skill, "timeout", started_at, dur, prompt=prompt, error=msg,
-                           run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
-                           linear_issue_id=linear_issue_id, agent=agent,
-                           model=_agent_model(agent, cfg), task_id=task_id)
-            if linear_issue_id:
-                _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry Timeout", prompt=prompt, error=msg))
-            socketio.emit("run_state_change", {"run_id": new_run_id, "state": "timeout", "skill": skill})
-        except Exception as e:
-            _running_procs.pop(new_run_id, None)
-            _running_jobs.pop(new_run_id, None)
-            _write_run_log(skill, "error", started_at, 0.0, prompt=prompt, error=str(e),
-                           run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
-                           linear_issue_id=linear_issue_id, agent=agent,
-                           model=_agent_model(agent, cfg), task_id=task_id)
+                # Claude / Codex — subprocess dispatch
+                try:
+                    if entry.get("schedule_eligible") and entry.get("entrypoint"):
+                        cmd = [_python(), str(RUNNER), skill]
+                    else:
+                        cmd = _ai_command(agent, prompt, output_format="json")
+                    proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    _running_procs[new_run_id] = proc
+                    stdout_b, stderr_b = proc.communicate(timeout=AI_RUN_TIMEOUT_S)
+                    dur = time.monotonic() - t0
+                    ok = proc.returncode == 0
+                    stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
+                    stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
+                    output, input_tokens, output_tokens, parsed_model = _parse_agent_output(agent, stdout_s)
+                    error_s = _extract_real_errors(stderr_s)
+                    if not output:
+                        output = error_s or stderr_s
+                    _running_jobs.pop(new_run_id, None)
+                    _running_procs.pop(new_run_id, None)
+                    final_state = "review" if linear_issue_id else ("success" if ok else "failed")
+                    _write_run_log(skill, final_state, started_at, dur,
+                                   prompt=prompt, output=output, error=error_s,
+                                   run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
+                                   linear_issue_id=linear_issue_id,
+                                   input_tokens=input_tokens, output_tokens=output_tokens,
+                                   agent=agent, model=parsed_model or _agent_model(agent, cfg),
+                                   task_id=task_id)
+                    if linear_issue_id:
+                        _push_linear_state_async(linear_issue_id, final_state)
+                        _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry", prompt=prompt, output=output, error=error_s))
+                    socketio.emit("run_state_change", {"run_id": new_run_id, "state": final_state, "skill": skill})
+                    socketio.emit("run_logged", {"skill": skill, "run_id": new_run_id})
+                except subprocess.TimeoutExpired:
+                    dur = time.monotonic() - t0
+                    proc = _running_procs.pop(new_run_id, None)
+                    if proc: proc.kill()
+                    _running_jobs.pop(new_run_id, None)
+                    msg = f"Timed out after {AI_RUN_TIMEOUT_S}s"
+                    _write_run_log(skill, "timeout", started_at, dur, prompt=prompt, error=msg,
+                                   run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
+                                   linear_issue_id=linear_issue_id, agent=agent,
+                                   model=_agent_model(agent, cfg), task_id=task_id)
+                    if linear_issue_id:
+                        _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry Timeout", prompt=prompt, error=msg))
+                    socketio.emit("run_state_change", {"run_id": new_run_id, "state": "timeout", "skill": skill})
+                except Exception as e:
+                    _running_procs.pop(new_run_id, None)
+                    _running_jobs.pop(new_run_id, None)
+                    _write_run_log(skill, "error", started_at, 0.0, prompt=prompt, error=str(e),
+                                   run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
+                                   linear_issue_id=linear_issue_id, agent=agent,
+                                   model=_agent_model(agent, cfg), task_id=task_id)
             if linear_issue_id:
                 _post_linear_comment(
                     linear_issue_id,
