@@ -1,6 +1,6 @@
 ---
 agent:
-  backend: deepseek
+  backend: claude
 polling:
   interval_ms: 30000
 tracker:

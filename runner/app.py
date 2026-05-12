@@ -329,6 +329,15 @@ def _push_linear_state_async(issue_id: str, board_status: str) -> None:
         logger.debug("No tracker available, state %s for %s not pushed", board_status, issue_id)
 
 
+def _ds_dispatch(prompt: str, run_id: str) -> dict:
+    """Bridge to DeepSeekModule.dispatch()."""
+    ds_mod = _module_registry.get("deepseek")
+    if ds_mod and ds_mod._capability.get("available"):
+        return ds_mod.dispatch(prompt, run_id)
+    logger.debug("DeepSeek module not available, skipping dispatch")
+    return {"ok": False, "error": "DeepSeek module not available"}
+
+
 def _locked_task_agent(original: dict, requested_agent: str | None = None) -> tuple[str | None, str | None]:
     """Return (locked_agent, error_message)."""
     locked_agent = (original.get("agent") or "").strip().lower() or None
@@ -897,62 +906,14 @@ def _parse_agent_output(agent: str, stdout_s: str) -> tuple[str, int | None, int
 
 
 def _execute_deepseek_commands(output: str, cwd: str | Path | None = None) -> str:
-    if not output:
-        return output
-    PATTERN = re.compile(r"```(?:bash|shell)\n(.*?)```", re.DOTALL)
-    cwd = cwd or ROOT
-    blocks: list[tuple[int, int, str]] = []
-    for m in PATTERN.finditer(output):
-        cmd = m.group(1).strip()
-        if not cmd:
-            continue
-        try:
-            proc = subprocess.run(cmd, shell=True, cwd=str(cwd),
-                capture_output=True, text=True, timeout=30)
-            parts: list[str] = []
-            if proc.stdout.strip():
-                parts.append(proc.stdout.strip())
-            if proc.stderr.strip():
-                parts.append(f"stderr: {proc.stderr.strip()}")
-            parts.append(f"exit code: {proc.returncode}")
-            real_output = "\n".join(parts)
-        except subprocess.TimeoutExpired:
-            real_output = "timed out after 30s"
-        except Exception as e:
-            real_output = f"error: {e}"
-        orig_block = m.group(0)
-        new_block = f"{orig_block}\n\n**Real execution result:**\n```\n{real_output}\n```"
-        blocks.append((m.start(), m.end(), new_block))
-    for start, end, replacement in reversed(blocks):
-        output = output[:start] + replacement + output[end:]
+    """Bridge to DeepSeekModule.execute_commands()."""
+    ds_mod = _module_registry.get("deepseek")
+    if ds_mod and ds_mod._capability.get("available"):
+        return ds_mod.execute_commands(output, cwd)
+    logger.debug("DeepSeek module not available, skipping command execution")
     return output
 
 
-def _deepseek_agent_dispatch(
-    prompt: str,
-    run_id: str,
-    socket_room: str | None = None,
-) -> dict:
-    """Run DeepSeek agent with tools. Returns result dict with keys:
-    ok, output, duration_s, input_tokens, output_tokens, model, error."""
-    logger.info("[deepseek_agent] dispatching run_id=%s", run_id)
-    buf: list[str] = []
-
-    def _on_chunk(text: str) -> None:
-        buf.append(text)
-        if socket_room:
-            socketio.emit("run_output", {"run_id": run_id, "text": text}, room=socket_room)
-
-    result = _run_deepseek_agent(
-        prompt,
-        workspace=str(ROOT),
-        stream_callback=_on_chunk,
-    )
-    output = "".join(buf)
-    if result.get("ok") and not output:
-        output = result.get("output", "")
-    result["output"] = output
-    return result
 
 
 def _extract_skill_name(raw: str, registry: dict) -> str:
@@ -1049,7 +1010,7 @@ def run():
     if agent == "deepseek" and _HAS_DEEPSEEK_AGENT:
         # DeepSeek agent with tools — direct API + tool loop
         try:
-            agent_result = _deepseek_agent_dispatch(prompt, run_id)
+            agent_result = _ds_dispatch(prompt, run_id)
             dur = agent_result.get("duration_s", 0.0)
             output = agent_result.get("output", "")
             input_tokens = agent_result.get("input_tokens")
@@ -1477,7 +1438,7 @@ def api_run_retry(run_id: str):
             nonlocal agent
             if agent == "deepseek" and _HAS_DEEPSEEK_AGENT:
                 try:
-                    agent_result = _deepseek_agent_dispatch(prompt, new_run_id)
+                    agent_result = _ds_dispatch(prompt, new_run_id)
                     dur = agent_result.get("duration_s", 0.0)
                     output = agent_result.get("output", "")
                     input_tokens = agent_result.get("input_tokens")
@@ -1652,6 +1613,9 @@ def api_config_patch():
         _linear_dispatched.clear()
         _linear_issues_cache.clear()
     _save_workflow_config(cfg)
+    # Notify connected clients (including Symphony) about config changes
+    if "agent_backend" in data:
+        socketio.emit("config_changed", {"agent_backend": data["agent_backend"]})
     return jsonify({"ok": True})
 
 
@@ -1663,7 +1627,10 @@ def api_config_patch():
 @app.route("/api/capabilities")
 def api_capabilities():
     """Return all module capabilities for frontend dynamic rendering."""
-    return jsonify(_module_registry.get_capabilities())
+    result = _module_registry.get_capabilities()
+    cfg = _load_workflow_config()
+    result["selected"] = (cfg.get("agent") or {}).get("backend", "")
+    return jsonify(result)
 
 
 # ── Runtime stats ──────────────────────────────────────────────────────────
@@ -1715,7 +1682,7 @@ def api_usage():
             "codex":  _load_codex_usage(),
         }
         if _HAS_DEEPSEEK_MONITOR:
-            result["deepseek"] = _load_deepseek_usage_from_monitor()
+            result["deepseek"] = _ds_load_usage()
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1746,7 +1713,7 @@ def api_deepseek_refresh():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-def _load_deepseek_usage_from_monitor() -> dict[str, Any]:
+def _ds_load_usage() -> dict[str, Any]:
     """Load DeepSeek usage via monitor's cached file."""
     from usage_reader import load_deepseek_usage as _load_ds
     data = _load_ds()
@@ -1791,17 +1758,6 @@ def _migrate_legacy_state() -> None:
     _load_task_state()
 
 
-def _deepseek_polling_loop() -> None:
-    """Periodically refresh DeepSeek usage data every 120s."""
-    import time as _time
-    if not _HAS_DEEPSEEK_MONITOR:
-        return
-    while True:
-        try:
-            _deepseek_monitor.update_usage()
-        except Exception:
-            logger.exception("deepseek poll failed")
-        _time.sleep(120)
 
 
 def _init_modules() -> None:
@@ -1840,8 +1796,7 @@ def main() -> None:
     _init_modules()
     # Linear + Stall Detection polling started via ModuleRegistry.init_background()
     
-    if _HAS_DEEPSEEK_MONITOR:
-        threading.Thread(target=_deepseek_polling_loop, daemon=True).start()
+    # DeepSeek polling started via ModuleRegistry.init_background()
     socketio.run(app, host=args.host, port=args.port, debug=args.debug, allow_unsafe_werkzeug=True)
 
 
