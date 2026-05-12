@@ -620,28 +620,12 @@ def _issue_agent_comment_body(agent: str, previous_agent: str | None = None) -> 
 
 
 def _post_linear_comment(issue_id: str, body: str) -> bool:
-    try:
-        cfg = _load_workflow_config()
-        tracker = cfg.get("tracker", {})
-        if tracker.get("kind") != "linear":
-            return False
-        api_key = _linear_api_key_from_cfg(tracker)
-        if not api_key:
-            return False
-        payload = json.dumps({
-            "query": _LINEAR_COMMENT_MUTATION,
-            "variables": {"issueId": issue_id, "body": body},
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            "https://api.linear.app/graphql",
-            data=payload,
-            headers={"Content-Type": "application/json", "Authorization": api_key},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read())
-        return not result.get("errors") and bool(((result.get("data") or {}).get("commentCreate") or {}).get("success"))
-    except Exception:
-        return False
+    """Bridge to LinearModule.post_comment or LocalTracker."""
+    linear_mod = _module_registry.get("linear")
+    if linear_mod and linear_mod._capability.get("available"):
+        return linear_mod.post_comment(issue_id, body)
+    logger.debug("No tracker available, comment for %s not posted", issue_id)
+    return False
 
 # Rule: `In Progress` means the agent is actively running; `In Review` means the agent has finished and is waiting for human review.
 # Board status → Linear state name mapping
@@ -658,41 +642,12 @@ _BOARD_TO_LINEAR: dict[str, str] = {
 
 
 def _push_linear_state_async(issue_id: str, board_status: str) -> None:
-    linear_state = _BOARD_TO_LINEAR.get(board_status)
-    if not linear_state:
-        return  # failed/error/stalled: don't push (Human Review is board-only)
-    target_state_key = _linear_state_key(linear_state)
-
-    def _push():
-        try:
-            from linear_client import LinearClient
-            cfg = _load_workflow_config()
-            tracker = cfg.get("tracker", {})
-            if tracker.get("kind") != "linear":
-                return
-            api_key = tracker.get("api_key", "")
-            if api_key.startswith("$"):
-                api_key = os.environ.get(api_key[1:], "")
-            if not api_key or not tracker.get("project_slug"):
-                return
-            client = LinearClient(api_key, tracker["project_slug"])
-            issue = client.fetch_issue(issue_id)
-            resolved_state = _resolve_linear_state_name(issue, target_state_key)
-            if not resolved_state:
-                logger.error("Cannot resolve Linear state for '%s' on issue %s", board_status, issue_id)
-                return
-            client.update_issue_state(issue_id, resolved_state)
-            try:
-                issue = client.fetch_issue(issue_id)
-                if issue:
-                    _linear_issues_cache[issue_id] = _normalize_linear_issue(issue)
-                    socketio.emit("linear_issues_updated", {"count": len(_linear_issues_cache)})
-            except Exception:
-                pass
-        except Exception as e:
-            logger.error("Linear state push failed: %s", e)
-
-    threading.Thread(target=_push, daemon=True).start()
+    """Bridge to LinearModule.push_state."""
+    linear_mod = _module_registry.get("linear")
+    if linear_mod and linear_mod._capability.get("available"):
+        linear_mod.push_state(issue_id, board_status)
+    else:
+        logger.debug("No tracker available, state %s for %s not pushed", board_status, issue_id)
 
 
 def _locked_task_agent(original: dict, requested_agent: str | None = None) -> tuple[str | None, str | None]:
@@ -2152,6 +2107,7 @@ def api_config_get():
         "agent_backend": cfg.get("agent", {}).get("backend", "claude"),
         "board_col_limit": cfg.get("board", {}).get("col_limit", 15),
         "linear_configured": bool(tracker.get("api_key") and tracker.get("project_slug")),
+        "tracker_type": _module_registry.get("linear")._capability.get("type", "none") if _module_registry.get("linear") else "none",
         "linear_project_slug": tracker.get("project_slug", ""),
         "linear_team_id": tracker.get("team_id", ""),
     })
@@ -2230,25 +2186,38 @@ def api_runtime():
 
 @app.route("/api/linear/issues")
 def api_linear_issues():
-    cfg = _load_workflow_config()
-    tracker = cfg.get("tracker", {})
-    api_key = tracker.get("api_key", "")
-    if api_key.startswith("$"):
-        api_key = os.environ.get(api_key[1:], "")
-
-    if api_key and tracker.get("kind") == "linear":
-        try:
-            from linear_client import LinearClient
-            client = LinearClient(api_key, tracker.get("project_slug", ""))
-            team_id = tracker.get("team_id", "") or None
-            live_issues = client.fetch_issues(_linear_poll_states(tracker), team_id=team_id)
-            _linear_issues_cache.clear()
-            for issue in live_issues:
-                _linear_issues_cache[issue["id"]] = _normalize_linear_issue(issue)
-        except Exception as e:
-            logger.warning("linear issues live refresh failed: %s", e)
-
-    return jsonify(list(_linear_issues_cache.values()))
+    linear_mod = _module_registry.get("linear")
+    if linear_mod and linear_mod._capability.get("available"):
+        # Use module-level tracker (Linear or LocalTracker)
+        cap = linear_mod._capability
+        if cap.get("type") == "linear":
+            # Linear mode: fetch live + merge cache
+            cfg = _load_workflow_config()
+            tracker = cfg.get("tracker", {})
+            api_key = tracker.get("api_key", "")
+            if api_key.startswith("$"):
+                api_key = os.environ.get(api_key[1:], "")
+            if api_key and tracker.get("kind") == "linear":
+                try:
+                    from linear_client import LinearClient
+                    client = LinearClient(api_key, tracker.get("project_slug", ""))
+                    team_id = tracker.get("team_id", "") or None
+                    live_issues = client.fetch_issues(_linear_poll_states(tracker), team_id=team_id)
+                    _linear_issues_cache.clear()
+                    for issue in live_issues:
+                        _linear_issues_cache[issue["id"]] = _normalize_linear_issue(issue)
+                except Exception as e:
+                    logger.warning("linear issues live refresh failed: %s", e)
+            return jsonify(list(_linear_issues_cache.values()))
+        else:
+            # Local tracker mode
+            tracker = linear_mod.get_local_tracker()
+            cfg = _load_workflow_config()
+            tcfg = cfg.get("tracker", {})
+            states = _linear_poll_states(tcfg)
+            issues = tracker.fetch_issues(states)
+            return jsonify(issues)
+    return jsonify([])
 
 
 @app.route("/api/linear/issues", methods=["POST"])
@@ -2274,23 +2243,36 @@ def api_linear_create_issue():
     description = _compose_issue_description(description, preferred_agent)
     team_id = (data.get("team_id") or "").strip()
 
+    linear_mod = _module_registry.get("linear")
+    cap = linear_mod._capability if linear_mod else {}
+    is_local = cap.get("type") == "local" if cap else True
+
+    if is_local:
+        # Local tracker mode
+        tracker = linear_mod.get_local_tracker()
+        issue = tracker.create_issue(title, description, preferred_agent=preferred_agent)
+        normalized = dict(issue)
+        _linear_issues_cache[issue["id"]] = normalized
+        socketio.emit("linear_issues_updated", {"count": len(_linear_issues_cache)})
+        return jsonify({"ok": True, "issue": normalized})
+
+    # Linear mode
     cfg = _load_workflow_config()
-    tracker = cfg.get("tracker", {})
-    api_key = tracker.get("api_key", "")
+    tracker_cfg = cfg.get("tracker", {})
+    api_key = tracker_cfg.get("api_key", "")
     if api_key.startswith("$"):
         api_key = os.environ.get(api_key[1:], "")
     if not team_id:
-        team_id = tracker.get("team_id", "")
+        team_id = tracker_cfg.get("team_id", "")
 
     if not api_key:
         return jsonify({"error": "Linear not configured"}), 503
-
     if not team_id:
         return jsonify({"error": "team_id required"}), 400
 
     try:
         from linear_client import LinearClient
-        client = LinearClient(api_key, tracker.get("project_slug", ""))
+        client = LinearClient(api_key, tracker_cfg.get("project_slug", ""))
         issue = client.create_issue(team_id, title, description, state_name="Todo")
         if not issue:
             return jsonify({"error": "Linear create failed"}), 500
@@ -2634,7 +2616,8 @@ def main() -> None:
     _load_dismissed()
     _init_modules()
     threading.Thread(target=_stall_detection_loop, daemon=True).start()
-    threading.Thread(target=_linear_polling_loop, daemon=True).start()
+    if _module_registry.is_available("linear"):
+        threading.Thread(target=_linear_polling_loop, daemon=True).start()
     if _HAS_DEEPSEEK_MONITOR:
         threading.Thread(target=_deepseek_polling_loop, daemon=True).start()
     socketio.run(app, host=args.host, port=args.port, debug=args.debug, allow_unsafe_werkzeug=True)

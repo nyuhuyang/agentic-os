@@ -598,7 +598,7 @@
     </div>
     <div class="detail-meta" id="detail-meta"></div>
     <div class="detail-section" id="linear-edit-section" style="display:none">
-      <div class="detail-section-label">◈ Linear Issue</div>
+      <div class="detail-section-label" id="linear-section-label">◈ Linear Issue</div>
       <div class="linear-edit-field">
         <div class="linear-edit-label">Title</div>
         <input class="linear-edit-input" id="linear-edit-title" type="text" placeholder="Issue title">
@@ -952,12 +952,32 @@ async function _initAgentFromConfig() {
     const backend = cfg.agent_backend || 'claude';
     if (backend !== selectedAgent) setAgent(backend);
     if (cfg.linear_configured) _linearConfigured = true;
+    _trackerType = cfg.tracker_type || (_linearConfigured ? 'linear' : 'none');
+    _updateTrackerLabel();
     if (cfg.board_col_limit) _colLimit = cfg.board_col_limit;
     if (cfg.linear_team_id) _currentTeamId = cfg.linear_team_id;
     _updateRuntimeChip();
-    if (_linearConfigured) _initTeamSelector();
+    if (_linearConfigured && _trackerType === 'linear') _initTeamSelector();
     return cfg;
   } catch (_) { return null; }
+}
+
+let _trackerType = 'none';
+
+function _updateTrackerLabel() {
+  const label = document.getElementById('linear-section-label');
+  if (!label) return;
+  const saveBtn = document.getElementById('linear-save-btn');
+  const link = document.getElementById('linear-issue-link');
+  if (_trackerType === 'local') {
+    label.textContent = '◈ Local Task';
+    if (saveBtn) saveBtn.textContent = 'Save Task';
+    if (link) link.style.display = 'none';
+  } else {
+    label.textContent = '◈ Linear Issue';
+    if (saveBtn) saveBtn.textContent = 'Save to Linear';
+    if (link && _detailLinearIssueId) link.style.display = '';
+  }
 }
 
 async function _updateRuntimeChip() {
