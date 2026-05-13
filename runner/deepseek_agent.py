@@ -381,13 +381,5 @@ def run_deepseek_agent(
 if __name__ == "__main__":
     import sys
     prompt = " ".join(sys.argv[1:]) or "Run 'date' and tell me the current time."
-    print(f"Prompt: {prompt}")
     result = run_deepseek_agent(prompt)
-    print("---")
-    if result["ok"]:
-        print(f"Output: {result['output'][:500]}")
-    else:
-        print(f"Error: {result.get('error', 'unknown')}")
-    print(f"Duration: {result.get('duration_s', 0)}s  "
-          f"Tokens: {result.get('input_tokens', 0)} in / {result.get('output_tokens', 0)} out  "
-          f"Iterations: {result.get('iterations', 0)}")
+    print(json.dumps(result))

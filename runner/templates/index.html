@@ -180,6 +180,9 @@
   .job-btn.retry-codex:hover { background: rgba(111,181,212,.1); }
   .job-btn.retry-deepseek { color: #7ec8a0; border-color: #3a6a52; }
   .job-btn.retry-deepseek:hover { background: rgba(126,200,160,.1); }
+  .job-btn.retry-claude.selected { background: rgba(232,114,58,.10); border-color: var(--accent); }
+  .job-btn.retry-codex.selected { background: rgba(111,181,212,.10); border-color: #6fb5d4; }
+  .job-btn.retry-deepseek.selected { background: rgba(126,200,160,.10); border-color: #7ec8a0; }
   .job-btn-group { display: inline-flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
   .job-card-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
   .model-badge { font-size: 8px; color: var(--text-dim); background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 3px; padding: 0 5px; letter-spacing: .2px; vertical-align: middle; white-space: nowrap; }
@@ -552,9 +555,9 @@
 
       <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid var(--border);">
         <div class="agent-toggle">
-          <button class="agent-btn active" id="agent-claude" onclick="setAgent('claude')">◆ Claude</button>
-          <button class="agent-btn" id="agent-codex" onclick="setAgent('codex')">✦ Codex</button>
-          <button class="agent-btn" id="agent-deepseek" onclick="setAgent('deepseek')">⬢ DeepSeek</button>
+          <button class="agent-btn active" id="agent-claude" onclick="setAgent('claude')">Claude</button>
+          <button class="agent-btn" id="agent-codex" onclick="setAgent('codex')">Codex</button>
+          <button class="agent-btn" id="agent-deepseek" onclick="setAgent('deepseek')">DeepSeek</button>
           <button class="agent-btn" id="ds-refresh" onclick="refreshDeepSeek()" style="display:none; font-size:10px; letter-spacing:.3px; opacity:.7;">↻ Refresh</button>
         </div>
         <span style="font-size:11px;color:var(--text-dim)">Active agent for skill cards &amp; terminal injection</span>
@@ -632,9 +635,9 @@
         <div class="linear-edit-label">Model</div>
         <div class="new-issue-agent-row">
           <div class="agent-toggle" aria-label="Issue preferred agent">
-            <button type="button" class="agent-btn active" id="linear-edit-agent-claude" onclick="setDetailIssueAgent('claude')">◆ Claude</button>
-            <button type="button" class="agent-btn" id="linear-edit-agent-codex" onclick="setDetailIssueAgent('codex')">✦ Codex</button>
-            <button type="button" class="agent-btn" id="linear-edit-agent-deepseek" onclick="setDetailIssueAgent('deepseek')">⬢ DeepSeek</button>
+            <button type="button" class="agent-btn active" id="linear-edit-agent-claude" onclick="setDetailIssueAgent('claude')">Claude</button>
+            <button type="button" class="agent-btn" id="linear-edit-agent-codex" onclick="setDetailIssueAgent('codex')">Codex</button>
+            <button type="button" class="agent-btn" id="linear-edit-agent-deepseek" onclick="setDetailIssueAgent('deepseek')">DeepSeek</button>
           </div>
           <span class="new-issue-agent-hint" id="linear-edit-agent-hint">Preferred agent for dispatch</span>
         </div>
@@ -674,7 +677,7 @@
         <div class="detail-section-label" style="margin-bottom:0">Comment / Feedback</div>
         <select id="stt-source" onchange="onSttSourceChange()" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:11px;padding:1px 4px;border-radius:3px;cursor:pointer;font-family:inherit;margin-right:4px">
           <option value="browser">Browser STT</option>
-          <option value="openai">OpenAI</option>
+          <option value="openai:gpt-4o-mini-transcribe">OpenAI 4o mini · fast</option>
         </select>
         <button id="mic-btn" onclick="toggleMic()" title="Voice input" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:14px;padding:2px 8px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
       </div>
@@ -1061,17 +1064,42 @@ function _updateSttSelector() {
   if (!sel) return;
   const current = sel.value;
   sel.innerHTML = '';
-  for (const backend of _sttBackends) {
+  const options = [];
+  if (_sttBackends.includes('browser')) {
+    options.push(['browser', 'Browser STT']);
+  }
+  if (_sttBackends.includes('openai')) {
+    options.push(['openai:whisper-1', 'OpenAI Whisper · slow']);
+    options.push(['openai:gpt-4o-mini-transcribe', 'OpenAI 4o mini · fast']);
+    options.push(['openai:gpt-4o-transcribe', 'OpenAI 4o · med']);
+  }
+  if (_sttBackends.includes('local')) {
+    options.push(['local', 'Local STT']);
+  }
+  for (const [value, label] of options) {
     const opt = document.createElement('option');
-    opt.value = backend;
-    opt.textContent = backend === 'browser' ? 'Browser STT' : backend === 'openai' ? 'OpenAI' : backend;
+    opt.value = value;
+    opt.textContent = label;
     sel.appendChild(opt);
   }
   // Keep current selection if still available
-  if (_sttBackends.includes(current)) sel.value = current;
+  if (options.some(([value]) => value === current)) {
+    sel.value = current;
+  } else if (_sttBackends.includes('browser')) {
+    sel.value = 'browser';
+  } else if (options.length > 0) {
+    sel.value = options[0][0];
+  }
   // Update mic button title
   const btn = document.getElementById('mic-btn');
-  if (btn) btn.title = sel.value === 'openai' ? 'Voice input (OpenAI)' : 'Voice input (Web Speech API)';
+  if (btn) btn.title = sel.value.startsWith('openai:')
+    ? 'Voice input (OpenAI ' + (sel.options[sel.selectedIndex]?.textContent || '') + ')'
+    : 'Voice input (Web Speech API)';
+  const saved = window.localStorage.getItem('agenticos.stt.source');
+  if (saved && options.some(([value]) => value === saved)) {
+    sel.value = saved;
+  }
+  onSttSourceChange();
 }
 
 function _updateTrackerLabel() {
@@ -1651,17 +1679,14 @@ function _buildColCard(run) {
     ? `<span class="agent-badge ${_esc(paClass)}${agentLocked ? ' locked' : ''}" title="${agentLocked ? 'Agent locked while in progress' : 'Click to toggle agent'}" ${agentLocked ? '' : `onclick="event.stopPropagation();setIssueAgent('${_esc(run.linear_issue_id)}','${_esc(pa)}')"`}>${_esc(paLabel)}</span>`
     : '';
   const hasAssignedAgent = ['claude','codex','aider','deepseek'].includes(pa);
-  const todoAgentToggle = run._is_linear_issue && state === 'todo'
+  const todoAgentToggle = run._is_linear_issue && state === 'todo' && hasAssignedAgent
     ? `<div class="todo-agent-toggle" aria-label="Assign agent">
-         <button type="button" class="todo-run-btn claude${pa === 'claude' ? ' selected' : ''}" title="Assign Claude" onclick="event.stopPropagation();setLinearIssuePreferredAgent('${_esc(run.linear_issue_id)}','claude')">Claude</button>
-         <button type="button" class="todo-run-btn codex${pa === 'codex' ? ' selected' : ''}" title="Assign Codex" onclick="event.stopPropagation();setLinearIssuePreferredAgent('${_esc(run.linear_issue_id)}','codex')">Codex</button>
-         <button type="button" class="todo-run-btn deepseek${pa === 'aider' || pa === 'deepseek' ? ' selected' : ''}" title="Assign DeepSeek" onclick="event.stopPropagation();setLinearIssuePreferredAgent('${_esc(run.linear_issue_id)}','deepseek')">DeepSeek</button>
-         ${hasAssignedAgent ? `<button type="button" class="todo-run-btn start" title="Move to In Progress" onclick="event.stopPropagation();startLinearIssue('${_esc(run.linear_issue_id)}')">▶ Start</button>` : ''}
+         <button type="button" class="todo-run-btn start" title="Move to In Progress" onclick="event.stopPropagation();startLinearIssue('${_esc(run.linear_issue_id)}')">▶ Start</button>
        </div>`
     : '';
   const issueLabel = run.skill || run.identifier || '?';
   const issueTitle = run.title || prompt || '';
-  const metaAgentHtml = run._is_linear_issue && state !== 'todo' ? agentBadge : '';
+  const metaAgentHtml = run._is_linear_issue ? agentBadge : '';
   const metaHtml = modelBadge || metaAgentHtml ? `<div class="job-card-meta">${modelBadge}${metaAgentHtml}</div>` : '';
   const footerControlsHtml = run._is_linear_issue && state === 'todo' ? todoAgentToggle : '';
 
@@ -1692,25 +1717,30 @@ function _buildColCard(run) {
     card.appendChild(dismissBtn);
   }
   if (canRetry) {
-    const lockedAgent = run.preferred_agent || null;
+    const preferredAgent = (run.preferred_agent || run.agent || '').toLowerCase() || null;
     const group = document.createElement('div');
     group.className = 'job-btn-group';
-    if (!lockedAgent || lockedAgent === 'claude') {
-      const btnC = document.createElement('button');
-      btnC.className = 'job-btn retry-claude';
-      btnC.textContent = '↺ Claude';
-      btnC.title = 'Continue with Claude';
-      btnC.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, 'claude'); };
-      group.appendChild(btnC);
-    }
-    if (!lockedAgent || lockedAgent === 'codex') {
-      const btnX = document.createElement('button');
-      btnX.className = 'job-btn retry-codex';
-      btnX.textContent = '↺ Codex';
-      btnX.title = 'Continue with Codex';
-      btnX.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, 'codex'); };
-      group.appendChild(btnX);
-    }
+    const btnC = document.createElement('button');
+    btnC.className = `job-btn retry-claude${preferredAgent === 'claude' ? ' selected' : ''}`;
+    btnC.textContent = '↺ Claude';
+    btnC.title = preferredAgent === 'claude' ? 'Preferred agent for retry' : 'Retry with Claude';
+    btnC.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, 'claude'); };
+    group.appendChild(btnC);
+
+    const btnX = document.createElement('button');
+    btnX.className = `job-btn retry-codex${preferredAgent === 'codex' ? ' selected' : ''}`;
+    btnX.textContent = '↺ Codex';
+    btnX.title = preferredAgent === 'codex' ? 'Preferred agent for retry' : 'Retry with Codex';
+    btnX.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, 'codex'); };
+    group.appendChild(btnX);
+
+    const btnA = document.createElement('button');
+    btnA.className = `job-btn retry-deepseek${preferredAgent === 'deepseek' ? ' selected' : ''}`;
+    btnA.textContent = '↺ DeepSeek';
+    btnA.title = preferredAgent === 'deepseek' ? 'Preferred agent for retry' : 'Retry with DeepSeek';
+    btnA.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, 'deepseek'); };
+    group.appendChild(btnA);
+
     card.appendChild(group);
   }
   card.addEventListener('click', (e) => {
@@ -1802,12 +1832,11 @@ async function refreshJobBoard(force = false) {
     return;
   }
   try {
-    const fetches = [fetch('/api/runs?state=running'), fetch('/api/runs?limit=80')];
-    if (_linearConfigured) fetches.push(fetch('/api/linear/issues'));
+    const fetches = [fetch('/api/runs?state=running'), fetch('/api/runs?limit=80'), fetch('/api/linear/issues')];
     const results = await Promise.all(fetches);
     const running = await results[0].json();
     const recent = await results[1].json();
-    const linearIssues = _linearConfigured && results[2] ? await results[2].json() : [];
+    const linearIssues = results[2] ? await results[2].json() : [];
 
     const latestRuns = _latestLinearRuns([
       ...running.map(r => ({ ...r, status: 'running' })),
@@ -2012,7 +2041,7 @@ async function openDetailModal(run_id) {
       document.getElementById('detail-path-section').style.display = '';
     }
 
-    const canRetry = !!r.linear_issue_id && state !== 'done' && state !== 'cancelled' && r.status !== 'running';
+    const canRetry = !!r.linear_issue_id && state !== 'done' && state !== 'cancelled' && state !== 'todo' && r.status !== 'running';
     document.getElementById('detail-retry-group').style.display = canRetry ? 'inline-flex' : 'none';
     if (canRetry) _updateDetailRetryLock(r.preferred_agent || r.agent || null);
 
@@ -2068,15 +2097,18 @@ function closeDetailModal() {
   _flushPendingBoardRefresh();
 }
 
-function _updateDetailRetryLock(lockedAgent) {
+function _updateDetailRetryLock(preferredAgent) {
   const retryGroup = document.getElementById('detail-retry-group');
   if (!retryGroup || retryGroup.style.display === 'none') return;
   const btnC = document.getElementById('detail-retry-claude');
   const btnX = document.getElementById('detail-retry-codex');
   const btnA = document.getElementById('detail-retry-deepseek');
-  if (btnC) btnC.style.display = (!lockedAgent || lockedAgent === 'claude') ? '' : 'none';
-  if (btnX) btnX.style.display = (!lockedAgent || lockedAgent === 'codex') ? '' : 'none';
-  if (btnA) btnA.style.display = (!lockedAgent || lockedAgent === 'deepseek') ? '' : 'none';
+  if (btnC) btnC.classList.toggle('selected', preferredAgent === 'claude');
+  if (btnX) btnX.classList.toggle('selected', preferredAgent === 'codex');
+  if (btnA) btnA.classList.toggle('selected', preferredAgent === 'deepseek');
+  if (btnC) btnC.title = preferredAgent === 'claude' ? 'Preferred agent for retry' : 'Retry with Claude';
+  if (btnX) btnX.title = preferredAgent === 'codex' ? 'Preferred agent for retry' : 'Retry with Codex';
+  if (btnA) btnA.title = preferredAgent === 'deepseek' ? 'Preferred agent for retry' : 'Retry with DeepSeek';
 }
 
 async function dispatchFromDetail(agent) {
@@ -2084,8 +2116,6 @@ async function dispatchFromDetail(agent) {
   if (!_detailLinearIssueId) return;
   const linearIssueId = _detailLinearIssueId;
   try {
-    await _commentReplyToLinear(linearIssueId);
-    _clearReplyComposer();
     await triggerLinearIssueWithAgent(linearIssueId, agent, { refresh: false });
     refreshJobBoard();
     closeDetailModal();
@@ -2526,10 +2556,10 @@ let _micFinalTranscript = '';
 let _micInterimTranscript = '';
 let _micLastRenderedValue = '';
 
-// OpenAI STT (MediaRecorder)
-let _micMediaRecorder = null;
-let _micAudioChunks = [];
-let _micStream = null;
+// OpenAI STT (file-upload mode)
+let _openAiMediaRecorder = null;
+let _openAiAudioChunks = [];
+let _openAiUploading = false;
 
 function _normalizeSpeechSegment(text, { final = false } = {}) {
   const raw = String(text || '').trim();
@@ -2563,8 +2593,9 @@ function toggleMic() {
 function toggleMicFor(targetId, btnId, statusId) {
   const source = (document.getElementById('stt-source') || {}).value || 'browser';
 
-  if (source === 'openai') {
-    if (_micMediaRecorder && _micMediaRecorder.state === 'recording') {
+  if (source.startsWith('openai:')) {
+    const model = source.split(':', 2)[1] || 'gpt-4o-mini-transcribe';
+    if (_openAiMediaRecorder && _openAiMediaRecorder.state !== 'inactive') {
       _stopOpenAiMic();
       return;
     }
@@ -2573,7 +2604,7 @@ function toggleMicFor(targetId, btnId, statusId) {
       try { _micRecognition.stop(); } catch (_) {}
       _micRecognition = null;
     }
-    _startOpenAiMic(targetId, btnId, statusId);
+    _startOpenAiMic(targetId, btnId, statusId, model);
     return;
   }
 
@@ -2590,103 +2621,187 @@ function onSttSourceChange() {
   const el = document.getElementById('stt-source');
   const btn = document.getElementById('mic-btn');
   if (el && btn) {
-    btn.title = el.value === 'openai' ? 'Voice input (OpenAI)' : 'Voice input (Web Speech API)';
+    btn.title = el.value.startsWith('openai:')
+      ? 'Voice input (OpenAI ' + (el.options[el.selectedIndex]?.textContent || '') + ')'
+      : 'Voice input (Web Speech API)';
   }
+  if (el) window.localStorage.setItem('agenticos.stt.source', el.value);
   // If recording, switch mode by stopping current capture
   if (_micRecognition) {
     try { _micRecognition.stop(); } catch (_) {}
     _micRecognition = null;
   }
-  if (_micMediaRecorder && _micMediaRecorder.state === 'recording') {
-    _micMediaRecorder.stop();
+  if (_openAiMediaRecorder && _openAiMediaRecorder.state !== 'inactive') {
+    _stopOpenAiMic();
+  } else {
+    _stopMic();
   }
-  _stopMic();
 }
 
-function _startOpenAiMic(targetId, btnId, statusId) {
+function _downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
+  if (outputSampleRate === inputSampleRate) {
+    return buffer;
+  }
+  if (outputSampleRate > inputSampleRate) {
+    throw new Error('Output sample rate must be lower than input sample rate');
+  }
+
+  const sampleRateRatio = inputSampleRate / outputSampleRate;
+  const newLength = Math.round(buffer.length / sampleRateRatio);
+  const result = new Float32Array(newLength);
+  let offsetResult = 0;
+  let offsetBuffer = 0;
+
+  while (offsetResult < result.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+    let accum = 0;
+    let count = 0;
+    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+      accum += buffer[i];
+      count += 1;
+    }
+    result[offsetResult] = count > 0 ? (accum / count) : 0;
+    offsetResult += 1;
+    offsetBuffer = nextOffsetBuffer;
+  }
+  return result;
+}
+
+function _float32ToPcm16(buffer) {
+  const pcm16 = new Int16Array(buffer.length);
+  for (let i = 0; i < buffer.length; i++) {
+    const sample = Math.max(-1, Math.min(1, buffer[i]));
+    pcm16[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+  }
+  return pcm16;
+}
+
+function _arrayBufferToBase64(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  let binary = '';
+  const chunkSize = 0x2000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function _cleanupOpenAiMic({ keepTranscript = false } = {}) {
+  if (_openAiMediaRecorder && _openAiMediaRecorder.state !== 'inactive') {
+    try { _openAiMediaRecorder.stop(); } catch (_) {}
+  }
+  _openAiMediaRecorder = null;
+  _openAiAudioChunks = [];
+  _openAiUploading = false;
+  if (!keepTranscript) {
+    _micTargetId = _micBtnId = _micStatusId = null;
+    _micTranscriptBase = '';
+    _micFinalTranscript = '';
+    _micInterimTranscript = '';
+    _micLastRenderedValue = '';
+  }
+}
+
+function _startOpenAiMic(targetId, btnId, statusId, model = 'gpt-4o-mini-transcribe') {
   if (!navigator.mediaDevices?.getUserMedia) {
     const stEl = document.getElementById(statusId);
-    if (stEl) { stEl.style.display = ''; stEl.textContent = 'MediaRecorder not supported'; }
+    if (stEl) { stEl.style.display = ''; stEl.textContent = 'Microphone capture not supported'; }
     return;
   }
 
   _micTargetId = targetId;
   _micBtnId = btnId;
   _micStatusId = statusId;
+  _micTranscriptBase = (document.getElementById(targetId) || {}).value || '';
+  _micFinalTranscript = '';
+  _micInterimTranscript = '';
+  _micLastRenderedValue = _micTranscriptBase;
+  _openAiAudioChunks = [];
+  _openAiUploading = false;
 
   const stEl = document.getElementById(statusId);
   const btn = document.getElementById(btnId);
 
+  if (stEl) { stEl.style.display = ''; stEl.textContent = 'Requesting mic…'; stEl.style.color = 'var(--accent)'; }
+
   navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-    _micStream = stream;
-    _micAudioChunks = [];
+    _openAiMediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+    _openAiAudioChunks = [];
 
-    const mime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-      ? 'audio/webm;codecs=opus'
-      : 'audio/webm';
-    const recorder = new MediaRecorder(stream, { mimeType: mime });
-    _micMediaRecorder = recorder;
-
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) _micAudioChunks.push(e.data);
+    _openAiMediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) _openAiAudioChunks.push(e.data);
     };
 
-    recorder.onstop = () => {
-      if (_micStream) {
-        _micStream.getTracks().forEach(t => t.stop());
-        _micStream = null;
-      }
-
-      const blob = new Blob(_micAudioChunks, { type: mime });
-      _micAudioChunks = [];
-
-      if (stEl) { stEl.textContent = '⏳ Transcribing…'; stEl.style.color = 'var(--blue)'; stEl.style.display = ''; }
-
-      const formData = new FormData();
-      formData.append('audio', blob, 'recording.webm');
-      fetch('/api/stt', { method: 'POST', body: formData })
-        .then(r => r.json())
-        .then(data => {
-          if (data.text) {
-            const ta = document.getElementById(targetId);
-            if (ta) {
-              const existing = ta.value;
-              const sep = existing && !existing.endsWith('\n') && !existing.endsWith(' ') ? '\n' : '';
-              ta.value = existing + sep + data.text;
-              ta.dispatchEvent(new Event('input', { bubbles: true }));
-            }
-          } else if (data.error) {
-            if (stEl) { stEl.textContent = `STT error: ${data.error}`; stEl.style.color = 'var(--red)'; stEl.style.display = ''; }
-            setTimeout(() => { if (stEl) stEl.style.display = 'none'; }, 5000);
-            return;
-          }
-          if (btn) { btn.style.color = ''; btn.style.borderColor = ''; btn.textContent = '🎙'; }
-          if (stEl) { stEl.style.display = 'none'; stEl.style.color = ''; }
-          _micMediaRecorder = null;
-          _micTargetId = _micBtnId = _micStatusId = null;
-        })
-        .catch(err => {
-          if (stEl) { stEl.textContent = `Network error: ${err.message}`; stEl.style.color = 'var(--red)'; stEl.style.display = ''; }
-          setTimeout(() => { if (stEl) stEl.style.display = 'none'; }, 5000);
-          if (btn) { btn.style.color = ''; btn.style.borderColor = ''; btn.textContent = '🎙'; }
-          _micMediaRecorder = null;
-          _micTargetId = _micBtnId = _micStatusId = null;
-        });
+    _openAiMediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      _uploadOpenAiAudio(targetId, btnId, statusId, model);
     };
 
-    recorder.start();
+    _openAiMediaRecorder.start();
 
     if (btn) { btn.style.color = 'var(--red)'; btn.style.borderColor = 'var(--red)'; btn.textContent = '⏹'; }
     if (stEl) { stEl.style.display = ''; stEl.textContent = '● Recording…'; stEl.style.color = 'var(--red)'; }
   }).catch(err => {
+    _cleanupOpenAiMic();
     if (stEl) { stEl.style.display = ''; stEl.textContent = `Mic access denied: ${err.message}`; stEl.style.color = 'var(--red)'; }
   });
 }
 
 function _stopOpenAiMic() {
-  if (_micMediaRecorder && _micMediaRecorder.state === 'recording') {
-    _micMediaRecorder.stop();
+  if (!_openAiMediaRecorder || _openAiMediaRecorder.state === 'inactive') return;
+  const btn = document.getElementById(_micBtnId);
+  const stEl = document.getElementById(_micStatusId);
+  if (btn) { btn.style.color = ''; btn.style.borderColor = ''; btn.textContent = '🎙'; }
+  if (stEl) { stEl.style.display = ''; stEl.textContent = '⏳ Uploading…'; stEl.style.color = 'var(--accent)'; }
+  _openAiMediaRecorder.stop();
+  _openAiMediaRecorder = null;
+}
+
+function _uploadOpenAiAudio(targetId, btnId, statusId, model) {
+  if (_openAiAudioChunks.length === 0) {
+    _cleanupOpenAiMic();
+    return;
   }
+  _openAiUploading = true;
+  const blob = new Blob(_openAiAudioChunks, { type: 'audio/webm' });
+
+  const stEl = document.getElementById(statusId);
+  const btn = document.getElementById(btnId);
+  if (stEl) { stEl.textContent = '⏳ Transcribing…'; stEl.style.color = 'var(--accent)'; }
+
+  const formData = new FormData();
+  formData.append('audio', blob, 'recording.webm');
+  formData.append('model', model);
+
+  fetch('/api/stt', {
+    method: 'POST',
+    body: formData,
+  })
+  .then(res => res.json())
+  .then(data => {
+    if (data.error) {
+      if (stEl) { stEl.style.display = ''; stEl.textContent = `STT error: ${data.error}`; stEl.style.color = 'var(--red)'; }
+      setTimeout(() => { if (stEl) stEl.style.display = 'none'; }, 5000);
+    } else if (data.text) {
+      const el = document.getElementById(targetId);
+      if (el) {
+        const base = _micTranscriptBase || '';
+        const separator = base && !base.endsWith('\n') ? '\n' : '';
+        el.value = base + separator + data.text;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      if (stEl) { stEl.style.display = 'none'; }
+    }
+    if (btn) { btn.style.color = ''; btn.style.borderColor = ''; btn.textContent = '🎙'; }
+    _cleanupOpenAiMic();
+    _openAiUploading = false;
+  })
+  .catch(err => {
+    if (stEl) { stEl.style.display = ''; stEl.textContent = `Upload error: ${err.message}`; stEl.style.color = 'var(--red)'; }
+    if (btn) { btn.style.color = ''; btn.style.borderColor = ''; btn.textContent = '🎙'; }
+    _cleanupOpenAiMic();
+    _openAiUploading = false;
+  });
 }
 
 function _startMic(targetId, btnId, statusId) {
@@ -2742,6 +2857,8 @@ function _startMic(targetId, btnId, statusId) {
   rec.start();
 }
 
+
+
 function _stopMic() {
   if (_micRecognition) { try { _micRecognition.stop(); } catch (_) {} _micRecognition = null; }
   const btn = document.getElementById(_micBtnId);
@@ -2763,6 +2880,12 @@ function _handleReplyInput() {
       _stopMic();
     }
   }
+  if (_openAiMediaRecorder && _openAiMediaRecorder.state !== 'inactive' && _micTargetId === 'detail-reply-input') {
+    const current = _getDetailReplyValue();
+    if (current !== _micLastRenderedValue) {
+      _stopOpenAiMic();
+    }
+  }
 }
 
 function _bindDraftPersistence() {
@@ -2776,7 +2899,14 @@ function _bindDraftPersistence() {
 
 // Stop mic when modals close
 const _origClose = closeDetailModal;
-closeDetailModal = function() { _stopMic(); _origClose(); };
+closeDetailModal = function() {
+  if (_micRecognition) {
+    _stopMic();
+  } else if (_openAiMediaRecorder && _openAiMediaRecorder.state !== 'inactive') {
+    _stopOpenAiMic();
+  }
+  _origClose();
+};
 
 // Initial load + polling
 _initBackends().then(cfg => {
@@ -2843,6 +2973,8 @@ socket.on('connect', () => {
 socket.on('pty_output', (data) => { term.write(data.data); });
 
 socket.on('run_logged', () => { refreshJobBoard(); });
+
+
 
 // --- task-complete chime ---
 let _audioCtx = null;
@@ -2985,9 +3117,9 @@ terminalEl.addEventListener('drop', async (e) => {
       <div class="new-issue-label">Run With</div>
       <div class="new-issue-agent-row">
         <div class="agent-toggle" aria-label="New task agent">
-          <button type="button" class="agent-btn active" id="new-issue-agent-claude" onclick="setNewIssueAgent('claude')">◆ Claude</button>
-          <button type="button" class="agent-btn" id="new-issue-agent-codex" onclick="setNewIssueAgent('codex')">✦ Codex</button>
-          <button type="button" class="agent-btn" id="new-issue-agent-deepseek" onclick="setNewIssueAgent('deepseek')">⬢ DeepSeek</button>
+          <button type="button" class="agent-btn active" id="new-issue-agent-claude" onclick="setNewIssueAgent('claude')">Claude</button>
+          <button type="button" class="agent-btn" id="new-issue-agent-codex" onclick="setNewIssueAgent('codex')">Codex</button>
+          <button type="button" class="agent-btn" id="new-issue-agent-deepseek" onclick="setNewIssueAgent('deepseek')">DeepSeek</button>
         </div>
         <span class="new-issue-agent-hint">Preferred agent for first dispatch</span>
       </div>

@@ -75,6 +75,23 @@ def _is_linear_in_progress(state: str | None) -> bool:
     return _linear_state_key(state) == "in progress"
 
 
+def _linear_state_to_board(state: str | None) -> str:
+    key = _linear_state_key(state)
+    if key == "in progress":
+        return "running"
+    if key == "in review":
+        return "review"
+    if key == "done":
+        return "success"
+    if key in {"canceled", "cancelled"}:
+        return "cancelled"
+    if key == "duplicate":
+        return "duplicate"
+    if key in {"rework", "merging"}:
+        return "running"
+    return "todo"
+
+
 def _linear_poll_states(tracker: dict) -> list[str]:
     active = list(tracker.get("active_states", ["Todo", "In Progress", "In Review"]))
     if "Backlog" not in active:
@@ -258,13 +275,12 @@ class LinearModule(AgenticModule):
                     new_cache[iid] = _normalize_linear_issue(issue)
                     if _is_linear_in_progress(issue.get("state")):
                         in_progress_ids.add(iid)
-                        if iid not in self.dispatched and not self._issue_is_running(iid):
-                            threading.Thread(target=self._dispatch_issue, args=(issue, cfg, socketio), daemon=True).start()
                 for iid in list(self.dispatched):
                     if iid not in in_progress_ids and not self._issue_is_running(iid):
                         self.dispatched.pop(iid, None)
                 self.issues_cache.clear()
                 self.issues_cache.update(new_cache)
+                self._sync_cache_to_local()
                 socketio.emit("linear_issues_updated", {"count": len(new_cache)})
             except Exception as e:
                 logger.error("Linear polling error: %s", e)
@@ -284,66 +300,227 @@ class LinearModule(AgenticModule):
         except Exception:
             return False
 
-    def _dispatch_issue(self, issue: dict, cfg: dict, socketio) -> None:
+    def _restore_issue_state(self, issue_id: str, board_status: str, cfg: dict) -> None:
+        state_name = _BOARD_TO_LINEAR.get(board_status)
+        if not state_name:
+            return
+        try:
+            local = self.get_local_tracker()
+            local.update_issue_state(issue_id, state_name)
+        except Exception:
+            pass
+        cached = dict(self.issues_cache.get(issue_id) or {})
+        cached["state"] = state_name
+        self.issues_cache[issue_id] = cached
+        if self._capability.get("type") == "linear":
+            threading.Thread(
+                target=self._linear_sync_patch,
+                args=(issue_id, {"state_name": state_name}, cfg, None),
+                daemon=True,
+            ).start()
+
+    def _dispatch_issue(self, issue: dict, cfg: dict, socketio, previous_board_status: str | None = None) -> None:
         import subprocess
-        from app import _running_jobs, _running_procs, _python, RUNNER, ROOT, _load_registry, _ai_command, _agent_model, _parse_agent_output, _extract_skill_name, _strip_issue_metadata as _sim, _execute_deepseek_commands, _write_run_log, AI_RUN_TIMEOUT_S, _extract_real_errors
+        from app import _running_jobs, _running_procs, _python_path, RUNNER, ROOT, _load_registry, _ai_command, _agent_model, _parse_agent_output, _extract_skill_name, _execute_deepseek_commands, _write_run_log, AI_RUN_TIMEOUT_S, _extract_real_errors, _registry_exec_env, _ds_dispatch
         issue_id = issue["id"]
         if issue_id in self.dispatched:
             return
+
         agent_cfg = cfg.get("agent", {})
         backend = issue.get("preferred_agent") or agent_cfg.get("backend", "claude")
-        registry = _load_registry(backend)
-        skill_list = "\n".join(f"- {n}: {e.get('purpose', '')[:100]}" for n, e in registry.items())
-        routing_prompt = f"Given this issue, return only the skill name that best matches.\n\nIssue: {issue['identifier']} — {issue['title']}\n{(issue.get('description') or '')[:500]}\n\nAvailable skills:\n{skill_list}\n\nReturn exactly one skill name, nothing else."
+
+        if backend == "deepseek":
+            run_id = str(uuid.uuid4())
+            started_at = datetime.now(timezone.utc).isoformat()
+            t0 = time.monotonic()
+            prompt = f"{issue['identifier']}: {issue['title']}\n\n{_strip_issue_metadata(issue.get('description') or '')}"
+            self.dispatched[issue_id] = run_id
+            _running_jobs[run_id] = {
+                "run_id": run_id,
+                "skill": "_prompt",
+                "started_at": started_at,
+                "prompt": prompt,
+                "state": "running",
+                "last_progress_at": time.monotonic(),
+                "linear_issue_id": issue_id,
+                "agent": "deepseek",
+            }
+            self.push_state(issue_id, "running")
+            socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": "_prompt"})
+            try:
+                result = _ds_dispatch(prompt, run_id)
+                dur = time.monotonic() - t0
+                _running_jobs.pop(run_id, None)
+                _running_procs.pop(run_id, None)
+                if result.get("ok"):
+                    output = result.get("output", "")
+                    output = _execute_deepseek_commands(output)
+                    it = result.get("input_tokens")
+                    ot = result.get("output_tokens")
+                    pm = result.get("model")
+                    _write_run_log(
+                        "_prompt",
+                        "review",
+                        started_at,
+                        dur,
+                        prompt=prompt,
+                        output=output,
+                        run_id=run_id,
+                        linear_issue_id=issue_id,
+                        selected_skill="_prompt",
+                        input_tokens=it,
+                        output_tokens=ot,
+                        agent="deepseek",
+                        model=pm or _agent_model("deepseek", cfg),
+                        task_id=run_id,
+                    )
+                    self.push_state(issue_id, "review")
+                    self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output))
+                    socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": "_prompt"})
+                else:
+                    err = result.get("error", "unknown deepseek error")
+                    _write_run_log(
+                        "_prompt",
+                        "error",
+                        started_at,
+                        dur,
+                        prompt=prompt,
+                        error=err,
+                        run_id=run_id,
+                        linear_issue_id=issue_id,
+                        agent="deepseek",
+                    )
+                    self._restore_issue_state(issue_id, previous_board_status or "todo", cfg)
+                    self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=err))
+                    socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": "_prompt"})
+                socketio.emit("run_logged", {"skill": "_prompt", "run_id": run_id})
+            except Exception as e:
+                _running_jobs.pop(run_id, None)
+                _running_procs.pop(run_id, None)
+                self._restore_issue_state(issue_id, previous_board_status or "todo", cfg)
+                _write_run_log(
+                    "_prompt",
+                    "error",
+                    started_at,
+                    0.0,
+                    prompt=prompt,
+                    error=str(e),
+                    run_id=run_id,
+                    linear_issue_id=issue_id,
+                    agent="deepseek",
+                )
+                self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
+                socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": "_prompt"})
+                socketio.emit("run_logged", {"skill": "_prompt", "run_id": run_id})
+            return
+
         try:
-            result = subprocess.run(_ai_command(backend, routing_prompt, output_format="text"), cwd=str(ROOT), capture_output=True, text=True, timeout=60)
-            selected_skill = _extract_skill_name(result.stdout or "", registry)
-        except Exception:
-            selected_skill = "_prompt"
-        run_id = str(uuid.uuid4())
-        started_at = datetime.now(timezone.utc).isoformat()
-        t0 = time.monotonic()
-        prompt = f"{issue['identifier']}: {issue['title']}\n\n{_sim(issue.get('description') or '')}"
-        self.dispatched[issue_id] = run_id
-        _running_jobs[run_id] = {"run_id": run_id, "skill": selected_skill, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "linear_issue_id": issue_id, "agent": backend}
-        self.push_state(issue_id, "running")
-        socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": selected_skill})
-        entry = registry.get(selected_skill, {})
-        cmd = [_python(), str(RUNNER), selected_skill] if entry.get("schedule_eligible") and entry.get("entrypoint") else _ai_command(backend, prompt, output_format="json")
-        try:
-            proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            _running_procs[run_id] = proc
-            stdout_b, stderr_b = proc.communicate(timeout=AI_RUN_TIMEOUT_S)
-            dur = time.monotonic() - t0
-            stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
-            stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
-            error_s = _extract_real_errors(stderr_s)
-            output, it, ot, pm = _parse_agent_output(backend, stdout_s)
-            if backend == "deepseek":
-                output = _execute_deepseek_commands(output)
-            _running_jobs.pop(run_id, None)
-            _running_procs.pop(run_id, None)
-            final_state = "review"
-            _write_run_log(selected_skill, final_state, started_at, dur, prompt=prompt, output=output, error=error_s, run_id=run_id, linear_issue_id=issue_id, selected_skill=selected_skill, input_tokens=it, output_tokens=ot, agent=backend, model=pm or _agent_model(backend, cfg), task_id=run_id)
-            self.push_state(issue_id, final_state)
-            self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output, error=error_s))
-            socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": selected_skill})
-            socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
-        except subprocess.TimeoutExpired:
-            dur = time.monotonic() - t0
-            proc = _running_procs.pop(run_id, None)
-            if proc: proc.kill()
-            _running_jobs.pop(run_id, None)
-            msg = f"Timed out after {AI_RUN_TIMEOUT_S}s"
-            _write_run_log(selected_skill, "timeout", started_at, dur, prompt=prompt, error=msg, run_id=run_id, linear_issue_id=issue_id, agent=backend)
-            self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Timeout", prompt=prompt, error=msg))
-            socketio.emit("run_state_change", {"run_id": run_id, "state": "timeout", "skill": selected_skill})
+            registry = _load_registry(backend)
+            skill_list = "\n".join(f"- {n}: {e.get('purpose', '')[:100]}" for n, e in registry.items())
+            routing_prompt = (
+                "Given this issue, return only the skill name that best matches.\n\n"
+                f"Issue: {issue['identifier']} — {issue['title']}\n"
+                f"{(issue.get('description') or '')[:500]}\n\n"
+                f"Available skills:\n{skill_list}\n\n"
+                "Return exactly one skill name, nothing else."
+            )
+            try:
+                result = subprocess.run(
+                    _ai_command(backend, routing_prompt, output_format="text"),
+                    cwd=str(ROOT),
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                selected_skill = _extract_skill_name(result.stdout or "", registry)
+            except Exception:
+                selected_skill = "_prompt"
+
+            run_id = str(uuid.uuid4())
+            started_at = datetime.now(timezone.utc).isoformat()
+            t0 = time.monotonic()
+            prompt = f"{issue['identifier']}: {issue['title']}\n\n{_strip_issue_metadata(issue.get('description') or '')}"
+            self.dispatched[issue_id] = run_id
+            _running_jobs[run_id] = {
+                "run_id": run_id,
+                "skill": selected_skill,
+                "started_at": started_at,
+                "prompt": prompt,
+                "state": "running",
+                "last_progress_at": time.monotonic(),
+                "linear_issue_id": issue_id,
+                "agent": backend,
+            }
+            self.push_state(issue_id, "running")
+            socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": selected_skill})
+            entry = registry.get(selected_skill, {})
+            cmd = [_python_path(), str(RUNNER), selected_skill] if entry.get("schedule_eligible") and entry.get("entrypoint") else _ai_command(backend, prompt, output_format="json")
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=str(ROOT),
+                    env=_registry_exec_env(backend, registry),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                _running_procs[run_id] = proc
+                stdout_b, stderr_b = proc.communicate(timeout=AI_RUN_TIMEOUT_S)
+                dur = time.monotonic() - t0
+                stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
+                stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
+                error_s = _extract_real_errors(stderr_s)
+                output, it, ot, pm = _parse_agent_output(backend, stdout_s)
+                _running_jobs.pop(run_id, None)
+                _running_procs.pop(run_id, None)
+                final_state = "review"
+                _write_run_log(
+                    selected_skill,
+                    final_state,
+                    started_at,
+                    dur,
+                    prompt=prompt,
+                    output=output,
+                    error=error_s,
+                    run_id=run_id,
+                    linear_issue_id=issue_id,
+                    selected_skill=selected_skill,
+                    input_tokens=it,
+                    output_tokens=ot,
+                    agent=backend,
+                    model=pm or _agent_model(backend, cfg),
+                    task_id=run_id,
+                )
+                self.push_state(issue_id, final_state)
+                self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output, error=error_s))
+                socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": selected_skill})
+                socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
+            except subprocess.TimeoutExpired:
+                dur = time.monotonic() - t0
+                proc = _running_procs.pop(run_id, None)
+                if proc:
+                    proc.kill()
+                _running_jobs.pop(run_id, None)
+                msg = f"Timed out after {AI_RUN_TIMEOUT_S}s"
+                _write_run_log(selected_skill, "timeout", started_at, dur, prompt=prompt, error=msg, run_id=run_id, linear_issue_id=issue_id, agent=backend)
+                self._restore_issue_state(issue_id, previous_board_status or "todo", cfg)
+                self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Timeout", prompt=prompt, error=msg))
+                socketio.emit("run_state_change", {"run_id": run_id, "state": "timeout", "skill": selected_skill})
+                socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
+            except Exception as e:
+                _running_procs.pop(run_id, None)
+                _running_jobs.pop(run_id, None)
+                _write_run_log(selected_skill, "error", started_at, 0.0, prompt=prompt, error=str(e), run_id=run_id, linear_issue_id=issue_id, agent=backend)
+                self._restore_issue_state(issue_id, previous_board_status or "todo", cfg)
+                self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
+                socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": selected_skill})
+                socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
         except Exception as e:
-            _running_procs.pop(run_id, None)
-            _running_jobs.pop(run_id, None)
-            _write_run_log(selected_skill, "error", started_at, 0.0, prompt=prompt, error=str(e), run_id=run_id, linear_issue_id=issue_id, agent=backend)
-            self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
-            socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": selected_skill})
+            logger.exception("_dispatch_issue failed for %s: %s", issue_id, e)
+            self._restore_issue_state(issue_id, previous_board_status or "todo", cfg)
+            try:
+                socketio.emit("run_state_change", {"run_id": str(uuid.uuid4()), "state": "error", "skill": "unknown"})
+            except Exception:
+                pass
 
     # ── Route registration ────────────────────────────────────────────────
 
@@ -369,19 +546,14 @@ class LinearModule(AgenticModule):
         @app.route("/api/linear/issues")
         def _issues_get():
             if self._capability.get("type") == "linear":
-                cfg = _load_workflow_config()
-                tc = cfg.get("tracker", {})
-                ak = _linear_api_key_from_cfg(tc)
-                if ak and tc.get("kind") == "linear":
+                # Return cache immediately; avoid blocking on Linear API
+                if not self.issues_cache:
                     try:
-                        from linear_client import LinearClient
-                        cl = LinearClient(ak, tc.get("project_slug", ""))
-                        live = cl.fetch_issues(_linear_poll_states(tc), team_id=tc.get("team_id", "") or None)
-                        self.issues_cache.clear()
-                        for issue in live:
-                            self.issues_cache[issue["id"]] = _normalize_linear_issue(issue)
-                    except Exception as e:
-                        logger.warning("linear issues refresh failed: %s", e)
+                        local = self.get_local_tracker()
+                        for issue in local.fetch_issues():
+                            self.issues_cache[issue["id"]] = issue
+                    except Exception:
+                        pass
                 return jsonify(list(self.issues_cache.values()))
             t = self.get_local_tracker()
             cfg = _load_workflow_config()
@@ -449,8 +621,17 @@ class LinearModule(AgenticModule):
             data = request.get_json(silent=True) or {}
             cfg = _load_workflow_config()
             tc = cfg.get("tracker", {})
+            preferred_agent = (data.get("preferred_agent") or "").strip().lower() or None
+            if preferred_agent not in {"claude", "codex", "deepseek"}:
+                preferred_agent = None
             if self._capability.get("type") == "local":
-                issue = self.get_local_tracker().update_issue(issue_id, title=data.get("title"), description=data.get("description"), state_name=data.get("state_name"))
+                issue = self.get_local_tracker().update_issue(
+                    issue_id,
+                    title=data.get("title"),
+                    description=data.get("description"),
+                    state_name=data.get("state_name"),
+                    preferred_agent=preferred_agent,
+                )
                 if issue:
                     self.issues_cache[issue_id] = issue
                     return jsonify({"ok": True, "issue": issue})
@@ -458,23 +639,51 @@ class LinearModule(AgenticModule):
             ak = _linear_api_key_from_cfg(tc)
             if not ak:
                 return jsonify({"error": "not configured"}), 400
+
+            # ── Local-first: update local + dispatch immediately ──────────
+            if data.get("state_name") and _is_linear_in_progress(data["state_name"]):
+                local = self.get_local_tracker()
+                previous_board_status = _linear_state_to_board(self.issues_cache.get(issue_id, {}).get("state"))
+                local.update_issue_state(issue_id, data["state_name"])
+                cached = dict(self.issues_cache.get(issue_id) or {})
+                cached["state"] = data["state_name"]
+                if data.get("title") is not None:
+                    cached["title"] = data["title"]
+                if data.get("description") is not None:
+                    cached["description"] = data["description"]
+                if preferred_agent is not None:
+                    cached["preferred_agent"] = preferred_agent
+                self.issues_cache[issue_id] = cached
+                if not self._issue_is_running(issue_id):
+                    self.dispatched.pop(issue_id, None)
+                    threading.Thread(target=self._dispatch_issue, args=(cached, cfg, self._socketio, previous_board_status), daemon=True).start()
+                threading.Thread(target=self._linear_sync_patch, args=(issue_id, data, cfg, preferred_agent), daemon=True).start()
+                return jsonify({"ok": True, "issue": cached})
+
+            # ── Synchronous Linear path for non-dispatch updates ──────────
             try:
                 from linear_client import LinearClient
                 cl = LinearClient(ak, tc.get("project_slug", ""))
                 existing = cl.fetch_issue(issue_id)
                 if not existing:
                     return jsonify({"error": "not found"}), 404
+                updates: dict[str, object] = {}
                 if data.get("title") is not None or data.get("description") is not None:
-                    cl.update_issue(issue_id, title=data.get("title"), description=data.get("description"))
+                    updates["title"] = data.get("title")
+                    updates["description"] = data.get("description")
+                if preferred_agent is not None:
+                    base_description = data.get("description")
+                    if base_description is None:
+                        base_description = existing.get("description", "")
+                    updates["description"] = _compose_issue_description(str(base_description or ""), preferred_agent)
+                if updates:
+                    cl.update_issue(issue_id, **updates)  # type: ignore[arg-type]
                 if data.get("state_name"):
                     cl.update_issue_state(issue_id, data["state_name"])
                 issue = cl.fetch_issue(issue_id)
                 if issue:
                     n = _normalize_linear_issue(issue)
                     self.issues_cache[issue_id] = n
-                    if _is_linear_in_progress(n.get("state")) and not self._issue_is_running(issue_id):
-                        self.dispatched.pop(issue_id, None)
-                        threading.Thread(target=self._dispatch_issue, args=(issue, cfg, self._socketio), daemon=True).start()
                     return jsonify({"ok": True, "issue": n})
                 return jsonify({"error": "update failed"}), 500
             except Exception as e:
@@ -519,6 +728,130 @@ class LinearModule(AgenticModule):
                 "team_id": tc.get("team_id", ""),
                 "tracker_type": self._capability.get("type", "none"),
             })
+
+    # ── Async Linear refresh (non-blocking) ──────────────────────────
+
+    def _refresh_linear_async(self) -> None:
+        """Refresh issues cache from Linear API in background thread."""
+        try:
+            cfg = _load_workflow_config()
+            tc = cfg.get("tracker", {})
+            ak = _linear_api_key_from_cfg(tc)
+            if not ak or tc.get("kind") != "linear":
+                return
+            from linear_client import LinearClient
+            cl = LinearClient(ak, tc.get("project_slug", ""))
+            live = cl.fetch_issues(_linear_poll_states(tc), team_id=tc.get("team_id", "") or None)
+            # Build new dict first, then swap — avoids empty-cache flicker
+            updated: dict[str, dict] = {}
+            for issue in live:
+                self._localize_issue(issue)
+                updated[issue["id"]] = _normalize_linear_issue(issue)
+            self.issues_cache.clear()
+            self.issues_cache.update(updated)
+            # Only notify via socket if cache changed (the polling loop already handles periodic emit)
+        except Exception as e:
+            logger.debug("async linear refresh failed: %s", e)
+
+    # ── Local backup helpers ───────────────────────────────────────────
+
+    def _localize_issue(self, issue: dict) -> None:
+        """Write a Linear issue to local state/tasks.json as backup."""
+        try:
+            local = self.get_local_tracker()
+            n = _normalize_linear_issue(issue)
+            # Upsert: update_issue for existing, create for new
+            existing = local.fetch_issue(issue["id"])
+            if existing:
+                local.update_issue(
+                    issue["id"],
+                    title=n.get("title"),
+                    description=n.get("description"),
+                    state_name=n.get("state"),
+                    preferred_agent=n.get("preferred_agent"),
+                )
+            else:
+                data = {
+                    "id": issue["id"],
+                    "identifier": issue.get("identifier", issue.get("id", "")),
+                    "title": n.get("title", ""),
+                    "description": n.get("description", ""),
+                    "state": n.get("state", "Todo"),
+                    "url": issue.get("url", ""),
+                    "preferred_agent": n.get("preferred_agent"),
+                    "created_at": issue.get("created_at", ""),
+                    "updated_at": issue.get("updated_at", ""),
+                }
+                tasks_path = STATE_DIR / "tasks.json"
+                tasks = {}
+                if tasks_path.exists():
+                    import json as _json
+                    try:
+                        tasks = _json.loads(tasks_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        tasks = {}
+                tasks[issue["id"]] = data
+                tasks_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = tasks_path.with_suffix(".tmp")
+                import json as _json
+                tmp.write_text(_json.dumps(tasks, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+                tmp.replace(tasks_path)
+        except Exception as e:
+            logger.debug("localize_issue failed for %s: %s", issue.get("id", "?"), e)
+
+    def _sync_cache_to_local(self) -> None:
+        """Sync all cached issues to local tracker."""
+        for issue in self.issues_cache.values():
+            try:
+                local = self.get_local_tracker()
+                existing = local.fetch_issue(issue["id"])
+                if existing:
+                    local.update_issue(
+                        issue["id"],
+                        title=issue.get("title"),
+                        description=issue.get("description"),
+                        state_name=issue.get("state"),
+                        preferred_agent=issue.get("preferred_agent"),
+                    )
+                else:
+                    local.create_issue(
+                        title=issue.get("title", ""),
+                        description=issue.get("description", ""),
+                        state_name=issue.get("state", "Todo"),
+                        preferred_agent=issue.get("preferred_agent"),
+                    )
+            except Exception as e:
+                logger.debug("sync_cache_to_local failed for %s: %s", issue.get("id", "?"), e)
+
+    def _linear_sync_patch(self, issue_id: str, data: dict, cfg: dict, preferred_agent: str | None) -> None:
+        """Async Linear sync for state/metadata updates (runs in daemon thread)."""
+        tc = cfg.get("tracker", {})
+        ak = _linear_api_key_from_cfg(tc)
+        if not ak:
+            return
+        try:
+            from linear_client import LinearClient
+            cl = LinearClient(ak, tc.get("project_slug", ""))
+            existing = cl.fetch_issue(issue_id)
+            if not existing:
+                return
+            updates: dict[str, object] = {}
+            if data.get("title") is not None or data.get("description") is not None:
+                updates["title"] = data.get("title")
+                updates["description"] = data.get("description")
+            if preferred_agent is not None:
+                base_description = data.get("description") or existing.get("description", "")
+                updates["description"] = _compose_issue_description(str(base_description), preferred_agent)
+            if updates:
+                cl.update_issue(issue_id, **updates)
+            if data.get("state_name"):
+                cl.update_issue_state(issue_id, data["state_name"])
+            # Refresh cache with Linear's authoritative version
+            synced = cl.fetch_issue(issue_id)
+            if synced:
+                self.issues_cache[issue_id] = _normalize_linear_issue(synced)
+        except Exception as e:
+            logger.error("Async Linear sync failed for %s: %s", issue_id, e)
 
     # ── Bridge methods (called from app.py) ──────────────────────────────
 

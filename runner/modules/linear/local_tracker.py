@@ -166,6 +166,7 @@ class LocalTracker:
         title: str | None = None,
         description: str | None = None,
         state_name: str | None = None,
+        preferred_agent: str | None = None,
     ) -> dict | None:
         """Update task fields, return updated issue or None."""
         tasks = _load_state(self._state_dir)
@@ -178,6 +179,8 @@ class LocalTracker:
             issue["description"] = description
         if state_name is not None:
             issue["state"] = state_name
+        if preferred_agent is not None:
+            issue["preferred_agent"] = preferred_agent
         issue["updated_at"] = _now_iso()
         _save_state(self._state_dir, tasks)
         return dict(issue)

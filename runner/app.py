@@ -90,6 +90,7 @@ OUTPUTS_DIR = _PROTO / "outputs"
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 RUN_LOG = OUTPUTS_DIR / "run_log.jsonl"
 JOB_STATE = OUTPUTS_DIR / "job_state.json"
+REGISTRY_CACHE_DIR = OUTPUTS_DIR / "registry-cache"
 
 # Structured state directory — operational truth
 STATE_DIR = _PROTO / "state"
@@ -132,6 +133,23 @@ def read_registry_json(path: Path) -> dict[str, dict]:
         return skills if isinstance(skills, dict) else {}
     except Exception:
         return {}
+
+
+def _registry_exec_env(agent: str, registry: dict[str, dict]) -> dict[str, str]:
+    """Return subprocess env with REGISTRY_JSON pointing at a generated cache file."""
+    payload = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "skill_count": len(registry),
+        "skills": registry,
+    }
+    REGISTRY_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    digest_src = json.dumps(payload["skills"], sort_keys=True, ensure_ascii=False).encode("utf-8")
+    digest = hashlib.sha256(digest_src).hexdigest()[:12]
+    path = REGISTRY_CACHE_DIR / f"{agent}-{digest}.json"
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    env = os.environ.copy()
+    env["REGISTRY_JSON"] = str(path)
+    return env
 
 
 
@@ -292,9 +310,9 @@ def _issue_agent_comment_body(agent: str, previous_agent: str | None = None) -> 
             previous_label = "DeepSeek"
         else:
             previous_label = "Claude"
-        feedback = f"Model changed from `{previous_label}` to `{label}`. This task stays on `{label}` until it finishes."
+        feedback = f"Model changed from `{previous_label}` to `{label}`. You can switch again on the next retry if needed."
     else:
-        feedback = f"Model locked to `{label}` for this task. All follow-up runs stay on the same agent to preserve continuity."
+        feedback = f"Preferred model for this task is `{label}`. You can switch agents on a retry if needed."
     return _linear_comment_body(title="AgenticOS Model", feedback=feedback)
 
 
@@ -338,18 +356,15 @@ def _ds_dispatch(prompt: str, run_id: str) -> dict:
     return {"ok": False, "error": "DeepSeek module not available"}
 
 
-def _locked_task_agent(original: dict, requested_agent: str | None = None) -> tuple[str | None, str | None]:
-    """Return (locked_agent, error_message)."""
-    locked_agent = (original.get("agent") or "").strip().lower() or None
+def _preferred_task_agent(original: dict) -> str | None:
+    """Return the preferred agent for a task, if one is set."""
+    preferred_agent = (original.get("agent") or "").strip().lower() or None
     if original.get("linear_issue_id"):
         issue = _linear_issues_cache.get(original["linear_issue_id"]) or {}
-        locked_agent = (issue.get("preferred_agent") or locked_agent or "").strip().lower() or None
-    if locked_agent not in {"claude", "codex", "deepseek"}:
-        locked_agent = None
-    requested = (requested_agent or "").strip().lower()
-    if requested and locked_agent and requested != locked_agent:
-        return locked_agent, f"Task is locked to {locked_agent}. Continue on the same agent until completion."
-    return locked_agent, None
+        preferred_agent = (issue.get("preferred_agent") or preferred_agent or "").strip().lower() or None
+    if preferred_agent not in {"claude", "codex", "deepseek"}:
+        return None
+    return preferred_agent
 
 
 
@@ -449,12 +464,22 @@ def _load_runs_from(path: Path, limit: int = 20, include_archived: bool = False)
     return records
 
 
+# ── Runs cache (TTL 3s, avoids re-reading file on every API call) ──
+_runs_cache: dict[str, tuple[float, list[dict]]] = {}
+_RUNS_CACHE_TTL = 3.0  # seconds
+
 def load_runs(limit: int = 20, include_archived: bool = False) -> list[dict]:
     """Load runs from operational truth (state/runs.jsonl), fall back to legacy."""
+    now = time.monotonic()
+    key = f"{limit}:{include_archived}"
+    cached = _runs_cache.get(key)
+    if cached and (now - cached[0]) < _RUNS_CACHE_TTL:
+        return cached[1]
     runs = _load_runs_from(STATE_RUN_LOG, limit, include_archived)
-    if runs:
-        return runs
-    return _load_runs_from(RUN_LOG, limit, include_archived)
+    if not runs:
+        runs = _load_runs_from(RUN_LOG, limit, include_archived)
+    _runs_cache[key] = (now, runs)
+    return runs
 
 
 def _shorten_pulse(text: str, limit: int = 96) -> str:
@@ -852,6 +877,8 @@ def _ai_cli(agent: str) -> list[str]:
     """Return the CLI command prefix for the selected agent."""
     if agent == "codex":
         return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
+    if agent == "deepseek":
+        return [_python_path(), str(_HERE / "deepseek_agent.py")]
     # default: claude
     claude_bin = _PROTO / ".venv" / "bin" / "claude"
     bin_str = str(claude_bin) if claude_bin.exists() else "claude"
@@ -893,6 +920,14 @@ def _agent_model(agent: str, cfg: dict | None = None) -> str:
 
 
 def _parse_agent_output(agent: str, stdout_s: str) -> tuple[str, int | None, int | None, str | None]:
+    if agent == "deepseek":
+        try:
+            parsed = json.loads(stdout_s)
+            if isinstance(parsed, dict):
+                return str(parsed.get("output", stdout_s)), parsed.get("input_tokens"), parsed.get("output_tokens"), parsed.get("model")
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return stdout_s, None, None, None
     if agent != "claude" or not stdout_s:
         return stdout_s, None, None, None
     try:
@@ -959,6 +994,7 @@ def run():
                 proc = subprocess.Popen(
                     [_python_path(), str(RUNNER), skill],
                     cwd=str(ROOT),
+                    env=_registry_exec_env(agent, registry),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                 )
@@ -1043,6 +1079,7 @@ def run():
             proc = subprocess.Popen(
                 _ai_command(agent, prompt, output_format="json"),
                 cwd=str(ROOT),
+                env=_registry_exec_env(agent, _load_registry(agent)),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
@@ -1144,6 +1181,7 @@ def stream():
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(ROOT),
+                env=_registry_exec_env(agent, registry),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 bufsize=0,
@@ -1407,10 +1445,9 @@ def api_run_retry(run_id: str):
 
     cfg = _load_workflow_config()
     agent_override = (req_data.get("agent") or "").strip().lower()
-    locked_agent, agent_error = _locked_task_agent(original, agent_override)
-    if agent_error:
-        return jsonify({"ok": False, "error": agent_error, "agent": locked_agent}), 400
-    agent = locked_agent or agent_override or original.get("agent") or cfg.get("agent", {}).get("backend", "claude")
+    preferred_agent = _preferred_task_agent(original)
+    agent = agent_override if agent_override in {"claude", "codex", "deepseek"} else None
+    agent = agent or preferred_agent or original.get("agent") or cfg.get("agent", {}).get("backend", "claude")
     registry = _load_registry(agent)
     entry = registry.get(skill, {})
 
@@ -1475,7 +1512,13 @@ def api_run_retry(run_id: str):
                         cmd = [_python_path(), str(RUNNER), skill]
                     else:
                         cmd = _ai_command(agent, prompt, output_format="json")
-                    proc = subprocess.Popen(cmd, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    proc = subprocess.Popen(
+                        cmd,
+                        cwd=str(ROOT),
+                        env=_registry_exec_env(agent, registry),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
                     _running_procs[new_run_id] = proc
                     stdout_b, stderr_b = proc.communicate(timeout=AI_RUN_TIMEOUT_S)
                     dur = time.monotonic() - t0

@@ -1,0 +1,741 @@
+{
+  "generated_at": "2026-05-11T03:25:53.567617+00:00",
+  "skill_count": 20,
+  "skills": {
+    "critique": {
+      "name": "critique",
+      "purpose": "Run a 5-dimension expert design review (Philosophy / Visual Hierarchy / Detail / Functionality / Innovation, scored 0-10) and output an HTML report with radar chart.",
+      "stack": "uncategorized",
+      "execution_mode": "local_only",
+      "schedule_eligible": false,
+      "entrypoint": null,
+      "trigger_phrases": [
+        "critique",
+        "design review",
+        "design audit",
+        "5维度评审",
+        "5-dim review",
+        "audit my design",
+        "review my design"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [],
+        "external_services": []
+      },
+      "failure_modes": [
+        "missing_design_system",
+        "assets_not_found"
+      ],
+      "security": {
+        "risk_level": "read",
+        "confirmation_required": false,
+        "reason": "Generates new HTML files only; does not read or modify existing project files."
+      },
+      "agents": [
+        "claude"
+      ]
+    },
+    "dashboard": {
+      "name": "dashboard",
+      "purpose": "Generate a single-screen admin/analytics dashboard HTML file with a fixed left sidebar, top bar, KPI cards, SVG charts, and a data table.",
+      "stack": "uncategorized",
+      "execution_mode": "local_only",
+      "schedule_eligible": false,
+      "entrypoint": null,
+      "trigger_phrases": [
+        "dashboard",
+        "admin panel",
+        "analytics",
+        "control panel",
+        "后台",
+        "管理后台",
+        "数据看板"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [],
+        "external_services": []
+      },
+      "failure_modes": [
+        "missing_design_system",
+        "assets_not_found"
+      ],
+      "security": {
+        "risk_level": "read",
+        "confirmation_required": false,
+        "reason": "Generates new HTML files only; does not read or modify existing project files."
+      },
+      "agents": [
+        "claude"
+      ]
+    },
+    "docs-page": {
+      "name": "docs-page",
+      "purpose": "Generate a documentation page with inline-start nav, scrollable article body, and inline-end table of contents, using active DESIGN.md tokens.",
+      "stack": "uncategorized",
+      "execution_mode": "local_only",
+      "schedule_eligible": false,
+      "entrypoint": null,
+      "trigger_phrases": [
+        "docs",
+        "documentation",
+        "guide",
+        "tutorial",
+        "api reference",
+        "文档",
+        "技术文档"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [],
+        "external_services": []
+      },
+      "failure_modes": [
+        "missing_design_system",
+        "assets_not_found"
+      ],
+      "security": {
+        "risk_level": "read",
+        "confirmation_required": false,
+        "reason": "Generates new HTML files only; does not read or modify existing project files."
+      },
+      "agents": [
+        "claude"
+      ]
+    },
+    "llm-wiki-ingest": {
+      "name": "llm-wiki-ingest",
+      "purpose": "Convert raw knowledge sources into persistent wiki pages with traceability, deduplication checks, and structured extraction of concepts, entities, and syntheses.",
+      "stack": "knowledge",
+      "execution_mode": "local_only",
+      "schedule_eligible": false,
+      "entrypoint": null,
+      "trigger_phrases": [
+        "ingest",
+        "摄入",
+        "处理这个",
+        "process this source",
+        "add to wiki"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [],
+        "external_services": []
+      },
+      "failure_modes": [
+        "missing_frontmatter",
+        "duplicate_source",
+        "raw_write_attempted",
+        "pdf_no_text",
+        "pdf_converter_not_installed",
+        "pandoc_not_installed",
+        "pandoc_conversion_failed"
+      ],
+      "security": {
+        "risk_level": "write",
+        "confirmation_required": false,
+        "reason": "Creates wiki pages from raw sources; non-destructive, raw/ is immutable by contract."
+      },
+      "agents": [
+        "claude",
+        "codex"
+      ]
+    },
+    "llm-wiki-lint": {
+      "name": "llm-wiki-lint",
+      "purpose": "Validate structural integrity and consistency of the LLM Wiki by running lint.py and surfacing broken links, stale pages, invalid frontmatter, duplicate concepts, and source integrity issues.",
+      "stack": "knowledge",
+      "execution_mode": "local_only",
+      "schedule_eligible": true,
+      "entrypoint": ".codex/skills/llm-wiki-lint/lint.py",
+      "trigger_phrases": [
+        "lint",
+        "检查",
+        "validate wiki",
+        "health check",
+        "wiki audit"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [
+          ".codex/skills/llm-wiki-lint/lint.py"
+        ],
+        "external_services": []
+      },
+      "failure_modes": [
+        "script_not_found",
+        "no_issues_found"
+      ],
+      "security": {
+        "risk_level": "read",
+        "confirmation_required": false,
+        "reason": "Report-only by default; fix mode requires explicit flag and is human-invoked."
+      },
+      "agents": [
+        "claude",
+        "codex"
+      ]
+    },
+    "llm-wiki-research": {
+      "name": "llm-wiki-research",
+      "purpose": "Deep synthesis, cross-source pattern discovery, and gap analysis across the LLM Wiki. Subsumes llm-wiki-reflect. Produces persisted syntheses and gap reports.",
+      "stack": "knowledge",
+      "execution_mode": "local_only",
+      "schedule_eligible": true,
+      "entrypoint": null,
+      "trigger_phrases": [
+        "research",
+        "reflect",
+        "synthesize",
+        "综合分析",
+        "找规律",
+        "discover patterns",
+        "identify gaps",
+        "cross-source insights",
+        "what does my wiki say about",
+        "what patterns",
+        "gap analysis",
+        "add question",
+        "track question",
+        "记录一个问题",
+        "我想搞清楚",
+        "merge duplicates",
+        "consolidate pages"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [],
+        "external_services": []
+      },
+      "failure_modes": [
+        "echo_chamber",
+        "sparse_coverage",
+        "destructive_merge"
+      ],
+      "security": {
+        "risk_level": "write",
+        "confirmation_required": false,
+        "reason": "Writes syntheses, gap reports, questions; merge mode requires user confirmation before any deletion."
+      },
+      "agents": [
+        "claude",
+        "codex"
+      ]
+    },
+    "llm-wiki-save": {
+      "name": "llm-wiki-save",
+      "purpose": "Two modes: SAVE scans conversation history for genuinely valuable content and selectively writes to the wiki (not a transcript dump; applies value judgment). QUERY retrieves and answers questions from existing wiki content with grounded citations and optional persistence.",
+      "stack": "knowledge",
+      "execution_mode": "local_only",
+      "schedule_eligible": false,
+      "entrypoint": null,
+      "trigger_phrases": [
+        "/llm-wiki-save",
+        "save the good stuff",
+        "save what's worth keeping",
+        "save valuable insights from this conversation",
+        "distill this conversation",
+        "save this conversation to wiki",
+        "根据我的知识库",
+        "what does the wiki say about",
+        "query the wiki",
+        "look up in wiki",
+        "synthesize from existing knowledge"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [],
+        "external_services": []
+      },
+      "failure_modes": [
+        "ambiguous_destination",
+        "duplicate_page",
+        "insufficient_wiki_coverage",
+        "conflicting_sources"
+      ],
+      "security": {
+        "risk_level": "write",
+        "confirmation_required": false,
+        "reason": "Writes to wiki/ or outputs/ only; never modifies raw/."
+      },
+      "agents": [
+        "claude",
+        "codex"
+      ]
+    },
+    "mobile-app": {
+      "name": "mobile-app",
+      "purpose": "Render a mobile app screen inside a pixel-accurate iPhone 15 Pro frame. Built from assets/template.html with one screen archetype from references/layouts.md.",
+      "stack": "uncategorized",
+      "execution_mode": "local_only",
+      "schedule_eligible": false,
+      "entrypoint": null,
+      "trigger_phrases": [
+        "mobile app",
+        "ios app",
+        "android app",
+        "phone screen",
+        "app ui",
+        "app mockup",
+        "移动端",
+        "手机app",
+        "手机界面"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [],
+        "external_services": []
+      },
+      "failure_modes": [
+        "missing_design_system",
+        "assets_not_found"
+      ],
+      "security": {
+        "risk_level": "read",
+        "confirmation_required": false,
+        "reason": "Generates new HTML files only; does not read or modify existing project files."
+      },
+      "agents": [
+        "claude"
+      ]
+    },
+    "mobile-onboarding": {
+      "name": "mobile-onboarding",
+      "purpose": "Generate a multi-screen mobile onboarding flow with three iPhone frames side-by-side: splash, value-prop, and sign-in screens.",
+      "stack": "uncategorized",
+      "execution_mode": "local_only",
+      "schedule_eligible": false,
+      "entrypoint": null,
+      "trigger_phrases": [
+        "mobile onboarding",
+        "ios onboarding",
+        "phone signup",
+        "app onboarding",
+        "移动端引导",
+        "引导页"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [],
+        "external_services": []
+      },
+      "failure_modes": [
+        "missing_design_system",
+        "assets_not_found"
+      ],
+      "security": {
+        "risk_level": "read",
+        "confirmation_required": false,
+        "reason": "Generates new HTML files only; does not read or modify existing project files."
+      },
+      "agents": [
+        "claude"
+      ]
+    },
+    "notebooklm": {
+      "name": "notebooklm",
+      "purpose": "Interact with Google NotebookLM programmatically: create notebooks, add sources, ask questions, generate summaries, and produce artifacts such as audio and quizzes.",
+      "stack": "research",
+      "execution_mode": "local_only",
+      "schedule_eligible": false,
+      "entrypoint": null,
+      "trigger_phrases": [
+        "add this to NotebookLM",
+        "create a notebook from",
+        "ask NotebookLM about",
+        "generate a podcast from",
+        "summarize these sources in NotebookLM"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [
+          ".codex/skills/notebooklm/scripts/notebooklm_helper.py",
+          ".codex/skills/notebooklm/scripts/check_auth.py"
+        ],
+        "external_services": [
+          "Google NotebookLM API"
+        ]
+      },
+      "failure_modes": [
+        "auth_failure",
+        "notebook_not_found",
+        "source_add_timeout"
+      ],
+      "security": {
+        "risk_level": "external",
+        "confirmation_required": true,
+        "reason": "Calls Google NotebookLM API; creates/modifies remote notebooks in user's Google account."
+      },
+      "agents": [
+        "claude",
+        "codex"
+      ]
+    },
+    "pricing-page": {
+      "name": "pricing-page",
+      "purpose": "Generate a standalone pricing page with plan tiers, feature comparison table, and FAQ, respecting active DESIGN.md tokens.",
+      "stack": "uncategorized",
+      "execution_mode": "local_only",
+      "schedule_eligible": false,
+      "entrypoint": null,
+      "trigger_phrases": [
+        "pricing",
+        "pricing page",
+        "plans",
+        "subscription",
+        "compare plans",
+        "定价",
+        "套餐",
+        "价格页"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [],
+        "external_services": []
+      },
+      "failure_modes": [
+        "missing_design_system",
+        "assets_not_found"
+      ],
+      "security": {
+        "risk_level": "read",
+        "confirmation_required": false,
+        "reason": "Generates new HTML files only; does not read or modify existing project files."
+      },
+      "agents": [
+        "claude"
+      ]
+    },
+    "saas-landing": {
+      "name": "saas-landing",
+      "purpose": "Generate a single-page SaaS marketing landing with hero, features, social proof, pricing tiers, and CTA, using the active DESIGN.md tokens.",
+      "stack": "uncategorized",
+      "execution_mode": "local_only",
+      "schedule_eligible": false,
+      "entrypoint": null,
+      "trigger_phrases": [
+        "saas landing",
+        "marketing page",
+        "product landing",
+        "SaaS官网",
+        "产品落地页"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [],
+        "external_services": []
+      },
+      "failure_modes": [
+        "missing_design_system",
+        "assets_not_found"
+      ],
+      "security": {
+        "risk_level": "read",
+        "confirmation_required": false,
+        "reason": "Generates new HTML files only; does not read or modify existing project files."
+      },
+      "agents": [
+        "claude"
+      ]
+    },
+    "skill-creator": {
+      "name": "skill-creator",
+      "purpose": "Create or update vault-local skills for this knowledge base and require each one to ship with a canonical metadata manifest that makes the skill operable, auditable, and ready for later registry or automation work.",
+      "stack": "admin",
+      "execution_mode": "local_only",
+      "schedule_eligible": false,
+      "entrypoint": null,
+      "trigger_phrases": [
+        "create a skill",
+        "build a local skill",
+        "standardize this skill",
+        "create a skill creator workflow"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [
+          ".codex/skills/skill-creator/scripts/validate_skill_manifest.py"
+        ],
+        "external_services": []
+      },
+      "failure_modes": [
+        "ambiguous_scope",
+        "invalid_manifest",
+        "overbuilt_skill"
+      ],
+      "security": {
+        "risk_level": "write",
+        "confirmation_required": false,
+        "reason": "Creates new skill files under .codex/skills/; no deletions, human-invoked only."
+      },
+      "agents": [
+        "claude",
+        "codex"
+      ]
+    },
+    "skill-registry": {
+      "name": "skill-registry",
+      "purpose": "Build and maintain the machine-readable skill registry for this knowledge base. Reads all skill.yaml manifests, validates them, and writes registry.json and registry.md as the authoritative skill index.",
+      "stack": "admin",
+      "execution_mode": "local_only",
+      "schedule_eligible": true,
+      "entrypoint": ".codex/skills/skill-registry/scripts/build_registry.py",
+      "trigger_phrases": [
+        "build registry",
+        "refresh registry",
+        "regenerate skill index",
+        "show skill registry",
+        "update registry"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [
+          ".codex/skills/skill-registry/scripts/build_registry.py"
+        ],
+        "external_services": []
+      },
+      "failure_modes": [
+        "invalid_manifest",
+        "missing_skills_dir"
+      ],
+      "security": {
+        "risk_level": "write",
+        "confirmation_required": false,
+        "reason": "Overwrites registry.json and registry.md only; idempotent, always regeneratable."
+      },
+      "agents": [
+        "claude",
+        "codex"
+      ]
+    },
+    "waitlist-page": {
+      "name": "waitlist-page",
+      "purpose": "Build a minimal pre-launch landing page with email capture, brand logo, and optional decorative layer — for product launches, beta signups, and early access.",
+      "stack": "uncategorized",
+      "execution_mode": "local_only",
+      "schedule_eligible": false,
+      "entrypoint": null,
+      "trigger_phrases": [
+        "waitlist page",
+        "coming soon page",
+        "pre-launch landing",
+        "email capture",
+        "launch page",
+        "候补名单",
+        "预热页"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [],
+        "external_services": []
+      },
+      "failure_modes": [
+        "missing_design_system",
+        "assets_not_found"
+      ],
+      "security": {
+        "risk_level": "read",
+        "confirmation_required": false,
+        "reason": "Generates new HTML files only; does not read or modify existing project files."
+      },
+      "agents": [
+        "claude"
+      ]
+    },
+    "web-prototype": {
+      "name": "web-prototype",
+      "purpose": "Produce a single self-contained HTML desktop web prototype by composing pre-built layouts and design tokens. Default skill for any landing, marketing, docs, or SaaS page.",
+      "stack": "uncategorized",
+      "execution_mode": "local_only",
+      "schedule_eligible": false,
+      "entrypoint": null,
+      "trigger_phrases": [
+        "prototype",
+        "mockup",
+        "landing page",
+        "single page app",
+        "marketing page",
+        "homepage",
+        "web页面",
+        "网页原型"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [],
+        "external_services": []
+      },
+      "failure_modes": [
+        "missing_design_system",
+        "assets_not_found"
+      ],
+      "security": {
+        "risk_level": "read",
+        "confirmation_required": false,
+        "reason": "Generates new HTML files only; does not read or modify existing project files."
+      },
+      "agents": [
+        "claude"
+      ]
+    },
+    "wireframe-sketch": {
+      "name": "wireframe-sketch",
+      "purpose": "Produce a hand-drawn lo-fi wireframe with graph-paper background, marker tones, sticky-note annotations, and sketch-style chart placeholders.",
+      "stack": "uncategorized",
+      "execution_mode": "local_only",
+      "schedule_eligible": false,
+      "entrypoint": null,
+      "trigger_phrases": [
+        "wireframe",
+        "sketch wireframe",
+        "lo-fi mockup",
+        "hand drawn",
+        "whiteboard sketch",
+        "low fidelity",
+        "手绘原型",
+        "草图",
+        "线框图"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [],
+        "external_services": []
+      },
+      "failure_modes": [
+        "missing_design_system",
+        "assets_not_found"
+      ],
+      "security": {
+        "risk_level": "read",
+        "confirmation_required": false,
+        "reason": "Generates new HTML files only; does not read or modify existing project files."
+      },
+      "agents": [
+        "claude"
+      ]
+    },
+    "youtube-search": {
+      "name": "youtube-search",
+      "purpose": "Search YouTube for videos on a topic and return structured results with engagement metrics: views, subscribers, views-per-subscriber ratio, duration, and upload date.",
+      "stack": "research",
+      "execution_mode": "remote_ok",
+      "schedule_eligible": true,
+      "entrypoint": ".codex/skills/youtube-search/scripts/search.py",
+      "trigger_phrases": [
+        "find videos about",
+        "search YouTube for",
+        "what are people publishing on",
+        "top videos on",
+        "recent uploads about"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [
+          ".codex/skills/youtube-search/scripts/search.py"
+        ],
+        "external_services": [
+          "YouTube (via yt-dlp)"
+        ]
+      },
+      "failure_modes": [
+        "no_results",
+        "yt_dlp_error"
+      ],
+      "security": {
+        "risk_level": "external",
+        "confirmation_required": false,
+        "reason": "Calls YouTube via yt-dlp but writes nothing; read-only external access, low risk."
+      },
+      "agents": [
+        "claude",
+        "codex"
+      ]
+    },
+    "yt-pipeline": {
+      "name": "yt-pipeline",
+      "purpose": "Run a full YouTube research pipeline: search for videos, ingest them into NotebookLM, conduct multi-pass analysis inside NotebookLM, and save a structured Obsidian research document. Supports fresh search, corpus augmentation with specific URLs, analysis refinement, and single-source deep reading with faithful reconstruction, core frameworks, and integrated commentary. For one source, requests containing triggers like 全面, 完整, 逐字, or 逐词 should also append a full transcript and the intermediate NotebookLM working passes in the same output document. Transcript retrieval for comprehensive single-source runs should be delegated to the yt-transcript skill, which handles provider fallback and completeness checks. Semantic work should remain inside NotebookLM; local code is limited to orchestration, ingestion, state management, and markdown rendering. This manifest describes version 1.1 of the skill behavior.",
+      "stack": "research",
+      "execution_mode": "local_only",
+      "schedule_eligible": true,
+      "entrypoint": ".codex/skills/yt-pipeline/scripts/pipeline.py",
+      "trigger_phrases": [
+        "research X using YouTube",
+        "find and analyze YouTube content on",
+        "go deeper on this",
+        "add this video to my research",
+        "what did those videos say about",
+        "全面梳理这个视频",
+        "给我这条视频的完整逐字稿和分析"
+      ],
+      "dependencies": {
+        "skills": [
+          "youtube-search",
+          "yt-transcript",
+          "notebooklm"
+        ],
+        "scripts": [
+          ".codex/skills/yt-pipeline/scripts/pipeline.py"
+        ],
+        "external_services": [
+          "YouTube (via yt-dlp)",
+          "Google NotebookLM API"
+        ]
+      },
+      "failure_modes": [
+        "no_videos_found",
+        "auth_failure",
+        "pipeline_timeout",
+        "audit_mismatch",
+        "notebooklm_unavailable"
+      ],
+      "security": {
+        "risk_level": "external",
+        "confirmation_required": true,
+        "reason": "Calls YouTube and Google NotebookLM APIs and writes research documents to raw/; external side effects."
+      },
+      "agents": [
+        "claude",
+        "codex"
+      ]
+    },
+    "yt-transcript": {
+      "name": "yt-transcript",
+      "purpose": "Fetch a YouTube transcript with deterministic fallbacks and completion checks. First try yt-dlp subtitles, then youtube-transcript-api, then direct YouTube caption metadata, and finally OpenAI audio transcription with chunked verification. Use when a user wants the full transcript of a known YouTube URL, when yt-dlp subtitles are missing or incomplete, or when another skill such as yt-pipeline needs a best-effort transcript plus metadata about completeness.",
+      "stack": "research",
+      "execution_mode": "local_only",
+      "schedule_eligible": true,
+      "entrypoint": ".codex/skills/yt-transcript/scripts/fetch_transcript.py",
+      "trigger_phrases": [
+        "get the transcript of this YouTube video",
+        "download the full transcript",
+        "extract subtitles from this YouTube URL",
+        "如果 yt-dlp 不行就用 openai-audio-transcribe",
+        "检查这条 YouTube 字幕是否完整"
+      ],
+      "dependencies": {
+        "skills": [],
+        "scripts": [
+          ".codex/skills/yt-transcript/scripts/fetch_transcript.py"
+        ],
+        "external_services": [
+          "YouTube",
+          "OpenAI Audio Transcriptions API"
+        ]
+      },
+      "failure_modes": [
+        "no_transcript_found",
+        "incomplete_audio_transcription",
+        "missing_openai_key"
+      ],
+      "security": {
+        "risk_level": "external",
+        "confirmation_required": false,
+        "reason": "Reads from YouTube and may call OpenAI transcription; writes only inside the local skill directory for helper runtime bootstrapping."
+      },
+      "agents": [
+        "claude",
+        "codex"
+      ]
+    }
+  }
+}
