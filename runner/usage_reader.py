@@ -63,8 +63,8 @@ DEFAULT_PRICE = 3.00
 
 # DeepSeek V4 pricing (USD per 1M tokens) — used by deepseek_monitor.py
 DEEPSEEK_MODEL_PRICING: dict[str, dict[str, float]] = {
-    "deepseek-v4-flash": {"input_per_m": 0.14, "output_per_m": 0.14},
-    "deepseek-v4-pro":   {"input_per_m": 0.42, "output_per_m": 0.42},
+    "deepseek-v4-flash": {"input_miss_per_m": 0.14, "input_hit_per_m": 0.0028, "output_per_m": 0.28},
+    "deepseek-v4-pro":   {"input_miss_per_m": 0.435, "input_hit_per_m": 0.003625, "output_per_m": 0.87},
 }
 
 # These defaults are inferred from /cost data (19.8M tokens = 83% of 5h; 155M = 15% of 7d).
@@ -232,7 +232,12 @@ def load_deepseek_usage() -> dict[str, Any]:
         # Pass through new fields if present
         for key in ("balance", "total_cost_usd", "total_cost_cny",
                      "by_model_detail", "current_session", "session_count",
-                     "last_updated", "window_5h_cost", "window_7d_cost"):
+                     "last_updated",
+                     "window_5h_cost", "window_5h_cost_cny",
+                     "window_7d_cost", "window_7d_cost_cny",
+                     "window_30d_cost", "window_30d_cost_cny",
+                     "_session_history", "_balance_snapshots",
+                     "_known_total_cost_cny", "_seed_initial_balance_cny"):
             val = data.get(key)
             if val is not None:
                 result[key] = val
@@ -667,78 +672,87 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
         return max(0, 100 - _pct(val, lim))
 
     if agent == "deepseek":
-        # Try usage.json first (from deepseek_monitor.py)
+        # Cost-based budget windows (CNY)
+        CAP_5H = 5.0
+        CAP_WEEKLY = 50.0
+        CAP_MONTHLY = 200.0
+
         _ds_usage = load_deepseek_usage()
-        # Also load raw for internal keys (prefixed with _)
-        _ds_raw = {}
-        if DEEPSEEK_USAGE_PATH.exists():
-            try:
-                _ds_raw = json.loads(DEEPSEEK_USAGE_PATH.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+        _bal_cny = 0.0
+        _cost_5h = 0.0
+        _cost_weekly = 0.0
+        _cost_monthly = 0.0
+
         if _ds_usage:
-            _balance = _ds_usage.get("balance", {})
-            _bal_cny = float(_balance.get("balance_cny", 0) or 0)
-            _bal_usd = float(_balance.get("balance_usd", 0) or 0)
-            _total_cost = float(_ds_usage.get("total_cost_usd", 0) or 0)
-            _cs = _ds_usage.get("current_session")
-            _detail = _ds_usage.get("by_model_detail", {})
-            _models: dict[str, dict] = {}
-            for _mn, _bm in _detail.items():
-                _models[_mn] = dict(_bm)
-            if _cs:
-                _m = _cs.get("model", "unknown")
-                _tok = _cs.get("total_tokens", 0) or 0
-                _ce = _cs.get("_cost_estimate", {})
-                if _m not in _models:
-                    _models[_m] = {"total_tokens": 0, "sessions": 1,
-                                   "cost_usd": 0.0, "cost_cny": 0.0}
-                _models[_m]["total_tokens"] += _tok
-                _models[_m]["cost_usd"] = round(
-                    _models[_m].get("cost_usd", 0) + _ce.get("cost_usd", 0), 4)
-            _total_all = sum(m.get("total_tokens", 0) for m in _models.values()) or 1
+            _bal = _ds_usage.get("balance", {})
+            _bal_cny = max(0.0, float(_bal.get("balance_cny", 0) or 0))
+            _cost_5h = float(_ds_usage.get("window_5h_cost_cny", 0) or 0)
+            _cost_weekly = float(_ds_usage.get("window_7d_cost_cny", 0) or 0)
+            _cost_monthly = float(_ds_usage.get("window_30d_cost_cny", 0) or 0)
 
-            def _mk_card(model_key: str, label: str) -> dict:
-                m = _models.get(model_key)
-                if not m:
-                    return {"title": label, "tokens": 0, "limit": 0,
-                            "pct": 0, "remaining_pct": None, "sessions": 0,
-                            "reset": "—", "display_line": "no usage yet",
-                            "resets_at_unix": None, "window_minutes": 0,
-                            "cost_usd": 0, "cost_cny": 0}
-                tok = m.get("total_tokens", 0)
-                cost = m.get("cost_usd", 0)
-                pct = int(tok / _total_all * 100) if tok else 0
-                return {"title": label, "tokens": tok, "limit": 0,
-                        "pct": pct, "remaining_pct": None, "sessions": m.get("sessions", 0),
-                        "reset": "—", "display_line": f"{_fmt_tok(tok)} tokens · ~${cost}",
-                        "resets_at_unix": None, "window_minutes": 0,
-                        "cost_usd": cost, "cost_cny": m.get("cost_cny", 0)}
+            # ── Calibrate: token-proportional distribution of real cost ──
+            _real_total = float(
+                _ds_usage.get("_known_total_cost_cny", 0)
+                or _ds_usage.get("total_cost_cny", 0)
+                or 0
+            )
+            if _real_total > 0:
+                _sessions = _ds_usage.get("_session_history", [])
+                _cut_5h = now - timedelta(hours=5)
+                _cut_7d = now - timedelta(days=7)
+                _cut_30d = now - timedelta(days=30)
+                _tok_5h = _tok_7d = _tok_30d = 0
+                for _s in _sessions:
+                    _ts = _s.get("created_at", "") or _s.get("started_at", "")
+                    _tok = _s.get("total_tokens", 0) or 0
+                    if _ts >= _cut_30d.isoformat():
+                        _tok_30d += _tok
+                        if _ts >= _cut_7d.isoformat():
+                            _tok_7d += _tok
+                            if _ts >= _cut_5h.isoformat():
+                                _tok_5h += _tok
+                _total_tok = _tok_30d
+                if _total_tok > 0:
+                    _cost_5h = round(_real_total * _tok_5h / _total_tok, 2)
+                    _cost_weekly = round(_real_total * _tok_7d / _total_tok, 2)
+                    _cost_monthly = round(_real_total, 2)
 
-            _flash = _mk_card("deepseek-v4-flash", "v4-Flash")
-            _pro   = _mk_card("deepseek-v4-pro",   "v4-Pro")
-            _bal_text = f"¥{_bal_cny}" if _bal_cny > 0 else (f"${_bal_usd}" if _bal_usd > 0 else "—")
-            # Model breakdown for aux (approximate, ~)
-            _model_parts = []
-            for _mn in ("deepseek-v4-flash", "deepseek-v4-pro"):
-                _c = _mk_card(_mn, _mn.replace("deepseek-", ""))
-                if _c["tokens"] > 0:
-                    _model_parts.append(f"{_c['title']}: ~${_c['cost_usd']}")
-            _mb = " · ".join(_model_parts)
-            # Balance-based spent (ground truth from API)
-            _spent_cny = float(_balance.get("balance_cny", 0) or 0)
-            _init_cny = _ds_raw.get("_initial_balance_cny", _spent_cny) or _spent_cny
-            _real_spent_cny = round(max(0, _init_cny - _spent_cny), 2)
-            _real_spent_usd = round(_real_spent_cny / 7.2, 2)
-            return {
-                "agent": agent, "limits_estimated": True,
-                "quota_source": "local-file",
-                "balance": _balance, "total_cost_usd": _total_cost,
-                "window_5h": _flash, "window_7d": _pro,
-                "aux": {"title": "Balance", "reset": midnight_label,
-                        "pct": 0, "value_line": _bal_text,
-                        "sub_line": f"spent ¥{_real_spent_cny} (~${_real_spent_usd}) · {_mb}" if _mb else f"spent ¥{_real_spent_cny} (~${_real_spent_usd})"},
+        def _cost_pct(cost: float, cap: float) -> int:
+            return min(100, round(cost / cap * 100)) if cap else 0
+
+        def _cost_card(cost: float, cap: float, title: str,
+                       reset_label: str, balance: float | None = None) -> dict:
+            pct = _cost_pct(cost, cap)
+            cost_fmt = f"¥{cost:.2f}"
+            cap_fmt = f"¥{cap:.2f}"
+            card: dict[str, Any] = {
+                "title": title,
+                "cost_cny": round(cost, 2),
+                "cap_cny": cap,
+                "pct": pct,
+                "tokens_fmt": cost_fmt,
+                "display_line": f"{cost_fmt} / {cap_fmt} · {reset_label}",
+                "value_line": f"{cost_fmt} / {cap_fmt}",
+                "sub_line": reset_label,
+                "reset": reset_label,
+                "tokens": int(cost * 100),
+                "limit": int(cap * 100),
+                "remaining_pct": _rem(int(cost * 100), int(cap * 100)) if cap else 100,
+                "resets_at_unix": None,
             }
+            if balance is not None and cap > 0:
+                marker = min(100, _cost_pct(cost + balance, cap))
+                card["balance_marker_pct"] = marker
+            return card
+
+        return {
+            "agent": agent, "limits_estimated": True,
+            "quota_source": "usage.json",
+            "balance_cny": round(_bal_cny, 2),
+            "window_5h": _cost_card(_cost_5h, CAP_5H, "5-Hour", midnight_label),
+            "window_7d": _cost_card(_cost_weekly, CAP_WEEKLY, "Weekly", weekly_reset_label, _bal_cny),
+            "aux": _cost_card(_cost_monthly, CAP_MONTHLY, "Monthly", "—", _bal_cny),
+        }
         # Fallback: run_log-based estimate
         sum_5h, sum_7d, runs_5h, runs_7d = 0, 0, 0, 0
         cutoff_5h = now - timedelta(hours=5)
@@ -926,6 +940,8 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
                 },
             }
 
+    _real_5h_pct = _pct(cur_5h["tokens"], lim_5h)
+    _real_7d_pct = _pct(cur_7d["tokens"], lim_7d)
     return {
         "agent": agent,
         "limits_estimated": True,
@@ -933,8 +949,8 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
         "window_5h": {
             "tokens":        cur_5h["tokens"],
             "limit":         lim_5h,
-            "pct":           0,
-            "remaining_pct": None,
+            "pct":           _real_5h_pct,
+            "remaining_pct": _rem(cur_5h["tokens"], lim_5h),
             "sessions":      cur_5h["sessions"],
             "reset":         "Not synced",
             "estimate_only": True,
@@ -945,8 +961,8 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
         "window_7d": {
             "tokens":        cur_7d["tokens"],
             "limit":         lim_7d,
-            "pct":           0,
-            "remaining_pct": None,
+            "pct":           _real_7d_pct,
+            "remaining_pct": _rem(cur_7d["tokens"], lim_7d),
             "sessions":      cur_7d["sessions"],
             "reset":         "Not synced",
             "estimate_only": True,

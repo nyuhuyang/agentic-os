@@ -47,11 +47,15 @@ DEEPSEEK_MODEL_PRICING: dict[str, dict[str, float]] = {
     },
 }
 # Fallback pricing for unknown models
-_DEFAULT_INPUT_PRICE = 0.14
-_DEFAULT_OUTPUT_PRICE = 0.14
+_DEFAULT_INPUT_MISS_PRICE = 0.14
+_DEFAULT_INPUT_HIT_PRICE = 0.0028
+_DEFAULT_OUTPUT_PRICE = 0.28
 
 # Estimated input/output split when only total_tokens is available
 _DEFAULT_INPUT_PCT = 0.70  # 70% input, 30% output
+# Estimated cache hit rate on input tokens for DeepSeek TUI sessions.
+# Long-running sessions with cached system prompt hit ~90%+.
+_DEFAULT_CACHE_HIT_RATE = 0.90
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -96,7 +100,7 @@ def _get_api_key() -> str | None:
 
 
 def _model_pricing(model: str) -> dict[str, float]:
-    """Return {input_per_m, output_per_m} for a given model name."""
+    """Return {input_miss_per_m, input_hit_per_m, output_per_m} for a given model."""
     base = DEEPSEEK_MODEL_PRICING.get(model, {})
     if base:
         return base
@@ -104,27 +108,58 @@ def _model_pricing(model: str) -> dict[str, float]:
         if model.startswith(key) or key.startswith(model):
             return prices
     return {
-        "input_per_m": _DEFAULT_INPUT_PRICE,
+        "input_miss_per_m": _DEFAULT_INPUT_MISS_PRICE,
+        "input_hit_per_m": _DEFAULT_INPUT_HIT_PRICE,
         "output_per_m": _DEFAULT_OUTPUT_PRICE,
     }
 
 
-def _estimate_cost(model: str, total_tokens: int) -> dict[str, float]:
+def _pro_discount_active() -> bool:
+    """Return True if the V4-Pro 75% discount is still active."""
+    try:
+        from datetime import datetime, timezone
+        expiry = datetime.fromisoformat(PRO_DISCOUNT_EXPIRY)
+        return datetime.now(timezone.utc) < expiry
+    except Exception:
+        return False
+
+
+def _estimate_cost(
+    model: str,
+    total_tokens: int,
+    cache_hit_rate: float = 0.0,
+) -> dict[str, float]:
     """Estimate cost from total_tokens, splitting into input/output.
 
-    Returns {cost_usd, cost_cny, input_tokens, output_tokens}.
+    cache_hit_rate: fraction of input tokens that are cache hits (0.0–1.0).
+    Default 0.0 means all input tokens are cache misses (conservative).
+
+    Returns {cost_usd, cost_cny, input_tokens, output_tokens, cache_hit_rate}.
     """
     p = _model_pricing(model)
+    input_miss = p.get("input_miss_per_m", _DEFAULT_INPUT_MISS_PRICE)
+    input_hit = p.get("input_hit_per_m", _DEFAULT_INPUT_HIT_PRICE)
+    output_price = p.get("output_per_m", _DEFAULT_OUTPUT_PRICE)
+
     input_tokens = int(total_tokens * _DEFAULT_INPUT_PCT)
     output_tokens = total_tokens - input_tokens
-    cost_usd = (input_tokens / 1_000_000) * p["input_per_m"] + \
-               (output_tokens / 1_000_000) * p["output_per_m"]
+    input_miss_tok = int(input_tokens * (1.0 - cache_hit_rate))
+    input_hit_tok = input_tokens - input_miss_tok
+
+    cost_usd = (
+        (input_miss_tok / 1_000_000) * input_miss
+        + (input_hit_tok / 1_000_000) * input_hit
+        + (output_tokens / 1_000_000) * output_price
+    )
     cost_cny = cost_usd * 7.2
     return {
         "cost_usd": round(cost_usd, 4),
         "cost_cny": round(cost_cny, 4),
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "input_miss_tokens": input_miss_tok,
+        "input_hit_tokens": input_hit_tok,
+        "cache_hit_rate": round(cache_hit_rate, 4),
     }
 
 
@@ -264,13 +299,42 @@ def update_usage() -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     now_iso = now.isoformat()
 
-    # ── Balance-based cost (ground truth) ────────────────────────────────
+    # ── Balance-based cost (ground truth from API balance changes) ───────
     bal_cny = float(balance.get("balance_cny", 0) or 0)
+
+    # Balance snapshot history for real cost tracking across top-ups
+    balance_snapshots: list[dict[str, Any]] = prev.get("_balance_snapshots", [])
+
+    # Seed initial snapshot if a known initial balance is configured
+    seed_initial = float(prev.get("_seed_initial_balance_cny", 0) or 0)
+    if seed_initial > 0 and (not balance_snapshots or len(balance_snapshots) == 0):
+        balance_snapshots.insert(0, {"ts": now_iso, "balance_cny": seed_initial})
+
+    balance_snapshots.append({"ts": now_iso, "balance_cny": bal_cny})
+    if len(balance_snapshots) > 200:
+        balance_snapshots = balance_snapshots[-200:]
+
+    # Compute real cost from balance decreases between consecutive snapshots.
+    # If balance increased between snapshots, it's a top-up event.
+    real_total_cost_cny = 0.0
+    topup_events: list[dict[str, Any]] = []
+    last_bal: float | None = None
+    for snap in balance_snapshots:
+        b = snap["balance_cny"]
+        if last_bal is not None:
+            if b < last_bal:
+                real_total_cost_cny += last_bal - b
+            elif b > last_bal:
+                topup_events.append({"ts": snap["ts"], "amount_cny": round(b - last_bal, 2)})
+        last_bal = b
+    real_total_cost_cny = round(real_total_cost_cny, 4)
+    real_total_cost_usd = round(real_total_cost_cny / 7.2, 4)
+
+    # Legacy _initial_balance tracking (kept for backwards compat)
     initial_balance_cny = float(prev.get("_initial_balance_cny", 0) or 0)
     if not initial_balance_cny and bal_cny > 0:
-        initial_balance_cny = bal_cny  # start tracking from current balance
-    spent_cny = round(max(0.0, initial_balance_cny - bal_cny), 4)
-    spent_usd = round(spent_cny / 7.2, 4)
+        initial_balance_cny = bal_cny
+
     # Daily tracking
     today_str = str(now.date())
     daily_key = f"_daily_balance_{today_str}"
@@ -279,6 +343,14 @@ def update_usage() -> dict[str, Any]:
         daily_initial = bal_cny
     today_spent_cny = round(max(0.0, daily_initial - bal_cny), 4)
     today_spent_usd = round(today_spent_cny / 7.2, 4)
+
+    # ── Recalculate historical session costs with current pricing ────────
+    for s in prev_sessions:
+        total_tok = s.get("total_tokens", 0) or 0
+        if total_tok > 0:
+            model = s.get("model", "deepseek-v4-flash")
+            new_est = _estimate_cost(model, total_tok, _DEFAULT_CACHE_HIT_RATE)
+            s["_cost_estimate"] = new_est
 
     # ── Track session transitions ────────────────────────────────────────
     last_session_id = prev.get("_last_session_id")
@@ -311,7 +383,7 @@ def update_usage() -> dict[str, Any]:
             bm["sessions"] += 1
 
         # Update current session
-        cost_est = _estimate_cost(model, total_tokens)
+        cost_est = _estimate_cost(model, total_tokens, _DEFAULT_CACHE_HIT_RATE)
         current_session = {
             "session_id": sid,
             "model": model,
@@ -351,17 +423,19 @@ def update_usage() -> dict[str, Any]:
         prev_sessions = prev_sessions[-100:]
 
     # ── Compute budget-window summaries ──────────────────────────────────
-    def _window_totals(sessions: list[dict], hours: int) -> tuple[int, int, float]:
+    def _window_totals(sessions: list[dict], hours: int) -> tuple[int, int, float, float]:
         tok = 0
         ses = 0
-        cost = 0.0
+        cost_usd = 0.0
+        cost_cny = 0.0
         for s in sessions:
             created = s.get("created_at", "") or s.get("started_at", "")
             if _is_in_window(created, hours, now):
                 tok += s.get("total_tokens", 0) or 0
                 ses += 1
                 ce = s.get("_cost_estimate", {})
-                cost += ce.get("cost_usd", 0)
+                cost_usd += ce.get("cost_usd", 0)
+                cost_cny += ce.get("cost_cny", 0)
         if current_session:
             created = current_session.get("created_at", "")
             if _is_in_window(created, hours, now):
@@ -369,12 +443,14 @@ def update_usage() -> dict[str, Any]:
                 if hours <= 168:
                     ses += 1
                 ce = current_session.get("_cost_estimate", {})
-                cost += ce.get("cost_usd", 0)
-        return tok, ses, round(cost, 4)
+                cost_usd += ce.get("cost_usd", 0)
+                cost_cny += ce.get("cost_cny", 0)
+        return tok, ses, round(cost_usd, 4), round(cost_cny, 4)
 
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    window_5h_tok, window_5h_ses, window_5h_cost = _window_totals(prev_sessions, 5)
-    window_7d_tok, window_7d_ses, window_7d_cost = _window_totals(prev_sessions, 168)
+    (window_5h_tok, window_5h_ses, window_5h_cost, window_5h_cost_cny) = _window_totals(prev_sessions, 5)
+    (window_7d_tok, window_7d_ses, window_7d_cost, window_7d_cost_cny) = _window_totals(prev_sessions, 168)
+    (window_30d_tok, window_30d_ses, window_30d_cost, window_30d_cost_cny) = _window_totals(prev_sessions, 720)
 
     today_tok = 0
     today_ses = 0
@@ -397,9 +473,9 @@ def update_usage() -> dict[str, Any]:
             today_cost += ce.get("cost_usd", 0)
     today_cost = round(today_cost, 4)
 
-    # Balance-based cost (ground truth from API balance changes)
-    total_cost_usd = spent_usd
-    total_cost_cny = spent_cny
+    # Balance-based cost (ground truth from API balance snapshots)
+    total_cost_usd = real_total_cost_usd
+    total_cost_cny = real_total_cost_cny
 
     # Today cost from balance tracking
     today_cost = today_spent_usd
@@ -423,7 +499,11 @@ def update_usage() -> dict[str, Any]:
         "total_cost_usd": total_cost_usd,
         "total_cost_cny": total_cost_cny,
         "window_5h_cost": window_5h_cost,
+        "window_5h_cost_cny": window_5h_cost_cny,
         "window_7d_cost": window_7d_cost,
+        "window_7d_cost_cny": window_7d_cost_cny,
+        "window_30d_cost": window_30d_cost,
+        "window_30d_cost_cny": window_30d_cost_cny,
         "by_model_detail": prev_by_model,
         "current_session": current_session,
         "session_count": len(prev_sessions) + (1 if current_session else 0),
@@ -433,6 +513,10 @@ def update_usage() -> dict[str, Any]:
         "_current_session": current_session,
         "_session_history": prev_sessions,
         "_initial_balance_cny": initial_balance_cny,
+        "_balance_snapshots": balance_snapshots,
+        "_topup_events": topup_events,
+        "_known_total_cost_cny": prev.get("_known_total_cost_cny"),
+        "_seed_initial_balance_cny": prev.get("_seed_initial_balance_cny"),
         daily_key: daily_initial,
     }
 

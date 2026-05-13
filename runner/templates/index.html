@@ -67,6 +67,15 @@
   .win-pace-marker.ahead  { background: var(--green); }
   .win-pace-marker.behind { background: var(--red); }
   .win-pace-marker.on-pace { background: var(--text-dim); }
+  .win-balance-marker {
+    position: absolute; top: -3px; width: 0; height: 10px;
+    border-left: 2px dashed #a78bfa;
+    pointer-events: none; z-index: 1;
+    transition: left .5s;
+  }
+  .win-balance-marker.exceeded {
+    border-left-color: var(--red);
+  }
   .win-bar.low    { background: var(--accent); }
   .win-bar.medium { background: var(--yellow); }
   .win-bar.high   { background: var(--red); }
@@ -460,6 +469,8 @@
           <div class="win-pace-marker on-pace"
                data-resets-at="{{ w7.resets_at_unix or '' }}"
                data-window-minutes="{{ w7.window_minutes or 10080 }}"></div>
+          <div class="win-balance-marker" data-balance-pct="{{ w7.balance_marker_pct or w7.limit }}"
+               style="left:{{ w7.balance_marker_pct or w7.limit }}%"></div>
         </div>
         <div class="win-remaining">
           {% if w7.remaining_pct is not none %}
@@ -480,9 +491,19 @@
         <div class="win-bar-wrap">
           <div class="win-bar {% if wa.pct >= 80 %}high{% elif wa.pct >= 50 %}medium{% else %}low{% endif %}"
                style="width:{{ wa.pct }}%"></div>
+          <div class="win-balance-marker" data-balance-pct="{{ wa.balance_marker_pct or 100 }}"
+               style="left:{{ wa.balance_marker_pct or 100 }}%"></div>
         </div>
-        <div class="win-main">{{ wa.value_line }}</div>
-        <div class="win-sub"><span>{{ wa.sub_line }}</span></div>
+        <div class="win-remaining">
+          {% if wa.remaining_pct is not none %}
+            {{ wa.remaining_pct }}<span class="pct-label">% remaining</span>
+          {% elif wa.tokens > 0 %}
+            {{ wa.tokens_fmt }}<span class="pct-label"> tokens</span>
+          {% else %}
+            —<span class="pct-label">no data</span>
+          {% endif %}
+        </div>
+        <div class="win-main">{{ wa.display_line or wa.value_line }}</div>
       </div>
       </div>
     </div>
@@ -882,6 +903,16 @@ function _updateOneRow(row, w) {
         marker.style.display = 'none';
       }
     }
+    const bm = card.querySelector('.win-balance-marker');
+    if (bm) {
+      if (d.balance_marker_pct !== undefined) {
+        bm.style.display = '';
+        bm.style.left = d.balance_marker_pct + '%';
+        bm.className = d.pct >= d.balance_marker_pct ? 'win-balance-marker exceeded' : 'win-balance-marker';
+      } else {
+        bm.style.display = 'none';
+      }
+    }
   });
   const rc = cards[2];
   if (!rc) return;
@@ -892,8 +923,28 @@ function _updateOneRow(row, w) {
   const rbar = rc.querySelector('.win-bar');
   rbar.style.width = r.pct + '%';
   rbar.className = _barClass(r.pct);
-  rc.querySelector('.win-main').textContent = r.value_line;
-  rc.querySelector('.win-sub span').textContent = r.sub_line;
+  const remEl3 = rc.querySelector('.win-remaining');
+  if (remEl3) {
+    if (r.remaining_pct !== null && r.remaining_pct !== undefined) {
+      remEl3.innerHTML = `${r.remaining_pct}<span class=\"pct-label\">% remaining</span>`;
+    } else if (r.tokens > 0) {
+      remEl3.innerHTML = `${_fmt(r.tokens)}<span class=\"pct-label\"> tokens</span>`;
+    } else {
+      remEl3.innerHTML = `—<span class=\"pct-label\">no data</span>`;
+    }
+  }
+  rc.querySelector('.win-main').textContent = r.display_line || r.value_line;
+
+  const bm3 = rc.querySelector('.win-balance-marker');
+  if (bm3) {
+    if (r.balance_marker_pct !== undefined) {
+      bm3.style.display = '';
+      bm3.style.left = r.balance_marker_pct + '%';
+      bm3.className = r.pct >= r.balance_marker_pct ? 'win-balance-marker exceeded' : 'win-balance-marker';
+    } else {
+      bm3.style.display = 'none';
+    }
+  }
 }
 
 async function updateWindows(agent) {

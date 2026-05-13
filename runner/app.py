@@ -1674,6 +1674,18 @@ def api_windows():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/windows/all")
+def api_windows_all():
+    try:
+        all_data: dict = {}
+        for ag in ("claude", "codex", "deepseek"):
+            w = _compute_windows(ag, RUN_LOG)
+            all_data[ag] = w
+        return jsonify(all_data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/usage")
 def api_usage():
     try:
