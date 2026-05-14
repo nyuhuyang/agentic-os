@@ -31,6 +31,14 @@ _OPENAI_STT_MODELS = {
 }
 _DEFAULT_OPENAI_STT_MODEL = os.environ.get("OPENAI_STT_MODEL", "gpt-4o-mini-transcribe")
 _REALTIME_TRANSPORT_MODEL = os.environ.get("OPENAI_REALTIME_TRANSPORT_MODEL", "gpt-realtime-mini")
+_OPENAI_LANGUAGE_CODES = {
+    "zh-cn": "zh",
+    "zh-tw": "zh",
+    "en-us": "en",
+    "en-gb": "en",
+    "ja-jp": "ja",
+    "ko-kr": "ko",
+}
 
 
 @dataclass
@@ -54,6 +62,13 @@ _realtime_stream_lock = threading.Lock()
 def _normalize_openai_model(model: str | None) -> str:
     value = (model or _DEFAULT_OPENAI_STT_MODEL).strip()
     return _OPENAI_STT_MODELS.get(value, _DEFAULT_OPENAI_STT_MODEL)
+
+
+def _normalize_openai_language(language: str | None) -> str | None:
+    value = (language or "").strip().lower()
+    if not value or value == "auto":
+        return None
+    return _OPENAI_LANGUAGE_CODES.get(value, value.split("-", 1)[0])
 
 
 def _emit_stream_event(state: _RealtimeStreamState, event: str, payload: dict[str, Any]) -> None:
@@ -233,20 +248,23 @@ class STTModule(AgenticModule):
             audio_file = request.files["audio"]
             model = (request.form.get("model") or _DEFAULT_OPENAI_STT_MODEL).strip()
             model = _OPENAI_STT_MODELS.get(model, _DEFAULT_OPENAI_STT_MODEL)
+            language = _normalize_openai_language(request.form.get("language"))
 
             try:
                 from openai import OpenAI
                 client = OpenAI(api_key=api_key)
-                transcript = client.audio.transcriptions.create(
-                    # Do not force language; let the model auto-detect spoken language.
-                    model=model,
-                    file=(
+                payload = {
+                    "model": model,
+                    "file": (
                         audio_file.filename or "recording.webm",
                         audio_file.read(),
                         audio_file.content_type or "audio/webm",
                     ),
-                    response_format="text",
-                )
+                    "response_format": "text",
+                }
+                if language:
+                    payload["language"] = language
+                transcript = client.audio.transcriptions.create(**payload)
                 return app.response_class(
                     response=json.dumps({"text": transcript}),
                     status=200,

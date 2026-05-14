@@ -86,6 +86,11 @@ class DeepSeekModule(AgenticModule):
         output = "".join(buf)
         if result.get("ok") and not output:
             output = result.get("output", "")
+        if result.get("ok") and not output:
+            it = result.get("input_tokens", 0)
+            ot = result.get("output_tokens", 0)
+            model = result.get("model", "deepseek-v4-flash")
+            output = f"Task completed. (model: {model}, tokens: {it} in / {ot} out, iterations: {result.get('iterations', 1)})"
         result["output"] = output
         return result
 

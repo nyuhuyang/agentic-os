@@ -163,8 +163,9 @@
   .job-card.dragging { opacity: 0.55; }
   .job-card-dismiss { position: absolute; top: 6px; right: 7px; background: transparent; border: none; color: var(--text-dim); font-size: 13px; line-height: 1; cursor: pointer; padding: 0 2px; opacity: 0; transition: opacity .15s; }
   .job-card:hover .job-card-dismiss { opacity: 1; }
-  .job-card-dismiss:hover { color: var(--red); }
+  .job-card-dismiss:hover { color: var(--text); }
   .job-card-id { font-size: 10px; color: var(--text-dim); margin-bottom: 4px; font-family: monospace; }
+  .job-card-id { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .job-card-title { font-size: 13px; font-weight: 500; color: var(--text); margin-bottom: 4px; line-height: 1.35; }
   .job-card-prompt { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 7px; }
   .job-card-footer { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; justify-content: space-between; }
@@ -185,7 +186,29 @@
   .job-btn.retry-deepseek.selected { background: rgba(126,200,160,.10); border-color: #7ec8a0; }
   .job-btn-group { display: inline-flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
   .job-card-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
-  .model-badge { font-size: 8px; color: var(--text-dim); background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 3px; padding: 0 5px; letter-spacing: .2px; vertical-align: middle; white-space: nowrap; }
+  .model-badge {
+    font-size: 8px;
+    color: var(--text-dim);
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 3px;
+    padding: 0 5px;
+    letter-spacing: .2px;
+    vertical-align: middle;
+    white-space: nowrap;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .model-badge:hover {
+    border-color: var(--accent-dim);
+    color: var(--text);
+  }
+  .model-badge.running {
+    color: #c4b5fd;
+    border-color: rgba(196,181,253,.35);
+    background: rgba(196,181,253,.10);
+    font-weight: 700;
+  }
   .agent-badge {
     font-size: 9px; border-radius: 3px; padding: 0 5px; letter-spacing: .3px;
     vertical-align: middle; cursor: pointer; border: 1px solid; font-weight: 700;
@@ -254,8 +277,52 @@
   .job-card-elapsed { font-size: 10px; color: var(--accent); font-weight: 600; }
   .job-card-turn { font-size: 10px; color: var(--text-dim); }
   .job-card-attempt { font-size: 10px; color: #ffa726; font-weight: 600; }
-  .cancel-btn { background: transparent; border: 1px solid #b71c1c; color: var(--red); font-size: 10px; padding: 2px 7px; border-radius: 3px; cursor: pointer; font-family: inherit; letter-spacing: .5px; transition: all .15s; margin-top: 8px; display: inline-block; }
-  .cancel-btn:hover { background: rgba(229,57,53,.15); }
+  .cancel-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: auto;
+    height: 20px;
+    margin-top: 8px;
+    padding: 0 10px;
+    background: transparent;
+    border: 1px solid #b71c1c;
+    color: var(--red);
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: .4px;
+    transition: all .15s;
+    opacity: .9;
+  }
+  .cancel-btn:hover { background: rgba(229,57,53,.15); opacity: 1; }
+  .job-card-dismiss.cancel-issue {
+    position: absolute;
+    top: 6px;
+    right: 7px;
+    width: auto;
+    height: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid transparent;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-dim);
+    font-size: 10px;
+    line-height: 1;
+    padding: 0 6px;
+    letter-spacing: .6px;
+    text-transform: none !important;
+    opacity: 0;
+    transition: opacity .15s, color .15s, background .15s, border-color .15s;
+    z-index: 2;
+  }
+  .job-card:hover .job-card-dismiss.cancel-issue { opacity: 1; }
+  .job-card-dismiss.cancel-issue:hover { color: var(--text); border-color: var(--border); background: rgba(255,255,255,.03); }
 
   .pulse-dot {
     width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
@@ -632,17 +699,6 @@
         <textarea class="linear-edit-input" id="linear-edit-desc" rows="4" placeholder="Issue description"></textarea>
       </div>
       <div class="linear-edit-field">
-        <div class="linear-edit-label">Model</div>
-        <div class="new-issue-agent-row">
-          <div class="agent-toggle" aria-label="Issue preferred agent">
-            <button type="button" class="agent-btn active" id="linear-edit-agent-claude" onclick="setDetailIssueAgent('claude')">Claude</button>
-            <button type="button" class="agent-btn" id="linear-edit-agent-codex" onclick="setDetailIssueAgent('codex')">Codex</button>
-            <button type="button" class="agent-btn" id="linear-edit-agent-deepseek" onclick="setDetailIssueAgent('deepseek')">DeepSeek</button>
-          </div>
-          <span class="new-issue-agent-hint" id="linear-edit-agent-hint">Preferred agent for dispatch</span>
-        </div>
-      </div>
-      <div class="linear-edit-field">
         <div class="linear-edit-label">State</div>
         <select class="linear-edit-select" id="linear-edit-state"></select>
       </div>
@@ -675,11 +731,13 @@
     <div class="detail-section" id="detail-reply-section" style="display:none">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div class="detail-section-label" style="margin-bottom:0">Comment / Feedback</div>
-        <select id="stt-source" onchange="onSttSourceChange()" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:11px;padding:1px 4px;border-radius:3px;cursor:pointer;font-family:inherit;margin-right:4px">
-          <option value="browser">Browser STT</option>
-          <option value="openai:gpt-4o-mini-transcribe">OpenAI 4o mini · fast</option>
-        </select>
-        <button id="mic-btn" onclick="toggleMic()" title="Voice input" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:14px;padding:2px 8px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
+        <div style="display:flex;align-items:center;gap:4px">
+          <select id="stt-source" class="stt-source" onchange="onSttSourceChange(this)" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:11px;padding:1px 4px;border-radius:3px;cursor:pointer;font-family:inherit">
+            <option value="browser">Browser STT</option>
+            <option value="openai:gpt-4o-mini-transcribe">OpenAI 4o mini</option>
+          </select>
+          <button id="mic-btn" onclick="toggleMic()" title="Voice input" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:14px;padding:2px 8px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
+        </div>
       </div>
       <textarea class="detail-reply-input" id="detail-reply-input" placeholder="Add feedback or instructions for the next run…" rows="3"></textarea>
       <div class="attach-bar">
@@ -692,7 +750,6 @@
     </div>
     <div class="detail-footer">
       <button class="job-btn" id="detail-approve-btn" onclick="approveRun()" style="display:none;background:var(--green);border-color:var(--green);color:#111">✓ Approve → Done</button>
-      <button class="job-btn" id="detail-comment-btn" onclick="commentToLinear()" style="display:none">↳ Comment to Linear</button>
       <div class="job-btn-group" id="detail-dispatch-group" style="display:none;margin-top:0">
         <button class="job-btn retry-claude" id="detail-dispatch-claude" onclick="dispatchFromDetail('claude')">▶ Claude</button>
         <button class="job-btn retry-codex" id="detail-dispatch-codex" onclick="dispatchFromDetail('codex')">▶ Codex</button>
@@ -1060,46 +1117,46 @@ async function _fetchCapabilities() {
 let _sttBackends = ['browser'];
 
 function _updateSttSelector() {
-  const sel = document.getElementById('stt-source');
-  if (!sel) return;
-  const current = sel.value;
-  sel.innerHTML = '';
-  const options = [];
-  if (_sttBackends.includes('browser')) {
-    options.push(['browser', 'Browser STT']);
-  }
-  if (_sttBackends.includes('openai')) {
-    options.push(['openai:whisper-1', 'OpenAI Whisper · slow']);
-    options.push(['openai:gpt-4o-mini-transcribe', 'OpenAI 4o mini · fast']);
-    options.push(['openai:gpt-4o-transcribe', 'OpenAI 4o · med']);
-  }
-  if (_sttBackends.includes('local')) {
-    options.push(['local', 'Local STT']);
-  }
-  for (const [value, label] of options) {
-    const opt = document.createElement('option');
-    opt.value = value;
-    opt.textContent = label;
-    sel.appendChild(opt);
-  }
-  // Keep current selection if still available
-  if (options.some(([value]) => value === current)) {
-    sel.value = current;
-  } else if (_sttBackends.includes('browser')) {
-    sel.value = 'browser';
-  } else if (options.length > 0) {
-    sel.value = options[0][0];
-  }
-  // Update mic button title
-  const btn = document.getElementById('mic-btn');
-  if (btn) btn.title = sel.value.startsWith('openai:')
-    ? 'Voice input (OpenAI ' + (sel.options[sel.selectedIndex]?.textContent || '') + ')'
-    : 'Voice input (Web Speech API)';
+  const selectors = Array.from(document.querySelectorAll('.stt-source'));
+  if (!selectors.length) return;
   const saved = window.localStorage.getItem('agenticos.stt.source');
-  if (saved && options.some(([value]) => value === saved)) {
-    sel.value = saved;
+  const current = saved || selectors.find(sel => sel.value)?.value || 'browser';
+  const options = [
+    ['browser', 'Browser STT'],
+    ['openai:gpt-4o-mini-transcribe', 'OpenAI 4o mini'],
+  ];
+  const selected = options.some(([value]) => value === current)
+    ? current
+    : 'browser';
+
+  for (const sel of selectors) {
+    sel.innerHTML = '';
+    for (const [value, label] of options) {
+      const opt = document.createElement('option');
+      opt.value = value;
+      opt.textContent = label;
+      sel.appendChild(opt);
+    }
+    sel.value = selected;
   }
-  onSttSourceChange();
+  window.localStorage.setItem('agenticos.stt.source', selected);
+  onSttSourceChange(selectors[0]);
+}
+
+function _getSttSource() {
+  return window.localStorage.getItem('agenticos.stt.source')
+    || document.querySelector('.stt-source')?.value
+    || 'browser';
+}
+
+function _getSttLanguage() {
+  return 'auto';
+}
+
+function _syncSttSourceControls(value) {
+  for (const sel of document.querySelectorAll('.stt-source')) {
+    if (sel.value !== value) sel.value = value;
+  }
 }
 
 function _updateTrackerLabel() {
@@ -1179,13 +1236,18 @@ const LINEAR_STATE_BY_COL_KEY = {
 function _stateBadgeHtml(state) {
   const dot = state === 'running' ? '<span class="pulse-dot"></span>' : '';
   const labels = {
-    running: 'Running', success: 'Done', failed: 'Failed', timeout: 'Timeout',
+    running: 'Running', success: 'Done', failed: 'Failed', timeout: 'Timed out',
     sent: 'Sent', backlog: 'Backlog', error: 'Error', todo: 'Todo', rework: 'Rework',
     merging: 'Merging', cancelled: 'Canceled', duplicate: 'Duplicated',
     stalled: 'Stalled', queued: 'Queued', review: 'In review',
     in_progress: 'In Progress', in_review: 'In review', done: 'Done',
   };
   return `<span class="state-badge ${state}">${dot}${labels[state] || state}</span>`;
+}
+
+function _historyBadgeState(status, isFinalAttempt) {
+  if (status === 'error' && !isFinalAttempt) return 'failed';
+  return status || 'unknown';
 }
 
 function _buildCol(col, items) {
@@ -1532,8 +1594,12 @@ function _anyModalInputFocused() {
   return !!(el.closest('#new-issue-modal') || el.closest('#detail-modal'));
 }
 
+function _anyTaskModalOpen() {
+  return _isModalOpen('new-issue-modal') || _isModalOpen('detail-modal');
+}
+
 function _shouldDeferBoardRefresh() {
-  return _imeComposing || _anyModalInputFocused() || _newIssueDirty() || _detailReplyDirty() || _detailLinearDirty();
+  return _anyTaskModalOpen() || _imeComposing || _anyModalInputFocused() || _newIssueDirty() || _detailReplyDirty() || _detailLinearDirty();
 }
 
 function _flushPendingBoardRefresh() {
@@ -1620,6 +1686,36 @@ function _latestLinearRuns(items) {
   return unlinked.concat(Array.from(byIssue.values()));
 }
 
+function _displayModelLabel(run) {
+  const model = (run?.model || '').trim();
+  if (model && model !== 'codex') return model;
+  const agent = (run?.agent || '').toLowerCase();
+  if (agent === 'codex') return 'gpt-5.4-mini';
+  if (agent === 'deepseek') return 'deepseek-v4-flash';
+  return model === 'codex' ? 'gpt-5.4-mini' : '';
+}
+
+function _modelBadgeHtml(modelLabel, running = false, onClick = '') {
+  const label = (modelLabel || '').trim();
+  if (!label) return '';
+  const clickAttr = onClick ? ` onclick="${_esc(onClick)}"` : '';
+  return `<span class="model-badge${running ? ' running' : ''}"${clickAttr}>MODEL · ${_esc(label)}</span>`;
+}
+
+function _normalizeAgentName(agent) {
+  const value = (agent || '').trim().toLowerCase();
+  if (value === 'aider') return 'deepseek';
+  if (['claude', 'codex', 'deepseek'].includes(value)) return value;
+  return '';
+}
+
+function _agentLabel(agent) {
+  if (agent === 'claude') return 'CLAUDE';
+  if (agent === 'codex') return 'CODEX';
+  if (agent === 'deepseek') return 'DEEPSEEK';
+  return '·';
+}
+
 // run_progress state: run_id -> {snippet, turn}
 const _runProgress = {};
 
@@ -1652,8 +1748,10 @@ function _buildColCard(run) {
   const prompt = (run.prompt || '').trim();
   const when = run.when || '';
   const dur = run.duration || '';
+  const isInProgress = state === 'in_progress';
   const latestRunStatus = run.latest_run_status || run.status || '';
   const isRunning = latestRunStatus === 'running';
+  const showCancelGuard = isRunning || isInProgress;
   const canRetry = !isRunning && !!run.latest_run_id;
   const isDraggable = false;
   const attempt = run.attempt || 0;
@@ -1669,16 +1767,24 @@ function _buildColCard(run) {
   const attemptHtml = attempt > 0 ? `<span class="job-card-attempt">↺${attempt}</span> ` : '';
   const tokensHtml = (run.input_tokens || run.output_tokens)
     ? `<span style="font-size:10px;color:var(--text-dim)">${_fmt((run.input_tokens||0)+(run.output_tokens||0))} tok</span>` : '';
-  const modelLabel = run.model === 'codex' ? 'gpt-5.4-mini' : (run.model || '');
-  const modelBadge = modelLabel ? `<span class="model-badge">Run model: ${_esc(modelLabel)}</span>` : '';
-  const pa = run.preferred_agent || '';
-  const paLabel = pa === 'claude' ? 'CLAUDE' : pa === 'codex' ? 'CODEX' : (pa === 'aider' || pa === 'deepseek') ? 'DEEPSEEK' : '·';
-  const paClass = pa === 'aider' ? 'deepseek' : (pa || 'none');
+  const modelLabel = _displayModelLabel(run);
+  const modelBadge = _modelBadgeHtml(modelLabel, isRunning);
+  const runAgent = _normalizeAgentName(run.agent);
+  const preferredAgent = _normalizeAgentName(run.preferred_agent);
+  const badgeAgent = runAgent || preferredAgent;
+  const paLabel = _agentLabel(badgeAgent);
+  const paClass = badgeAgent || 'none';
   const agentLocked = isRunning || state === 'in_progress';
+  const badgeTitle = agentLocked
+    ? 'Agent locked while in progress'
+    : (runAgent
+      ? `Actual run agent: ${paLabel}. Click to change preferred agent.`
+      : 'Click to toggle agent');
+  const showRunCancel = isRunning;
   const agentBadge = run._is_linear_issue
-    ? `<span class="agent-badge ${_esc(paClass)}${agentLocked ? ' locked' : ''}" title="${agentLocked ? 'Agent locked while in progress' : 'Click to toggle agent'}" ${agentLocked ? '' : `onclick="event.stopPropagation();setIssueAgent('${_esc(run.linear_issue_id)}','${_esc(pa)}')"`}>${_esc(paLabel)}</span>`
+    ? `<span class="agent-badge ${_esc(paClass)}${agentLocked ? ' locked' : ''}" title="${_esc(badgeTitle)}" ${agentLocked ? '' : `onclick="event.stopPropagation();setIssueAgent('${_esc(run.linear_issue_id)}','${_esc(preferredAgent || badgeAgent)}')"`}>${_esc(paLabel)}</span>`
     : '';
-  const hasAssignedAgent = ['claude','codex','aider','deepseek'].includes(pa);
+  const hasAssignedAgent = ['claude','codex','deepseek'].includes(preferredAgent);
   const todoAgentToggle = run._is_linear_issue && state === 'todo' && hasAssignedAgent
     ? `<div class="todo-agent-toggle" aria-label="Assign agent">
          <button type="button" class="todo-run-btn start" title="Move to In Progress" onclick="event.stopPropagation();startLinearIssue('${_esc(run.linear_issue_id)}')">▶ Start</button>
@@ -1687,11 +1793,12 @@ function _buildColCard(run) {
   const issueLabel = run.skill || run.identifier || '?';
   const issueTitle = run.title || prompt || '';
   const metaAgentHtml = run._is_linear_issue ? agentBadge : '';
-  const metaHtml = modelBadge || metaAgentHtml ? `<div class="job-card-meta">${modelBadge}${metaAgentHtml}</div>` : '';
+  const metaModelHtml = isRunning ? '' : modelBadge;
+  const metaHtml = metaModelHtml || metaAgentHtml ? `<div class="job-card-meta">${metaModelHtml}${metaAgentHtml}</div>` : '';
   const footerControlsHtml = run._is_linear_issue && state === 'todo' ? todoAgentToggle : '';
 
   card.innerHTML = `
-    <div class="job-card-id">${attemptHtml}${_esc(issueLabel)}</div>
+    <div class="job-card-id">${attemptHtml}${_esc(issueLabel)}${isRunning ? ` ${modelBadge}` : ''}</div>
     ${metaHtml}
     <div class="job-card-title">${_esc(issueTitle)}</div>
     ${prompt ? `<div class="job-card-prompt">${_esc(prompt)}</div>` : ''}
@@ -1700,21 +1807,24 @@ function _buildColCard(run) {
       <span>${isRunning ? elapsedHtml + turnHtml : (when ? 'Updated ' + _esc(when) : '—')}</span>
       <div class="job-card-dur">${tokensHtml || _esc(dur)}${footerControlsHtml ? ` ${footerControlsHtml}` : ''}</div>
     </div>
+    ${showRunCancel ? '<button type="button" class="cancel-btn" title="Cancel run" aria-label="Cancel run">Cancel</button>' : ''}
   `;
-  if (isRunning) {
-    const cancelBtn = document.createElement('button');
-    cancelBtn.className = 'cancel-btn';
-    cancelBtn.textContent = '✕ Cancel';
-    cancelBtn.onclick = (e) => { e.stopPropagation(); cancelRun(run.run_id); };
-    card.appendChild(cancelBtn);
-  }
   if (run.linear_issue_id && state !== 'cancelled') {
     const dismissBtn = document.createElement('button');
-    dismissBtn.className = 'job-card-dismiss';
-    dismissBtn.textContent = '✕';
-    dismissBtn.title = 'Cancel issue';
-    dismissBtn.onclick = (e) => { e.stopPropagation(); cancelLinearIssueById(run.linear_issue_id); };
+    dismissBtn.className = 'job-card-dismiss cancel-issue';
+    dismissBtn.textContent = '×';
+    dismissBtn.title = 'Cancel task';
+    dismissBtn.setAttribute('aria-label', 'Cancel task');
+    if (isRunning || isInProgress) dismissBtn.style.opacity = '1';
+    dismissBtn.onclick = (e) => { e.stopPropagation(); cancelLinearIssueById(run.linear_issue_id, run.latest_run_id || run.run_id || ''); };
     card.appendChild(dismissBtn);
+  }
+  const runCancelBtn = card.querySelector('.cancel-btn');
+  if (runCancelBtn) {
+    runCancelBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      cancelRun(run.latest_run_id || run.run_id);
+    });
   }
   if (canRetry) {
     const preferredAgent = (run.preferred_agent || run.agent || '').toLowerCase() || null;
@@ -1744,7 +1854,7 @@ function _buildColCard(run) {
     card.appendChild(group);
   }
   card.addEventListener('click', (e) => {
-    if (e.target.classList.contains('job-btn') || e.target.classList.contains('cancel-btn')) return;
+    if (e.target.classList.contains('job-btn') || e.target.classList.contains('cancel-btn') || e.target.classList.contains('job-card-dismiss')) return;
     openDetailModal(run.run_id);
   });
   return card;
@@ -1765,7 +1875,13 @@ async function setIssueAgent(issueId, currentAgent) {
   if (!issueId) return;
   const base = currentAgent === 'aider' ? 'deepseek' : currentAgent;
   const next = base === 'claude' ? 'codex' : base === 'codex' ? 'deepseek' : 'claude';
-  return setLinearIssuePreferredAgent(issueId, next);
+  // Set agent and move to In Progress (server skips dispatch if already running)
+  await fetch(`/api/linear/issues/${issueId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ preferred_agent: next, state_name: 'In Progress' }),
+  });
+  refreshJobBoard();
 }
 
 async function setLinearIssuePreferredAgent(issueId, next) {
@@ -1800,15 +1916,24 @@ async function startLinearIssue(issueId) {
 async function triggerLinearIssueWithAgent(issueId, agent, { refresh = true } = {}) {
   if (!issueId) return;
   const agentVal = ['codex', 'deepseek', 'aider'].includes(agent) ? (agent === 'aider' ? 'deepseek' : agent) : 'claude';
+  const titleEl = document.getElementById('linear-edit-title');
+  const descEl = document.getElementById('linear-edit-desc');
+  const body = { preferred_agent: agentVal, state_name: 'In Progress' };
+  if (titleEl) body.title = titleEl.value;
+  if (descEl) body.description = descEl.value;
   try {
-    await fetch(`/api/linear/issues/${issueId}`, {
+    const res = await fetch(`/api/linear/issues/${issueId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ preferred_agent: agentVal, state_name: 'In Progress' }),
+      body: JSON.stringify(body),
     });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'dispatch failed');
+    _clearLinearDraft(issueId);
     if (refresh) refreshJobBoard();
   } catch (err) {
     console.error('triggerLinearIssueWithAgent failed:', err);
+    throw err;
   }
 }
 
@@ -1850,7 +1975,8 @@ async function refreshJobBoard(force = false) {
     let all = linearIssues.map(issue => {
       const latest = latestRunByIssue.get(issue.id);
       const isActivelyRunning = running.some(r => r.linear_issue_id === issue.id);
-      const boardStatus = isActivelyRunning ? 'in_progress' : _linearStateToBoard(issue.state);
+      let boardStatus = isActivelyRunning ? 'in_progress' : _linearStateToBoard(issue.state);
+      if (!isActivelyRunning && latest?.status === 'review' && ['In Progress', 'In Review'].includes(issue.state)) boardStatus = 'in_review';
       if (boardStatus !== 'in_review') {
         _clearReplyDraftForIssue(issue.id);
       }
@@ -1870,9 +1996,7 @@ async function refreshJobBoard(force = false) {
         when: latest?.when || '',
         duration: latest?.duration || '',
         attempt: latest?.attempt || 0,
-        model: latest?.model === 'codex'
-          ? 'gpt-5.4-mini'
-          : (latest?.model || (latest?.agent === 'codex' ? 'gpt-5.4-mini' : '')),
+        model: _displayModelLabel(latest),
         agent: latest?.agent || '',
         preferred_agent: issue.preferred_agent || '',
         input_tokens: latest?.input_tokens || 0,
@@ -1974,7 +2098,6 @@ async function openDetailModal(run_id) {
   document.getElementById('detail-retry-group').style.display = 'none';
   document.getElementById('detail-dispatch-group').style.display = 'none';
   document.getElementById('detail-approve-btn').style.display = 'none';
-  document.getElementById('detail-comment-btn').style.display = 'none';
   document.getElementById('detail-reply-section').style.display = 'none';
   document.getElementById('detail-history-section').style.display = 'none';
   document.getElementById('detail-history-list').innerHTML = '';
@@ -1992,10 +2115,9 @@ async function openDetailModal(run_id) {
     document.getElementById('detail-meta').textContent = 'Linear issue';
     document.getElementById('detail-prompt').textContent = 'No local prompt yet.';
     document.getElementById('detail-prompt').classList.remove('empty');
-    document.getElementById('detail-output').textContent = 'This board mirrors the Linear issue directly. Edit state below or add a comment.';
+    document.getElementById('detail-output').textContent = 'This board mirrors the Linear issue directly. Edit state below or choose a model to run it.';
     document.getElementById('detail-output').classList.remove('empty');
     document.getElementById('detail-reply-section').style.display = '';
-    document.getElementById('detail-comment-btn').style.display = '';
     const isTodoVirtual = (boardItem?._boardStatus || '') === 'todo';
     document.getElementById('detail-dispatch-group').style.display = isTodoVirtual ? 'inline-flex' : 'none';
     if (_linearConfigured) _loadLinearIssueIntoModal(issueId, boardItem);
@@ -2016,8 +2138,10 @@ async function openDetailModal(run_id) {
 
     const started = r.started_at ? new Date(r.started_at).toLocaleString() : '—';
     const dur = r.duration_s != null ? `${r.duration_s}s` : '—';
+    const modelLabel = _displayModelLabel(r) || _displayModelLabel(boardItem);
+    const modelMeta = modelLabel ? ` &nbsp;·&nbsp; Model: <span>${_esc(modelLabel)}</span>` : '';
     document.getElementById('detail-meta').innerHTML =
-      `Started: <span>${_esc(started)}</span> &nbsp;·&nbsp; Duration: <span>${_esc(dur)}</span> &nbsp;·&nbsp; ID: <span style="font-family:monospace;font-size:10px">${_esc(run_id)}</span>`;
+      `Started: <span>${_esc(started)}</span> &nbsp;·&nbsp; Duration: <span>${_esc(dur)}</span>${modelMeta} &nbsp;·&nbsp; ID: <span style="font-family:monospace;font-size:10px">${_esc(run_id)}</span>`;
 
     const prompt = (r.prompt || '').trim();
     const promptEl = document.getElementById('detail-prompt');
@@ -2025,11 +2149,11 @@ async function openDetailModal(run_id) {
     promptEl.classList.toggle('empty', !prompt);
 
     const output = (r.output || '').trim();
-    const outputEl = document.getElementById('detail-output');
-    outputEl.textContent = output || '(no output)';
-    outputEl.classList.toggle('empty', !output);
-
     const error = _normalizeErrorText(r.error);
+    const outputEl = document.getElementById('detail-output');
+    outputEl.textContent = output || error || '(no output)';
+    outputEl.classList.toggle('empty', !output && !error);
+
     if (error) {
       document.getElementById('detail-error').textContent = error;
       document.getElementById('detail-error-section').style.display = '';
@@ -2050,7 +2174,6 @@ async function openDetailModal(run_id) {
 
     const isReview = state === 'in_review';
     document.getElementById('detail-approve-btn').style.display = isReview ? '' : 'none';
-    document.getElementById('detail-comment-btn').style.display = r.linear_issue_id ? '' : 'none';
     document.getElementById('detail-reply-section').style.display = r.linear_issue_id ? '' : 'none';
     _detailLinearIssueId = r.linear_issue_id || null;
     if (isReview) {
@@ -2160,57 +2283,36 @@ async function approveRun() {
   const linearIssueId = boardItem?.linear_issue_id || _detailLinearIssueId;
   try {
     if (!linearIssueId) throw new Error('No linked Linear issue');
-    await fetch(`/api/linear/issues/${linearIssueId}`, {
+    const doneState = _detailDoneStateName();
+    const res = await fetch(`/api/linear/issues/${linearIssueId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ state_name: 'Done' }),
+      body: JSON.stringify({ state_name: doneState }),
     });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || 'approve failed');
     closeDetailModal();
     refreshJobBoard();
   } catch (err) { alert('Approve error: ' + err); }
 }
 
-async function _commentReplyToLinear(linearIssueId) {
-  const feedback = (document.getElementById('detail-reply-input')?.value || '').trim();
-  if (!feedback && !_replyAttachments.length) return false;
-  const res = await fetch(`/api/linear/issues/${linearIssueId}/comment`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      title: 'Human Feedback',
-      feedback,
-      attachments: _replyAttachments,
-    }),
-  });
-  const data = await res.json();
-  if (!data.ok) throw new Error(data.error || 'comment failed');
-  return true;
-}
-
-function _clearReplyComposer() {
-  _setDetailReplyValue('');
-  _clearReplyDraft();
-  _replyAttachments = [];
-  _renderAttachList('reply-attach-list', _replyAttachments);
-  _renderDetailReplyStatus(true);
-}
-
-async function commentToLinear() {
-  const linearIssueId = _detailLinearIssueId || _boardItemsByRunId[_detailRunId]?.linear_issue_id;
-  if (!linearIssueId) return;
-  try {
-    const sent = await _commentReplyToLinear(linearIssueId);
-    if (!sent) return;
-    _clearReplyComposer();
-    if (_linearConfigured) _loadLinearIssueIntoModal(linearIssueId, _boardItemsByRunId[_detailRunId] || null);
-  } catch (err) {
-    alert('Comment error: ' + err);
+function _detailDoneStateName() {
+  const candidates = ['Done', 'Completed', 'Complete', 'Closed'];
+  const states = Array.isArray(_detailLinearStates) ? _detailLinearStates : [];
+  for (const candidate of candidates) {
+    const match = states.find(s => String(s.name || '').trim().toLowerCase() === candidate.toLowerCase());
+    if (match?.name) return match.name;
   }
+  return 'Done';
 }
 
-// Close detail modal on backdrop click
+// NEVER close modals on outside click / Escape / socket events / timers.
+// Only 3 allowed close paths:
+//   1. Click ✕ Close button
+//   2. Change state from todo + click "Save to Linear"
+//   3. Click dispatch button → save to Linear + start In Progress
 document.getElementById('detail-modal').addEventListener('click', function(e) {
-  if (e.target === this) closeDetailModal();
+  if (e.target === this) e.stopPropagation();
 });
 
 // Close team dropdown on outside click
@@ -2309,7 +2411,7 @@ function setDetailIssueAgent(agent, { dispatch = false } = {}) {
   if (dispatch) {
     const boardItem = _boardItemsByRunId[_detailRunId] || null;
     const boardStatus = boardItem?._boardStatus || _linearStateToBoard(document.getElementById('linear-edit-state')?.value || '');
-    if (boardStatus === 'todo' && _detailLinearIssueId) {
+    if (!['done', 'cancelled', 'duplicate'].includes(boardStatus) && _detailLinearIssueId) {
       void dispatchFromDetail(_detailPreferredAgent);
     }
   }
@@ -2411,6 +2513,9 @@ async function saveLinearIssue() {
   if (!_detailLinearIssueId) return;
   const btn = document.getElementById('linear-save-btn');
   const status = document.getElementById('linear-edit-status');
+  const previousBoardState = _linearStateToBoard(_detailLinearInitial?.state || '');
+  const nextState = document.getElementById('linear-edit-state').value;
+  const shouldCloseAfterSave = previousBoardState === 'todo' && _linearStateToBoard(nextState) !== 'todo';
   if (btn) btn.disabled = true;
   if (status) status.textContent = 'Saving…';
   try {
@@ -2430,12 +2535,17 @@ async function saveLinearIssue() {
       _detailLinearInitial = {
         title: document.getElementById('linear-edit-title').value,
         description: document.getElementById('linear-edit-desc').value,
-        state: document.getElementById('linear-edit-state').value,
+        state: nextState,
         preferred_agent: _detailPreferredAgent,
       };
       if (status) { status.textContent = '✓ Saved'; status.style.color = 'var(--green)'; }
       setTimeout(() => { if (status) { status.textContent = ''; status.style.color = ''; } }, 2000);
-      refreshJobBoard();
+      if (shouldCloseAfterSave) {
+        closeDetailModal();
+        refreshJobBoard(true);
+      } else {
+        refreshJobBoard();
+      }
     } else {
       if (status) { status.textContent = 'Error: ' + (data.error || 'failed'); status.style.color = 'var(--red)'; }
     }
@@ -2457,6 +2567,7 @@ function _renderHistory(chain, currentRunId) {
   if (countEl) countEl.textContent = `(${prior.length})`;
   list.innerHTML = '';
   prior.forEach((r, i) => {
+    const isFinalAttempt = i === prior.length - 1;
     const attemptNum = r.attempt > 0 ? r.attempt : i + 1;
     const started = r.started_at ? new Date(r.started_at).toLocaleString() : '—';
     const dur = r.duration_s != null ? `${r.duration_s}s` : '';
@@ -2473,7 +2584,7 @@ function _renderHistory(chain, currentRunId) {
         b.classList.toggle('open');
         document.getElementById('${togId}').textContent=b.classList.contains('open')?'▲':'▼';
       ">
-        ${_stateBadgeHtml(r.status || 'unknown')}
+        ${_stateBadgeHtml(_historyBadgeState(r.status || 'unknown', isFinalAttempt))}
         <span>Attempt ${attemptNum}</span>
         <span style="font-size:10px;color:var(--text-dim)">${_esc(started)}${dur ? ' · ' + _esc(dur) : ''}</span>
         <span class="attempt-toggle" id="${togId}">▼</span>
@@ -2512,9 +2623,17 @@ async function cancelLinearIssue() {
   }
 }
 
-async function cancelLinearIssueById(issueId) {
+async function cancelLinearIssueById(issueId, runId = '') {
   if (!issueId) return;
   try {
+    if (runId) {
+      try {
+        await fetch(`/api/runs/${runId}`, { method: 'DELETE' });
+        delete _runProgress[runId];
+      } catch (err) {
+        console.error('Run cancel failed:', err);
+      }
+    }
     const res = await fetch(`/api/linear/issues/${issueId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -2591,7 +2710,8 @@ function toggleMic() {
 }
 
 function toggleMicFor(targetId, btnId, statusId) {
-  const source = (document.getElementById('stt-source') || {}).value || 'browser';
+  const source = _getSttSource();
+  const language = _getSttLanguage();
 
   if (source.startsWith('openai:')) {
     const model = source.split(':', 2)[1] || 'gpt-4o-mini-transcribe';
@@ -2604,7 +2724,7 @@ function toggleMicFor(targetId, btnId, statusId) {
       try { _micRecognition.stop(); } catch (_) {}
       _micRecognition = null;
     }
-    _startOpenAiMic(targetId, btnId, statusId, model);
+    _startOpenAiMic(targetId, btnId, statusId, model, language);
     return;
   }
 
@@ -2614,18 +2734,21 @@ function toggleMicFor(targetId, btnId, statusId) {
     _stopMic();
     if (activeBtnId === btnId) return;
   }
-  _startMic(targetId, btnId, statusId);
+  _startMic(targetId, btnId, statusId, language);
 }
 
-function onSttSourceChange() {
-  const el = document.getElementById('stt-source');
-  const btn = document.getElementById('mic-btn');
-  if (el && btn) {
+function onSttSourceChange(sourceEl = null) {
+  const el = sourceEl || document.querySelector('.stt-source');
+  if (el) {
+    window.localStorage.setItem('agenticos.stt.source', el.value);
+    _syncSttSourceControls(el.value);
+  }
+  for (const btn of [document.getElementById('mic-btn'), document.getElementById('mic-btn-desc')]) {
+    if (!btn || !el) continue;
     btn.title = el.value.startsWith('openai:')
-      ? 'Voice input (OpenAI ' + (el.options[el.selectedIndex]?.textContent || '') + ')'
+      ? 'Voice input (' + (el.options[el.selectedIndex]?.textContent || 'OpenAI STT') + ')'
       : 'Voice input (Web Speech API)';
   }
-  if (el) window.localStorage.setItem('agenticos.stt.source', el.value);
   // If recording, switch mode by stopping current capture
   if (_micRecognition) {
     try { _micRecognition.stop(); } catch (_) {}
@@ -2636,6 +2759,10 @@ function onSttSourceChange() {
   } else {
     _stopMic();
   }
+}
+
+function onSttLanguageChange() {
+  // no-op — language is always auto
 }
 
 function _downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
@@ -2702,7 +2829,7 @@ function _cleanupOpenAiMic({ keepTranscript = false } = {}) {
   }
 }
 
-function _startOpenAiMic(targetId, btnId, statusId, model = 'gpt-4o-mini-transcribe') {
+function _startOpenAiMic(targetId, btnId, statusId, model = 'gpt-4o-mini-transcribe', language = 'auto') {
   if (!navigator.mediaDevices?.getUserMedia) {
     const stEl = document.getElementById(statusId);
     if (stEl) { stEl.style.display = ''; stEl.textContent = 'Microphone capture not supported'; }
@@ -2734,7 +2861,7 @@ function _startOpenAiMic(targetId, btnId, statusId, model = 'gpt-4o-mini-transcr
 
     _openAiMediaRecorder.onstop = () => {
       stream.getTracks().forEach(t => t.stop());
-      _uploadOpenAiAudio(targetId, btnId, statusId, model);
+      _uploadOpenAiAudio(targetId, btnId, statusId, model, language);
     };
 
     _openAiMediaRecorder.start();
@@ -2757,7 +2884,7 @@ function _stopOpenAiMic() {
   _openAiMediaRecorder = null;
 }
 
-function _uploadOpenAiAudio(targetId, btnId, statusId, model) {
+function _uploadOpenAiAudio(targetId, btnId, statusId, model, language = 'auto') {
   if (_openAiAudioChunks.length === 0) {
     _cleanupOpenAiMic();
     return;
@@ -2772,6 +2899,7 @@ function _uploadOpenAiAudio(targetId, btnId, statusId, model) {
   const formData = new FormData();
   formData.append('audio', blob, 'recording.webm');
   formData.append('model', model);
+  if (language && language !== 'auto') formData.append('language', language);
 
   fetch('/api/stt', {
     method: 'POST',
@@ -2804,7 +2932,7 @@ function _uploadOpenAiAudio(targetId, btnId, statusId, model) {
   });
 }
 
-function _startMic(targetId, btnId, statusId) {
+function _startMic(targetId, btnId, statusId, language = 'auto') {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   const stEl = document.getElementById(statusId);
   if (!SR) {
@@ -2817,7 +2945,7 @@ function _startMic(targetId, btnId, statusId) {
   const rec = new SR();
   rec.continuous = true;
   rec.interimResults = true;
-  rec.lang = 'zh-CN';
+  rec.lang = language === 'auto' ? (navigator.language || 'zh-CN') : language;
   _micRecognition = rec;
   const currentValue = (document.getElementById(targetId) || {}).value || '';
   _micTranscriptBase = currentValue;
@@ -3127,7 +3255,13 @@ terminalEl.addEventListener('drop', async (e) => {
     <div class="new-issue-field">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
         <div class="new-issue-label" style="margin-bottom:0">Description (optional)</div>
-        <button id="mic-btn-desc" onclick="toggleMicFor('new-issue-desc','mic-btn-desc','mic-status-desc')" title="Voice input" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:13px;padding:1px 7px;border-radius:4px;cursor:pointer;font-family:inherit">🎙</button>
+        <div style="display:flex;align-items:center;gap:4px">
+          <select id="stt-source-desc" class="stt-source" onchange="onSttSourceChange(this)" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:11px;padding:1px 4px;border-radius:3px;cursor:pointer;font-family:inherit">
+            <option value="browser">Browser STT</option>
+            <option value="openai:gpt-4o-mini-transcribe">OpenAI 4o mini</option>
+          </select>
+          <button id="mic-btn-desc" onclick="toggleMicFor('new-issue-desc','mic-btn-desc','mic-status-desc')" title="Voice input" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:13px;padding:1px 7px;border-radius:4px;cursor:pointer;font-family:inherit">🎙</button>
+        </div>
       </div>
       <textarea class="new-issue-input" id="new-issue-desc" placeholder="Details…"></textarea>
       <div class="attach-bar">
@@ -3177,22 +3311,32 @@ function openNewIssueModal(event) {
   }, 50);
 }
 
+let _newIssueClosing = false;
+
 function closeNewIssueModal() {
-  if (typeof _stopMic === 'function') _stopMic();
-  if (_newIssueFocusTimer) {
-    clearTimeout(_newIssueFocusTimer);
-    _newIssueFocusTimer = null;
+  if (_newIssueClosing) return;
+  _newIssueClosing = true;
+  try {
+    if (typeof _stopMic === 'function') _stopMic();
+    if (_newIssueFocusTimer) {
+      clearTimeout(_newIssueFocusTimer);
+      _newIssueFocusTimer = null;
+    }
+    _newTaskAttachments = [];
+    document.getElementById('new-issue-modal').classList.remove('open');
+    if (document.activeElement && document.activeElement.closest('#new-issue-modal')) {
+      document.activeElement.blur();
+    }
+    _flushPendingBoardRefresh();
+  } finally {
+    _newIssueClosing = false;
   }
-  _newTaskAttachments = [];
-  document.getElementById('new-issue-modal').classList.remove('open');
-  if (document.activeElement && document.activeElement.closest('#new-issue-modal')) {
-    document.activeElement.blur();
-  }
-  _flushPendingBoardRefresh();
 }
 
+// NEVER close modals on outside click / Escape / socket events / timers.
+// Same policy as detail-modal (see above).
 document.getElementById('new-issue-modal').addEventListener('click', (e) => {
-  if (e.target === document.getElementById('new-issue-modal')) closeNewIssueModal();
+  if (e.target === document.getElementById('new-issue-modal')) e.stopPropagation();
 });
 
 let _newIssueTitleComposing = false;
@@ -3205,7 +3349,11 @@ _newIssueTitleEl?.addEventListener('keydown', (e) => {
     e.preventDefault();
     submitNewIssue();
   }
-  if (e.key === 'Escape' && !e.isComposing && !_newIssueTitleComposing) closeNewIssueModal();
+  // NEVER close modals on Escape. Only 3 allowed close paths:
+  //   1. Click ✕ Close button
+  //   2. Change state from todo + click "Save to Linear"
+  //   3. Click dispatch button → save to Linear + start In Progress
+  // Any other close = bug.
 });
 
 // Attachment state

@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import threading
 import time
 import uuid
@@ -28,6 +29,8 @@ logger = logging.getLogger(__name__)
 _HERE = Path(__file__).resolve().parent
 _PROTO = _HERE.parent.parent.parent
 STATE_DIR = _PROTO / "state"
+BOARD_UPLOADS_DIR = _PROTO / "runner" / "outputs" / "board_uploads"
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic"}
 
 
 def _load_workflow_config() -> dict:
@@ -93,15 +96,19 @@ def _linear_state_to_board(state: str | None) -> str:
 
 
 def _linear_poll_states(tracker: dict) -> list[str]:
+    """返回轮询用状态列表（仅 active 状态，排除 terminal 状态）。
+
+    Terminal 状态（Done/Canceled/Duplicate）不参与拉取，避免将大量已关闭
+    的历史 issue 拉入本地缓存和 dashboard。
+    """
     active = list(tracker.get("active_states", ["Todo", "In Progress", "In Review"]))
     if "Backlog" not in active:
         active.insert(0, "Backlog")
     if "In Review" not in active:
         active.append("In Review")
-    terminal = list(tracker.get("terminal_states", ["Done", "Canceled", "Duplicate"]))
     seen: set[str] = set()
     ordered: list[str] = []
-    for s in active + terminal:
+    for s in active:
         if s not in seen:
             seen.add(s)
             ordered.append(s)
@@ -175,8 +182,76 @@ def _resolve_linear_state_name(issue: dict | None, target_state_key: str) -> str
     return None
 
 
+def _ocr_image_text(path: Path) -> str:
+    try:
+        proc = subprocess.run(
+            ["tesseract", str(path), "stdout", "--psm", "6"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        text = (proc.stdout or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text[:1400]
+    except Exception:
+        return ""
+
+
+def _format_attachments_for_text(attachments: list[dict] | None) -> str:
+    lines = []
+    uploads_root = BOARD_UPLOADS_DIR.resolve()
+    for idx, attachment in enumerate(attachments or [], 1):
+        name = attachment.get("name") or attachment.get("filename") or f"attachment-{idx}"
+        filename = attachment.get("filename") or ""
+        url = attachment.get("url") or ""
+        local_path = ""
+        if filename:
+            candidate = (BOARD_UPLOADS_DIR / Path(filename).name).resolve()
+        elif attachment.get("path"):
+            candidate = Path(str(attachment["path"])).resolve()
+        else:
+            candidate = None
+        if candidate:
+            try:
+                candidate.relative_to(uploads_root)
+            except ValueError:
+                candidate = None
+            if candidate and candidate.exists():
+                if candidate.suffix.lower() in _IMAGE_SUFFIXES:
+                    ocr_text = _ocr_image_text(candidate)
+                    parts = [f"{idx}. {name}", "type: image"]
+                    if ocr_text:
+                        parts.append(f"ocr:\n{ocr_text}")
+                    else:
+                        parts.append("ocr: (no text recognized)")
+                    lines.append(" | ".join(parts))
+                    continue
+                local_path = str(candidate)
+
+        parts = [f"{idx}. {name}"]
+        if local_path:
+            parts.append(f"local path: {local_path}")
+        if url:
+            parts.append(f"url: {url}")
+        lines.append(" | ".join(parts))
+    if not lines:
+        return ""
+    return "[Attachments]\n" + "\n".join(lines)
+
+
+def _append_attachments_to_text(text: str, attachments: list[dict] | None) -> str:
+    attachment_text = _format_attachments_for_text(attachments)
+    base = (text or "").strip()
+    if not attachment_text:
+        return base
+    return f"{base}\n\n{attachment_text}" if base else attachment_text
+
+
 def _linear_comment_body(*, title: str, prompt: str = "", output: str = "",
-                         error: str = "", feedback: str = "") -> str:
+                         error: str = "", feedback: str = "",
+                         attachments: list[dict] | None = None) -> str:
     parts = [f"### {title}", ""]
     if prompt:
         parts.append(f"**Prompt:**\n{prompt}\n")
@@ -187,6 +262,9 @@ def _linear_comment_body(*, title: str, prompt: str = "", output: str = "",
         parts.append(f"**Error:**\n```\n{error}\n```\n")
     if feedback:
         parts.append(f"**Feedback:**\n{feedback}\n")
+    attachment_text = _format_attachments_for_text(attachments)
+    if attachment_text:
+        parts.append(f"**Attachments:**\n{attachment_text}\n")
     return "\n".join(parts).strip()
 
 
@@ -244,6 +322,16 @@ class LinearModule(AgenticModule):
         self._socketio = socketio
         if self._capability.get("type") != "linear":
             return []
+        # Pre-populate cache from local tracker before first poll so terminal-state
+        # issues (Canceled/Done/Duplicate) are immediately visible in the board & trash
+        try:
+            local = self.get_local_tracker()
+            for issue in local.fetch_issues():
+                self.issues_cache[issue["id"]] = issue
+            if self.issues_cache:
+                logger.info("Pre-populated issues_cache with %d issues from state/tasks.json", len(self.issues_cache))
+        except Exception:
+            pass
         return [threading.Thread(target=self._polling_loop, args=(socketio,), daemon=True)]
 
     def _polling_loop(self, socketio) -> None:
@@ -272,16 +360,32 @@ class LinearModule(AgenticModule):
                 in_progress_ids: set[str] = set()
                 for issue in issues:
                     iid = issue["id"]
-                    new_cache[iid] = _normalize_linear_issue(issue)
+                    normalized = _normalize_linear_issue(issue)
+                    local_state = self.issues_cache.get(iid, {}).get("state")
+                    if (
+                        _is_linear_in_progress(issue.get("state"))
+                        and _linear_state_to_board(local_state) == "review"
+                        and not self._issue_is_running(iid)
+                    ):
+                        normalized["state"] = "In Review"
+                    new_cache[iid] = normalized
                     if _is_linear_in_progress(issue.get("state")):
                         in_progress_ids.add(iid)
                 for iid in list(self.dispatched):
                     if iid not in in_progress_ids and not self._issue_is_running(iid):
                         self.dispatched.pop(iid, None)
+                # Keep terminal-state issues (Canceled/Done/Duplicate) for trash display
+                terminal_issues = {
+                    k: v for k, v in self.issues_cache.items()
+                    if v.get("state") in ("Canceled", "Done", "Duplicate")
+                }
                 self.issues_cache.clear()
                 self.issues_cache.update(new_cache)
+                # Preserve last N terminal issues so the recycle bin stays populated
+                terminal_list = sorted(terminal_issues.items(), key=lambda x: x[1].get("updated_at", ""))
+                self.issues_cache.update(dict(terminal_list[-100:]))
                 self._sync_cache_to_local()
-                socketio.emit("linear_issues_updated", {"count": len(new_cache)})
+                socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
             except Exception as e:
                 logger.error("Linear polling error: %s", e)
             time.sleep(max(1, interval_ms / 1000))
@@ -319,6 +423,19 @@ class LinearModule(AgenticModule):
                 daemon=True,
             ).start()
 
+    def _mark_issue_review(self, issue_id: str) -> None:
+        # Don't override terminal states (Canceled, Done, Duplicate)
+        current_state = (self.issues_cache.get(issue_id) or {}).get("state", "")
+        if _linear_state_key(current_state) in ("canceled", "cancelled", "done", "duplicate"):
+            return
+        cached = dict(self.issues_cache.get(issue_id) or {})
+        cached["state"] = "In Review"
+        self.issues_cache[issue_id] = cached
+        self.dispatched.pop(issue_id, None)
+        if self._socketio:
+            self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+        self.push_state(issue_id, "review")
+
     def _dispatch_issue(self, issue: dict, cfg: dict, socketio, previous_board_status: str | None = None) -> None:
         import subprocess
         from app import _running_jobs, _running_procs, _python_path, RUNNER, ROOT, _load_registry, _ai_command, _agent_model, _parse_agent_output, _extract_skill_name, _execute_deepseek_commands, _write_run_log, AI_RUN_TIMEOUT_S, _extract_real_errors, _registry_exec_env, _ds_dispatch
@@ -344,6 +461,7 @@ class LinearModule(AgenticModule):
                 "last_progress_at": time.monotonic(),
                 "linear_issue_id": issue_id,
                 "agent": "deepseek",
+                "model": _agent_model("deepseek", cfg),
             }
             self.push_state(issue_id, "running")
             socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": "_prompt"})
@@ -374,7 +492,7 @@ class LinearModule(AgenticModule):
                         model=pm or _agent_model("deepseek", cfg),
                         task_id=run_id,
                     )
-                    self.push_state(issue_id, "review")
+                    self._mark_issue_review(issue_id)
                     self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output))
                     socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": "_prompt"})
                 else:
@@ -390,14 +508,14 @@ class LinearModule(AgenticModule):
                         linear_issue_id=issue_id,
                         agent="deepseek",
                     )
-                    self._restore_issue_state(issue_id, previous_board_status or "todo", cfg)
+                    self._mark_issue_review(issue_id)
                     self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=err))
-                    socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": "_prompt"})
+                    socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": "_prompt"})
                 socketio.emit("run_logged", {"skill": "_prompt", "run_id": run_id})
             except Exception as e:
                 _running_jobs.pop(run_id, None)
                 _running_procs.pop(run_id, None)
-                self._restore_issue_state(issue_id, previous_board_status or "todo", cfg)
+                self._mark_issue_review(issue_id)
                 _write_run_log(
                     "_prompt",
                     "error",
@@ -410,7 +528,7 @@ class LinearModule(AgenticModule):
                     agent="deepseek",
                 )
                 self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
-                socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": "_prompt"})
+                socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": "_prompt"})
                 socketio.emit("run_logged", {"skill": "_prompt", "run_id": run_id})
             return
 
@@ -490,7 +608,7 @@ class LinearModule(AgenticModule):
                     model=pm or _agent_model(backend, cfg),
                     task_id=run_id,
                 )
-                self.push_state(issue_id, final_state)
+                self._mark_issue_review(issue_id)
                 self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output, error=error_s))
                 socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": selected_skill})
                 socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
@@ -502,21 +620,21 @@ class LinearModule(AgenticModule):
                 _running_jobs.pop(run_id, None)
                 msg = f"Timed out after {AI_RUN_TIMEOUT_S}s"
                 _write_run_log(selected_skill, "timeout", started_at, dur, prompt=prompt, error=msg, run_id=run_id, linear_issue_id=issue_id, agent=backend)
-                self._restore_issue_state(issue_id, previous_board_status or "todo", cfg)
+                self._mark_issue_review(issue_id)
                 self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Timeout", prompt=prompt, error=msg))
-                socketio.emit("run_state_change", {"run_id": run_id, "state": "timeout", "skill": selected_skill})
+                socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": selected_skill})
                 socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
             except Exception as e:
                 _running_procs.pop(run_id, None)
                 _running_jobs.pop(run_id, None)
                 _write_run_log(selected_skill, "error", started_at, 0.0, prompt=prompt, error=str(e), run_id=run_id, linear_issue_id=issue_id, agent=backend)
-                self._restore_issue_state(issue_id, previous_board_status or "todo", cfg)
+                self._mark_issue_review(issue_id)
                 self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
-                socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": selected_skill})
+                socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": selected_skill})
                 socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
         except Exception as e:
             logger.exception("_dispatch_issue failed for %s: %s", issue_id, e)
-            self._restore_issue_state(issue_id, previous_board_status or "todo", cfg)
+            self._mark_issue_review(issue_id)
             try:
                 socketio.emit("run_state_change", {"run_id": str(uuid.uuid4()), "state": "error", "skill": "unknown"})
             except Exception:
@@ -566,6 +684,8 @@ class LinearModule(AgenticModule):
             if not title:
                 return jsonify({"error": "title required"}), 400
             desc = (data.get("description") or "").strip()
+            attachments = data.get("attachments") or []
+            desc = _append_attachments_to_text(desc, attachments)
             pa = (data.get("agent") or "").strip().lower()
             pa = pa if pa in {"claude", "codex", "deepseek"} else None
             desc = _compose_issue_description(desc, pa)
@@ -634,6 +754,8 @@ class LinearModule(AgenticModule):
                 )
                 if issue:
                     self.issues_cache[issue_id] = issue
+                    if self._socketio:
+                        self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
                     return jsonify({"ok": True, "issue": issue})
                 return jsonify({"error": "not found"}), 404
             ak = _linear_api_key_from_cfg(tc)
@@ -684,6 +806,8 @@ class LinearModule(AgenticModule):
                 if issue:
                     n = _normalize_linear_issue(issue)
                     self.issues_cache[issue_id] = n
+                    if self._socketio:
+                        self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
                     return jsonify({"ok": True, "issue": n})
                 return jsonify({"error": "update failed"}), 500
             except Exception as e:
@@ -691,10 +815,16 @@ class LinearModule(AgenticModule):
 
         @app.route("/api/linear/issues/<issue_id>/comment", methods=["POST"])
         def _issues_comment(issue_id: str):
-            text = (request.get_json(silent=True) or {}).get("text", "").strip()
-            if not text:
-                return jsonify({"error": "text required"}), 400
-            body = _linear_comment_body(title="AgenticOS Feedback", feedback=text)
+            data = request.get_json(silent=True) or {}
+            text = (data.get("feedback") or data.get("text") or "").strip()
+            attachments = data.get("attachments") or []
+            if not text and not attachments:
+                return jsonify({"error": "feedback or attachment required"}), 400
+            body = _linear_comment_body(
+                title=data.get("title") or "AgenticOS Feedback",
+                feedback=text,
+                attachments=attachments,
+            )
             if self._capability.get("type") == "local":
                 return jsonify({"ok": self.get_local_tracker().post_comment(issue_id, body)})
             cfg = _load_workflow_config()
@@ -800,28 +930,29 @@ class LinearModule(AgenticModule):
             logger.debug("localize_issue failed for %s: %s", issue.get("id", "?"), e)
 
     def _sync_cache_to_local(self) -> None:
-        """Sync all cached issues to local tracker."""
-        for issue in self.issues_cache.values():
-            try:
-                local = self.get_local_tracker()
-                existing = local.fetch_issue(issue["id"])
+        """Sync all cached issues to local tracker, keyed by Linear UUID.
+
+        使用 Linear issue 的原始 UUID 作为 tasks.json 的存储 key，确保同一
+        issue 每次轮询都能被正确识别为已有条目，避免每轮重复创建。
+        """
+        if not self.issues_cache:
+            return
+        try:
+            local = self.get_local_tracker()
+            tasks = local._load_raw()
+            modified = False
+            for issue in self.issues_cache.values():
+                iid = issue["id"]
+                existing = tasks.get(iid)
                 if existing:
-                    local.update_issue(
-                        issue["id"],
-                        title=issue.get("title"),
-                        description=issue.get("description"),
-                        state_name=issue.get("state"),
-                        preferred_agent=issue.get("preferred_agent"),
-                    )
+                    existing.update(issue)
                 else:
-                    local.create_issue(
-                        title=issue.get("title", ""),
-                        description=issue.get("description", ""),
-                        state_name=issue.get("state", "Todo"),
-                        preferred_agent=issue.get("preferred_agent"),
-                    )
-            except Exception as e:
-                logger.debug("sync_cache_to_local failed for %s: %s", issue.get("id", "?"), e)
+                    tasks[iid] = dict(issue)
+                modified = True
+            if modified:
+                local._save_raw(tasks)
+        except Exception as e:
+            logger.debug("_sync_cache_to_local failed: %s", e)
 
     def _linear_sync_patch(self, issue_id: str, data: dict, cfg: dict, preferred_agent: str | None) -> None:
         """Async Linear sync for state/metadata updates (runs in daemon thread)."""
@@ -850,12 +981,23 @@ class LinearModule(AgenticModule):
             synced = cl.fetch_issue(issue_id)
             if synced:
                 self.issues_cache[issue_id] = _normalize_linear_issue(synced)
+                if self._socketio:
+                    self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
         except Exception as e:
             logger.error("Async Linear sync failed for %s: %s", issue_id, e)
 
     # ── Bridge methods (called from app.py) ──────────────────────────────
 
     def push_state(self, issue_id: str, board_status: str) -> None:
+        state_name = _BOARD_TO_LINEAR.get(board_status)
+        if state_name:
+            cached = dict(self.issues_cache.get(issue_id) or {})
+            cached["state"] = state_name
+            self.issues_cache[issue_id] = cached
+            if board_status == "review":
+                self.dispatched.pop(issue_id, None)
+            if self._socketio:
+                self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
         threading.Thread(target=self._push_sync, args=(issue_id, board_status), daemon=True).start()
 
     def _push_sync(self, issue_id: str, board_status: str) -> None:
@@ -875,7 +1017,13 @@ class LinearModule(AgenticModule):
             ak = _linear_api_key_from_cfg(tc)
             if not ak or not tc.get("project_slug"):
                 return
-            LinearClient(ak, tc["project_slug"]).update_issue_state(issue_id, ls)
+            cl = LinearClient(ak, tc["project_slug"])
+            cl.update_issue_state(issue_id, ls)
+            synced = cl.fetch_issue(issue_id)
+            if synced:
+                self.issues_cache[issue_id] = _normalize_linear_issue(synced)
+                if self._socketio:
+                    self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
         except Exception as e:
             logger.error("Linear state push failed: %s", e)
 

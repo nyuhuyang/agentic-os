@@ -108,13 +108,16 @@ def filter_registry_for_agent(agent: str | None) -> dict[str, dict]:
 def ensure_claude_registry() -> dict[str, dict]:
     _ensure_paths()
     registry = filter_registry_for_agent("claude")
-    _CLAUDE_REGISTRY_JSON.parent.mkdir(parents=True, exist_ok=True)
-    _CLAUDE_REGISTRY_JSON.write_text(
-        json.dumps({"generated_at": datetime.now(timezone.utc).isoformat(),
-                     "skill_count": len(registry), "skills": registry},
-                    indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8")
-    _CLAUDE_REGISTRY_MD.write_text(registry_md_text(registry), encoding="utf-8")
+    try:
+        _CLAUDE_REGISTRY_JSON.parent.mkdir(parents=True, exist_ok=True)
+        _CLAUDE_REGISTRY_JSON.write_text(
+            json.dumps({"generated_at": datetime.now(timezone.utc).isoformat(),
+                         "skill_count": len(registry), "skills": registry},
+                        indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8")
+        _CLAUDE_REGISTRY_MD.write_text(registry_md_text(registry), encoding="utf-8")
+    except (PermissionError, OSError):
+        pass  # cache write is best-effort
     return registry
 
 

@@ -198,7 +198,12 @@ class PTYModule(AgenticModule):
                 dest = BOARD_UPLOADS_DIR / f"{dest.stem}_{counter}{dest.suffix}"
                 counter += 1
             f.save(str(dest))
-            return jsonify({"name": original_name, "filename": dest.name, "url": f"/api/board/uploads/{dest.name}"})
+            return jsonify({
+                "name": original_name,
+                "filename": dest.name,
+                "url": f"/api/board/uploads/{dest.name}",
+                "path": str(dest.resolve()),
+            })
 
         @app.route("/api/board/uploads/<path:filename>")
         def api_board_uploads_serve(filename):

@@ -22,6 +22,11 @@ DEEPSEEK_API_BASE = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
 MAX_TOOL_ITERATIONS = 20
 TOOL_TIMEOUT = 60
+DEFAULT_SYSTEM_PROMPT = (
+    "You are an agentic coding assistant with file and shell tools. "
+    "If the user prompt includes an [Attachments] block, treat any OCR text for image attachments as the image contents. "
+    "Do not try to inspect image files with tools; use the provided OCR text directly."
+)
 
 
 def _api_key() -> str:
@@ -338,11 +343,7 @@ class DeepSeekAgent:
                         func_args = json.loads(tc["function"]["arguments"])
                     except json.JSONDecodeError:
                         func_args = {}
-                    if stream_callback:
-                        stream_callback(f"\n[{func_name}]")
                     tool_result = _exec_tool(func_name, func_args, cwd=self.workspace)
-                    if stream_callback and len(tool_result) < 2000:
-                        stream_callback(f"\n{tool_result[:1000]}\n")
                     self._messages.append({
                         "role": "tool",
                         "tool_call_id": tc["id"],
@@ -375,6 +376,8 @@ def run_deepseek_agent(
     stream_callback: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     agent = DeepSeekAgent(model=model, workspace=workspace)
+    if system_prompt is None:
+        system_prompt = DEFAULT_SYSTEM_PROMPT
     return agent.run(prompt, system_prompt=system_prompt, stream_callback=stream_callback)
 
 

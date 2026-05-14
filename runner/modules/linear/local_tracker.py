@@ -230,6 +230,20 @@ class LocalTracker:
             if _state_key(t.get("state")) == "in progress"
         }
 
+    # ── Raw access for sync_cache_to_local ──────────────────────────────
+
+    def _load_raw(self) -> dict:
+        """Load the raw tasks dict directly (bypassing the class abstraction).
+
+        Used by LinearModule._sync_cache_to_local to write issues keyed by
+        their Linear UUID instead of a generated local-* id.
+        """
+        return _load_state(self._state_dir)
+
+    def _save_raw(self, tasks: dict) -> None:
+        """Atomically write the raw tasks dict."""
+        _save_state(self._state_dir, tasks)
+
     @property
     def is_available(self) -> bool:
         """Always available — no API key needed."""

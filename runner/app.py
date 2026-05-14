@@ -41,15 +41,28 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 CODEX_CONFIG = CODEX_HOME / "config.toml"
 
 # Load .env at proto root so $VAR references in WORKFLOW.md resolve without restarting
+def _dotenv_value(raw: str) -> str:
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
 _DOTENV = _PROTO / ".env"
 if _DOTENV.exists():
     for _line in _DOTENV.read_text().splitlines():
         _line = _line.strip()
         if _line and not _line.startswith("#") and "=" in _line:
             _k, _, _v = _line.partition("=")
-            os.environ.setdefault(_k.strip(), _v.strip())
+            _k = _k.strip()
+            if _k.startswith("export "):
+                _k = _k[7:].strip()
+            if _k:
+                os.environ.setdefault(_k, _dotenv_value(_v))
 
 ROOT = _PROTO
+BOARD_UPLOADS_DIR = _HERE / "outputs" / "board_uploads"
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic"}
 
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_PROTO))  # so "from runner.core.*" imports work
@@ -209,8 +222,12 @@ def _archive_stale_sent() -> None:
             f.write("\n".join(appended) + "\n")
 
 
-# Linear issue cache: issue_id -> normalized issue dict
-_linear_issues_cache: dict[str, dict] = {}
+# Linear issue cache — delegates to LinearModule.issues_cache (the real source of truth)
+def _linear_cache() -> dict[str, dict]:
+    """Return the LinearModule issue cache, or empty dict as fallback."""
+    linear_mod = _module_registry.get("linear")
+    return linear_mod.issues_cache if linear_mod else {}
+
 # Track which In Progress issues have been dispatched: issue_id -> run_id
 _linear_dispatched: dict[str, str] = {}
 _linear_dispatches_warmed = False
@@ -296,6 +313,81 @@ def _linear_comment_body(*, title: str, prompt: str = "", output: str = "", erro
     return "\n\n".join(s for s in sections if s).strip()
 
 
+def _is_image_attachment(name: str) -> bool:
+    return Path(name).suffix.lower() in _IMAGE_SUFFIXES
+
+
+def _ocr_image_text(path: Path) -> str:
+    try:
+        proc = subprocess.run(
+            ["tesseract", str(path), "stdout", "--psm", "6"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        text = (proc.stdout or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text[:1400]
+    except Exception:
+        return ""
+
+
+def _format_prompt_attachments(attachments: list[dict] | None) -> str:
+    lines = []
+    uploads_root = BOARD_UPLOADS_DIR.resolve()
+    for idx, attachment in enumerate(attachments or [], 1):
+        name = attachment.get("name") or attachment.get("filename") or f"attachment-{idx}"
+        filename = attachment.get("filename") or ""
+        url = attachment.get("url") or ""
+        local_path = ""
+        if filename:
+            candidate = (BOARD_UPLOADS_DIR / Path(filename).name).resolve()
+            try:
+                candidate.relative_to(uploads_root)
+            except ValueError:
+                candidate = None
+            if candidate and candidate.exists():
+                if _is_image_attachment(candidate.name):
+                    ocr_text = _ocr_image_text(candidate)
+                    parts = [f"{idx}. {name}", "type: image"]
+                    if ocr_text:
+                        parts.append(f"ocr:\n{ocr_text}")
+                    else:
+                        parts.append("ocr: (no text recognized)")
+                    lines.append(" | ".join(parts))
+                    continue
+                local_path = str(candidate)
+        elif attachment.get("path"):
+            candidate = Path(str(attachment["path"])).resolve()
+            try:
+                candidate.relative_to(uploads_root)
+            except ValueError:
+                candidate = None
+            if candidate and candidate.exists():
+                if _is_image_attachment(candidate.name):
+                    ocr_text = _ocr_image_text(candidate)
+                    parts = [f"{idx}. {name}", "type: image"]
+                    if ocr_text:
+                        parts.append(f"ocr:\n{ocr_text}")
+                    else:
+                        parts.append("ocr: (no text recognized)")
+                    lines.append(" | ".join(parts))
+                    continue
+                local_path = str(candidate)
+
+        parts = [f"{idx}. {name}"]
+        if local_path:
+            parts.append(f"local path: {local_path}")
+        if url:
+            parts.append(f"url: {url}")
+        lines.append(" | ".join(parts))
+    if not lines:
+        return ""
+    return "\n\n[Attachments]\n" + "\n".join(lines)
+
+
 def _issue_agent_comment_body(agent: str, previous_agent: str | None = None) -> str:
     if agent == "codex":
         label = "Codex"
@@ -360,7 +452,7 @@ def _preferred_task_agent(original: dict) -> str | None:
     """Return the preferred agent for a task, if one is set."""
     preferred_agent = (original.get("agent") or "").strip().lower() or None
     if original.get("linear_issue_id"):
-        issue = _linear_issues_cache.get(original["linear_issue_id"]) or {}
+        issue = _linear_cache().get(original["linear_issue_id"]) or {}
         preferred_agent = (issue.get("preferred_agent") or preferred_agent or "").strip().lower() or None
     if preferred_agent not in {"claude", "codex", "deepseek"}:
         return None
@@ -788,7 +880,7 @@ def index():
 
     # Linear issues are source of truth for stats — deduplicate by id, include dismissed
     seen_linear: dict[str, dict] = {}
-    for issue in _linear_issues_cache.values():
+    for issue in _linear_cache().values():
         seen_linear[issue["id"]] = issue
     linear_for_stats = [
         {"started_at": i.get("created_at", ""), "skill": i.get("identifier", ""), "status": "success"}
@@ -988,7 +1080,7 @@ def run():
             run_id = str(uuid.uuid4())
             started_at = datetime.now(timezone.utc).isoformat()
             t0 = time.monotonic()
-            _running_jobs[run_id] = {"run_id": run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic()}
+            _running_jobs[run_id] = {"run_id": run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent)}
             socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill})
             try:
                 proc = subprocess.Popen(
@@ -1006,7 +1098,7 @@ def run():
                 stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
                 _running_jobs.pop(run_id, None)
                 _running_procs.pop(run_id, None)
-                final_state = "success" if ok else "failed"
+                final_state = "review"
                 _write_run_log(skill, final_state, started_at, dur,
                                prompt=prompt, output=output, error=stderr_s, run_id=run_id)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": skill})
@@ -1041,7 +1133,7 @@ def run():
     run_id = str(uuid.uuid4())
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
-    _running_jobs[run_id] = {"run_id": run_id, "skill": skill_name, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic()}
+    _running_jobs[run_id] = {"run_id": run_id, "skill": skill_name, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent)}
     socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill_name})
     if agent == "deepseek" and _HAS_DEEPSEEK_AGENT:
         # DeepSeek agent with tools — direct API + tool loop
@@ -1055,7 +1147,7 @@ def run():
             error_s = agent_result.get("error", "")
             ok = agent_result.get("ok", False)
             _running_jobs.pop(run_id, None)
-            final_state = "success" if ok else "failed"
+            final_state = "review"
             _write_run_log(skill_name, final_state, started_at, dur,
                            prompt=prompt, output=output, error=error_s, run_id=run_id,
                            input_tokens=input_tokens, output_tokens=output_tokens, agent=agent,
@@ -1094,7 +1186,7 @@ def run():
                 output = stderr_s
             _running_jobs.pop(run_id, None)
             _running_procs.pop(run_id, None)
-            final_state = "success" if ok else "failed"
+            final_state = "review"
             _write_run_log(skill_name, final_state, started_at, dur,
                            prompt=prompt, output=output, error="" if ok else stderr_s, run_id=run_id,
                            input_tokens=input_tokens, output_tokens=output_tokens, agent=agent,
@@ -1164,7 +1256,7 @@ def stream():
         t0 = time.monotonic()
         output_buf: list[str] = []
 
-        _running_jobs[run_id] = {"run_id": run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic()}
+        _running_jobs[run_id] = {"run_id": run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent)}
         socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill})
         yield _sse({"type": "start", "run_id": run_id})
 
@@ -1204,7 +1296,7 @@ def stream():
             ok = proc.returncode == 0
             _running_jobs.pop(run_id, None)
             _running_procs.pop(run_id, None)
-            final_state = "success" if ok else "failed"
+            final_state = "review"
             _write_run_log(skill, final_state, started_at, dur,
                            prompt=prompt, output="".join(output_buf), run_id=run_id)
             socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": skill})
@@ -1236,7 +1328,7 @@ def api_runs():
         archived = [r for r in runs if r.get("status") == "archived"]
         # Add dismissed Linear virtual cards to trash
         for issue_id in list(_linear_dismissed):
-            issue = _linear_issues_cache.get(issue_id)
+            issue = _linear_cache().get(issue_id)
             if issue:
                 archived.append({
                     "run_id": f"linear-{issue_id}",
@@ -1376,10 +1468,13 @@ def api_run_cancel(run_id: str):
     _running_procs.pop(run_id, None)
     started_at = job.get("started_at", datetime.now(timezone.utc).isoformat())
     skill = job.get("skill", "unknown")
+    linear_issue_id = job.get("linear_issue_id")
     dur = time.monotonic() - (time.monotonic() - 0)  # best effort
     _write_run_log(skill, "cancelled", started_at, 0.0,
                    prompt=job.get("prompt", ""), error="Cancelled by user", run_id=run_id,
-                   linear_issue_id=job.get("linear_issue_id"))
+                   linear_issue_id=linear_issue_id)
+    if linear_issue_id:
+        _push_linear_state_async(linear_issue_id, "review")
     socketio.emit("run_state_change", {"run_id": run_id, "state": "cancelled", "skill": skill})
     return jsonify({"ok": True, "run_id": run_id})
 
@@ -1417,10 +1512,7 @@ def api_run_retry(run_id: str):
     reply = (req_data.get("reply") or "").strip()
     attachments = req_data.get("attachments") or []
     prev_output = (original.get("output") or "").strip()
-    attach_note = ""
-    if attachments:
-        names = ", ".join(a.get("name", a.get("filename", "")) for a in attachments)
-        attach_note = f"\n\n[Attachments]: {names}"
+    attach_note = _format_prompt_attachments(attachments)
     if reply and prev_output:
         prompt = (
             f"Original task:\n{original_prompt}\n\n"
@@ -1468,6 +1560,7 @@ def api_run_retry(run_id: str):
         "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(),
         "linear_issue_id": linear_issue_id,
         "agent": agent,
+        "model": _agent_model(agent, cfg),
     }
     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "running", "skill": skill})
 
@@ -1483,7 +1576,7 @@ def api_run_retry(run_id: str):
                     parsed_model = agent_result.get("model")
                     error_s = agent_result.get("error", "")
                     _running_jobs.pop(new_run_id, None)
-                    final_state = "review" if linear_issue_id else ("success" if agent_result.get("ok") else "failed")
+                    final_state = "review"
                     _write_run_log(skill, final_state, started_at, dur,
                                    prompt=prompt, output=output, error=error_s,
                                    run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
@@ -1503,8 +1596,9 @@ def api_run_retry(run_id: str):
                                    linear_issue_id=linear_issue_id, agent=agent,
                                    model=_agent_model(agent, cfg), task_id=task_id)
                     if linear_issue_id:
+                        _push_linear_state_async(linear_issue_id, "review")
                         _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry Error", prompt=prompt, error=str(e)))
-                    socketio.emit("run_state_change", {"run_id": new_run_id, "state": "error", "skill": skill})
+                    socketio.emit("run_state_change", {"run_id": new_run_id, "state": "review", "skill": skill})
             else:
                 # Claude / Codex — subprocess dispatch
                 try:
@@ -1531,7 +1625,7 @@ def api_run_retry(run_id: str):
                         output = error_s or stderr_s
                     _running_jobs.pop(new_run_id, None)
                     _running_procs.pop(new_run_id, None)
-                    final_state = "review" if linear_issue_id else ("success" if ok else "failed")
+                    final_state = "review"
                     _write_run_log(skill, final_state, started_at, dur,
                                    prompt=prompt, output=output, error=error_s,
                                    run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
@@ -1555,8 +1649,9 @@ def api_run_retry(run_id: str):
                                    linear_issue_id=linear_issue_id, agent=agent,
                                    model=_agent_model(agent, cfg), task_id=task_id)
                     if linear_issue_id:
+                        _push_linear_state_async(linear_issue_id, "review")
                         _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry Timeout", prompt=prompt, error=msg))
-                    socketio.emit("run_state_change", {"run_id": new_run_id, "state": "timeout", "skill": skill})
+                    socketio.emit("run_state_change", {"run_id": new_run_id, "state": "review", "skill": skill})
                 except Exception as e:
                     _running_procs.pop(new_run_id, None)
                     _running_jobs.pop(new_run_id, None)
@@ -1564,12 +1659,13 @@ def api_run_retry(run_id: str):
                                    run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
                                    linear_issue_id=linear_issue_id, agent=agent,
                                    model=_agent_model(agent, cfg), task_id=task_id)
-            if linear_issue_id:
-                _post_linear_comment(
-                    linear_issue_id,
-                    _linear_comment_body(title="AgenticOS Retry Error", prompt=prompt, error=str(e)),
-                )
-            socketio.emit("run_state_change", {"run_id": new_run_id, "state": "error", "skill": skill})
+                    if linear_issue_id:
+                        _push_linear_state_async(linear_issue_id, "review")
+                        _post_linear_comment(
+                            linear_issue_id,
+                            _linear_comment_body(title="AgenticOS Retry Error", prompt=prompt, error=str(e)),
+                        )
+                    socketio.emit("run_state_change", {"run_id": new_run_id, "state": "review", "skill": skill})
 
     threading.Thread(target=_do_retry, daemon=True).start()
     return jsonify({"ok": True, "run_id": new_run_id, "skill": skill, "attempt": prev_attempt + 1, "agent": agent})
@@ -1650,11 +1746,11 @@ def api_config_patch():
     if "linear_project_slug" in data:
         cfg.setdefault("tracker", {})["project_slug"] = data["linear_project_slug"]
         _linear_dispatched.clear()
-        _linear_issues_cache.clear()
+        _linear_cache().clear()
     if "linear_team_id" in data:
         cfg.setdefault("tracker", {})["team_id"] = data["linear_team_id"]
         _linear_dispatched.clear()
-        _linear_issues_cache.clear()
+        _linear_cache().clear()
     _save_workflow_config(cfg)
     # Notify connected clients (including Symphony) about config changes
     if "agent_backend" in data:
@@ -1836,6 +1932,11 @@ def _init_modules() -> None:
     _mod_reg.init_socketio(socketio)
     # Start background threads for available modules
     _mod_reg.init_background(app, socketio)
+
+
+@app.route("/favicon.ico")
+def favicon():
+    return "", 204
 
 
 def main() -> None:

@@ -273,7 +273,16 @@ class LinearClient:
         return self._state_cache.get(state_name)
 
     def update_issue_state(self, issue_id: str, state_name: str) -> bool:
-        state_id = self.resolve_state_id(state_name)
+        state_id = None
+        issue = self.fetch_issue(issue_id)
+        if issue:
+            for s in issue.get("team_states", []):
+                if s.get("name") == state_name:
+                    state_id = s.get("id")
+                    self._state_cache[state_name] = state_id
+                    break
+        if not state_id:
+            state_id = self.resolve_state_id(state_name)
         if not state_id:
             logger.error("Cannot resolve Linear state '%s'", state_name)
             return False
