@@ -131,7 +131,7 @@ mutation AgenticOSCommentCreate($issueId: String!, $body: String!) {
 """
 
 _ISSUE_AGENT_MARKER_RE = re.compile(
-    r"<!--\s*agent_backend:\s*(claude|codex|aider|deepseek)\s*-->\s*", re.IGNORECASE
+    r"<!--\s*agent_backend:\s*(claude|codex|aider|deepseek|deepseek-tui)\s*-->\s*", re.IGNORECASE
 )
 
 
@@ -153,7 +153,7 @@ def _strip_issue_metadata(description: str | None) -> str:
 
 def _compose_issue_description(description: str, preferred_agent: str | None) -> str:
     base = (description or "").strip()
-    if preferred_agent in {"claude", "codex", "deepseek"}:
+    if preferred_agent in {"claude", "codex", "deepseek", "deepseek-tui"}:
         marker = f"<!-- agent_backend: {preferred_agent} -->"
         return f"{base}\n\n{marker}" if base else marker
     return base
@@ -308,6 +308,11 @@ class LinearModule(AgenticModule):
         self.issues_cache: dict[str, dict] = {}
         self.dispatched: dict[str, str] = {}
         self.dispatches_warmed = False
+        # Multi-team support
+        self._issues_by_team: dict[str, dict[str, dict]] = {}  # team_id → {issue_id → issue}
+        self._teams_cache: list[dict] = []
+        self._teams_last_refreshed: float = 0
+        self._local_overrides: dict[str, dict] = {}
 
     def check_capabilities(self) -> dict:
         kind = _tracker_type()
@@ -334,6 +339,19 @@ class LinearModule(AgenticModule):
             pass
         return [threading.Thread(target=self._polling_loop, args=(socketio,), daemon=True)]
 
+    def _get_or_refresh_teams(self, client) -> list[dict]:
+        """Return cached teams list, refreshing from Linear API every 30 min."""
+        now = time.time()
+        if now - self._teams_last_refreshed > 1800:
+            try:
+                teams = client.fetch_teams()
+                self._teams_cache = teams
+                self._teams_last_refreshed = now
+                logger.info("Refreshed teams list: %s", [t.get("key") for t in teams])
+            except Exception as e:
+                logger.debug("Failed to refresh teams: %s", e)
+        return self._teams_cache
+
     def _polling_loop(self, socketio) -> None:
         while True:
             try:
@@ -352,38 +370,67 @@ class LinearModule(AgenticModule):
                 from linear_client import LinearClient
                 client = LinearClient(api_key, tracker.get("project_slug", ""))
                 states = _linear_poll_states(tracker)
-                issues = client.fetch_issues(states, team_id=tracker.get("team_id", "") or None)
+
+                # Resolve list of teams to poll
+                teams = self._get_or_refresh_teams(client)
+                configured_team_id = tracker.get("team_id", "") or None
+                if configured_team_id:
+                    team_ids_to_poll = [configured_team_id]
+                else:
+                    team_ids_to_poll = [t["id"] for t in teams]
+
+                new_cache: dict[str, dict] = {}
+                new_by_team: dict[str, dict[str, dict]] = {}
+                all_in_progress_ids: set[str] = set()
+
+                for tid in team_ids_to_poll:
+                    team_issues = client.fetch_issues(states, team_id=tid)
+                    team_issue_dict: dict[str, dict] = {}
+                    for issue in team_issues:
+                        iid = issue["id"]
+                        normalized = _normalize_linear_issue(issue)
+                        normalized = self._apply_local_override(iid, normalized)
+                        local_state = self.issues_cache.get(iid, {}).get("state")
+                        if (
+                            _is_linear_in_progress(issue.get("state"))
+                            and _linear_state_to_board(local_state) == "review"
+                            and not self._issue_is_running(iid)
+                        ):
+                            normalized["state"] = "In Review"
+                        team_issue_dict[iid] = normalized
+                        new_cache[iid] = normalized
+                        if _is_linear_in_progress(issue.get("state")):
+                            all_in_progress_ids.add(iid)
+                    new_by_team[tid] = team_issue_dict
+
                 if not self.dispatches_warmed:
                     self._warm_dispatches()
                     self.dispatches_warmed = True
-                new_cache: dict[str, dict] = {}
-                in_progress_ids: set[str] = set()
-                for issue in issues:
-                    iid = issue["id"]
-                    normalized = _normalize_linear_issue(issue)
-                    local_state = self.issues_cache.get(iid, {}).get("state")
-                    if (
-                        _is_linear_in_progress(issue.get("state"))
-                        and _linear_state_to_board(local_state) == "review"
-                        and not self._issue_is_running(iid)
-                    ):
-                        normalized["state"] = "In Review"
-                    new_cache[iid] = normalized
-                    if _is_linear_in_progress(issue.get("state")):
-                        in_progress_ids.add(iid)
+
                 for iid in list(self.dispatched):
-                    if iid not in in_progress_ids and not self._issue_is_running(iid):
+                    if iid not in all_in_progress_ids and not self._issue_is_running(iid):
                         self.dispatched.pop(iid, None)
+
                 # Keep terminal-state issues (Canceled/Done/Duplicate) for trash display
                 terminal_issues = {
                     k: v for k, v in self.issues_cache.items()
                     if v.get("state") in ("Canceled", "Done", "Duplicate")
                 }
+
                 self.issues_cache.clear()
                 self.issues_cache.update(new_cache)
+                self._issues_by_team.clear()
+                self._issues_by_team.update(new_by_team)
+
                 # Preserve last N terminal issues so the recycle bin stays populated
                 terminal_list = sorted(terminal_issues.items(), key=lambda x: x[1].get("updated_at", ""))
                 self.issues_cache.update(dict(terminal_list[-100:]))
+                # Also add terminal issues back into _issues_by_team so team-filtered
+                # requests (e.g. /api/linear/issues?team_id=xxx) still see them
+                for iid, issue in terminal_list[-100:]:
+                    tid = issue.get("team_id") or ""
+                    if tid:
+                        self._issues_by_team.setdefault(tid, {})[iid] = issue
                 self._sync_cache_to_local()
                 socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
             except Exception as e:
@@ -403,6 +450,47 @@ class LinearModule(AgenticModule):
             return any(job.get("linear_issue_id") == issue_id and job.get("state") == "running" for job in _running_jobs.values())
         except Exception:
             return False
+
+    def _remember_local_override(self, issue_id: str, data: dict, preferred_agent: str | None = None,
+                                 ttl_s: float = 60.0) -> None:
+        """Keep local-first updates visible while Linear catches up."""
+        if not issue_id:
+            return
+        patch = dict((self._local_overrides.get(issue_id) or {}).get("patch") or {})
+        if data.get("state_name"):
+            patch["state"] = data["state_name"]
+        if data.get("title") is not None:
+            patch["title"] = data["title"]
+        if data.get("description") is not None:
+            patch["description"] = data["description"]
+        if preferred_agent is not None:
+            patch["preferred_agent"] = preferred_agent
+        if not patch:
+            return
+        self._local_overrides[issue_id] = {"patch": patch, "expires_at": time.monotonic() + ttl_s}
+
+    def _apply_local_override(self, issue_id: str, issue: dict | None) -> dict:
+        if not issue:
+            return issue or {}
+        override = self._local_overrides.get(issue_id)
+        if not override:
+            return issue
+        if time.monotonic() > override.get("expires_at", 0):
+            self._local_overrides.pop(issue_id, None)
+            return issue
+        patched = dict(issue)
+        patched.update(override.get("patch") or {})
+        return patched
+
+    def _clear_local_override_if_synced(self, issue_id: str, issue: dict | None) -> None:
+        override = self._local_overrides.get(issue_id)
+        if not override or not issue:
+            return
+        patch = override.get("patch") or {}
+        for key, expected in patch.items():
+            if expected is not None and issue.get(key) != expected:
+                return
+        self._local_overrides.pop(issue_id, None)
 
     def _restore_issue_state(self, issue_id: str, board_status: str, cfg: dict) -> None:
         state_name = _BOARD_TO_LINEAR.get(board_status)
@@ -438,7 +526,7 @@ class LinearModule(AgenticModule):
 
     def _dispatch_issue(self, issue: dict, cfg: dict, socketio, previous_board_status: str | None = None) -> None:
         import subprocess
-        from app import _running_jobs, _running_procs, _python_path, RUNNER, ROOT, _load_registry, _ai_command, _agent_model, _parse_agent_output, _extract_skill_name, _execute_deepseek_commands, _write_run_log, AI_RUN_TIMEOUT_S, _extract_real_errors, _registry_exec_env, _ds_dispatch
+        from app import _running_jobs, _running_procs, _python_path, RUNNER, ROOT, _load_registry, _ai_command, _agent_model, _parse_agent_output, _extract_skill_name, _write_run_log, AI_RUN_TIMEOUT_S, _extract_real_errors, _registry_exec_env, _run_deepseek_agent
         issue_id = issue["id"]
         if issue_id in self.dispatched:
             return
@@ -465,14 +553,16 @@ class LinearModule(AgenticModule):
             }
             self.push_state(issue_id, "running")
             socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": "_prompt"})
+            if _run_deepseek_agent is None:
+                raise RuntimeError("_run_deepseek_agent not available (httpx missing?)")
             try:
-                result = _ds_dispatch(prompt, run_id)
+                result = _run_deepseek_agent(prompt, workspace=str(ROOT))
                 dur = time.monotonic() - t0
                 _running_jobs.pop(run_id, None)
                 _running_procs.pop(run_id, None)
                 if result.get("ok"):
                     output = result.get("output", "")
-                    output = _execute_deepseek_commands(output)
+
                     it = result.get("input_tokens")
                     ot = result.get("output_tokens")
                     pm = result.get("model")
@@ -663,6 +753,7 @@ class LinearModule(AgenticModule):
 
         @app.route("/api/linear/issues")
         def _issues_get():
+            team_id = (request.args.get("team_id") or "").strip() or None
             if self._capability.get("type") == "linear":
                 # Return cache immediately; avoid blocking on Linear API
                 if not self.issues_cache:
@@ -672,10 +763,28 @@ class LinearModule(AgenticModule):
                             self.issues_cache[issue["id"]] = issue
                     except Exception:
                         pass
-                return jsonify(list(self.issues_cache.values()))
+                if team_id and team_id in self._issues_by_team:
+                    return jsonify([
+                        self._apply_local_override(iid, issue)
+                        for iid, issue in self._issues_by_team[team_id].items()
+                    ])
+                # Fallback: filter issues_cache by team_id field if team specified
+                if team_id:
+                    return jsonify([
+                        self._apply_local_override(v.get("id", ""), v)
+                        for v in self.issues_cache.values()
+                        if v.get("team_id") == team_id
+                    ])
+                return jsonify([
+                    self._apply_local_override(v.get("id", ""), v)
+                    for v in self.issues_cache.values()
+                ])
             t = self.get_local_tracker()
             cfg = _load_workflow_config()
-            return jsonify(t.fetch_issues(_linear_poll_states(cfg.get("tracker", {}))))
+            return jsonify(t.fetch_issues(
+                _linear_poll_states(cfg.get("tracker", {})),
+                team_id=team_id,
+            ))
 
         @app.route("/api/linear/issues", methods=["POST"])
         def _issues_post():
@@ -687,7 +796,7 @@ class LinearModule(AgenticModule):
             attachments = data.get("attachments") or []
             desc = _append_attachments_to_text(desc, attachments)
             pa = (data.get("agent") or "").strip().lower()
-            pa = pa if pa in {"claude", "codex", "deepseek"} else None
+            pa = pa if pa in {"claude", "codex", "deepseek", "deepseek-tui"} else None
             desc = _compose_issue_description(desc, pa)
             if self._capability.get("type") == "local":
                 t = self.get_local_tracker()
@@ -732,17 +841,55 @@ class LinearModule(AgenticModule):
             try:
                 from linear_client import LinearClient
                 issue = LinearClient(ak, tc.get("project_slug", "")).fetch_issue(issue_id)
-                return jsonify(_normalize_linear_issue(issue)) if issue else (jsonify({"error": "not found"}), 404)
+                if not issue:
+                    return jsonify({"error": "not found"}), 404
+                normalized = _normalize_linear_issue(issue)
+                self._clear_local_override_if_synced(issue_id, normalized)
+                return jsonify(self._apply_local_override(issue_id, normalized))
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
+        @app.route("/api/linear/issues/local/<issue_id>", methods=["PATCH", "POST"])
+        def _issues_local_patch(issue_id: str):
+            """Write-only local state update, no Linear API call."""
+            data = request.get_json(silent=True) or {}
+            local = self.get_local_tracker()
+            preferred_agent = (data.get("preferred_agent") or "").strip().lower() or None
+            if preferred_agent not in {"claude", "codex", "deepseek", "deepseek-tui"}:
+                preferred_agent = None
+            self._remember_local_override(issue_id, data, preferred_agent)
+            local.update_issue(
+                issue_id,
+                title=data.get("title"),
+                description=data.get("description"),
+                state_name=data.get("state_name"),
+                preferred_agent=preferred_agent,
+            )
+            if issue_id in self.issues_cache:
+                cached = dict(self.issues_cache[issue_id])
+                if data.get("state_name"):
+                    cached["state"] = data["state_name"]
+                if data.get("title") is not None:
+                    cached["title"] = data["title"]
+                if data.get("description") is not None:
+                    cached["description"] = data["description"]
+                if preferred_agent is not None:
+                    cached["preferred_agent"] = preferred_agent
+                self.issues_cache[issue_id] = cached
+                tid = cached.get("team_id") or ""
+                if tid and issue_id in self._issues_by_team.get(tid, {}):
+                    self._issues_by_team[tid][issue_id] = cached
+            if self._socketio:
+                self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+            return jsonify({"ok": True})
 
-        @app.route("/api/linear/issues/<issue_id>", methods=["PATCH"])
+
+        @app.route("/api/linear/issues/<issue_id>", methods=["PATCH", "POST"])
         def _issues_patch(issue_id: str):
             data = request.get_json(silent=True) or {}
             cfg = _load_workflow_config()
             tc = cfg.get("tracker", {})
             preferred_agent = (data.get("preferred_agent") or "").strip().lower() or None
-            if preferred_agent not in {"claude", "codex", "deepseek"}:
+            if preferred_agent not in {"claude", "codex", "deepseek", "deepseek-tui"}:
                 preferred_agent = None
             if self._capability.get("type") == "local":
                 issue = self.get_local_tracker().update_issue(
@@ -761,6 +908,7 @@ class LinearModule(AgenticModule):
             ak = _linear_api_key_from_cfg(tc)
             if not ak:
                 return jsonify({"error": "not configured"}), 400
+            self._remember_local_override(issue_id, data, preferred_agent)
 
             # ── Local-first: update local + dispatch immediately ──────────
             if data.get("state_name") and _is_linear_in_progress(data["state_name"]):
@@ -776,6 +924,9 @@ class LinearModule(AgenticModule):
                 if preferred_agent is not None:
                     cached["preferred_agent"] = preferred_agent
                 self.issues_cache[issue_id] = cached
+                tid = cached.get("team_id") or ""
+                if tid and issue_id in self._issues_by_team.get(tid, {}):
+                    self._issues_by_team[tid][issue_id] = cached
                 if not self._issue_is_running(issue_id):
                     self.dispatched.pop(issue_id, None)
                     threading.Thread(target=self._dispatch_issue, args=(cached, cfg, self._socketio, previous_board_status), daemon=True).start()
@@ -805,6 +956,8 @@ class LinearModule(AgenticModule):
                 issue = cl.fetch_issue(issue_id)
                 if issue:
                     n = _normalize_linear_issue(issue)
+                    self._clear_local_override_if_synced(issue_id, n)
+                    n = self._apply_local_override(issue_id, n)
                     self.issues_cache[issue_id] = n
                     if self._socketio:
                         self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
@@ -909,6 +1062,9 @@ class LinearModule(AgenticModule):
                     "state": n.get("state", "Todo"),
                     "url": issue.get("url", ""),
                     "preferred_agent": n.get("preferred_agent"),
+                    "team_id": issue.get("team_id", ""),
+                    "team_key": issue.get("team_key", ""),
+                    "team_name": issue.get("team_name", ""),
                     "created_at": issue.get("created_at", ""),
                     "updated_at": issue.get("updated_at", ""),
                 }
@@ -980,7 +1136,13 @@ class LinearModule(AgenticModule):
             # Refresh cache with Linear's authoritative version
             synced = cl.fetch_issue(issue_id)
             if synced:
-                self.issues_cache[issue_id] = _normalize_linear_issue(synced)
+                normalized = _normalize_linear_issue(synced)
+                self._clear_local_override_if_synced(issue_id, normalized)
+                normalized = self._apply_local_override(issue_id, normalized)
+                self.issues_cache[issue_id] = normalized
+                tid = normalized.get("team_id") or ""
+                if tid and issue_id in self._issues_by_team.get(tid, {}):
+                    self._issues_by_team[tid][issue_id] = normalized
                 if self._socketio:
                     self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
         except Exception as e:

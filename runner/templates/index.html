@@ -171,6 +171,7 @@
   .job-card-footer { font-size: 11px; color: var(--text-dim); display: flex; align-items: center; justify-content: space-between; }
   .job-card-dur { font-size: 10px; color: var(--text-dim); display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 
+  .agent-hidden { display: none !important; }
   .job-btn { background: transparent; border: 1px solid var(--border); color: var(--text-dim); font-size: 10px; padding: 2px 7px; border-radius: 3px; cursor: pointer; font-family: inherit; letter-spacing: .5px; transition: all .15s; margin-top: 8px; display: inline-block; }
   .job-btn:hover { border-color: var(--accent-dim); color: var(--text); }
   .job-btn.retry { color: var(--accent); border-color: var(--accent-dim); }
@@ -181,9 +182,12 @@
   .job-btn.retry-codex:hover { background: rgba(111,181,212,.1); }
   .job-btn.retry-deepseek { color: #7ec8a0; border-color: #3a6a52; }
   .job-btn.retry-deepseek:hover { background: rgba(126,200,160,.1); }
+  .job-btn.retry-deepseek-tui { color: #2e8b57; border-color: #1a5c38; }
+  .job-btn.retry-deepseek-tui:hover { background: rgba(46,139,87,.1); }
   .job-btn.retry-claude.selected { background: rgba(232,114,58,.10); border-color: var(--accent); }
   .job-btn.retry-codex.selected { background: rgba(111,181,212,.10); border-color: #6fb5d4; }
   .job-btn.retry-deepseek.selected { background: rgba(126,200,160,.10); border-color: #7ec8a0; }
+  .job-btn.retry-deepseek-tui.selected { background: rgba(46,139,87,.10); border-color: #2e8b57; }
   .job-btn-group { display: inline-flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
   .job-card-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
   .model-badge {
@@ -219,6 +223,7 @@
   .agent-badge.claude { color: #e8a87c; border-color: rgba(232,168,124,.4); background: rgba(232,168,124,.1); }
   .agent-badge.codex  { color: #6fb5d4; border-color: rgba(111,181,212,.4); background: rgba(111,181,212,.1); }
   .agent-badge.deepseek { color: #7ec8a0; border-color: rgba(126,200,160,.4); background: rgba(126,200,160,.1); }
+  .agent-badge.deepseek-tui { color: #2e8b57; border-color: rgba(46,139,87,.4); background: rgba(46,139,87,.1); }
   .agent-badge.none   { color: var(--text-dim); border-color: var(--border); background: rgba(255,255,255,0.04); }
   .agent-badge:hover { opacity: .75; }
   .agent-badge.locked { cursor: default; opacity: .45; }
@@ -234,6 +239,9 @@
   .todo-run-btn.deepseek { color: #7ec8a0; border-color: #3a6a52; }
   .todo-run-btn.deepseek:hover { background: rgba(126,200,160,.12); border-color: #7ec8a0; }
   .todo-run-btn.deepseek.selected { background: rgba(126,200,160,.10); border-color: #7ec8a0; }
+  .todo-run-btn.deepseek-tui { color: #2e8b57; border-color: #1a5c38; }
+  .todo-run-btn.deepseek-tui:hover { background: rgba(46,139,87,.12); border-color: #2e8b57; }
+  .todo-run-btn.deepseek-tui.selected { background: rgba(46,139,87,.10); border-color: #2e8b57; }
 
 
   /* Trash panel */
@@ -300,10 +308,10 @@
   .cancel-btn:hover { background: rgba(229,57,53,.15); opacity: 1; }
   .job-card-dismiss.cancel-issue {
     position: absolute;
-    top: 6px;
-    right: 7px;
-    width: auto;
-    height: 18px;
+    top: 10px;
+    right: 10px;
+    width: 28px;
+    height: 28px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -311,9 +319,9 @@
     border-radius: 50%;
     background: transparent;
     color: var(--text-dim);
-    font-size: 10px;
+    font-size: 15px;
     line-height: 1;
-    padding: 0 6px;
+    padding: 0;
     letter-spacing: .6px;
     text-transform: none !important;
     opacity: 0;
@@ -624,6 +632,7 @@
           <button class="agent-btn active" id="agent-claude" onclick="setAgent('claude')">Claude</button>
           <button class="agent-btn" id="agent-codex" onclick="setAgent('codex')">Codex</button>
           <button class="agent-btn" id="agent-deepseek" onclick="setAgent('deepseek')">DeepSeek</button>
+          <button class="agent-btn agent-hidden" id="agent-deepseek-tui" onclick="setAgent('deepseek-tui')">DS TUI</button>
           <button class="agent-btn" id="ds-refresh" onclick="refreshDeepSeek()" style="display:none; font-size:10px; letter-spacing:.3px; opacity:.7;">↻ Refresh</button>
         </div>
         <span style="font-size:11px;color:var(--text-dim)">Active agent for skill cards &amp; terminal injection</span>
@@ -694,7 +703,16 @@
         <input class="linear-edit-input" id="linear-edit-title" type="text" placeholder="Issue title">
       </div>
       <div class="linear-edit-field">
-        <div class="linear-edit-label">Description</div>
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div class="linear-edit-label" style="margin-bottom:0">Description</div>
+          <div style="display:none" id="desc-stt-group">
+            <select id="stt-source-desc" class="stt-source" onchange="onSttSourceChangeDesc(this)" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:11px;padding:1px 4px;border-radius:3px;cursor:pointer;font-family:inherit">
+              <option value="browser">Browser STT</option>
+              <option value="openai:gpt-4o-mini-transcribe">OpenAI 4o mini</option>
+            </select>
+            <button id="mic-btn-desc" onclick="toggleMicDesc()" title="Voice input" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:14px;padding:2px 8px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
+          </div>
+        </div>
         <textarea class="linear-edit-input" id="linear-edit-desc" rows="4" placeholder="Issue description"></textarea>
       </div>
       <div class="linear-edit-field">
@@ -1010,7 +1028,7 @@ async function updateWindows(agent) {
   try {
     const res = await fetch('/api/windows/all');
     const all = await res.json();
-    ['claude', 'codex', 'deepseek'].forEach(ag => {
+    ['claude', 'codex', 'deepseek', 'deepseek-tui'].forEach(ag => {
       const row = document.getElementById('windows-row-' + ag);
       if (row && all[ag]) _updateOneRow(row, all[ag]);
     });
@@ -1079,10 +1097,10 @@ async function _initBackends() {
 }
 
 let _trackerType = 'none';
-let _availableBackends = ['claude', 'codex', 'deepseek'];
+let _availableBackends = ['claude', 'codex', 'deepseek', 'deepseek-tui'];
 
 function _updateAgentVisibility() {
-  for (const agent of ['claude', 'codex', 'deepseek']) {
+  for (const agent of ['claude', 'codex', 'deepseek', 'deepseek-tui']) {
     const visible = _availableBackends.includes(agent);
     const toggle = document.getElementById('agent-' + agent);
     const newToggle = document.getElementById('new-issue-agent-' + agent);
@@ -1149,7 +1167,7 @@ function _getSttSource() {
 }
 
 function _getSttLanguage() {
-  return 'auto';
+  return 'zh-CN';
 }
 
 function _syncSttSourceControls(value) {
@@ -1318,10 +1336,14 @@ function _buildCol(col, items) {
 }
 
 let _colLimit = 15;
+let _boardItems = [];
 let _boardItemsByRunId = {};
 let _trashOpen = false;
 let _cancelledItems = [];
 let _pendingBoardRefresh = false;
+let _optimisticBoardHoldUntil = 0;
+let _heldBoardRefreshTimer = null;
+let _optimisticLinearIssuePatches = {};
 let _detailLinearInitial = null;
 let _detailLinearUpdatedAt = '';
 
@@ -1412,21 +1434,23 @@ function _readBoardDragPayload(e) {
 
 async function _moveLinearIssueToColumn(issueId, stateName) {
   if (!issueId || !stateName) return;
-  try {
-    const res = await fetch(`/api/linear/issues/${issueId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ state_name: stateName }),
-    });
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || 'move failed');
-    if (_detailLinearIssueId === issueId && _isModalOpen('detail-modal')) {
-      _loadLinearIssueIntoModal(issueId, _boardItemsByRunId[`linear-${issueId}`] || null);
-    }
-    refreshJobBoard();
-  } catch (err) {
-    console.error('Linear issue move failed:', err);
+  _holdBoardRefresh();
+  _optimisticPatchLinearIssue(issueId, { state_name: stateName });
+  if (_detailLinearIssueId === issueId && _isModalOpen('detail-modal')) {
+    const stateEl = document.getElementById('linear-edit-state');
+    if (stateEl) stateEl.value = stateName;
+    document.getElementById('detail-state-badge').innerHTML = _stateBadgeHtml(_linearStateToBoard(stateName));
   }
+  fetch(`/api/linear/issues/local/${issueId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state_name: stateName }),
+  }).catch(() => {});
+  fetch(`/api/linear/issues/${issueId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state_name: stateName }),
+  }).catch(err => console.error('Linear issue move failed:', err));
 }
 
 function _saveNewIssueDraft() {
@@ -1540,6 +1564,7 @@ function _restoreLinearDraft(issue) {
   if (raw) {
     try { draft = { ...fallback, ...JSON.parse(raw) }; } catch (_) {}
   }
+  if (!String(draft.title || '').trim() && fallback.title) draft.title = fallback.title;
   document.getElementById('linear-edit-title').value = draft.title;
   document.getElementById('linear-edit-desc').value = draft.description;
   setDetailIssueAgent(draft.preferred_agent || 'claude');
@@ -1603,8 +1628,28 @@ function _shouldDeferBoardRefresh() {
 
 function _flushPendingBoardRefresh() {
   if (!_pendingBoardRefresh || _shouldDeferBoardRefresh()) return;
+  if (Date.now() < _optimisticBoardHoldUntil) return;
   _pendingBoardRefresh = false;
   refreshJobBoard(true);
+}
+
+function _holdBoardRefresh(ms = 2500) {
+  _optimisticBoardHoldUntil = Math.max(_optimisticBoardHoldUntil, Date.now() + ms);
+}
+
+function _requestBoardRefresh(force = false) {
+  const wait = _optimisticBoardHoldUntil - Date.now();
+  if (wait > 0) {
+    _pendingBoardRefresh = true;
+    if (!_heldBoardRefreshTimer) {
+      _heldBoardRefreshTimer = setTimeout(() => {
+        _heldBoardRefreshTimer = null;
+        _flushPendingBoardRefresh();
+      }, wait + 50);
+    }
+    return;
+  }
+  refreshJobBoard(force);
 }
 
 function _shortId(run_id) {
@@ -1703,8 +1748,7 @@ function _modelBadgeHtml(modelLabel, running = false, onClick = '') {
 
 function _normalizeAgentName(agent) {
   const value = (agent || '').trim().toLowerCase();
-  if (value === 'aider') return 'deepseek';
-  if (['claude', 'codex', 'deepseek'].includes(value)) return value;
+  if (['claude', 'codex', 'deepseek', 'deepseek-tui'].includes(value)) return value;
   return '';
 }
 
@@ -1712,6 +1756,7 @@ function _agentLabel(agent) {
   if (agent === 'claude') return 'CLAUDE';
   if (agent === 'codex') return 'CODEX';
   if (agent === 'deepseek') return 'DEEPSEEK';
+  if (agent === 'deepseek-tui') return 'DS TUI';
   return '·';
 }
 
@@ -1723,6 +1768,7 @@ function _buildColCard(run) {
   const card = document.createElement('div');
   card.className = 'job-card';
   card.dataset.runId = run.run_id || '';
+  if (run.linear_issue_id) card.dataset.linearIssueId = run.linear_issue_id;
   if (run._is_linear_issue) {
     card.draggable = true;
     card.addEventListener('dragstart', (e) => {
@@ -1778,15 +1824,22 @@ function _buildColCard(run) {
     ? 'Agent locked while in progress'
     : (runAgent
       ? `Actual run agent: ${paLabel}. Click to change preferred agent.`
-      : 'Click to toggle agent');
+      : state === 'todo' && badgeAgent
+        ? `Start with ${paLabel}`
+        : 'Click to toggle agent');
+  const agentBadgeClick = agentLocked
+    ? ''
+    : (state === 'todo' && badgeAgent
+      ? `onclick="event.stopPropagation();triggerLinearIssueWithAgent('${_esc(run.linear_issue_id)}','${_esc(badgeAgent)}')"`
+      : `onclick="event.stopPropagation();setIssueAgent('${_esc(run.linear_issue_id)}','${_esc(preferredAgent || badgeAgent)}')"`);
   const showRunCancel = isRunning;
   const agentBadge = run._is_linear_issue
-    ? `<span class="agent-badge ${_esc(paClass)}${agentLocked ? ' locked' : ''}" title="${_esc(badgeTitle)}" ${agentLocked ? '' : `onclick="event.stopPropagation();setIssueAgent('${_esc(run.linear_issue_id)}','${_esc(preferredAgent || badgeAgent)}')"`}>${_esc(paLabel)}</span>`
+    ? `<span class="agent-badge ${_esc(paClass)}${agentLocked ? ' locked' : ''}" title="${_esc(badgeTitle)}" ${agentBadgeClick}>${_esc(paLabel)}</span>`
     : '';
-  const hasAssignedAgent = ['claude','codex','deepseek'].includes(preferredAgent);
+  const hasAssignedAgent = ['claude','codex','deepseek','deepseek-tui'].includes(preferredAgent);
   const todoAgentToggle = run._is_linear_issue && state === 'todo' && hasAssignedAgent
     ? `<div class="todo-agent-toggle" aria-label="Assign agent">
-         <button type="button" class="todo-run-btn start" title="Move to In Progress" onclick="event.stopPropagation();startLinearIssue('${_esc(run.linear_issue_id)}')">▶ Start</button>
+         <button type="button" class="todo-run-btn ${_esc(preferredAgent)} selected" title="Start with ${_esc(_agentLabel(preferredAgent))}" onclick="event.stopPropagation();triggerLinearIssueWithAgent('${_esc(run.linear_issue_id)}','${_esc(preferredAgent)}')">▶ ${_esc(_agentLabel(preferredAgent))}</button>
        </div>`
     : '';
   const issueLabel = run.skill || run.identifier || '?';
@@ -1815,7 +1868,11 @@ function _buildColCard(run) {
     dismissBtn.title = 'Cancel task';
     dismissBtn.setAttribute('aria-label', 'Cancel task');
     if (isRunning || isInProgress) dismissBtn.style.opacity = '1';
-    dismissBtn.onclick = (e) => { e.stopPropagation(); cancelLinearIssueById(run.linear_issue_id, run.latest_run_id || run.run_id || ''); };
+    dismissBtn.onclick = (e) => {
+      e.stopPropagation();
+      const id = run.linear_issue_id;
+      if (id) cancelLinearIssueById(id, run.latest_run_id || run.run_id || '');
+    };
     card.appendChild(dismissBtn);
   }
   const runCancelBtn = card.querySelector('.cancel-btn');
@@ -1843,12 +1900,13 @@ function _buildColCard(run) {
     btnX.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, 'codex'); };
     group.appendChild(btnX);
 
-    const btnA = document.createElement('button');
-    btnA.className = `job-btn retry-deepseek${preferredAgent === 'deepseek' ? ' selected' : ''}`;
-    btnA.textContent = '↺ DeepSeek';
-    btnA.title = preferredAgent === 'deepseek' ? 'Preferred agent for retry' : 'Retry with DeepSeek';
-    btnA.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, 'deepseek'); };
-    group.appendChild(btnA);
+    const btnD = document.createElement('button');
+    btnD.className = `job-btn retry-deepseek${preferredAgent === 'deepseek' ? ' selected' : ''}`;
+    btnD.textContent = '↺ DeepSeek';
+    btnD.title = preferredAgent === 'deepseek' ? 'Preferred agent for retry' : 'Retry with DeepSeek';
+    btnD.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, 'deepseek'); };
+    group.appendChild(btnD);
+
 
     card.appendChild(group);
   }
@@ -1872,8 +1930,7 @@ async function cancelRun(run_id) {
 
 async function setIssueAgent(issueId, currentAgent) {
   if (!issueId) return;
-  const base = currentAgent === 'aider' ? 'deepseek' : currentAgent;
-  const next = base === 'claude' ? 'codex' : base === 'codex' ? 'deepseek' : 'claude';
+  const next = currentAgent === 'claude' ? 'codex' : currentAgent === 'codex' ? 'deepseek' : currentAgent === 'deepseek' ? 'deepseek-tui' : 'claude';
   // Set agent and move to In Progress (server skips dispatch if already running)
   await fetch(`/api/linear/issues/${issueId}`, {
     method: 'PATCH',
@@ -1885,7 +1942,7 @@ async function setIssueAgent(issueId, currentAgent) {
 
 async function setLinearIssuePreferredAgent(issueId, next) {
   if (!issueId) return;
-  const agent = ['claude','codex','aider','deepseek'].includes(next) ? (next === 'aider' ? 'deepseek' : next) : 'claude';
+  const agent = ['claude','codex','deepseek','deepseek-tui'].includes(next) ? next : 'claude';
   try {
     await fetch(`/api/linear/issues/${issueId}`, {
       method: 'PATCH',
@@ -1914,7 +1971,7 @@ async function startLinearIssue(issueId) {
 
 async function triggerLinearIssueWithAgent(issueId, agent, { refresh = true } = {}) {
   if (!issueId) return;
-  const agentVal = ['codex', 'deepseek', 'aider'].includes(agent) ? (agent === 'aider' ? 'deepseek' : agent) : 'claude';
+  const agentVal = ['claude', 'codex', 'deepseek', 'deepseek-tui'].includes(agent) ? agent : 'claude';
   const titleEl = document.getElementById('linear-edit-title');
   const descEl = document.getElementById('linear-edit-desc');
   const body = { preferred_agent: agentVal, state_name: 'In Progress' };
@@ -1933,6 +1990,50 @@ async function triggerLinearIssueWithAgent(issueId, agent, { refresh = true } = 
   } catch (err) {
     console.error('triggerLinearIssueWithAgent failed:', err);
     throw err;
+  }
+}
+
+
+function onSttSourceChangeDesc(sel) {
+  _sttModeDesc = sel.value;
+  localStorage.setItem('sttModeDesc', sel.value);
+}
+let _sttModeDesc = localStorage.getItem('sttModeDesc') || 'browser';
+document.addEventListener('DOMContentLoaded', () => {
+  const sel = document.getElementById('stt-source-desc');
+  if (sel) sel.value = _sttModeDesc;
+});
+let _sttRecDesc = null;
+let _sttRunningDesc = false;
+function toggleMicDesc() {
+  const btn = document.getElementById('mic-btn-desc');
+  if (_sttRunningDesc) {
+    if (_sttRecDesc) { _sttRecDesc.stop(); _sttRecDesc = null; }
+    _sttRunningDesc = false;
+    btn.style.background = 'none';
+    btn.textContent = '🎙';
+    return;
+  }
+  if (_sttModeDesc === 'browser') {
+    if (!('webkitSpeechRecognition' in window)) { alert('Browser STT not supported'); return; }
+    const rec = new webkitSpeechRecognition();
+    rec.continuous = false; rec.interimResults = true; rec.lang = 'zh-CN';
+    _sttRecDesc = rec;
+    _sttRunningDesc = true;
+    btn.style.background = 'var(--accent)';
+    btn.textContent = '🔴';
+    rec.onresult = (e) => {
+      const text = Array.from(e.results).map(r => r[0].transcript).join('');
+      const el = document.getElementById('linear-edit-desc');
+      if (el) {
+        const start = el.selectionStart || el.value.length;
+        el.value = el.value.slice(0, start) + text + el.value.slice(el.selectionEnd || el.value.length);
+        el.selectionStart = el.selectionEnd = start + text.length;
+      }
+    };
+    rec.onerror = () => { btn.style.background = 'none'; btn.textContent = '🎙'; _sttRunningDesc = false; };
+    rec.onend = () => { btn.style.background = 'none'; btn.textContent = '🎙'; _sttRunningDesc = false; };
+    rec.start();
   }
 }
 
@@ -1956,7 +2057,8 @@ async function refreshJobBoard(force = false) {
     return;
   }
   try {
-    const fetches = [fetch('/api/runs?state=running'), fetch('/api/runs?limit=80'), fetch('/api/linear/issues')];
+    const teamParam = _currentTeamId ? `?team_id=${encodeURIComponent(_currentTeamId)}` : '';
+    const fetches = [fetch('/api/runs?state=running'), fetch('/api/runs?limit=80'), fetch(`/api/linear/issues${teamParam}`)];
     const results = await Promise.all(fetches);
     const running = await results[0].json();
     const recent = await results[1].json();
@@ -1972,10 +2074,13 @@ async function refreshJobBoard(force = false) {
     });
 
     let all = linearIssues.map(issue => {
+      const optimistic = _readOptimisticLinearIssuePatch(issue.id);
+      if (optimistic) issue = _applyOptimisticLinearIssuePatch(issue, optimistic);
       const latest = latestRunByIssue.get(issue.id);
       const isActivelyRunning = running.some(r => r.linear_issue_id === issue.id);
       let boardStatus = isActivelyRunning ? 'in_progress' : _linearStateToBoard(issue.state);
       if (!isActivelyRunning && latest?.status === 'review' && ['In Progress', 'In Review'].includes(issue.state)) boardStatus = 'in_review';
+      if (optimistic?.board_status) boardStatus = optimistic.board_status;
       if (boardStatus !== 'in_review') {
         _clearReplyDraftForIssue(issue.id);
       }
@@ -2004,35 +2109,106 @@ async function refreshJobBoard(force = false) {
       };
     });
 
-    _boardItemsByRunId = {};
-    all.forEach(item => { _boardItemsByRunId[item.run_id] = item; });
-
-    const byCol = {};
-    ALL_COLS.forEach(c => { byCol[c.key] = []; });
-    all.forEach(r => {
-      const state = r._boardStatus || r.status || r.state || 'unknown';
-      const col = ALL_COLS.find(c => c.states.includes(state));
-      if (col) byCol[col.key].push(r);
-    });
-    _cancelledItems = all.filter(r => (r._boardStatus || r.status || r.state || 'unknown') === 'cancelled');
-
-    const container = document.getElementById('job-board-cols');
-    if (!container) return;
-
-    const runningCount = byCol['in_progress']?.length || 0;
-    document.getElementById('job-board-meta').textContent =
-      runningCount > 0 ? `${runningCount} in progress · ${all.length} total tasks` : `${all.length} total tasks`;
-
-    const frag = document.createDocumentFragment();
-    JOB_COLS.forEach(col => frag.appendChild(_buildCol(col, byCol[col.key] || [])));
-    container.replaceChildren(frag);
-
-    const cancelledChip = document.getElementById('cancelled-count-chip');
-    const trashCount = document.getElementById('trash-count');
-    if (trashCount) trashCount.textContent = String(_cancelledItems.length);
-    if (cancelledChip) cancelledChip.classList.toggle('open', _trashOpen);
-    if (_trashOpen) renderTrash(_cancelledItems);
+    _renderBoardItems(all);
   } catch (_) {}
+}
+
+function _renderBoardItems(all) {
+  _boardItems = Array.isArray(all) ? all : [];
+  _boardItemsByRunId = {};
+  _boardItems.forEach(item => {
+    if (item.run_id) _boardItemsByRunId[item.run_id] = item;
+    if (item.linear_issue_id) _boardItemsByRunId[`linear-${item.linear_issue_id}`] = item;
+  });
+
+  const byCol = {};
+  ALL_COLS.forEach(c => { byCol[c.key] = []; });
+  _boardItems.forEach(r => {
+    const state = r._boardStatus || r.status || r.state || 'unknown';
+    const col = ALL_COLS.find(c => c.states.includes(state));
+    if (col) byCol[col.key].push(r);
+  });
+  _cancelledItems = _boardItems.filter(r => (r._boardStatus || r.status || r.state || 'unknown') === 'cancelled');
+
+  const container = document.getElementById('job-board-cols');
+  if (!container) return;
+
+  const runningCount = byCol['in_progress']?.length || 0;
+  document.getElementById('job-board-meta').textContent =
+    runningCount > 0 ? `${runningCount} in progress · ${_boardItems.length} total tasks` : `${_boardItems.length} total tasks`;
+
+  const frag = document.createDocumentFragment();
+  JOB_COLS.forEach(col => frag.appendChild(_buildCol(col, byCol[col.key] || [])));
+  container.replaceChildren(frag);
+
+  const cancelledChip = document.getElementById('cancelled-count-chip');
+  const trashCount = document.getElementById('trash-count');
+  if (trashCount) trashCount.textContent = String(_cancelledItems.length);
+  if (cancelledChip) cancelledChip.classList.toggle('open', _trashOpen);
+  if (_trashOpen) renderTrash(_cancelledItems);
+}
+
+function _optimisticPatchLinearIssue(issueId, patch = {}) {
+  if (!issueId) return;
+  _rememberOptimisticLinearIssuePatch(issueId, patch);
+  const boardStatus = patch.board_status || (patch.state_name ? _linearStateToBoard(patch.state_name) : '');
+  let changed = false;
+  const nextItems = _boardItems.map(item => {
+    if (item.linear_issue_id !== issueId) return item;
+    changed = true;
+    const next = { ...item };
+    if (boardStatus) {
+      next.status = boardStatus;
+      next._boardStatus = boardStatus;
+    }
+    if (patch.title !== undefined) {
+      next.title = patch.title;
+      next.prompt = patch.title;
+    }
+    if (patch.preferred_agent !== undefined) next.preferred_agent = patch.preferred_agent;
+    return next;
+  });
+  if (changed) _renderBoardItems(nextItems);
+}
+
+function _rememberOptimisticLinearIssuePatch(issueId, patch = {}, ttlMs = 15000) {
+  if (!issueId) return;
+  const current = _optimisticLinearIssuePatches[issueId]?.patch || {};
+  const nextPatch = { ...current, ...patch };
+  const boardStatus = nextPatch.board_status || (nextPatch.state_name ? _linearStateToBoard(nextPatch.state_name) : '');
+  if (boardStatus) nextPatch.board_status = boardStatus;
+  _optimisticLinearIssuePatches[issueId] = {
+    patch: nextPatch,
+    expires_at: Date.now() + ttlMs,
+  };
+}
+
+function _readOptimisticLinearIssuePatch(issueId) {
+  const entry = _optimisticLinearIssuePatches[issueId];
+  if (!entry) return null;
+  if (Date.now() > entry.expires_at) {
+    delete _optimisticLinearIssuePatches[issueId];
+    return null;
+  }
+  return entry.patch;
+}
+
+function _applyOptimisticLinearIssuePatch(issue, patch = {}) {
+  const next = { ...issue };
+  if (patch.state_name) next.state = patch.state_name;
+  if (patch.title !== undefined) next.title = patch.title;
+  if (patch.description !== undefined) next.description = patch.description;
+  if (patch.preferred_agent !== undefined) next.preferred_agent = patch.preferred_agent;
+  return next;
+}
+
+function _removeLinearIssueCards(issueId, runId = '') {
+  if (runId) {
+    document.querySelectorAll(`[data-run-id="${CSS.escape(runId)}"]`).forEach(el => el.remove());
+  }
+  if (issueId) {
+    document.querySelectorAll(`[data-linear-issue-id="${CSS.escape(issueId)}"]`).forEach(el => el.remove());
+  }
 }
 
 function updateJobCardState(run_id, state) {
@@ -2112,11 +2288,10 @@ async function openDetailModal(run_id) {
     if (requestSeq !== _detailModalLoadSeq || _detailRunId !== run_id || !_isModalOpen('detail-modal')) return;
     _detailLinearIssueId = issueId;
     document.getElementById('detail-meta').textContent = 'Linear issue';
-    document.getElementById('detail-prompt').textContent = 'No local prompt yet.';
-    document.getElementById('detail-prompt').classList.remove('empty');
-    document.getElementById('detail-output').textContent = 'This board mirrors the Linear issue directly. Edit state below or choose a model to run it.';
-    document.getElementById('detail-output').classList.remove('empty');
-    document.getElementById('detail-reply-section').style.display = '';
+    document.getElementById('detail-prompt-section').style.display = 'none';
+    document.getElementById('detail-output-section').style.display = 'none';
+    document.getElementById('detail-reply-section').style.display = 'none';
+    document.getElementById('desc-stt-group').style.display = 'flex';
     const isTodoVirtual = (boardItem?._boardStatus || '') === 'todo';
     document.getElementById('detail-dispatch-group').style.display = isTodoVirtual ? 'inline-flex' : 'none';
     if (_linearConfigured) _loadLinearIssueIntoModal(issueId, boardItem);
@@ -2174,6 +2349,7 @@ async function openDetailModal(run_id) {
     const isReview = state === 'in_review';
     document.getElementById('detail-approve-btn').style.display = isReview ? '' : 'none';
     document.getElementById('detail-reply-section').style.display = r.linear_issue_id ? '' : 'none';
+    document.getElementById('desc-stt-group').style.display = 'none';
     _detailLinearIssueId = r.linear_issue_id || null;
     if (isReview) {
       _restoreReplyDraft();
@@ -2204,7 +2380,7 @@ async function openDetailModal(run_id) {
   }
 }
 
-function closeDetailModal() {
+function closeDetailModal({ flush = true } = {}) {
   _detailModalLoadSeq++;
   _detailLinearLoadSeq++;
   document.getElementById('detail-modal').classList.remove('open');
@@ -2216,7 +2392,7 @@ function closeDetailModal() {
   _setDetailReplyStatus('');
   _replyAttachments = [];
   _renderAttachList('reply-attach-list', _replyAttachments);
-  _flushPendingBoardRefresh();
+  if (flush) _flushPendingBoardRefresh();
 }
 
 function _updateDetailRetryLock(preferredAgent) {
@@ -2234,16 +2410,22 @@ function _updateDetailRetryLock(preferredAgent) {
 }
 
 async function dispatchFromDetail(agent) {
-  agent = (agent === 'aider' ? 'deepseek' : agent);
   if (!_detailLinearIssueId) return;
   const linearIssueId = _detailLinearIssueId;
-  try {
-    await triggerLinearIssueWithAgent(linearIssueId, agent, { refresh: false });
-    refreshJobBoard();
-    closeDetailModal();
-  } catch (err) {
-    alert('Dispatch error: ' + err);
-  }
+  // Local state + close modal immediately
+  fetch(`/api/linear/issues/local/${linearIssueId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state_name: 'In Progress', preferred_agent: agent }),
+  }).catch(() => {});
+  refreshJobBoard();
+  closeDetailModal();
+  // Fire-and-forget to backend (triggers dispatch)
+  fetch(`/api/linear/issues/${linearIssueId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state_name: 'In Progress', preferred_agent: agent }),
+  }).catch(err => console.error('Dispatch sync failed:', err));
 }
 
 async function retryRun(run_id, agent = 'claude', reply = '', attachments = []) {
@@ -2268,7 +2450,6 @@ async function retryRun(run_id, agent = 'claude', reply = '', attachments = []) 
 }
 
 function retryFromDetail(agent = 'claude') {
-  agent = (agent === 'aider' ? 'deepseek' : agent);
   if (!_detailRunId) return;
   const reply = (document.getElementById('detail-reply-input')?.value || '').trim();
   retryRun(_detailRunId, agent, reply, _replyAttachments);
@@ -2280,19 +2461,22 @@ async function approveRun() {
   if (!_detailRunId) return;
   const boardItem = _boardItemsByRunId[_detailRunId] || null;
   const linearIssueId = boardItem?.linear_issue_id || _detailLinearIssueId;
-  try {
-    if (!linearIssueId) throw new Error('No linked Linear issue');
-    const doneState = _detailDoneStateName();
-    const res = await fetch(`/api/linear/issues/${linearIssueId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ state_name: doneState }),
-    });
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.error || 'approve failed');
-    closeDetailModal();
-    refreshJobBoard();
-  } catch (err) { alert('Approve error: ' + err); }
+  if (!linearIssueId) return;
+  const doneState = _detailDoneStateName();
+  // Local state update
+  fetch(`/api/linear/issues/local/${linearIssueId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state_name: doneState }),
+  }).catch(() => {});
+  closeDetailModal();
+  refreshJobBoard();
+  // Fire-and-forget to Linear
+  fetch(`/api/linear/issues/${linearIssueId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state_name: doneState }),
+  }).catch(err => console.error('Approve sync failed:', err));
 }
 
 function _detailDoneStateName() {
@@ -2400,10 +2584,11 @@ function _setLinearEditDisabled(disabled) {
 }
 
 function setDetailIssueAgent(agent, { dispatch = false } = {}) {
-  _detailPreferredAgent = ['claude','codex','aider','deepseek'].includes(agent) ? (agent === 'aider' ? 'deepseek' : agent) : 'claude';
+  _detailPreferredAgent = ['claude','codex','deepseek','deepseek-tui'].includes(agent) ? agent : 'claude';
   document.getElementById('linear-edit-agent-claude')?.classList.toggle('active', _detailPreferredAgent === 'claude');
   document.getElementById('linear-edit-agent-codex')?.classList.toggle('active', _detailPreferredAgent === 'codex');
   document.getElementById('linear-edit-agent-deepseek')?.classList.toggle('active', _detailPreferredAgent === 'deepseek');
+  document.getElementById('linear-edit-agent-deepseek-tui')?.classList.toggle('active', _detailPreferredAgent === 'deepseek-tui');
   _updateDetailRetryLock(_detailPreferredAgent);
   _saveLinearDraft();
   // dispatch=true only when user clicks the button; skip on programmatic load
@@ -2510,48 +2695,48 @@ async function _loadLinearIssueIntoModal(linear_issue_id, boardItem = null) {
 
 async function saveLinearIssue() {
   if (!_detailLinearIssueId) return;
-  const btn = document.getElementById('linear-save-btn');
-  const status = document.getElementById('linear-edit-status');
-  const previousBoardState = _linearStateToBoard(_detailLinearInitial?.state || '');
+  const issueId = _detailLinearIssueId;
+  const title = document.getElementById('linear-edit-title').value;
+  const desc = document.getElementById('linear-edit-desc').value;
   const nextState = document.getElementById('linear-edit-state').value;
-  const shouldCloseAfterSave = previousBoardState === 'todo' && _linearStateToBoard(nextState) !== 'todo';
-  if (btn) btn.disabled = true;
-  if (status) status.textContent = 'Saving…';
-  try {
-    const res = await fetch(`/api/linear/issues/${_detailLinearIssueId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        title: document.getElementById('linear-edit-title').value,
-        description: document.getElementById('linear-edit-desc').value,
-        state_name: document.getElementById('linear-edit-state').value,
-        preferred_agent: _detailPreferredAgent,
-      }),
-    });
-    const data = await res.json();
-    if (data.ok) {
-      _clearLinearDraft();
-      _detailLinearInitial = {
-        title: document.getElementById('linear-edit-title').value,
-        description: document.getElementById('linear-edit-desc').value,
-        state: nextState,
-        preferred_agent: _detailPreferredAgent,
-      };
-      if (status) { status.textContent = '✓ Saved'; status.style.color = 'var(--green)'; }
-      setTimeout(() => { if (status) { status.textContent = ''; status.style.color = ''; } }, 2000);
-      if (shouldCloseAfterSave) {
-        closeDetailModal();
-        refreshJobBoard(true);
-      } else {
-        refreshJobBoard();
-      }
-    } else {
-      if (status) { status.textContent = 'Error: ' + (data.error || 'failed'); status.style.color = 'var(--red)'; }
-    }
-  } catch (err) {
-    if (status) { status.textContent = 'Error: ' + err; status.style.color = 'var(--red)'; }
-  } finally {
-    if (btn) btn.disabled = false;
+  if (!title.trim()) { document.getElementById('linear-edit-title').focus(); return; }
+  const previousState = _detailLinearInitial?.state || '';
+  const stateChanged = String(previousState).trim() !== String(nextState).trim();
+  const status = document.getElementById('linear-edit-status');
+  const saveBtn = document.getElementById('linear-save-btn');
+  _holdBoardRefresh();
+  _optimisticPatchLinearIssue(issueId, {
+    title,
+    state_name: nextState,
+    preferred_agent: _detailPreferredAgent,
+  });
+  document.getElementById('detail-state-badge').innerHTML = _stateBadgeHtml(_linearStateToBoard(nextState));
+  if (status) {
+    status.textContent = 'Saved locally · syncing Linear…';
+    status.style.color = 'var(--green)';
+  }
+  if (saveBtn) saveBtn.textContent = 'Saved';
+  // Immediate local write
+  fetch(`/api/linear/issues/local/${issueId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, description: desc, state_name: nextState, preferred_agent: _detailPreferredAgent }),
+  }).catch(() => {});
+  // Linear sync in background (fire-and-forget)
+  fetch(`/api/linear/issues/${issueId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title, description: desc, state_name: nextState, preferred_agent: _detailPreferredAgent }),
+  }).catch(() => {});
+  _clearLinearDraft();
+  _detailLinearInitial = { title, description: desc, state: nextState, preferred_agent: _detailPreferredAgent };
+  if (stateChanged) {
+    closeDetailModal({ flush: false });
+  } else {
+    setTimeout(() => {
+      if (status) { status.textContent = ''; status.style.color = ''; }
+      if (saveBtn) saveBtn.textContent = 'Save to Linear';
+    }, 1200);
   }
 }
 
@@ -2600,53 +2785,47 @@ function _renderHistory(chain, currentRunId) {
 
 async function cancelLinearIssue() {
   if (!_detailLinearIssueId) return;
-  const btn = document.getElementById('detail-cancel-btn');
-  if (btn) btn.disabled = true;
-  try {
-    const res = await fetch(`/api/linear/issues/${_detailLinearIssueId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+  const iid = _detailLinearIssueId;
+  _holdBoardRefresh();
+  _optimisticPatchLinearIssue(iid, { state_name: 'Canceled' });
+  // Close modal immediately; network sync happens in the background.
+  _detailModalLoadSeq++;
+  _detailLinearLoadSeq++;
+  document.getElementById('detail-modal').classList.remove('open');
+  _detailRunId = null;
+  _detailLinearIssueId = null;
+  // Fast local update
+  fetch(`/api/linear/issues/local/${iid}`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state_name: 'Canceled' }),
+  }).catch(() => {});
+  // Background sync
+  setTimeout(() => {
+    fetch(`/api/linear/issues/${iid}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ state_name: 'Canceled' }),
-    });
-    const data = await res.json();
-    if (data.ok) {
-      closeDetailModal();
-      refreshJobBoard();
-    } else {
-      alert('Cancel failed: ' + (data.error || 'unknown'));
-      if (btn) btn.disabled = false;
-    }
-  } catch (err) {
-    alert('Cancel error: ' + err);
-    if (btn) btn.disabled = false;
-  }
+    }).catch(() => {});
+  }, 50);
 }
 
 async function cancelLinearIssueById(issueId, runId = '') {
   if (!issueId) return;
-  try {
-    if (runId) {
-      try {
-        await fetch(`/api/runs/${runId}`, { method: 'DELETE' });
-        delete _runProgress[runId];
-      } catch (err) {
-        console.error('Run cancel failed:', err);
-      }
-    }
-    const res = await fetch(`/api/linear/issues/${issueId}`, {
+  delete _runProgress[runId || ''];
+  _holdBoardRefresh();
+  _removeLinearIssueCards(issueId, runId);
+  _optimisticPatchLinearIssue(issueId, { state_name: 'Canceled' });
+  fetch(`/api/linear/issues/local/${issueId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state_name: 'Canceled' }),
+  }).catch(() => {});
+  setTimeout(() => {
+    fetch(`/api/linear/issues/${issueId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ state_name: 'Canceled' }),
-    });
-    const data = await res.json();
-    if (data.ok) {
-      refreshJobBoard();
-    } else {
-      alert('Cancel failed: ' + (data.error || 'unknown'));
-    }
-  } catch (err) {
-    alert('Cancel error: ' + err);
-  }
+    }).catch(() => {});
+  }, 50);
 }
 
 function _linearStateToBoard(linearState) {
@@ -3131,7 +3310,7 @@ socket.on('run_state_change', (data) => {
   }
 });
 
-socket.on('linear_issues_updated', () => { if (_linearConfigured) refreshJobBoard(); });
+socket.on('linear_issues_updated', () => { if (_linearConfigured) _requestBoardRefresh(); });
 
 socket.on('run_progress', (data) => {
   if (!data.run_id) return;
@@ -3247,6 +3426,7 @@ terminalEl.addEventListener('drop', async (e) => {
           <button type="button" class="agent-btn active" id="new-issue-agent-claude" onclick="setNewIssueAgent('claude')">Claude</button>
           <button type="button" class="agent-btn" id="new-issue-agent-codex" onclick="setNewIssueAgent('codex')">Codex</button>
           <button type="button" class="agent-btn" id="new-issue-agent-deepseek" onclick="setNewIssueAgent('deepseek')">DeepSeek</button>
+          <button type="button" class="agent-btn agent-hidden" id="new-issue-agent-deepseek-tui" onclick="setNewIssueAgent('deepseek-tui')">DS TUI</button>
         </div>
         <span class="new-issue-agent-hint">Preferred agent for first dispatch</span>
       </div>
@@ -3285,10 +3465,11 @@ let _newIssueAgent = 'claude';
 let _newIssueFocusTimer = null;
 
 function setNewIssueAgent(agent) {
-  _newIssueAgent = ['claude','codex','aider','deepseek'].includes(agent) ? (agent === 'aider' ? 'deepseek' : agent) : 'claude';
+  _newIssueAgent = ['claude','codex','deepseek','deepseek-tui'].includes(agent) ? agent : 'claude';
   document.getElementById('new-issue-agent-claude')?.classList.toggle('active', _newIssueAgent === 'claude');
   document.getElementById('new-issue-agent-codex')?.classList.toggle('active', _newIssueAgent === 'codex');
   document.getElementById('new-issue-agent-deepseek')?.classList.toggle('active', _newIssueAgent === 'deepseek');
+  document.getElementById('new-issue-agent-deepseek-tui')?.classList.toggle('active', _newIssueAgent === 'deepseek-tui');
   _saveDraft('agenticos.draft.new_issue.agent', _newIssueAgent);
 }
 
