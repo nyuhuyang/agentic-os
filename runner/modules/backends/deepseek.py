@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -67,32 +68,53 @@ class DeepSeekModule(AgenticModule):
 
     def dispatch(self, prompt: str, run_id: str,
                  socket_room: str | None = None) -> dict:
-        """Run DeepSeek agent with tools. Returns result dict."""
-        logger.info("[deepseek_agent] dispatching run_id=%s", run_id)
-        try:
-            from deepseek_agent import run_deepseek_agent as _run
-        except ImportError:
-            return {"ok": False, "error": "deepseek_agent not available"}
+        """Run DeepSeek TUI CLI (deepseek exec). Returns result dict."""
+        logger.info("[deepseek] dispatching run_id=%s via deepseek exec", run_id)
+
+        # Resolve deepseek binary
+        ds_bin = shutil.which("deepseek")
+        if not ds_bin:
+            for _p in ("/opt/homebrew/bin/deepseek", "/usr/local/bin/deepseek"):
+                if Path(_p).exists():
+                    ds_bin = _p
+                    break
+        if not ds_bin:
+            return {"ok": False, "error": "deepseek CLI not found"}
+
+        cmd = [ds_bin, "--yolo", "--approval-policy", "auto", "exec", prompt]
 
         import app as _app
-        buf: list[str] = []
-
-        def _on_chunk(text: str) -> None:
-            buf.append(text)
+        t0 = time.monotonic()
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=str(_app.ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            stdout_s, stderr_s = proc.communicate(timeout=300)
+            dur = round(time.monotonic() - t0, 2)
+            ok = proc.returncode == 0
+            output = stdout_s.strip()
+            error_s = stderr_s.strip() if not ok else ""
             if socket_room and self._socketio:
-                self._socketio.emit("run_output", {"run_id": run_id, "text": text}, room=socket_room)
-
-        result = _run(prompt, workspace=str(_app.ROOT), stream_callback=_on_chunk)
-        output = "".join(buf)
-        if result.get("ok") and not output:
-            output = result.get("output", "")
-        if result.get("ok") and not output:
-            it = result.get("input_tokens", 0)
-            ot = result.get("output_tokens", 0)
-            model = result.get("model", "deepseek-v4-flash")
-            output = f"Task completed. (model: {model}, tokens: {it} in / {ot} out, iterations: {result.get('iterations', 1)})"
-        result["output"] = output
-        return result
+                self._socketio.emit("run_output", {"run_id": run_id, "text": output}, room=socket_room)
+            return {
+                "ok": ok,
+                "output": output or error_s,
+                "duration_s": dur,
+                "input_tokens": None,
+                "output_tokens": None,
+                "model": "deepseek-v4-flash",
+                "error": error_s or None,
+            }
+        except subprocess.TimeoutExpired:
+            if proc:
+                proc.kill()
+            return {"ok": False, "error": "DeepSeek exec timed out after 300s", "duration_s": round(time.monotonic() - t0, 2)}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "duration_s": round(time.monotonic() - t0, 2)}
 
     def execute_commands(self, output: str, cwd: str | Path | None = None) -> str:
         """Execute ```bash/shell blocks in DeepSeek output."""

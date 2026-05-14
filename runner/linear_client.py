@@ -29,6 +29,7 @@ query AgenticOSPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!
       url
       assignee { id displayName }
       labels { nodes { name } }
+      team { id key name }
       createdAt
       updatedAt
     }
@@ -54,6 +55,7 @@ query AgenticOSPollAll($stateNames: [String!]!, $first: Int!, $after: String) {
       url
       assignee { id displayName }
       labels { nodes { name } }
+      team { id key name }
       createdAt
       updatedAt
     }
@@ -152,6 +154,7 @@ query AgenticOSPollTeam($teamId: ID!, $stateNames: [String!]!, $first: Int!, $af
       url
       assignee { id displayName }
       labels { nodes { name } }
+      team { id key name }
       createdAt
       updatedAt
     }
@@ -172,17 +175,16 @@ query AgenticOSIssue($id: String!) {
     url
     assignee { id displayName }
     labels { nodes { id name } }
+    team { id key name states { nodes { id name } } }
     createdAt
     updatedAt
-    team {
-      states { nodes { id name } }
-    }
   }
 }
 """
 
 
 def _normalize(node: dict) -> dict:
+    team = node.get("team") or {}
     return {
         "id": node.get("id", ""),
         "identifier": node.get("identifier", ""),
@@ -193,6 +195,9 @@ def _normalize(node: dict) -> dict:
         "url": node.get("url", ""),
         "assignee": (node.get("assignee") or {}).get("displayName", ""),
         "labels": [l["name"] for l in (node.get("labels") or {}).get("nodes", [])],
+        "team_id": team.get("id", ""),
+        "team_key": team.get("key", ""),
+        "team_name": team.get("name", ""),
         "created_at": node.get("createdAt", ""),
         "updated_at": node.get("updatedAt", ""),
     }

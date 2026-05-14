@@ -68,12 +68,6 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".t
 sys.path.insert(0, str(_HERE))
 sys.path.insert(0, str(_PROTO))  # so "from runner.core.*" imports work
 
-try:
-    from deepseek_agent import DeepSeekAgent, run_deepseek_agent as _run_deepseek_agent
-    _HAS_DEEPSEEK_AGENT = True
-except ImportError:
-    _HAS_DEEPSEEK_AGENT = False
-    DeepSeekAgent = None  # type: ignore
 from usage_reader import (
     compute_stats as _compute_usage,
     compute_windows as _compute_windows,
@@ -91,13 +85,21 @@ except ImportError:
     _deepseek_monitor = None  # type: ignore[assignment]
     _HAS_DEEPSEEK_MONITOR = False
 
+# Lazy import — deepseek_agent requires httpx
+try:
+    from deepseek_agent import run_deepseek_agent as _run_deepseek_agent
+    _HAS_DEEPSEEK_AGENT = True
+except ImportError:
+    _run_deepseek_agent = None  # type: ignore[assignment]
+    _HAS_DEEPSEEK_AGENT = False
+
 # ── Module registry ────────────────────────────────────────────────────────
 from runner.core.module_registry import registry as _module_registry
 from runner.modules import discover_all as _discover_modules
 from runner.core.registry_loader import load_registry as _load_registry, python_path as _python_path, set_paths as _set_registry_paths
 _AVAILABLE_MODULES: list[str] = []
 
-MASTER_REGISTRY_JSON = Path(os.environ.get("REGISTRY_JSON", str(WORKSPACE_ROOT / ".codex" / "registry.json")))
+MASTER_REGISTRY_JSON = Path(os.environ.get("REGISTRY_JSON", str(_PROTO / ".codex" / "registry.json")))
 CLAUDE_REGISTRY_JSON = WORKSPACE_ROOT / ".claude" / "registry.json"
 CLAUDE_REGISTRY_MD = WORKSPACE_ROOT / ".claude" / "registry.md"
 OUTPUTS_DIR = _PROTO / "outputs"
@@ -220,6 +222,8 @@ def _archive_stale_sent() -> None:
             continue
     if appended:
         with RUN_LOG.open("a", encoding="utf-8") as f:
+            f.write("\n".join(appended) + "\n")
+        with STATE_RUN_LOG.open("a", encoding="utf-8") as f:
             f.write("\n".join(appended) + "\n")
 
 
@@ -440,22 +444,13 @@ def _push_linear_state_async(issue_id: str, board_status: str) -> None:
         logger.debug("No tracker available, state %s for %s not pushed", board_status, issue_id)
 
 
-def _ds_dispatch(prompt: str, run_id: str) -> dict:
-    """Bridge to DeepSeekModule.dispatch()."""
-    ds_mod = _module_registry.get("deepseek")
-    if ds_mod and ds_mod._capability.get("available"):
-        return ds_mod.dispatch(prompt, run_id)
-    logger.debug("DeepSeek module not available, skipping dispatch")
-    return {"ok": False, "error": "DeepSeek module not available"}
-
-
 def _preferred_task_agent(original: dict) -> str | None:
     """Return the preferred agent for a task, if one is set."""
     preferred_agent = (original.get("agent") or "").strip().lower() or None
     if original.get("linear_issue_id"):
         issue = _linear_cache().get(original["linear_issue_id"]) or {}
         preferred_agent = (issue.get("preferred_agent") or preferred_agent or "").strip().lower() or None
-    if preferred_agent not in {"claude", "codex", "deepseek"}:
+    if preferred_agent not in {"claude", "codex", "deepseek", "deepseek-tui"}:
         return None
     return preferred_agent
 
@@ -562,15 +557,15 @@ _runs_cache: dict[str, tuple[float, list[dict]]] = {}
 _RUNS_CACHE_TTL = 3.0  # seconds
 
 def load_runs(limit: int = 20, include_archived: bool = False) -> list[dict]:
-    """Load runs from operational truth (state/runs.jsonl), fall back to legacy."""
+    """Load runs from RUN_LOG (superset of all records), fall back to state."""
     now = time.monotonic()
     key = f"{limit}:{include_archived}"
     cached = _runs_cache.get(key)
     if cached and (now - cached[0]) < _RUNS_CACHE_TTL:
         return cached[1]
-    runs = _load_runs_from(STATE_RUN_LOG, limit, include_archived)
+    runs = _load_runs_from(RUN_LOG, limit, include_archived)
     if not runs:
-        runs = _load_runs_from(RUN_LOG, limit, include_archived)
+        runs = _load_runs_from(STATE_RUN_LOG, limit, include_archived)
     _runs_cache[key] = (now, runs)
     return runs
 
@@ -970,8 +965,19 @@ def _ai_cli(agent: str) -> list[str]:
     """Return the CLI command prefix for the selected agent."""
     if agent == "codex":
         return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
-    if agent == "deepseek":
-        return ["deepseek", "exec", "--yolo", "--approval-policy", "auto"]
+    if agent == "deepseek-tui":
+        # Resolve deepseek binary — try shutil.which first, fallback to
+        # common install paths (e.g. Homebrew) for environments where PATH
+        # may not include the install prefix (e.g. subprocess env).
+        _ds_bin = shutil.which("deepseek")
+        if not _ds_bin:
+            for _p in ("/opt/homebrew/bin/deepseek", "/usr/local/bin/deepseek"):
+                if Path(_p).exists():
+                    _ds_bin = _p
+                    break
+        if not _ds_bin:
+            _ds_bin = "deepseek"  # let subprocess raise FileNotFoundError
+        return [_ds_bin, "--yolo", "--approval-policy", "auto", "exec"]
     # default: claude
     claude_bin = _PROTO / ".venv" / "bin" / "claude"
     bin_str = str(claude_bin) if claude_bin.exists() else "claude"
@@ -1031,15 +1037,6 @@ def _parse_agent_output(agent: str, stdout_s: str) -> tuple[str, int | None, int
         return output, usage.get("input_tokens"), usage.get("output_tokens"), model
     except (json.JSONDecodeError, AttributeError):
         return stdout_s, None, None, None
-
-
-def _execute_deepseek_commands(output: str, cwd: str | Path | None = None) -> str:
-    """Bridge to DeepSeekModule.execute_commands()."""
-    ds_mod = _module_registry.get("deepseek")
-    if ds_mod and ds_mod._capability.get("available"):
-        return ds_mod.execute_commands(output, cwd)
-    logger.debug("DeepSeek module not available, skipping command execution")
-    return output
 
 
 
@@ -1136,10 +1133,15 @@ def run():
     t0 = time.monotonic()
     _running_jobs[run_id] = {"run_id": run_id, "skill": skill_name, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent)}
     socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill_name})
-    if agent == "deepseek" and _HAS_DEEPSEEK_AGENT and not shutil.which("deepseek"):
-        # DeepSeek API fallback — used when deepseek CLI is not available
+    if agent == "deepseek":
+        # Direct DeepSeek API (deepseek_agent.py)
+        if not _HAS_DEEPSEEK_AGENT:
+            _running_jobs.pop(run_id, None)
+            _write_run_log(skill_name, "error", started_at, 0.0, prompt=prompt, error="deepseek_agent not available (httpx missing?)", run_id=run_id)
+            socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill_name})
+            return jsonify({"ok": False, "error": "deepseek_agent not available (httpx missing?)"})
         try:
-            agent_result = _ds_dispatch(prompt, run_id)
+            agent_result = _run_deepseek_agent(prompt, workspace=str(ROOT))
             dur = agent_result.get("duration_s", 0.0)
             output = agent_result.get("output", "")
             input_tokens = agent_result.get("input_tokens")
@@ -1167,7 +1169,7 @@ def run():
             socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill_name})
             return jsonify({"ok": False, "error": str(e)})
     else:
-        # Claude / Codex / DeepSeek CLI — subprocess dispatch
+        # Claude / Codex / DeepSeek TUI — subprocess dispatch via CLI
         try:
             proc = subprocess.Popen(
                 _ai_command(agent, prompt, output_format="json"),
@@ -1411,6 +1413,8 @@ def api_run_set_status(run_id: str):
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     with RUN_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
+    with STATE_RUN_LOG.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
     socketio.emit("run_state_change", {"run_id": run_id, "state": new_status})
 
     # Push state to Linear if this run is linked to a Linear issue
@@ -1444,6 +1448,8 @@ def api_run_restore(run_id: str):
                 record["status"] = prev_status
                 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
                 with RUN_LOG.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(record) + "\n")
+                with STATE_RUN_LOG.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(record) + "\n")
                 socketio.emit("run_state_change", {"run_id": run_id, "state": prev_status})
                 return jsonify({"ok": True, "run_id": run_id, "status": prev_status})
@@ -1539,7 +1545,7 @@ def api_run_retry(run_id: str):
     cfg = _load_workflow_config()
     agent_override = (req_data.get("agent") or "").strip().lower()
     preferred_agent = _preferred_task_agent(original)
-    agent = agent_override if agent_override in {"claude", "codex", "deepseek"} else None
+    agent = agent_override if agent_override in {"claude", "codex", "deepseek", "deepseek-tui"} else None
     agent = agent or preferred_agent or original.get("agent") or cfg.get("agent", {}).get("backend", "claude")
     registry = _load_registry(agent)
     entry = registry.get(skill, {})
@@ -1567,15 +1573,22 @@ def api_run_retry(run_id: str):
 
     def _do_retry():
             nonlocal agent
-            if agent == "deepseek" and _HAS_DEEPSEEK_AGENT and not shutil.which("deepseek"):
+            if agent == "deepseek":
+                # Direct DeepSeek API (deepseek_agent.py)
+                if not _HAS_DEEPSEEK_AGENT:
+                    _running_jobs.pop(new_run_id, None)
+                    _write_run_log(skill, "error", started_at, 0.0, prompt=prompt, error="deepseek_agent not available (httpx missing?)", run_id=new_run_id, agent=agent, model=_agent_model(agent, cfg), task_id=task_id)
+                    socketio.emit("run_state_change", {"run_id": new_run_id, "state": "error", "skill": skill})
+                    return
                 try:
-                    agent_result = _ds_dispatch(prompt, new_run_id)
+                    agent_result = _run_deepseek_agent(prompt, workspace=str(ROOT))
                     dur = agent_result.get("duration_s", 0.0)
                     output = agent_result.get("output", "")
                     input_tokens = agent_result.get("input_tokens")
                     output_tokens = agent_result.get("output_tokens")
                     parsed_model = agent_result.get("model")
                     error_s = agent_result.get("error", "")
+                    ok = agent_result.get("ok", False)
                     _running_jobs.pop(new_run_id, None)
                     final_state = "review"
                     _write_run_log(skill, final_state, started_at, dur,
@@ -1601,7 +1614,7 @@ def api_run_retry(run_id: str):
                         _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry Error", prompt=prompt, error=str(e)))
                     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "review", "skill": skill})
             else:
-                # Claude / Codex — subprocess dispatch
+                # Claude / Codex / DeepSeek TUI — subprocess dispatch
                 try:
                     if entry.get("schedule_eligible") and entry.get("entrypoint"):
                         cmd = [_python_path(), str(RUNNER), skill]
@@ -1666,7 +1679,6 @@ def api_run_retry(run_id: str):
                             linear_issue_id,
                             _linear_comment_body(title="AgenticOS Retry Error", prompt=prompt, error=str(e)),
                         )
-                    socketio.emit("run_state_change", {"run_id": new_run_id, "state": "review", "skill": skill})
 
     threading.Thread(target=_do_retry, daemon=True).start()
     return jsonify({"ok": True, "run_id": new_run_id, "skill": skill, "attempt": prev_attempt + 1, "agent": agent})
@@ -1770,12 +1782,13 @@ def api_capabilities():
     result = _module_registry.get_capabilities()
     cfg = _load_workflow_config()
     result["selected"] = (cfg.get("agent") or {}).get("backend", "")
+    # Add deepseek-tui as a synthetic backend when deepseek module is available
+    if "deepseek" in result.get("backends", []):
+        result["backends"].append("deepseek-tui")
     return jsonify(result)
 
 
 # ── Runtime stats ──────────────────────────────────────────────────────────
-
-
 @app.route("/api/runtime")
 def api_runtime():
     total_s = 0.0

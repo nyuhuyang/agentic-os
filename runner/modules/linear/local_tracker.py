@@ -12,6 +12,9 @@ Task format (matches _normalize_linear_issue output):
         "state": "Todo | In Progress | In Review | Done | Canceled",
         "url": "",
         "preferred_agent": "claude | codex | deepseek | null",
+        "team_id": "linear-team-uuid | ''",
+        "team_key": "AGE | ML4T | ''",
+        "team_name": "Agenticos | ''",
         "created_at": "ISO datetime",
         "updated_at": "ISO datetime",
     }
@@ -101,19 +104,19 @@ class LocalTracker:
 
     # ── Matching LinearClient interface ──────────────────────────────────
 
-    def fetch_issues(self, states: list[str] | None = None) -> list[dict]:
-        """Return all tasks, optionally filtered by state names.
+    def fetch_issues(self, states: list[str] | None = None, team_id: str | None = None) -> list[dict]:
+        """Return all tasks, optionally filtered by state names and/or team_id.
 
         Returns format compatible with _normalize_linear_issue output.
         """
         tasks = _load_state(self._state_dir)
+        results: list[dict] = list(tasks.values())
         if states:
             state_set = set(_state_key(s) for s in states)
-            return [
-                t for t in tasks.values()
-                if _state_key(t.get("state")) in state_set
-            ]
-        return list(tasks.values())
+            results = [t for t in results if _state_key(t.get("state")) in state_set]
+        if team_id:
+            results = [t for t in results if t.get("team_id") == team_id]
+        return results
 
     def fetch_issue(self, issue_id: str) -> dict | None:
         """Return a single task by id."""
@@ -126,6 +129,9 @@ class LocalTracker:
         description: str = "",
         state_name: str = "Todo",
         preferred_agent: str | None = None,
+        team_id: str = "",
+        team_key: str = "",
+        team_name: str = "",
     ) -> dict:
         """Create a new task, return normalized issue dict."""
         tasks = _load_state(self._state_dir)
@@ -139,6 +145,9 @@ class LocalTracker:
             "state": state_name,
             "url": "",
             "preferred_agent": preferred_agent,
+            "team_id": team_id,
+            "team_key": team_key,
+            "team_name": team_name,
             "created_at": now,
             "updated_at": now,
         }

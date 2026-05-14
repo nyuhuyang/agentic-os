@@ -1,4 +1,8 @@
-"""DeepSeek Agent -- direct API integration with tool-calling loop.
+"""DEPRECATED — kept as reference for direct DeepSeek API integration.
+Dispatch now uses `deepseek exec` CLI (DeepSeek TUI).
+See modules/backends/deepseek.py for the active dispatch path.
+
+DeepSeek Agent -- direct API integration with tool-calling loop.
 
 Replaces the old `deepseek --prompt --yolo` subprocess + _execute_deepseek_commands
 hack with a proper tool-enabled agent that calls DeepSeek's chat completions API
