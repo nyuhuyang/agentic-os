@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -970,7 +971,7 @@ def _ai_cli(agent: str) -> list[str]:
     if agent == "codex":
         return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
     if agent == "deepseek":
-        return [_python_path(), str(_HERE / "deepseek_agent.py")]
+        return ["deepseek", "exec", "--yolo", "--approval-policy", "auto"]
     # default: claude
     claude_bin = _PROTO / ".venv" / "bin" / "claude"
     bin_str = str(claude_bin) if claude_bin.exists() else "claude"
@@ -1068,7 +1069,7 @@ def run():
         return jsonify({"ok": False, "error": "No prompt provided."})
 
     # Guard: reject if skill doesn't support selected agent
-    if skill:
+    if skill and skill != "_prompt":
         registry = _load_registry(agent)
         entry = registry.get(skill, {})
         allowed_agents = entry.get("agents", ["claude"])
@@ -1135,8 +1136,8 @@ def run():
     t0 = time.monotonic()
     _running_jobs[run_id] = {"run_id": run_id, "skill": skill_name, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent)}
     socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill_name})
-    if agent == "deepseek" and _HAS_DEEPSEEK_AGENT:
-        # DeepSeek agent with tools — direct API + tool loop
+    if agent == "deepseek" and _HAS_DEEPSEEK_AGENT and not shutil.which("deepseek"):
+        # DeepSeek API fallback — used when deepseek CLI is not available
         try:
             agent_result = _ds_dispatch(prompt, run_id)
             dur = agent_result.get("duration_s", 0.0)
@@ -1166,7 +1167,7 @@ def run():
             socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill_name})
             return jsonify({"ok": False, "error": str(e)})
     else:
-        # Claude / Codex — subprocess dispatch
+        # Claude / Codex / DeepSeek CLI — subprocess dispatch
         try:
             proc = subprocess.Popen(
                 _ai_command(agent, prompt, output_format="json"),
@@ -1566,7 +1567,7 @@ def api_run_retry(run_id: str):
 
     def _do_retry():
             nonlocal agent
-            if agent == "deepseek" and _HAS_DEEPSEEK_AGENT:
+            if agent == "deepseek" and _HAS_DEEPSEEK_AGENT and not shutil.which("deepseek"):
                 try:
                     agent_result = _ds_dispatch(prompt, new_run_id)
                     dur = agent_result.get("duration_s", 0.0)
