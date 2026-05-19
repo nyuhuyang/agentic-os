@@ -25,11 +25,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_SAVE_LOCK = threading.Lock()
 
 # Board status → tracker state mapping (matches _BOARD_TO_LINEAR in app.py)
 BOARD_TO_STATE: dict[str, str] = {
@@ -68,12 +71,13 @@ def _save_state(state_dir: Path, tasks: dict) -> None:
     """Atomically write tasks to state/tasks.json."""
     state_dir.mkdir(parents=True, exist_ok=True)
     path = state_dir / "tasks.json"
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(
-        json.dumps(tasks, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    tmp.replace(path)
+    with _SAVE_LOCK:
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps(tasks, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        tmp.replace(path)
 
 
 def _next_identifier(tasks: dict) -> str:

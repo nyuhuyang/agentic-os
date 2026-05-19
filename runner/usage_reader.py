@@ -24,13 +24,18 @@ CLAUDE_DIR = Path.home() / ".claude"
 _PROTO = Path(__file__).resolve().parents[1]         # agentic-os/
 
 def _find_workspace_claude_dir() -> Path:
-    # Walk up from _PROTO looking for a .claude dir that has rate-limits-live.json
+    # Walk up from _PROTO collecting all .claude dirs that have rate-limits-live.json,
+    # then return the one with the most recently modified file.
     p = _PROTO
+    candidates: list[tuple[float, Path]] = []
     for _ in range(5):
         candidate = p / ".claude"
-        if (candidate / "rate-limits-live.json").exists():
-            return candidate
+        f = candidate / "rate-limits-live.json"
+        if f.exists():
+            candidates.append((f.stat().st_mtime, candidate))
         p = p.parent
+    if candidates:
+        return max(candidates)[1]
     return _PROTO / ".claude"  # fallback
 
 _workspace_claude_env = os.environ.get("WORKSPACE_CLAUDE_DIR", "").strip()
@@ -284,6 +289,8 @@ def load_budget(agent: str) -> dict[str, Any]:
         }
         if "weekly_reset" in ag:
             result["weekly_reset"] = ag["weekly_reset"]
+        if "window_5h_reset" in ag:
+            result["window_5h_reset"] = ag["window_5h_reset"]
         return result
     except Exception:
         return dict(defaults)
@@ -387,13 +394,15 @@ def load_latest_codex_rate_limits() -> dict[str, Any]:
     try:
         best_ts: datetime | None = None
         best: dict[str, Any] = {}
+        # Track the most recent "limit hit" signal: limit_id != "codex" with null primary
+        limit_hit_ts: datetime | None = None
 
         for path in CODEX_SESSIONS_DIR.rglob("*.jsonl"):
             try:
                 lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
             except Exception:
                 continue
-            # Find the last (most recent) token_count record in this file.
+            # Scan from newest to oldest; capture both codex quota events and limit-hit signals.
             for raw in reversed(lines):
                 if '"type":"token_count"' not in raw or '"rate_limits"' not in raw:
                     continue
@@ -405,22 +414,37 @@ def load_latest_codex_rate_limits() -> dict[str, Any]:
                 if payload.get("type") != "token_count":
                     continue
                 rate = payload.get("rate_limits") or {}
-                if rate.get("limit_id") != "codex":
-                    continue
                 ts = _parse_iso_utc(record.get("timestamp"))
-                if ts is not None and (best_ts is None or ts > best_ts):
-                    best_ts = ts
-                    info = payload.get("info") or {}
-                    total = (info.get("total_token_usage") or {}).get("total_tokens")
-                    best = {
-                        "timestamp": record.get("timestamp"),
-                        "plan_type": rate.get("plan_type"),
-                        "primary": rate.get("primary") or {},
-                        "secondary": rate.get("secondary") or {},
-                        "total_tokens": int(total) if isinstance(total, (int, float)) else None,
-                        "model_context_window": info.get("model_context_window"),
-                    }
-                break  # Only the last token_count per file; no need to scan further.
+                if ts is None:
+                    continue
+
+                if rate.get("limit_id") == "codex":
+                    if best_ts is None or ts > best_ts:
+                        best_ts = ts
+                        info = payload.get("info") or {}
+                        total = (info.get("total_token_usage") or {}).get("total_tokens")
+                        best = {
+                            "timestamp": record.get("timestamp"),
+                            "plan_type": rate.get("plan_type"),
+                            "primary": rate.get("primary") or {},
+                            "secondary": rate.get("secondary") or {},
+                            "total_tokens": int(total) if isinstance(total, (int, float)) else None,
+                            "model_context_window": info.get("model_context_window"),
+                        }
+                elif rate.get("primary") is None and not (rate.get("credits") or {}).get("has_credits", True):
+                    # limit_id switched away from "codex" with null windows = limit hit
+                    if limit_hit_ts is None or ts > limit_hit_ts:
+                        limit_hit_ts = ts
+                break  # Only the last token_count per file.
+
+        # If a limit-hit event is newer than the last codex quota snapshot, mark as exhausted.
+        if limit_hit_ts and (best_ts is None or limit_hit_ts > best_ts):
+            pri = best.get("primary") or {}
+            best["primary"] = {**pri, "used_percent": 100}
+            best["limit_hit"] = True
+            best["limit_hit_at"] = limit_hit_ts.isoformat()
+            if not best.get("timestamp"):
+                best["timestamp"] = limit_hit_ts.isoformat()
 
         return best
     except Exception:
@@ -511,20 +535,95 @@ def _claude_window_range(since: datetime, until: datetime) -> dict[str, Any]:
 
 
 def _codex_window_range(since: datetime, until: datetime) -> dict[str, Any]:
-    if not CODEX_DB.exists():
-        return {"tokens": 0, "sessions": 0, "output": 0, "earliest_ts": None}
-    try:
-        import sqlite3
-        db = sqlite3.connect(str(CODEX_DB))
-        r = db.execute(
-            "SELECT COALESCE(SUM(tokens_used),0), COUNT(*), MIN(created_at) FROM threads "
-            "WHERE created_at >= ? AND created_at < ? AND tokens_used > 0",
-            (since.timestamp(), until.timestamp()),
-        ).fetchone()
-        earliest_ts = datetime.fromtimestamp(r[2], tz=timezone.utc) if r[2] else None
-        return {"tokens": int(r[0]), "sessions": int(r[1]), "output": 0, "earliest_ts": earliest_ts}
-    except Exception:
-        return {"tokens": 0, "sessions": 0, "output": 0, "earliest_ts": None}
+    """Aggregate Codex token usage between two datetimes, including cached input tokens.
+
+    Reads session JSONL files for full token counts (input + output + cached_input),
+    falling back to SQLite threads.tokens_used (input + output only) when JSONL
+    is unavailable.
+    """
+    total_tokens = 0
+    sessions: set[str] = set()
+    earliest_ts: datetime | None = None
+
+    if CODEX_SESSIONS_DIR.exists():
+        try:
+            for path in CODEX_SESSIONS_DIR.rglob("*.jsonl"):
+                try:
+                    content = path.read_text(encoding="utf-8", errors="ignore")
+                    lines = content.splitlines()
+                except Exception:
+                    continue
+                first = next((json.loads(l) for l in lines if l.strip()), None)
+                if not first:
+                    continue
+                ts_str = first.get("timestamp", "")
+                if not ts_str:
+                    continue
+                try:
+                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                except Exception:
+                    continue
+                if not (since <= ts < until):
+                    continue
+
+                # Session ID is in payload.id for session_meta events, or in the filename
+                sid = (first.get("payload") or {}).get("id", "")
+                if not sid:
+                    sid = first.get("sessionId", "") or first.get("session_id", "")
+                if not sid:
+                    _m = __import__("re").search(r"[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}", path.name)
+                    if _m:
+                        sid = _m.group()
+                if sid:
+                    sessions.add(sid)
+                if earliest_ts is None or ts < earliest_ts:
+                    earliest_ts = ts
+
+                # Find the last token_count event with actual info (skip null info entries)
+                for raw in reversed(lines):
+                    if not raw.strip():
+                        continue
+                    if '"type":"token_count"' not in raw:
+                        continue
+                    try:
+                        rec = json.loads(raw)
+                    except Exception:
+                        continue
+                    payload = rec.get("payload", {})
+                    if payload.get("type") != "token_count":
+                        continue
+                    info = payload.get("info")
+                    if not info:
+                        continue
+                    ttu = info.get("total_token_usage", {})
+                    if not ttu:
+                        continue
+                    inp = ttu.get("input_tokens", 0) or 0
+                    out = ttu.get("output_tokens", 0) or 0
+                    cached = ttu.get("cached_input_tokens", 0) or 0
+                    total_tokens += inp + out + cached
+                    break
+        except Exception:
+            pass
+
+    # Fallback: use SQLite threads table (input + output only, no cache)
+    if not sessions and CODEX_DB.exists():
+        try:
+            import sqlite3
+            db = sqlite3.connect(str(CODEX_DB))
+            r = db.execute(
+                "SELECT COALESCE(SUM(tokens_used),0), COUNT(*), MIN(created_at) FROM threads "
+                "WHERE created_at >= ? AND created_at < ? AND tokens_used > 0",
+                (since.timestamp(), until.timestamp()),
+            ).fetchone()
+            total_tokens = int(r[0])
+            if not earliest_ts and r[2]:
+                earliest_ts = datetime.fromtimestamp(r[2], tz=timezone.utc)
+            _cnt = int(r[1])
+        except Exception:
+            pass
+
+    return {"tokens": total_tokens, "sessions": len(sessions), "output": 0, "earliest_ts": earliest_ts}
 
 
 def _deepseek_window_range(since: datetime, until: datetime) -> dict[str, Any]:
@@ -591,6 +690,56 @@ def _reset_label(earliest_ts: datetime | None, window_hours: float, now: datetim
     return f"{h}h{m:02d}m" if h else f"{m}m"
 
 
+def _next_daily_reset_label(cfg: dict, now: datetime) -> str:
+    """Compute time-until-reset from a daily anchor (hour + minute + tz)."""
+    try:
+        from zoneinfo import ZoneInfo
+        _tz = ZoneInfo(cfg["tz"])
+        _nl = now.astimezone(_tz)
+        _tr = _nl.replace(hour=cfg["hour"], minute=cfg["minute"], second=0, microsecond=0)
+        if _nl >= _tr:
+            _tr += timedelta(days=1)
+        _secs = int((_tr.astimezone(timezone.utc) - now).total_seconds())
+        if _secs <= 300:
+            return "NOW"
+        _h, _r = divmod(_secs, 3600)
+        _m = _r // 60
+        _d, _h = divmod(_h, 24)
+        if _d > 0:
+            return f"{_d}d{_h:02d}h"
+        return f"{_h}h{_m:02d}m" if _h else f"{_m}m"
+    except Exception:
+        return "—"
+
+
+def _next_daily_reset_ts(cfg: dict, now: datetime) -> int:
+    """Return Unix timestamp of the next daily reset."""
+    try:
+        from zoneinfo import ZoneInfo
+        _tz = ZoneInfo(cfg["tz"])
+        _nl = now.astimezone(_tz)
+        _tr = _nl.replace(hour=cfg["hour"], minute=cfg["minute"], second=0, microsecond=0)
+        if _nl >= _tr:
+            _tr += timedelta(days=1)
+        return int(_tr.astimezone(timezone.utc).timestamp())
+    except Exception:
+        return int(now.timestamp())
+
+
+def _prev_daily_reset_dt(cfg: dict, now: datetime) -> datetime:
+    """Return the most recent daily reset datetime (UTC) before now."""
+    try:
+        from zoneinfo import ZoneInfo
+        _tz = ZoneInfo(cfg["tz"])
+        _nl = now.astimezone(_tz)
+        _tr = _nl.replace(hour=cfg["hour"], minute=cfg["minute"], second=0, microsecond=0)
+        if _nl < _tr:
+            _tr -= timedelta(days=1)
+        return _tr.astimezone(timezone.utc)
+    except Exception:
+        return now - timedelta(hours=5)
+
+
 def _today_stats_claude(now: datetime) -> dict[str, Any]:
     """Tokens, sessions, and estimated cost for today (local calendar day)."""
     # Use local midnight so non-UTC users see their own "today", not UTC's.
@@ -640,8 +789,13 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
     else:
         _range = _claude_window_range
 
-    cur_5h  = _range(now - timedelta(hours=5),  now)
-    pri_5h  = _range(now - timedelta(hours=10), now - timedelta(hours=5))
+    _w5h_r_cfg = limits.get("window_5h_reset")
+    if _w5h_r_cfg:
+        _w5h_since = _prev_daily_reset_dt(_w5h_r_cfg, now)
+    else:
+        _w5h_since = now - timedelta(hours=5)
+    cur_5h  = _range(_w5h_since,  now)
+    pri_5h  = _range(_w5h_since - timedelta(hours=5), _w5h_since)
     cur_7d  = _range(now - timedelta(days=7),   now)
     pri_7d  = _range(now - timedelta(days=14),  now - timedelta(days=7))
 
@@ -652,7 +806,17 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
     def _pct(val: int, lim: int) -> int:
         return min(100, round(val / lim * 100)) if lim else 0
 
-    today_stats = _today_stats_claude(now) if agent != "codex" else None
+    # Compute today stats per agent
+    if agent == "codex":
+        _codex_usage = load_codex_usage()
+        _today_codex = _codex_usage.get("today", {})
+        today_stats = {
+            "tokens": int(_today_codex.get("tokens", 0) or 0),
+            "sessions": int(_today_codex.get("sessions", 0) or 0),
+            "cost": 0.0,
+        }
+    else:
+        today_stats = _today_stats_claude(now)
 
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     secs_to_midnight = int((midnight - now).total_seconds())
@@ -745,13 +909,44 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
                 card["balance_marker_pct"] = marker
             return card
 
+        _total_cost = max(float(_ds_usage.get("total_cost_cny", 0) or 0), _real_total)
+        _total_value = _bal_cny + _total_cost
+        _total_pct = min(100, round(_total_cost / _total_value * 100)) if _total_value > 0 else 0
+        _total_rem = max(0, 100 - _total_pct)
+        _ds_bm = _ds_usage.get("by_model_detail", {})
+        _ds_tok = sum(bm.get("total_tokens", 0) or 0 for bm in _ds_bm.values())
+        _ds_tok_fmt = f"{_ds_tok/1_000_000:.1f}M" if _ds_tok >= 1_000_000 else f"{_ds_tok/1_000:.1f}K"
         return {
             "agent": agent, "limits_estimated": True,
             "quota_source": "usage.json",
             "balance_cny": round(_bal_cny, 2),
-            "window_5h": _cost_card(_cost_5h, CAP_5H, "5-Hour", midnight_label),
-            "window_7d": _cost_card(_cost_weekly, CAP_WEEKLY, "Weekly", weekly_reset_label, _bal_cny),
-            "aux": _cost_card(_cost_monthly, CAP_MONTHLY, "Monthly", "—", _bal_cny),
+            "window_5h": {
+                "title": "Total Spend", "reset": "Lifetime",
+                "pct": _total_pct, "remaining_pct": _total_rem,
+                "tokens": _ds_tok, "limit": _ds_tok,
+                "value_line": f"¥{_total_cost:.2f} / ¥{_total_value:.2f}",
+                "sub_line": f"¥{_bal_cny:.2f} remaining · {_ds_tok_fmt} tokens",
+                "display_line": f"¥{_total_cost:.2f} spent · ¥{_bal_cny:.2f} left · {_ds_tok_fmt} tokens",
+                "resets_at_unix": None, "window_minutes": 0,
+            },
+            "window_7d": {
+                "title": "Balance", "reset": "—",
+                "pct": 0, "remaining_pct": None,
+                "tokens": int(_bal_cny * 100), "limit": int(_total_cost * 100),
+                "value_line": f"¥{_bal_cny:.2f}",
+                "sub_line": f"¥{_total_cost:.2f} spent to date",
+                "display_line": f"¥{_bal_cny:.2f} balance · ¥{_total_cost:.2f} spent",
+                "resets_at_unix": None, "window_minutes": 0,
+            },
+            "aux": {
+                "title": "Recent Spend", "reset": midnight_label,
+                "pct": _cost_pct(_cost_5h, CAP_5H) if CAP_5H else 0,
+                "value_line": f"¥{_cost_5h:.2f} (5h) · ¥{_cost_weekly:.2f} (7d)",
+                "sub_line": f"¥{_cost_monthly:.2f} total",
+                "tokens": int(_cost_5h * 100),
+                "display_line": f"¥{_cost_5h:.2f} last 5h · ¥{_cost_weekly:.2f} last 7d",
+                "resets_at_unix": None, "window_minutes": 0,
+            },
         }
         # Fallback: run_log-based estimate
         sum_5h, sum_7d, runs_5h, runs_7d = 0, 0, 0, 0
@@ -807,77 +1002,110 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
             },
         }
 
+    # today_stats was computed above per agent
+
     if agent == "codex":
-        live = load_latest_codex_rate_limits()
-        if live:
-            snapshot_ts = _parse_iso_utc(live.get("timestamp"))
-            primary = live.get("primary", {})
-            secondary = live.get("secondary", {})
+        codex_live = load_latest_codex_rate_limits()
+        codex_captured = _parse_iso_utc(codex_live.get("timestamp"))
+        pri = codex_live.get("primary") or {}
+        sec = codex_live.get("secondary") or {}
+        # resets_at is a plain epoch timestamp — valid regardless of snapshot age.
+        # Token/pct data goes stale after 2h; reset time does not.
+        _pri_resets_at = pri.get("resets_at")
+        _sec_resets_at = sec.get("resets_at")
+        _pri_resets_dt = datetime.fromtimestamp(float(_pri_resets_at), tz=timezone.utc) if _pri_resets_at else None
+        _sec_resets_dt = datetime.fromtimestamp(float(_sec_resets_at), tz=timezone.utc) if _sec_resets_at else None
+        _server_5h_reset_valid = _pri_resets_dt and _pri_resets_dt > now
+        _server_7d_reset_valid = _sec_resets_dt and _sec_resets_dt > now
+        snapshot_fresh = codex_captured and now - codex_captured <= timedelta(hours=2)
+        if snapshot_fresh:
             used_5h = _window_percent_from_snapshot(
-                primary.get("used_percent", 0),
-                primary.get("resets_at"),
-                snapshot_ts,
+                pri.get("used_percent", 0),
+                _pri_resets_at,
+                codex_captured,
                 now,
             )
             used_7d = _window_percent_from_snapshot(
-                secondary.get("used_percent", 0),
-                secondary.get("resets_at"),
-                snapshot_ts,
+                sec.get("used_percent", 0),
+                _sec_resets_at,
+                codex_captured,
                 now,
             )
-            local_total = live.get("total_tokens")
-            local_total_label = f"{local_total:,} local tokens".replace(",", "_").replace("_", ",") if local_total else None
-            codex_usage = load_codex_usage()
-            today = codex_usage.get("today", {})
-            today_tokens = int(today.get("tokens", 0) or 0)
-            today_sessions = int(today.get("sessions", 0) or 0)
-            display_5h = "server-reported usage"
-            if used_5h == 0 and snapshot_ts:
-                try:
-                    reset_at = datetime.fromtimestamp(float(primary.get("resets_at")), tz=timezone.utc)
-                    if snapshot_ts < reset_at <= now:
-                        display_5h = "window reset; awaiting next Codex usage snapshot"
-                except Exception:
-                    pass
-
-            return {
-                "agent": agent,
-                "limits_estimated": False,
-                "quota_source": "server",
-                "plan_type": live.get("plan_type"),
-                "window_5h": {
-                    "tokens":        cur_5h["tokens"],
-                    "limit":         100,
-                    "pct":           used_5h,
-                    "remaining_pct": max(0, 100 - used_5h),
-                    "sessions":      cur_5h["sessions"],
-                    "reset":         _reset_label_from_epoch(primary.get("resets_at"), now),
-                    "display_line":  display_5h + (f" · {local_total_label}" if local_total_label else ""),
-                    "resets_at_unix": primary.get("resets_at"),
-                    "window_minutes": primary.get("window_minutes", 300),
-                },
-                "window_7d": {
-                    "tokens":        cur_7d["tokens"],
-                    "limit":         100,
-                    "pct":           used_7d,
-                    "remaining_pct": max(0, 100 - used_7d),
-                    "sessions":      cur_7d["sessions"],
-                    "reset":         _reset_label_from_epoch(secondary.get("resets_at"), now),
-                    "display_line":  "server-reported usage",
-                    "resets_at_unix": secondary.get("resets_at"),
-                    "window_minutes": secondary.get("window_minutes", 10080),
-                },
-                "aux": {
-                    "title":      "Today Tokens",
-                    "reset":      midnight_label,
-                    "pct":        0,
-                    "value_line": f"{today_tokens:,} local tokens".replace(",", "_").replace("_", ","),
-                    "sub_line":   f"{today_sessions} session{'s' if today_sessions != 1 else ''}",
-                },
-            }
-
-    # Ensure today_stats is defined for deepseek (fallback path)
-    today_stats = {"tokens": 0, "sessions": 0, "cost": 0}
+            # Use server-reported pct (staleness-corrected). If the snapshot predates
+            # the reset boundary, _window_percent_from_snapshot returns 0 = fresh window.
+            _pct_5h = used_5h
+            _pct_7d = used_7d
+            # When the window just reset, local JSONL still contains old-window sessions;
+            # show 0 tokens rather than the stale accumulated count.
+            _disp_tok_5h = 0 if used_5h == 0 else cur_5h["tokens"]
+            _disp_tok_7d = 0 if used_7d == 0 else cur_7d["tokens"]
+            _reset_5h_label = _reset_label_from_epoch(_pri_resets_at, now)
+            _reset_7d_label = _reset_label_from_epoch(_sec_resets_at, now)
+            _win_min_5h = pri.get("window_minutes", 300)
+            _win_min_7d = sec.get("window_minutes", 10080)
+            _quota_src = "server"
+            _limits_est = False
+        else:
+            # Snapshot stale: fall back to local token counts but keep server reset time if still valid.
+            _real_5h_pct = _pct(cur_5h["tokens"], lim_5h)
+            _real_7d_pct = _pct(cur_7d["tokens"], lim_7d)
+            _pct_5h = _real_5h_pct
+            _pct_7d = _real_7d_pct
+            _disp_tok_5h = cur_5h["tokens"]
+            _disp_tok_7d = cur_7d["tokens"]
+            _reset_5h_label = (
+                _reset_label_from_epoch(_pri_resets_at, now) if _server_5h_reset_valid
+                else _next_daily_reset_label(limits["window_5h_reset"], now) if limits.get("window_5h_reset")
+                else _reset_label(cur_5h.get("earliest_ts"), 5, now)
+            )
+            _reset_7d_label = (
+                _reset_label_from_epoch(_sec_resets_at, now) if _server_7d_reset_valid
+                else _next_weekly_reset_label(weekly_reset_cfg, now) if weekly_reset_cfg
+                else _reset_label(cur_7d.get("earliest_ts"), 168, now)
+            )
+            _win_min_5h = pri.get("window_minutes", 300) if _pri_resets_at else 300
+            _win_min_7d = sec.get("window_minutes", 10080) if _sec_resets_at else 10080
+            _quota_src = "server+local"
+            _limits_est = True
+        return {
+            "agent": agent,
+            "limits_estimated": _limits_est,
+            "quota_source": _quota_src,
+            "window_5h": {
+                "tokens":        _disp_tok_5h,
+                "limit":         lim_5h,
+                "pct":           _pct_5h,
+                "remaining_pct": max(0, 100 - _pct_5h),
+                "sessions":      cur_5h["sessions"],
+                "reset":         _reset_5h_label,
+                "display_line":  f"{_fmt_tok(_disp_tok_5h)} / {_fmt_tok(lim_5h)} · {cur_5h['sessions']} sessions",
+                "resets_at_unix": _pri_resets_at if _server_5h_reset_valid else None,
+                "window_minutes": _win_min_5h,
+            },
+            "window_7d": {
+                "tokens":        _disp_tok_7d,
+                "limit":         lim_7d,
+                "pct":           _pct_7d,
+                "remaining_pct": max(0, 100 - _pct_7d),
+                "sessions":      cur_7d["sessions"],
+                "reset":         _reset_7d_label,
+                "display_line":  f"{_fmt_tok(_disp_tok_7d)} / {_fmt_tok(lim_7d)}"
+                                 f" · {cur_7d['sessions']} sessions",
+                "resets_at_unix": _sec_resets_at if _server_7d_reset_valid else None,
+                "window_minutes": _win_min_7d,
+            },
+            "aux": {
+                "title":      "Today Tokens",
+                "reset":      midnight_label,
+                "pct":        _pct(today_stats["tokens"], lim_7d // 7),
+                "value_line": f"{_fmt_tok(today_stats['tokens'])} tokens",
+                "sub_line":   (
+                    f"{today_stats['sessions']} session"
+                    f"{'s' if today_stats['sessions'] != 1 else ''}"
+                    + (f" · snapshot {codex_captured.strftime('%H:%M')} UTC" if codex_captured else "")
+                ),
+            },
+        }
 
     if agent == "claude":
         live = load_live_claude_rate_limits()
@@ -897,33 +1125,32 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
                 captured_at,
                 now,
             )
+            # Derive effective limits from server pct + JSONL token counts
+            _eff_5h = int(cur_5h["tokens"] / (used_5h / 100)) if used_5h > 0 else lim_5h
+            _eff_7d = int(cur_7d["tokens"] / (used_7d / 100)) if used_7d > 0 else lim_7d
             return {
                 "agent": agent,
                 "limits_estimated": False,
                 "quota_source": "server",
                 "window_5h": {
                     "tokens":        cur_5h["tokens"],
-                    "limit":         100,
+                    "limit":         _eff_5h,
                     "pct":           used_5h,
                     "remaining_pct": max(0, 100 - used_5h),
                     "sessions":      cur_5h["sessions"],
                     "reset":         _reset_label_from_epoch(five.get("resets_at"), now),
-                    "display_line":  "server-reported usage"
-                                     f" · {cur_5h['tokens']:,} local tokens"
-                                     f" · {cur_5h['sessions']} sessions",
+                    "display_line":  f"{_fmt_tok(cur_5h['tokens'])} / {_fmt_tok(_eff_5h)} · {cur_5h['sessions']} sessions",
                     "resets_at_unix": five.get("resets_at"),
                     "window_minutes": 300,
                 },
                 "window_7d": {
                     "tokens":        cur_7d["tokens"],
-                    "limit":         100,
+                    "limit":         _eff_7d,
                     "pct":           used_7d,
                     "remaining_pct": max(0, 100 - used_7d),
                     "sessions":      cur_7d["sessions"],
                     "reset":         _reset_label_from_epoch(seven.get("resets_at"), now),
-                    "display_line":  "server-reported usage"
-                                     f" · {cur_7d['tokens']:,} local tokens"
-                                     f" · {cur_7d['sessions']} sessions",
+                    "display_line":  f"{_fmt_tok(cur_7d['tokens'])} / {_fmt_tok(_eff_7d)} · {cur_7d['sessions']} sessions",
                     "resets_at_unix": seven.get("resets_at"),
                     "window_minutes": 10080,
                 },
@@ -942,6 +1169,37 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
 
     _real_5h_pct = _pct(cur_5h["tokens"], lim_5h)
     _real_7d_pct = _pct(cur_7d["tokens"], lim_7d)
+
+    # Reset labels: 5h uses window_5h_reset if configured, else earliest_ts; 7d uses weekly_reset if available
+    _w5h_r = limits.get("window_5h_reset")
+    _reset_5h = _next_daily_reset_label(_w5h_r, now) if _w5h_r else _reset_label(cur_5h.get("earliest_ts"), 5, now)
+    _reset_7d = (
+        _next_weekly_reset_label(weekly_reset_cfg, now)
+        if weekly_reset_cfg
+        else _reset_label(cur_7d.get("earliest_ts"), 168, now)
+    )
+
+    # Pace marker for rolling windows: use earliest usage timestamp
+    _e5 = cur_5h.get("earliest_ts")
+    _e7 = cur_7d.get("earliest_ts")
+    _resets_5h = _next_daily_reset_ts(_w5h_r, now) if _w5h_r else (int(_e5.timestamp()) + 300 * 60 if _e5 else int(now.timestamp()))
+    if weekly_reset_cfg:
+        try:
+            from zoneinfo import ZoneInfo
+            _tz = ZoneInfo(weekly_reset_cfg["tz"])
+            _nl = now.astimezone(_tz)
+            _da = weekly_reset_cfg["weekday"] - _nl.weekday()
+            if _da < 0:
+                _da += 7
+            elif _da == 0 and (_nl.hour, _nl.minute) >= (weekly_reset_cfg["hour"], weekly_reset_cfg["minute"]):
+                _da += 7
+            _nr = _nl.replace(hour=weekly_reset_cfg["hour"], minute=weekly_reset_cfg["minute"], second=0, microsecond=0) + timedelta(days=_da)
+            _resets_7d = int(_nr.astimezone(timezone.utc).timestamp())
+        except Exception:
+            _resets_7d = int(_e7.timestamp()) + 10080 * 60 if _e7 else int(now.timestamp())
+    else:
+        _resets_7d = int(_e7.timestamp()) + 10080 * 60 if _e7 else int(now.timestamp())
+
     return {
         "agent": agent,
         "limits_estimated": True,
@@ -952,11 +1210,11 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
             "pct":           _real_5h_pct,
             "remaining_pct": _rem(cur_5h["tokens"], lim_5h),
             "sessions":      cur_5h["sessions"],
-            "reset":         "Not synced",
+            "reset":         _reset_5h,
             "estimate_only": True,
-            "display_line":  "estimated local usage"
-                             f" · {cur_5h['tokens']:,} / {lim_5h:,}"
-                             f" · {cur_5h['sessions']} sessions",
+            "display_line":  f"{_fmt_tok(cur_5h['tokens'])} / {_fmt_tok(lim_5h)} · {cur_5h['sessions']} sessions",
+            "resets_at_unix": _resets_5h,
+            "window_minutes": 300,
         },
         "window_7d": {
             "tokens":        cur_7d["tokens"],
@@ -964,11 +1222,11 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
             "pct":           _real_7d_pct,
             "remaining_pct": _rem(cur_7d["tokens"], lim_7d),
             "sessions":      cur_7d["sessions"],
-            "reset":         "Not synced",
+            "reset":         _reset_7d,
             "estimate_only": True,
-            "display_line":  "estimated local usage"
-                             f" · {cur_7d['tokens']:,} / {lim_7d:,}"
-                             f" · {cur_7d['sessions']} sessions",
+            "display_line":  f"{_fmt_tok(cur_7d['tokens'])} / {_fmt_tok(lim_7d)} · {cur_7d['sessions']} sessions",
+            "resets_at_unix": _resets_7d,
+            "window_minutes": 10080,
         },
         "aux": {
             "title":      "Today Tokens",

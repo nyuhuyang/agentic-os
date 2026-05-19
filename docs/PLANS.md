@@ -10,31 +10,36 @@
 - [x] **P6**: Structured Operational Memory — `state/` JSON source of truth, `render_roadmap_md.py` fixed, Graphify integrated
 - [x] **P7**: Aider / DeepSeek third backend — `runner/app.py` + UI 3-way toggle + telemetry + ADR
 - [x] **P8**: Migrate Aider → DeepSeek TUI — installed, validated on real task, aider config retired
+- [x] **P11**: Agent Dispatch DeepSeek — per-issue agent override in Job Board
+- [x] **P12**: Test Coverage — runner core + linear_client smoke tests
+- [x] **P13**: DeepSeek TUI Cleanup — config, prompts, MCP alignment
+- [x] **P14**: Four-Agent Selection — Claude/Codex/DeepSeek/DeepSeek TUI parity
+- [x] **P16**: Optimistic UI — instant feedback on dispatch/cancel/comment
+- [x] **P17**: Fix Engine Stability — symphony-ts refactor + reliable task_shell dispatch
+- [x] **P18**: Dashboard Skeleton — Preact + dnd-kit basic kanban
+- [x] **P19**: Dashboard v2 — React 18 + vibe-kanban + 全列看板
 
 ## 🔄 Active
 
+### P15 — DeepSeek TUI Exec Tools: stable agent shell dispatch
+
+**Status:** active — symphony-ts engine refactor complete (P17). Agent dispatch via `task_shell_start`/`wait` stable. Next: end-to-end validation with deepseek backend.
+
+→ [`docs/exec-plans/active/p15-deepseek-tui-exec-tools.md`](exec-plans/active/p15-deepseek-tui-exec-tools.md)
+
 ### P10 — Modular Architecture: 可插拔模块系统
 
-**Goal:** 将当前单体架构拆分为独立、可插拔的模块。Agent 后端、集成（Linear、STT）、前端组件均可按需安装/启用，缺少依赖时优雅降级。
-
-**5 个阶段：**
-1. **Core 拆分** — `config.py`、`registry.py`、`state.py`、`pty.py`
-2. **Agent 模块化** — `agents/claude.py`、`agents/codex.py`、`agents/aider.py` + 注册表
-3. **集成模块化** — `integrations/linear.py`、`integrations/stt.py` + fallback 链
-4. **前端模块化** — 模板拆分 + 基于 `config.modules` 动态渲染
-5. **安装系统** — `scripts/setup.py` + `agentic-os.toml`
-
-**Status:** Phase 1 待开始
+**Status:** active — 核心拆分 + Agent/集成模块化 + 前端动态渲染 + 安装系统。Phase 1 待开始。
 
 → [`docs/exec-plans/active/p10-modular-architecture.md`](exec-plans/active/p10-modular-architecture.md)
 
 ### P6 — Structured Operational Memory
 
-**Status:** active — 基础架构已完成，`render_roadmap_md.py` bugs 已修复
+**Status:** active — `render_roadmap_md.py` bugs fixed. Remaining: initialState bootstrap, verify generated docs.
 
-### P9 — Research: DeepSeek Shell via MCP
+### P9 — DeepSeek Shell via MCP
 
-**Status:** planned — 调研 DeepSeek TUI exec 模式下能否通过 MCP 获取真实 shell 工具
+**Status:** planned — 调研 DeepSeek TUI exec 模式下能否通过 MCP 获取真实 shell 工具。
 
 → [`docs/exec-plans/active/p9-deepseek-shell-via-mcp.md`](exec-plans/active/p9-deepseek-shell-via-mcp.md)
 
@@ -44,3 +49,7 @@
 
 - **Reduce agent token waste** from repo-wide exploration
 - **Controlled autonomy / layered permissions**
+- **Lexical rich text** — full toolbar (Bold/Italic/Code/List)
+- **Linear GraphQL proxy** — direct frontend-to-Linear fallback (Vite proxy configured)
+- **Agent log** — wire real engine session data into DetailPanel
+- **HistoryPanel** — date range picker + CSV export

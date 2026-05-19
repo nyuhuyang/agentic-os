@@ -4,26 +4,14 @@
 
 ## Critical Token Budget Rule
 
-For small bug-fix tasks, do **not** read project-level documents by default.
-
-Forbidden unless explicitly requested: `SPEC.md`, `ARCHITECTURE.md`, `CONTEXT.md`, `README.md`, `docs/**`, `outputs/**`, historical logs.
-
-Small bug-fix workflow: read task → search implementation files → open narrow line ranges → smallest patch → validate.
-
-For Job Board UI tasks, default scope: `runner/templates/index.html`, `runner/app.py`, `runner/linear_client.py` (only if Linear API involved).
+Bug-fix scope: `runner/templates/index.html`, `runner/app.py`, `runner/linear_client.py` (Linear API only). Do **not** read `SPEC.md`, `ARCHITECTURE.md`, `CONTEXT.md`, `README.md`, `docs/**` unless explicitly requested. Workflow: read task → grep implementation files → open narrow line ranges → smallest patch → validate.
 
 ## Quick Start
 
 ```bash
-# Web dashboard (port 8510)
-.venv/bin/python3 runner/app.py
-
-# CLI job runner
-.venv/bin/python3 runner/run_skill.py --list
-.venv/bin/python3 runner/run_skill.py <skill> [--dry-run]
-
-# Token usage stats
-.venv/bin/python3 runner/usage_reader.py --days 7
+.venv/bin/python3 runner/app.py                          # dashboard (port 8510)
+.venv/bin/python3 runner/run_skill.py <skill> [--dry-run]  # CLI runner
+.venv/bin/python3 runner/usage_reader.py --days 7        # token stats
 ```
 
 ## Repository Map
@@ -36,6 +24,10 @@ agentic-os/
 │   ├── usage_reader.py     # Token usage aggregator (Claude JSONL + Codex SQLite)
 │   ├── dashboard.py        # Rich TUI — read-only CLI view
 │   ├── linear_client.py    # Linear API client
+│   ├── deepseek_agent.py   # DeepSeek agent dispatcher
+│   ├── deepseek_monitor.py # DeepSeek process monitor
+│   ├── core/               # Module registry, feature flags
+│   ├── modules/            # Linear and other connectors
 │   └── templates/
 │       └── index.html      # Jinja2 dashboard — all CSS/JS inline, no build step
 ├── outputs/                # Runtime state (created on first run)
@@ -47,12 +39,11 @@ agentic-os/
 │   ├── task_state.json     # Per-run task state (written by app.py)
 │   └── events.jsonl        # Append-only event log
 ├── scripts/
-│   └── render_roadmap_md.py  # Generates docs/generated/ + docs/exec-plans/ROADMAP.md from state/roadmap.json
+│   └── render_roadmap_md.py  # Generates docs/generated/ + docs/exec-plans/ROADMAP.md
 ├── docs/
-│   ├── generated/          # Auto-generated summaries — do not edit (run render_roadmap_md.py to refresh)
-│   │   ├── ACTIVE_TASKS.md # Current active work
-│   │   └── COMPLETED.md    # Completed work history
-│   ├── adr/                # Architecture decision records
+│   ├── generated/          # Auto-generated — do not edit manually
+│   │   ├── ACTIVE_TASKS.md
+│   │   └── COMPLETED.md
 │   ├── design-docs/        # Design decisions and core beliefs
 │   ├── exec-plans/
 │   │   ├── active/         # Work in progress
@@ -61,7 +52,8 @@ agentic-os/
 │   └── PLANS.md            # Roadmap and prioritized backlog
 ├── SPEC.md                 # Authoritative FR/NFR/AC spec
 ├── WORKFLOW.md             # Development workflow
-└── CLAUDE.md               # Agent operating contract
+├── CLAUDE.md               # Agent operating contract
+└── graphify-out/           # Architecture knowledge graph (read-only)
 ```
 
 ## Architecture
@@ -78,7 +70,6 @@ agentic-os/
 |------|---------|
 | `SPEC.md` | Authoritative FR/NFR/AC — check before implementing any feature |
 | `docs/design-docs/` | Design decisions and core beliefs |
-| `docs/adr/` | Architecture decision records |
 | `state/roadmap.json` | Authoritative roadmap — edit this, not the generated files |
 | `docs/generated/ACTIVE_TASKS.md` | Quick summary of active work (generated) |
 | `docs/exec-plans/active/` | Full exec plans for active work |
@@ -88,7 +79,7 @@ agentic-os/
 
 ## Conventions
 
-- No packages, no build step — all source is flat files in `runner/`
+- No external build step — source in `runner/`; submodules in `runner/core/` and `runner/modules/`
 - Run status closed set: `running`, `success`, `failed`, `error`, `timeout`, `sent`, `archived`
 - Only skills with `schedule_eligible: true` + non-empty `entrypoint` can run via `run_skill.py`
 - `outputs/` created on first run; never pre-create in code
@@ -98,27 +89,20 @@ agentic-os/
 ## Agent Workflow
 
 1. Read this file first.
-2. Read `docs/generated/ACTIVE_TASKS.md` for current work summary; open the relevant `docs/exec-plans/active/` plan for detail.
+2. Read `docs/generated/ACTIVE_TASKS.md`; open relevant `docs/exec-plans/active/` plan for detail.
 3. Read `SPEC.md` before touching any FR/NFR/AC — it is the source of truth.
 4. No test suite — verify against AC in `SPEC.md` before declaring done.
-5. Escalate to human for anything below.
-
-## Agent Retrieval Discipline
-
-- **Do not scan the entire repository by default.** Only read files that are directly relevant to the current task.
-- **Read the active plan** (`docs/exec-plans/active/`) before proposing any changes.
-- **Propose minimal additional files** — request bounded context expansion rather than reading large swaths of the codebase.
-- **Avoid repo-wide archaeology** — do not search for historical context unless explicitly needed.
-- **Historical plans are isolated** in `docs/exec-plans/completed/`. Do not read them unless the task requires it.
+5. Only read files directly relevant to task; no repo-wide scans. Historical plans in `docs/exec-plans/completed/` — do not read unless required.
+6. Escalate to human for anything below.
 
 ## Graphify Usage
 
 Knowledge graph lives at `graphify-out/`. Read it before answering architecture questions.
 
-- Before architecture/codebase questions: read `graphify-out/GRAPH_REPORT.md` for god nodes and community structure
-- Cross-module "how does X relate to Y": use `graphify query "<question>"`, `graphify path "<A>" "<B>"`, or `graphify explain "<concept>"` — not grep
+- Before architecture questions: read `graphify-out/GRAPH_REPORT.md` for god nodes and community structure
+- Cross-module queries: use `graphify query/path/explain` — not grep
 - After modifying code: run `graphify update .` (AST-only, no API cost)
-- CLI install: `pip install graphifyy` (double y); command is `graphify`; `/graphify` is the Claude Code skill
+- CLI: `pip install graphifyy` (double y); command is `graphify`; `/graphify` is the Claude Code skill
 
 ## Escalation — Do Not Proceed Without Human Confirmation
 

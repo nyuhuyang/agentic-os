@@ -29,8 +29,6 @@ logger = logging.getLogger(__name__)
 _HERE = Path(__file__).resolve().parent
 _PROTO = _HERE.parent.parent.parent
 STATE_DIR = _PROTO / "state"
-BOARD_UPLOADS_DIR = _PROTO / "runner" / "outputs" / "board_uploads"
-_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic"}
 
 
 def _load_workflow_config() -> dict:
@@ -70,7 +68,9 @@ def _linear_api_key_from_cfg(tracker: dict) -> str:
     return api_key
 
 
-def _linear_state_key(state: str | None) -> str:
+def _linear_state_key(state) -> str:
+    if isinstance(state, dict):
+        state = state.get("name")
     return re.sub(r"\s+", " ", (state or "").strip()).lower()
 
 
@@ -182,64 +182,20 @@ def _resolve_linear_state_name(issue: dict | None, target_state_key: str) -> str
     return None
 
 
-def _ocr_image_text(path: Path) -> str:
-    try:
-        proc = subprocess.run(
-            ["tesseract", str(path), "stdout", "--psm", "6"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-        text = (proc.stdout or "").strip()
-        if not text:
-            return ""
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        return text[:1400]
-    except Exception:
-        return ""
-
-
 def _format_attachments_for_text(attachments: list[dict] | None) -> str:
-    lines = []
-    uploads_root = BOARD_UPLOADS_DIR.resolve()
-    for idx, attachment in enumerate(attachments or [], 1):
-        name = attachment.get("name") or attachment.get("filename") or f"attachment-{idx}"
-        filename = attachment.get("filename") or ""
-        url = attachment.get("url") or ""
-        local_path = ""
-        if filename:
-            candidate = (BOARD_UPLOADS_DIR / Path(filename).name).resolve()
-        elif attachment.get("path"):
-            candidate = Path(str(attachment["path"])).resolve()
-        else:
-            candidate = None
-        if candidate:
-            try:
-                candidate.relative_to(uploads_root)
-            except ValueError:
-                candidate = None
-            if candidate and candidate.exists():
-                if candidate.suffix.lower() in _IMAGE_SUFFIXES:
-                    ocr_text = _ocr_image_text(candidate)
-                    parts = [f"{idx}. {name}", "type: image"]
-                    if ocr_text:
-                        parts.append(f"ocr:\n{ocr_text}")
-                    else:
-                        parts.append("ocr: (no text recognized)")
-                    lines.append(" | ".join(parts))
-                    continue
-                local_path = str(candidate)
-
+    if not attachments:
+        return ""
+    lines: list[str] = []
+    for idx, attachment in enumerate(attachments, start=1):
+        name = attachment.get("name", f"file_{idx}")
+        url = attachment.get("url", "")
         parts = [f"{idx}. {name}"]
-        if local_path:
-            parts.append(f"local path: {local_path}")
         if url:
             parts.append(f"url: {url}")
         lines.append(" | ".join(parts))
     if not lines:
         return ""
     return "[Attachments]\n" + "\n".join(lines)
-
 
 def _append_attachments_to_text(text: str, attachments: list[dict] | None) -> str:
     attachment_text = _format_attachments_for_text(attachments)
@@ -417,6 +373,19 @@ class LinearModule(AgenticModule):
                     if v.get("state") in ("Canceled", "Done", "Duplicate")
                 }
 
+                # Late-guard: re-check right before commit so a cancel that raced
+                # with the issue-iteration loop still prevents "In Progress" from
+                # overwriting a cache entry already set to "In Review".
+                for _iid2, _norm in list(new_cache.items()):
+                    if (
+                        _is_linear_in_progress(_norm.get("state"))
+                        and _linear_state_to_board(self.issues_cache.get(_iid2, {}).get("state")) == "review"
+                        and not self._issue_is_running(_iid2)
+                    ):
+                        _updated = dict(_norm)
+                        _updated["state"] = "In Review"
+                        new_cache[_iid2] = _updated
+
                 self.issues_cache.clear()
                 self.issues_cache.update(new_cache)
                 self._issues_by_team.clear()
@@ -553,9 +522,9 @@ class LinearModule(AgenticModule):
             }
             self.push_state(issue_id, "running")
             socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": "_prompt"})
-            if _run_deepseek_agent is None:
-                raise RuntimeError("_run_deepseek_agent not available (httpx missing?)")
             try:
+                if _run_deepseek_agent is None:
+                    raise RuntimeError("_run_deepseek_agent not available (httpx missing?)")
                 result = _run_deepseek_agent(prompt, workspace=str(ROOT))
                 dur = time.monotonic() - t0
                 _running_jobs.pop(run_id, None)
@@ -582,8 +551,8 @@ class LinearModule(AgenticModule):
                         model=pm or _agent_model("deepseek", cfg),
                         task_id=run_id,
                     )
-                    self._mark_issue_review(issue_id)
                     self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output))
+                    self._mark_issue_review(issue_id)
                     socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": "_prompt"})
                 else:
                     err = result.get("error", "unknown deepseek error")
@@ -598,14 +567,13 @@ class LinearModule(AgenticModule):
                         linear_issue_id=issue_id,
                         agent="deepseek",
                     )
-                    self._mark_issue_review(issue_id)
                     self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=err))
+                    self._mark_issue_review(issue_id)
                     socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": "_prompt"})
                 socketio.emit("run_logged", {"skill": "_prompt", "run_id": run_id})
             except Exception as e:
                 _running_jobs.pop(run_id, None)
                 _running_procs.pop(run_id, None)
-                self._mark_issue_review(issue_id)
                 _write_run_log(
                     "_prompt",
                     "error",
@@ -618,6 +586,7 @@ class LinearModule(AgenticModule):
                     agent="deepseek",
                 )
                 self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
+                self._mark_issue_review(issue_id)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": "_prompt"})
                 socketio.emit("run_logged", {"skill": "_prompt", "run_id": run_id})
             return
@@ -698,8 +667,8 @@ class LinearModule(AgenticModule):
                     model=pm or _agent_model(backend, cfg),
                     task_id=run_id,
                 )
-                self._mark_issue_review(issue_id)
                 self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output, error=error_s))
+                self._mark_issue_review(issue_id)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": selected_skill})
                 socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
             except subprocess.TimeoutExpired:
@@ -710,21 +679,20 @@ class LinearModule(AgenticModule):
                 _running_jobs.pop(run_id, None)
                 msg = f"Timed out after {AI_RUN_TIMEOUT_S}s"
                 _write_run_log(selected_skill, "timeout", started_at, dur, prompt=prompt, error=msg, run_id=run_id, linear_issue_id=issue_id, agent=backend)
-                self._mark_issue_review(issue_id)
                 self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Timeout", prompt=prompt, error=msg))
+                self._mark_issue_review(issue_id)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": selected_skill})
                 socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
             except Exception as e:
                 _running_procs.pop(run_id, None)
                 _running_jobs.pop(run_id, None)
                 _write_run_log(selected_skill, "error", started_at, 0.0, prompt=prompt, error=str(e), run_id=run_id, linear_issue_id=issue_id, agent=backend)
-                self._mark_issue_review(issue_id)
                 self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
+                self._mark_issue_review(issue_id)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": selected_skill})
                 socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
         except Exception as e:
             logger.exception("_dispatch_issue failed for %s: %s", issue_id, e)
-            self._mark_issue_review(issue_id)
             try:
                 socketio.emit("run_state_change", {"run_id": str(uuid.uuid4()), "state": "error", "skill": "unknown"})
             except Exception:
@@ -798,35 +766,61 @@ class LinearModule(AgenticModule):
             pa = (data.get("agent") or "").strip().lower()
             pa = pa if pa in {"claude", "codex", "deepseek", "deepseek-tui"} else None
             desc = _compose_issue_description(desc, pa)
+            cfg = _load_workflow_config()
+            tc = cfg.get("tracker", {})
+            tid = (data.get("team_id") or "").strip() or tc.get("team_id", "")
             if self._capability.get("type") == "local":
                 t = self.get_local_tracker()
-                issue = t.create_issue(title, desc, preferred_agent=pa)
+                issue = t.create_issue(title, desc, preferred_agent=pa, team_id=tid)
                 nd = dict(issue)
                 self.issues_cache[issue["id"]] = nd
+                if tid:
+                    self._issues_by_team.setdefault(tid, {})[issue["id"]] = nd
                 if self._socketio:
                     self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
                 return jsonify({"ok": True, "issue": nd})
-            cfg = _load_workflow_config()
-            tc = cfg.get("tracker", {})
             ak = _linear_api_key_from_cfg(tc)
-            tid = (data.get("team_id") or "").strip() or tc.get("team_id", "")
             if not ak:
                 return jsonify({"error": "Linear not configured"}), 503
             if not tid:
                 return jsonify({"error": "team_id required"}), 400
-            try:
-                from linear_client import LinearClient
-                issue = LinearClient(ak, tc.get("project_slug", "")).create_issue(tid, title, desc)
-                if not issue:
-                    return jsonify({"error": "Linear create failed"}), 500
-                n = _normalize_linear_issue(issue)
-                self.issues_cache[issue["id"]] = n
-                _post_linear_comment_raw(issue["id"], _issue_agent_comment_body(n.get("preferred_agent")), ak)
-                if self._socketio:
-                    self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
-                return jsonify({"ok": True, "issue": n})
-            except Exception as e:
-                return jsonify({"error": str(e)}), 500
+            # Local-first: write to local tracker immediately, return to client, sync Linear in background
+            local = self.get_local_tracker()
+            local_issue = local.create_issue(title, desc, preferred_agent=pa, team_id=tid)
+            local_id = local_issue["id"]
+            self.issues_cache[local_id] = dict(local_issue)
+            self._issues_by_team.setdefault(tid, {})[local_id] = dict(local_issue)
+            if self._socketio:
+                self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+
+            def _bg_sync_to_linear():
+                try:
+                    from linear_client import LinearClient
+                    linear_issue = LinearClient(ak, tc.get("project_slug", "")).create_issue(tid, title, desc)
+                    if not linear_issue:
+                        logger.warning("Linear create returned nothing for local %s", local_id)
+                        return
+                    n = _normalize_linear_issue(linear_issue)
+                    real_id = linear_issue["id"]
+                    # Swap local placeholder → real Linear ID in local tracker and cache
+                    raw = local._load_raw()
+                    raw.pop(local_id, None)
+                    raw[real_id] = dict(n)
+                    local._save_raw(raw)
+                    self.issues_cache.pop(local_id, None)
+                    self.issues_cache[real_id] = n
+                    if tid:
+                        team_cache = self._issues_by_team.setdefault(tid, {})
+                        team_cache.pop(local_id, None)
+                        team_cache[real_id] = n
+                    _post_linear_comment_raw(real_id, _issue_agent_comment_body(n.get("preferred_agent")), ak)
+                    if self._socketio:
+                        self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+                except Exception as e:
+                    logger.error("Background Linear create failed: %s", e)
+
+            threading.Thread(target=_bg_sync_to_linear, daemon=True).start()
+            return jsonify({"ok": True, "issue": local_issue})
 
         @app.route("/api/linear/issues/<issue_id>")
         def _issues_detail(issue_id: str):
@@ -892,6 +886,7 @@ class LinearModule(AgenticModule):
             if preferred_agent not in {"claude", "codex", "deepseek", "deepseek-tui"}:
                 preferred_agent = None
             if self._capability.get("type") == "local":
+                previous_board_status = _linear_state_to_board(self.issues_cache.get(issue_id, {}).get("state"))
                 issue = self.get_local_tracker().update_issue(
                     issue_id,
                     title=data.get("title"),
@@ -903,6 +898,13 @@ class LinearModule(AgenticModule):
                     self.issues_cache[issue_id] = issue
                     if self._socketio:
                         self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+                    if data.get("state_name") and _is_linear_in_progress(data["state_name"]) and not self._issue_is_running(issue_id):
+                        self.dispatched.pop(issue_id, None)
+                        threading.Thread(
+                            target=self._dispatch_issue,
+                            args=(issue, cfg, self._socketio, previous_board_status),
+                            daemon=True,
+                        ).start()
                     return jsonify({"ok": True, "issue": issue})
                 return jsonify({"error": "not found"}), 404
             ak = _linear_api_key_from_cfg(tc)

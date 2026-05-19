@@ -470,6 +470,12 @@
   .detail-section-label { font-size: 10px; color: var(--text-dim); letter-spacing: 2px; text-transform: uppercase; margin-bottom: 6px; }
   .detail-section-body { font-size: 12px; color: var(--text); background: var(--bg); border-radius: 4px; padding: 10px 12px; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow-y: auto; line-height: 1.5; }
   .detail-section-body.empty { color: var(--text-dim); font-style: italic; }
+  .detail-output-tabs { display:flex; margin-bottom:6px; }
+  .detail-tab { background:none; border:1px solid #444; color:var(--text-dim); font-size:10px; letter-spacing:1.5px; text-transform:uppercase; padding:3px 10px; cursor:pointer; font-family:inherit; transition:all .15s; }
+  .detail-tab:first-child { border-radius:3px 0 0 3px; border-right:none; }
+  .detail-tab:last-child { border-radius:0 3px 3px 0; }
+  .detail-tab.active { background:rgba(232,114,58,.12); border-color:var(--accent); color:var(--accent); }
+  .detail-tab.error-tab.active { background:rgba(229,57,53,.10); border-color:#b71c1c; color:var(--red); }
   .detail-footer { padding: 12px 20px; display: flex; gap: 8px; justify-content: flex-end; border-top: 1px solid var(--border); }
   .attach-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
   .attach-btn { cursor: pointer; padding: 3px 10px; border-radius: 4px; font-size: 11px; border: 1px dashed var(--border); color: var(--text-dim); background: transparent; user-select: none; transition: border-color .15s, color .15s; font-family: inherit; }
@@ -587,7 +593,25 @@
     {% endmacro %}
     {{ win_row("claude", "◆ Claude", windows_claude) if windows_claude else "" }}
     {{ win_row("codex", "✦ Codex", windows_codex) if windows_codex else "" }}
-    {{ win_row("deepseek", "⬢ DeepSeek", windows_deepseek) if windows_deepseek else "" }}
+    {% if windows_deepseek %}
+    {% set w5 = windows_deepseek.window_5h %}
+    <div class="windows-row" id="windows-row-deepseek">
+      <div class="win-agent-label">⬢ DeepSeek</div>
+      <div class="windows-row-cards" style="grid-template-columns:1fr">
+      <div class="win-card">
+        <div class="win-header">
+          <span class="win-title">{{ w5.title or "Spend" }}</span>
+          <span class="win-reset-label">{{ w5.reset }}</span>
+        </div>
+        <div class="win-bar-wrap">
+          <div class="win-bar {% if w5.pct >= 80 %}high{% elif w5.pct >= 50 %}medium{% else %}low{% endif %}" style="width:{{ w5.pct }}%"></div>
+        </div>
+        <div class="win-remaining">{% if w5.remaining_pct is not none %}{{ w5.remaining_pct }}<span class="pct-label">% remaining</span>{% else %}<span class="pct-label">no data</span>{% endif %}</div>
+        <div class="win-main">{{ w5.display_line }}</div>
+      </div>
+      </div>
+    </div>
+    {% endif %}
 
     <!-- Activity chart -->
     <div class="chart-box">
@@ -705,15 +729,21 @@
       <div class="linear-edit-field">
         <div style="display:flex;justify-content:space-between;align-items:center">
           <div class="linear-edit-label" style="margin-bottom:0">Description</div>
-          <div style="display:none" id="desc-stt-group">
-            <select id="stt-source-desc" class="stt-source" onchange="onSttSourceChangeDesc(this)" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:11px;padding:1px 4px;border-radius:3px;cursor:pointer;font-family:inherit">
+          <div style="display:flex;align-items:center;gap:4px;display:none" id="desc-stt-group">
+            <select id="stt-source-desc" class="stt-source" onchange="onSttSourceChange(this)" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:11px;padding:1px 4px;border-radius:3px;cursor:pointer;font-family:inherit">
               <option value="browser">Browser STT</option>
               <option value="openai:gpt-4o-mini-transcribe">OpenAI 4o mini</option>
             </select>
-            <button id="mic-btn-desc" onclick="toggleMicDesc()" title="Voice input" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:14px;padding:2px 8px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
+            <button id="mic-btn-desc" onclick="toggleMicFor('linear-edit-desc','mic-btn-desc','mic-status-desc')" title="Voice input" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:14px;padding:2px 8px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
           </div>
         </div>
+        <div id="mic-status-desc" style="font-size:10px;color:var(--text-dim);margin-top:2px;display:none"></div>
         <textarea class="linear-edit-input" id="linear-edit-desc" rows="4" placeholder="Issue description"></textarea>
+        <div class="attach-bar">
+          <label class="attach-btn" for="desc-files">📎 Attach file</label>
+          <input type="file" id="desc-files" multiple style="display:none" onchange="onDescFilesChange(this)">
+          <div class="attach-list" id="desc-attach-list"></div>
+        </div>
       </div>
       <div class="linear-edit-field">
         <div class="linear-edit-label">State</div>
@@ -734,12 +764,14 @@
       <div class="detail-section-body" id="detail-prompt"></div>
     </div>
     <div class="detail-section" id="detail-output-section">
-      <div class="detail-section-label">Output</div>
+      <div class="detail-output-tabs">
+        <button class="detail-tab active" id="tab-output" onclick="_switchOutputTab('output')">Output</button>
+        <button class="detail-tab" id="tab-log" onclick="_switchOutputTab('log')" style="display:none">Log</button>
+        <button class="detail-tab error-tab" id="tab-error" onclick="_switchOutputTab('error')" style="display:none">Error</button>
+      </div>
       <div class="detail-section-body" id="detail-output"></div>
-    </div>
-    <div class="detail-section" id="detail-error-section" style="display:none">
-      <div class="detail-section-label">Error</div>
-      <div class="detail-section-body" style="color:var(--red)" id="detail-error"></div>
+      <div class="detail-section-body" style="display:none" id="detail-log"></div>
+      <div class="detail-section-body" style="color:var(--red);display:none" id="detail-error"></div>
     </div>
     <div class="detail-section" id="detail-path-section" style="display:none">
       <div class="detail-section-label">Output Path</div>
@@ -952,6 +984,7 @@ function _updateOneRow(row, w) {
     { card: cards[0], d: w.window_5h },
     { card: cards[1], d: w.window_7d },
   ].forEach(({ card, d }) => {
+    if (!card) return;
     const titleEl = card.querySelector('.win-title');
     if (titleEl && d.title) titleEl.textContent = d.title;
     const rst = card.querySelector('.win-reset-label');
@@ -1762,6 +1795,60 @@ function _agentLabel(agent) {
 
 // run_progress state: run_id -> {snippet, turn}
 const _runProgress = {};
+let _detailProgressTimer = null;
+
+function _stopDetailProgressPoll() {
+  if (_detailProgressTimer) {
+    clearInterval(_detailProgressTimer);
+    _detailProgressTimer = null;
+  }
+}
+
+function _renderProgressLog(data) {
+  const logEl = document.getElementById('detail-log');
+  if (!logEl) return;
+  const events = Array.isArray(data?.events) ? data.events : [];
+  const header = [
+    data?.status ? `status: ${data.status}` : '',
+    data?.pid ? `pid: ${data.pid}` : '',
+    data?.session_path ? `session: ${data.session_path}` : '',
+    data?.log_path ? `json: ${data.log_path}` : '',
+  ].filter(Boolean).join('\n');
+  const body = events.map(e => {
+    const ts = e.ts ? `[${e.ts}] ` : '';
+    return `${ts}${e.text || ''}`;
+  }).join('\n\n');
+  logEl.textContent = [header, body || '(no live log yet)'].filter(Boolean).join('\n\n');
+  logEl.classList.toggle('empty', !body);
+  document.getElementById('tab-log').style.display = '';
+}
+
+async function _refreshDetailProgress(runId, issueId = '') {
+  if (!runId && !issueId) return;
+  const url = issueId
+    ? `/api/linear/issues/${encodeURIComponent(issueId)}/progress`
+    : `/api/runs/${encodeURIComponent(runId)}/progress`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return;
+    const data = await res.json();
+    _renderProgressLog(data);
+    const last = (data.events || []).slice(-1)[0];
+    const progressKey = runId || (issueId ? `linear-${issueId}` : '');
+    if (progressKey && last?.text) {
+      _runProgress[progressKey] = {
+        snippet: String(last.text).replace(/\s+/g, ' ').slice(-140),
+        turn: (data.events || []).length,
+      };
+    }
+  } catch (_) {}
+}
+
+function _startDetailProgressPoll(runId, issueId = '') {
+  _stopDetailProgressPoll();
+  _refreshDetailProgress(runId, issueId);
+  _detailProgressTimer = setInterval(() => _refreshDetailProgress(runId, issueId), 3000);
+}
 
 function _buildColCard(run) {
   const state = run._boardStatus || run.status || run.state || 'unknown';
@@ -1832,7 +1919,7 @@ function _buildColCard(run) {
     : (state === 'todo' && badgeAgent
       ? `onclick="event.stopPropagation();triggerLinearIssueWithAgent('${_esc(run.linear_issue_id)}','${_esc(badgeAgent)}')"`
       : `onclick="event.stopPropagation();setIssueAgent('${_esc(run.linear_issue_id)}','${_esc(preferredAgent || badgeAgent)}')"`);
-  const showRunCancel = isRunning;
+  const showRunCancel = isRunning || isInProgress;
   const agentBadge = run._is_linear_issue
     ? `<span class="agent-badge ${_esc(paClass)}${agentLocked ? ' locked' : ''}" title="${_esc(badgeTitle)}" ${agentBadgeClick}>${_esc(paLabel)}</span>`
     : '';
@@ -1879,7 +1966,24 @@ function _buildColCard(run) {
   if (runCancelBtn) {
     runCancelBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      cancelRun(run.latest_run_id || run.run_id);
+      const rid = run.latest_run_id || run.run_id;
+      if (rid) {
+        fetch(`/api/runs/${rid}`, { method: 'DELETE' }).catch(() => {});
+        delete _runProgress[rid];
+      }
+      const iid = run.linear_issue_id || '';
+      if (iid) {
+        // Optimistic update first — board shows in_review immediately and holds
+        // off refreshes so the race between DELETE/PATCH and board fetch can't bounce it back.
+        _optimisticPatchLinearIssue(iid, { state_name: 'In Review', board_status: 'in_review' });
+        _holdBoardRefresh(4000);
+        fetch(`/api/linear/issues/${iid}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ state_name: 'In Review' }),
+        }).catch(() => {});
+      } else {
+        refreshJobBoard();
+      }
     });
   }
   if (canRetry) {
@@ -1919,13 +2023,9 @@ function _buildColCard(run) {
 
 async function cancelRun(run_id) {
   if (!run_id) return;
-  try {
-    await fetch(`/api/runs/${run_id}`, { method: 'DELETE' });
-    delete _runProgress[run_id];
-    refreshJobBoard();
-  } catch (err) {
-    console.error('Cancel failed:', err);
-  }
+  fetch(`/api/runs/${run_id}`, { method: 'DELETE' }).catch(() => {});
+  delete _runProgress[run_id];
+  refreshJobBoard();
 }
 
 async function setIssueAgent(issueId, currentAgent) {
@@ -1994,48 +2094,8 @@ async function triggerLinearIssueWithAgent(issueId, agent, { refresh = true } = 
 }
 
 
-function onSttSourceChangeDesc(sel) {
-  _sttModeDesc = sel.value;
-  localStorage.setItem('sttModeDesc', sel.value);
-}
-let _sttModeDesc = localStorage.getItem('sttModeDesc') || 'browser';
-document.addEventListener('DOMContentLoaded', () => {
-  const sel = document.getElementById('stt-source-desc');
-  if (sel) sel.value = _sttModeDesc;
-});
-let _sttRecDesc = null;
-let _sttRunningDesc = false;
-function toggleMicDesc() {
-  const btn = document.getElementById('mic-btn-desc');
-  if (_sttRunningDesc) {
-    if (_sttRecDesc) { _sttRecDesc.stop(); _sttRecDesc = null; }
-    _sttRunningDesc = false;
-    btn.style.background = 'none';
-    btn.textContent = '🎙';
-    return;
-  }
-  if (_sttModeDesc === 'browser') {
-    if (!('webkitSpeechRecognition' in window)) { alert('Browser STT not supported'); return; }
-    const rec = new webkitSpeechRecognition();
-    rec.continuous = false; rec.interimResults = true; rec.lang = 'zh-CN';
-    _sttRecDesc = rec;
-    _sttRunningDesc = true;
-    btn.style.background = 'var(--accent)';
-    btn.textContent = '🔴';
-    rec.onresult = (e) => {
-      const text = Array.from(e.results).map(r => r[0].transcript).join('');
-      const el = document.getElementById('linear-edit-desc');
-      if (el) {
-        const start = el.selectionStart || el.value.length;
-        el.value = el.value.slice(0, start) + text + el.value.slice(el.selectionEnd || el.value.length);
-        el.selectionStart = el.selectionEnd = start + text.length;
-      }
-    };
-    rec.onerror = () => { btn.style.background = 'none'; btn.textContent = '🎙'; _sttRunningDesc = false; };
-    rec.onend = () => { btn.style.background = 'none'; btn.textContent = '🎙'; _sttRunningDesc = false; };
-    rec.start();
-  }
-}
+
+
 
 function _tickElapsedTimers() {
   document.querySelectorAll('[data-started][data-run-id]').forEach(el => {
@@ -2253,6 +2313,7 @@ async function openDetailModal(run_id) {
   if (!run_id) return;
   const requestSeq = ++_detailModalLoadSeq;
   const boardItem = _boardItemsByRunId[run_id] || null;
+  _stopDetailProgressPoll();
   _detailRunId = run_id;
   _detailLinearIssueId = null;
   _detailLinearInitial = null;
@@ -2264,7 +2325,16 @@ async function openDetailModal(run_id) {
   document.getElementById('detail-prompt').classList.add('empty');
   document.getElementById('detail-output').textContent = '';
   document.getElementById('detail-output').classList.add('empty');
-  document.getElementById('detail-error-section').style.display = 'none';
+  document.getElementById('detail-output').style.display = '';
+  document.getElementById('detail-log').textContent = '';
+  document.getElementById('detail-log').style.display = 'none';
+  document.getElementById('tab-log').style.display = 'none';
+  document.getElementById('tab-log').classList.remove('active');
+  document.getElementById('detail-error').textContent = '';
+  document.getElementById('detail-error').style.display = 'none';
+  document.getElementById('tab-error').style.display = 'none';
+  document.getElementById('tab-error').classList.remove('active');
+  document.getElementById('tab-output').classList.add('active');
   document.getElementById('detail-path-section').style.display = 'none';
   document.getElementById('linear-edit-section').style.display = 'none';
   document.getElementById('linear-edit-status').textContent = '';
@@ -2283,13 +2353,23 @@ async function openDetailModal(run_id) {
   _renderAttachList('reply-attach-list', _replyAttachments);
 
   // Virtual Linear card — no run record yet, show issue details directly
+  // Exception: if a latest_run_id exists (e.g. run outside the 80-run window), load that instead.
   if (run_id.startsWith('linear-')) {
+    if (boardItem?.latest_run_id) {
+      await openDetailModal(boardItem.latest_run_id);
+      return;
+    }
     const issueId = run_id.slice(7);
     if (requestSeq !== _detailModalLoadSeq || _detailRunId !== run_id || !_isModalOpen('detail-modal')) return;
     _detailLinearIssueId = issueId;
     document.getElementById('detail-meta').textContent = 'Linear issue';
     document.getElementById('detail-prompt-section').style.display = 'none';
-    document.getElementById('detail-output-section').style.display = 'none';
+    const isInProgressVirtual = (boardItem?._boardStatus || '') === 'in_progress';
+    document.getElementById('detail-output-section').style.display = isInProgressVirtual ? '' : 'none';
+    if (isInProgressVirtual) {
+      _switchOutputTab('log');
+      _startDetailProgressPoll(run_id, issueId);
+    }
     document.getElementById('detail-reply-section').style.display = 'none';
     document.getElementById('desc-stt-group').style.display = 'flex';
     const isTodoVirtual = (boardItem?._boardStatus || '') === 'todo';
@@ -2298,6 +2378,8 @@ async function openDetailModal(run_id) {
     return;
   }
 
+  document.getElementById('detail-prompt-section').style.display = '';
+  document.getElementById('detail-output-section').style.display = '';
   document.getElementById('detail-output').textContent = 'Loading…';
   document.getElementById('detail-output').classList.remove('empty');
   try {
@@ -2323,14 +2405,23 @@ async function openDetailModal(run_id) {
     promptEl.classList.toggle('empty', !prompt);
 
     const output = (r.output || '').trim();
-    const error = _normalizeErrorText(r.error);
+    const errorRaw = (r.error || '').trim();
+    const hasError = !!errorRaw || r.status === 'error' || r.status === 'timeout';
+    const hasLog = !!r.log_path || r.status === 'running' || state === 'in_progress';
     const outputEl = document.getElementById('detail-output');
-    outputEl.textContent = output || error || '(no output)';
-    outputEl.classList.toggle('empty', !output && !error);
+    outputEl.textContent = output || '(no output)';
+    outputEl.classList.toggle('empty', !output);
 
-    if (error) {
-      document.getElementById('detail-error').textContent = error;
-      document.getElementById('detail-error-section').style.display = '';
+    if (hasLog) {
+      document.getElementById('tab-log').style.display = '';
+      _startDetailProgressPoll(run_id, r.linear_issue_id || '');
+    }
+
+    if (hasError) {
+      const errorEl = document.getElementById('detail-error');
+      errorEl.textContent = errorRaw || '(no error details recorded)';
+      errorEl.classList.toggle('empty', !errorRaw);
+      document.getElementById('tab-error').style.display = '';
     }
 
     const path = (r.output_path || '').trim();
@@ -2380,9 +2471,21 @@ async function openDetailModal(run_id) {
   }
 }
 
+function _switchOutputTab(tab) {
+  const isError = tab === 'error';
+  const isLog = tab === 'log';
+  document.getElementById('detail-output').style.display = (isError || isLog) ? 'none' : '';
+  document.getElementById('detail-log').style.display = isLog ? '' : 'none';
+  document.getElementById('detail-error').style.display = isError ? '' : 'none';
+  document.getElementById('tab-output').classList.toggle('active', !isError && !isLog);
+  document.getElementById('tab-log').classList.toggle('active', isLog);
+  document.getElementById('tab-error').classList.toggle('active', isError);
+}
+
 function closeDetailModal({ flush = true } = {}) {
   _detailModalLoadSeq++;
   _detailLinearLoadSeq++;
+  _stopDetailProgressPoll();
   document.getElementById('detail-modal').classList.remove('open');
   _detailRunId = null;
   _detailLinearIssueId = null;
@@ -3302,7 +3405,9 @@ function _playChime() {
 
 socket.on('run_state_change', (data) => {
   if (data.run_id && data.state) {
-    if (data.state !== 'running') {
+    if (data.state === 'running') {
+      _playStartSound();
+    } else {
       delete _runProgress[data.run_id];
       if (data.state === 'success' || data.state === 'review') _playChime();
     }
@@ -3442,18 +3547,18 @@ terminalEl.addEventListener('drop', async (e) => {
           <button id="mic-btn-desc" onclick="toggleMicFor('new-issue-desc','mic-btn-desc','mic-status-desc')" title="Voice input" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:13px;padding:1px 7px;border-radius:4px;cursor:pointer;font-family:inherit">🎙</button>
         </div>
       </div>
+      <div id="mic-status-desc" style="font-size:10px;color:var(--text-dim);margin-top:2px;display:none"></div>
       <textarea class="new-issue-input" id="new-issue-desc" placeholder="Details…"></textarea>
       <div class="attach-bar">
         <label class="attach-btn" for="new-task-files">📎 Attach file</label>
         <input type="file" id="new-task-files" multiple style="display:none" onchange="onNewTaskFilesChange(this)">
         <div class="attach-list" id="new-task-attach-list"></div>
       </div>
-      <div id="mic-status-desc" style="font-size:10px;color:var(--text-dim);margin-top:2px;display:none"></div>
     </div>
     <div class="new-issue-actions">
       <span class="new-issue-status" id="new-issue-status"></span>
       <button type="button" class="new-issue-cancel" onclick="closeNewIssueModal()">Cancel</button>
-      <button type="button" class="new-issue-submit" id="new-issue-submit" onclick="submitNewIssue()">Create in Linear</button>
+      <button type="button" class="new-issue-submit" id="new-issue-submit" onclick="submitNewIssue()">Add to Todo</button>
     </div>
   </div>
 </div>
@@ -3556,18 +3661,42 @@ function _removeAttach(listId, idx) {
 async function onNewTaskFilesChange(input) {
   for (const file of Array.from(input.files)) {
     const result = await _uploadBoardFile(file);
-    if (result && result.url) _newTaskAttachments.push(result);
+    if (result && (result.local_path || result.path || result.url)) {
+      const path = result.local_path || result.path || result.url;
+      const desc = document.getElementById('new-issue-desc');
+      if (desc) {
+        desc.value += (desc.value ? '\n' : '') + path;
+      }
+    }
   }
-  _renderAttachList('new-task-attach-list', _newTaskAttachments);
   _saveNewIssueDraft();
   input.value = '';
 }
 async function onReplyFilesChange(input) {
   for (const file of Array.from(input.files)) {
     const result = await _uploadBoardFile(file);
-    if (result && result.url) _replyAttachments.push(result);
+    if (result && (result.local_path || result.path || result.url)) {
+      const path = result.local_path || result.path || result.url;
+      const reply = document.getElementById('detail-reply-input');
+      if (reply) {
+        reply.value += (reply.value ? '\n' : '') + path;
+      }
+    }
   }
-  _renderAttachList('reply-attach-list', _replyAttachments);
+  input.value = '';
+}
+
+async function onDescFilesChange(input) {
+  for (const file of Array.from(input.files)) {
+    const result = await _uploadBoardFile(file);
+    if (result && (result.local_path || result.path || result.url)) {
+      const desc = document.getElementById('linear-edit-desc');
+      if (desc) {
+        const path = result.local_path || result.path || result.url;
+        desc.value += (desc.value ? '\n' : '') + path;
+      }
+    }
+  }
   input.value = '';
 }
 
@@ -3578,7 +3707,7 @@ async function submitNewIssue() {
   const btn   = document.getElementById('new-issue-submit');
   const status = document.getElementById('new-issue-status');
   btn.disabled = true;
-  status.textContent = 'Creating…';
+  status.textContent = 'Saving local Todo…';
   try {
     const res = await fetch('/api/linear/issues', {
       method: 'POST',
@@ -3605,3 +3734,19 @@ async function submitNewIssue() {
 </script>
 </body>
 </html>
+function _playStartSound() {
+  try {
+    if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = _audioCtx.currentTime;
+    const osc = _audioCtx.createOscillator();
+    const gain = _audioCtx.createGain();
+    osc.frequency.setValueAtTime(392, now);          // G4
+    osc.frequency.setValueAtTime(523.25, now + 0.15); // C5
+    osc.frequency.setValueAtTime(659.25, now + 0.3);  // E5
+    gain.gain.setValueAtTime(0.25, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+    osc.connect(gain).connect(_audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.5);
+  } catch (_) {}
+}

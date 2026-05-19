@@ -107,6 +107,7 @@ OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 RUN_LOG = OUTPUTS_DIR / "run_log.jsonl"
 JOB_STATE = OUTPUTS_DIR / "job_state.json"
 REGISTRY_CACHE_DIR = OUTPUTS_DIR / "registry-cache"
+RUN_PROGRESS_DIR = OUTPUTS_DIR / "logs"
 
 # Structured state directory — operational truth
 STATE_DIR = _PROTO / "state"
@@ -322,23 +323,6 @@ def _is_image_attachment(name: str) -> bool:
     return Path(name).suffix.lower() in _IMAGE_SUFFIXES
 
 
-def _ocr_image_text(path: Path) -> str:
-    try:
-        proc = subprocess.run(
-            ["tesseract", str(path), "stdout", "--psm", "6"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-        text = (proc.stdout or "").strip()
-        if not text:
-            return ""
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        return text[:1400]
-    except Exception:
-        return ""
-
-
 def _format_prompt_attachments(attachments: list[dict] | None) -> str:
     lines = []
     uploads_root = BOARD_UPLOADS_DIR.resolve()
@@ -355,13 +339,7 @@ def _format_prompt_attachments(attachments: list[dict] | None) -> str:
                 candidate = None
             if candidate and candidate.exists():
                 if _is_image_attachment(candidate.name):
-                    ocr_text = _ocr_image_text(candidate)
-                    parts = [f"{idx}. {name}", "type: image"]
-                    if ocr_text:
-                        parts.append(f"ocr:\n{ocr_text}")
-                    else:
-                        parts.append("ocr: (no text recognized)")
-                    lines.append(" | ".join(parts))
+                    lines.append(" | ".join([f"{idx}. {name}", "type: image", f"path: {candidate}"]))
                     continue
                 local_path = str(candidate)
         elif attachment.get("path"):
@@ -372,13 +350,7 @@ def _format_prompt_attachments(attachments: list[dict] | None) -> str:
                 candidate = None
             if candidate and candidate.exists():
                 if _is_image_attachment(candidate.name):
-                    ocr_text = _ocr_image_text(candidate)
-                    parts = [f"{idx}. {name}", "type: image"]
-                    if ocr_text:
-                        parts.append(f"ocr:\n{ocr_text}")
-                    else:
-                        parts.append("ocr: (no text recognized)")
-                    lines.append(" | ".join(parts))
+                    lines.append(" | ".join([f"{idx}. {name}", "type: image", f"path: {candidate}"]))
                     continue
                 local_path = str(candidate)
 
@@ -570,6 +542,208 @@ def load_runs(limit: int = 20, include_archived: bool = False) -> list[dict]:
     return runs
 
 
+def _run_progress_path(run_id: str) -> Path:
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", run_id)
+    return RUN_PROGRESS_DIR / f"{safe_id}.json"
+
+
+def _write_run_progress_json(run_id: str, payload: dict) -> str:
+    RUN_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
+    path = _run_progress_path(run_id)
+    existing: dict = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+    existing.update(payload)
+    existing["run_id"] = run_id
+    existing["updated_at"] = datetime.now(timezone.utc).isoformat()
+    path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+def _tail_text_lines(path: Path, max_lines: int = 160) -> list[str]:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()[-max_lines:]
+    except Exception:
+        return []
+
+
+def _extract_text_from_codex_item(item: dict) -> str:
+    payload = item.get("payload") or {}
+    if item.get("type") == "event_msg":
+        return str(payload.get("message") or "").strip()
+    if item.get("type") != "response_item":
+        return ""
+    typ = payload.get("type")
+    if typ == "message":
+        parts: list[str] = []
+        for part in payload.get("content") or []:
+            if isinstance(part, dict):
+                text = part.get("text") or part.get("output_text") or ""
+                if text:
+                    parts.append(str(text))
+        return "\n".join(parts).strip()
+    if typ == "function_call":
+        name = payload.get("name") or "tool"
+        return f"[tool] {name}"
+    if typ == "function_call_output":
+        output = str(payload.get("output") or "").strip()
+        first = " ".join(output.split())[:240]
+        return f"[tool output] {first}" if first else ""
+    return ""
+
+
+def _tail_codex_session(path: Path, max_events: int = 40) -> list[dict]:
+    events: list[dict] = []
+    for line in _tail_text_lines(path, 240):
+        try:
+            item = json.loads(line)
+        except Exception:
+            continue
+        text = _extract_text_from_codex_item(item)
+        if not text:
+            continue
+        events.append({
+            "ts": item.get("timestamp", ""),
+            "kind": item.get("type", ""),
+            "text": text[-2000:],
+        })
+    return events[-max_events:]
+
+
+def _session_from_pid(pid: int | None) -> Path | None:
+    if not pid:
+        return None
+    try:
+        proc = subprocess.run(["lsof", "-p", str(pid)], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None
+    for line in proc.stdout.splitlines():
+        if "/.codex/sessions/" not in line or not line.rstrip().endswith(".jsonl"):
+            continue
+        path = Path(line.split()[-1])
+        if path.exists():
+            return path
+    return None
+
+
+def _find_codex_process_for_issue(issue: dict) -> tuple[int | None, Path | None]:
+    needle_parts = [
+        str(issue.get("identifier") or ""),
+        str(issue.get("title") or ""),
+    ]
+    needles = [n for n in needle_parts if n]
+    if not needles:
+        return None, None
+    try:
+        proc = subprocess.run(["ps", "-axo", "pid,command"], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None, None
+    for line in proc.stdout.splitlines():
+        if "codex exec" not in line:
+            continue
+        if not any(n in line for n in needles):
+            continue
+        pid_s = line.strip().split(maxsplit=1)[0]
+        try:
+            pid = int(pid_s)
+        except ValueError:
+            continue
+        return pid, _session_from_pid(pid)
+    return None, None
+
+
+def _file_contains_needles(path: Path, needles: list[str]) -> bool:
+    try:
+        with path.open("rb") as f:
+            head = f.read(200_000)
+            try:
+                f.seek(max(0, path.stat().st_size - 200_000))
+            except OSError:
+                pass
+            tail = f.read(200_000)
+        text = (head + b"\n" + tail).decode("utf-8", errors="ignore")
+    except Exception:
+        return False
+    return any(n and n in text for n in needles)
+
+
+def _find_recent_codex_session_for_issue(issue: dict) -> Path | None:
+    needles = [
+        str(issue.get("identifier") or ""),
+        str(issue.get("title") or ""),
+    ]
+    needles = [n for n in needles if n]
+    if not needles:
+        return None
+    root = Path.home() / ".codex" / "sessions"
+    try:
+        paths = sorted(root.glob("**/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except Exception:
+        return None
+    issue_ts = 0.0
+    for field in ("updated_at", "created_at"):
+        raw = issue.get(field)
+        if not raw:
+            continue
+        try:
+            issue_ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
+            break
+        except Exception:
+            pass
+
+    def _session_start(path: Path) -> float:
+        match = re.search(r"rollout-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})", path.name)
+        if not match:
+            return 0.0
+        day, hh, mm, ss = match.groups()
+        try:
+            local_dt = datetime.strptime(f"{day} {hh}:{mm}:{ss}", "%Y-%m-%d %H:%M:%S").astimezone()
+            return local_dt.timestamp()
+        except Exception:
+            return 0.0
+
+    if issue_ts:
+        paths = [p for p in paths if _session_start(p) >= issue_ts - 300]
+    for path in paths[:25]:
+        if _file_contains_needles(path, needles):
+            return path
+    return None
+
+
+def _build_progress_payload(run_id: str, *, issue_id: str | None = None) -> dict:
+    job = dict(_running_jobs.get(run_id) or {})
+    proc = _running_procs.get(run_id)
+    pid = proc.pid if proc else job.get("pid")
+    session_path = _session_from_pid(pid)
+    status = "running" if job else "unknown"
+
+    if issue_id and not session_path:
+        issue = _linear_cache().get(issue_id) or {}
+        pid, session_path = _find_codex_process_for_issue(issue)
+        if pid:
+            status = "detached"
+        if not session_path:
+            session_path = _find_recent_codex_session_for_issue(issue)
+            if session_path:
+                status = "session"
+
+    events = _tail_codex_session(session_path) if session_path else []
+    payload = {
+        "ok": True,
+        "run_id": run_id,
+        "linear_issue_id": issue_id or job.get("linear_issue_id"),
+        "status": status,
+        "pid": pid,
+        "session_path": str(session_path) if session_path else "",
+        "events": events,
+    }
+    payload["log_path"] = _write_run_progress_json(run_id, payload)
+    return payload
+
+
 def _shorten_pulse(text: str, limit: int = 96) -> str:
     text = " ".join(text.split())
     if len(text) <= limit:
@@ -678,9 +852,53 @@ def _fmt_tok(n: int) -> str:
     return str(n)
 
 
+def _fmt_window_reset(seconds: float) -> str:
+    minutes = max(1, int((seconds + 59) // 60))
+    hours, mins = divmod(minutes, 60)
+    if hours >= 24:
+        days, rem_hours = divmod(hours, 24)
+        return f"{days}d{rem_hours:02d}h"
+    if hours > 0:
+        return f"{hours}h{mins:02d}m"
+    return f"{minutes}m"
+
+
+def _normalize_window_reset(d: dict, now: datetime | None = None) -> dict:
+    """Keep a reset timestamp inside its declared rolling window."""
+    out = dict(d)
+    try:
+        resets_at = float(out.get("resets_at_unix") or 0)
+        window_minutes = float(out.get("window_minutes") or 0)
+    except (TypeError, ValueError):
+        return out
+    if resets_at <= 0 or window_minutes <= 0:
+        return out
+
+    now_dt = now or datetime.now(timezone.utc)
+    now_unix = now_dt.timestamp()
+    window_seconds = window_minutes * 60
+    remaining = resets_at - now_unix
+    if remaining > window_seconds:
+        remaining = remaining % window_seconds
+        if remaining <= 0:
+            remaining = window_seconds
+        out["resets_at_unix"] = int(now_unix + remaining)
+        out["reset"] = _fmt_window_reset(remaining)
+    return out
+
+
+def _normalize_windows(w: dict) -> dict:
+    now = datetime.now(timezone.utc)
+    out = dict(w)
+    for key in ("window_5h", "window_7d"):
+        if isinstance(out.get(key), dict):
+            out[key] = _normalize_window_reset(out[key], now)
+    return out
+
+
 def load_windows(agent: str = "claude") -> dict:
     try:
-        w = _compute_windows(agent, RUN_LOG)
+        w = _normalize_windows(_compute_windows(agent, RUN_LOG))
         # Format token counts for template
         def _fmt_win(d: dict) -> dict:
             tokens_fmt = _fmt_tok(d["tokens"])
@@ -819,12 +1037,16 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
         record["agent"] = agent
     if model:
         record["model"] = model
+    progress_path = _run_progress_path(run_id)
+    if progress_path.exists():
+        record["log_path"] = str(progress_path)
 
     # Write to both locations: state/ (operational truth) and outputs/ (backward compat)
     with STATE_RUN_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     with RUN_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
+    _runs_cache.clear()  # invalidate so next board refresh sees the new record
 
     # Update task state in state/task_state.json (operational truth)
     state = _load_task_state()
@@ -849,6 +1071,8 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
         "output": output,
         "prompt": prompt,
     }
+    if progress_path.exists():
+        run_record["log_path"] = str(progress_path)
     state[skill]["runs"].append(run_record)
     state[skill]["status"] = status
     state[skill]["last_run"] = started_at
@@ -1041,6 +1265,68 @@ def _parse_agent_output(agent: str, stdout_s: str) -> tuple[str, int | None, int
 
 
 
+def _claude_stream_log_path(run_id: str) -> Path:
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", run_id)
+    return RUN_PROGRESS_DIR / f"{safe_id}_stream.jsonl"
+
+
+def _stream_claude_run(
+    proc: "subprocess.Popen[bytes]",
+    run_id: str,
+    timeout: float = 600,
+) -> tuple[str, int | None, int | None, str | None, str]:
+    """Stream Claude stream-json stdout to a JSONL progress file.
+
+    Returns (output, input_tokens, output_tokens, model, stderr).
+    """
+    stream_path = _claude_stream_log_path(run_id)
+    RUN_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
+
+    lines: list[str] = []
+    result_event: dict = {}
+
+    def _reader() -> None:
+        with stream_path.open("w", encoding="utf-8") as sf:
+            for raw in proc.stdout:  # type: ignore[union-attr]
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if not line:
+                    continue
+                lines.append(line)
+                sf.write(line + "\n")
+                sf.flush()
+                try:
+                    ev = json.loads(line)
+                    if ev.get("type") == "result":
+                        result_event.update(ev)
+                    _write_run_progress_json(run_id, {
+                        "state": "running",
+                        "stream_log": str(stream_path),
+                        "last_event_type": ev.get("type", ""),
+                    })
+                except Exception:
+                    pass
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+
+    if t.is_alive():
+        proc.kill()
+        raise subprocess.TimeoutExpired(proc.args, timeout)
+
+    proc.wait()
+    stderr_s = (proc.stderr.read() or b"").decode("utf-8", errors="replace").strip()  # type: ignore[union-attr]
+
+    output = result_event.get("result", "")
+    usage = result_event.get("usage") or {}
+    model = result_event.get("model")
+    if not output and lines:
+        output = lines[-1]
+
+    _write_run_progress_json(run_id, {"stream_log": str(stream_path)})
+    return output, usage.get("input_tokens"), usage.get("output_tokens"), model, stderr_s
+
+
 def _extract_skill_name(raw: str, registry: dict) -> str:
     normalized = (raw or "").strip().lower().replace(" ", "-")
     if normalized in registry:
@@ -1169,24 +1455,34 @@ def run():
             socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill_name})
             return jsonify({"ok": False, "error": str(e)})
     else:
-        # Claude / Codex / DeepSeek TUI — subprocess dispatch via CLI
+        # Claude — streaming dispatch (stream-json, progress written per-event)
+        # Codex / DeepSeek TUI — subprocess dispatch via CLI (communicate)
         try:
+            if agent == "claude":
+                fmt, _timeout = "stream-json", 600
+            else:
+                fmt, _timeout = "json", 120
             proc = subprocess.Popen(
-                _ai_command(agent, prompt, output_format="json"),
+                _ai_command(agent, prompt, output_format=fmt),
                 cwd=str(ROOT),
                 env=_registry_exec_env(agent, _load_registry(agent)),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
             _running_procs[run_id] = proc
-            stdout_b, stderr_b = proc.communicate(timeout=120)
-            dur = time.monotonic() - t0
-            ok = proc.returncode == 0
-            stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
-            stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
-            output, input_tokens, output_tokens, parsed_model = _parse_agent_output(agent, stdout_s)
+            if agent == "claude":
+                output, input_tokens, output_tokens, parsed_model, stderr_s = \
+                    _stream_claude_run(proc, run_id, timeout=_timeout)
+                ok = proc.returncode == 0
+            else:
+                stdout_b, stderr_b = proc.communicate(timeout=_timeout)
+                ok = proc.returncode == 0
+                stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
+                stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
+                output, input_tokens, output_tokens, parsed_model = _parse_agent_output(agent, stdout_s)
             if not output:
                 output = stderr_s
+            dur = time.monotonic() - t0
             _running_jobs.pop(run_id, None)
             _running_procs.pop(run_id, None)
             final_state = "review"
@@ -1214,9 +1510,9 @@ def run():
             _running_procs.get(run_id) and _running_procs[run_id].kill()
             _running_procs.pop(run_id, None)
             _running_jobs.pop(run_id, None)
-            _write_run_log(skill_name, "timeout", started_at, dur, prompt=prompt, error="Timed out after 120s", run_id=run_id)
+            _write_run_log(skill_name, "timeout", started_at, dur, prompt=prompt, error=f"Timed out after {_timeout}s", run_id=run_id)
             socketio.emit("run_state_change", {"run_id": run_id, "state": "timeout", "skill": skill_name})
-            return jsonify({"ok": False, "error": "Timed out after 120s."})
+            return jsonify({"ok": False, "error": f"Timed out after {_timeout}s."})
         except Exception as e:
             dur = time.monotonic() - t0
             _running_procs.pop(run_id, None)
@@ -1324,6 +1620,7 @@ def stream():
 def api_runs():
     limit = int(request.args.get("limit", 30))
     state_filter = request.args.get("state", "")
+    issue_id_filter = request.args.get("linear_issue_id", "")
     if state_filter == "running":
         return jsonify(list(_running_jobs.values()))
     if state_filter == "archived":
@@ -1345,6 +1642,8 @@ def api_runs():
                 })
         return jsonify([{**r, "when": _fmt_dt(r.get("started_at")), "duration": _fmt_dur(r.get("duration_s"))} if not r.get("_is_linear_issue") else r for r in archived])
     runs = load_runs(limit)
+    if issue_id_filter:
+        runs = [r for r in runs if r.get("linear_issue_id") == issue_id_filter]
     return jsonify([{
         **r,
         "when": _fmt_dt(r.get("started_at")),
@@ -1354,6 +1653,16 @@ def api_runs():
 
 @app.route("/api/runs/<run_id>")
 def api_run_detail(run_id: str):
+    if run_id in _running_jobs:
+        job = dict(_running_jobs[run_id])
+        job.setdefault("status", "running")
+        job.setdefault("output", "")
+        job.setdefault("error", "")
+        job.setdefault("output_path", "")
+        path = _run_progress_path(run_id)
+        if path.exists():
+            job["log_path"] = str(path)
+        return jsonify(job)
     if not RUN_LOG.exists():
         return jsonify({"error": "not found"}), 404
     for line in reversed(RUN_LOG.read_text(encoding="utf-8").strip().splitlines()):
@@ -1370,6 +1679,20 @@ def api_run_detail(run_id: str):
         except Exception:
             continue
     return jsonify({"error": "not found"}), 404
+
+
+@app.route("/api/runs/<run_id>/progress")
+def api_run_progress(run_id: str):
+    issue_id = request.args.get("linear_issue_id") or None
+    return jsonify(_build_progress_payload(run_id, issue_id=issue_id))
+
+
+@app.route("/api/linear/issues/<issue_id>/progress")
+def api_linear_issue_progress(issue_id: str):
+    for rid, job in _running_jobs.items():
+        if job.get("linear_issue_id") == issue_id:
+            return jsonify(_build_progress_payload(rid, issue_id=issue_id))
+    return jsonify(_build_progress_payload(f"linear-{issue_id}", issue_id=issue_id))
 
 
 @app.route("/api/runs/<run_id>/status", methods=["PATCH"])
@@ -1461,16 +1784,18 @@ def api_run_restore(run_id: str):
 @app.route("/api/runs/<run_id>", methods=["DELETE"])
 def api_run_cancel(run_id: str):
     proc = _running_procs.get(run_id)
-    if proc is None:
+    # DeepSeek/async jobs have no proc entry — still cancel if in _running_jobs
+    if proc is None and run_id not in _running_jobs:
         return jsonify({"error": "not running"}), 404
-    try:
-        proc.terminate()
+    if proc is not None:
         try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-    except Exception:
-        pass
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        except Exception:
+            pass
     job = _running_jobs.pop(run_id, {})
     _running_procs.pop(run_id, None)
     started_at = job.get("started_at", datetime.now(timezone.utc).isoformat())
@@ -1600,7 +1925,7 @@ def api_run_retry(run_id: str):
                                    task_id=task_id)
                     if linear_issue_id:
                         _push_linear_state_async(linear_issue_id, final_state)
-                        _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry", prompt=prompt, output=output, error=error_s))
+                        _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry", prompt=prompt, output=output))
                     socketio.emit("run_state_change", {"run_id": new_run_id, "state": final_state, "skill": skill})
                     socketio.emit("run_logged", {"skill": skill, "run_id": new_run_id})
                 except Exception as e:
@@ -1611,7 +1936,7 @@ def api_run_retry(run_id: str):
                                    model=_agent_model(agent, cfg), task_id=task_id)
                     if linear_issue_id:
                         _push_linear_state_async(linear_issue_id, "review")
-                        _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry Error", prompt=prompt, error=str(e)))
+                        _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry Error", prompt=prompt))
                     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "review", "skill": skill})
             else:
                 # Claude / Codex / DeepSeek TUI — subprocess dispatch
@@ -1649,7 +1974,7 @@ def api_run_retry(run_id: str):
                                    task_id=task_id)
                     if linear_issue_id:
                         _push_linear_state_async(linear_issue_id, final_state)
-                        _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry", prompt=prompt, output=output, error=error_s))
+                        _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry", prompt=prompt, output=output))
                     socketio.emit("run_state_change", {"run_id": new_run_id, "state": final_state, "skill": skill})
                     socketio.emit("run_logged", {"skill": skill, "run_id": new_run_id})
                 except subprocess.TimeoutExpired:
@@ -1664,7 +1989,7 @@ def api_run_retry(run_id: str):
                                    model=_agent_model(agent, cfg), task_id=task_id)
                     if linear_issue_id:
                         _push_linear_state_async(linear_issue_id, "review")
-                        _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry Timeout", prompt=prompt, error=msg))
+                        _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry Timeout", prompt=prompt))
                     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "review", "skill": skill})
                 except Exception as e:
                     _running_procs.pop(new_run_id, None)
@@ -1677,7 +2002,7 @@ def api_run_retry(run_id: str):
                         _push_linear_state_async(linear_issue_id, "review")
                         _post_linear_comment(
                             linear_issue_id,
-                            _linear_comment_body(title="AgenticOS Retry Error", prompt=prompt, error=str(e)),
+                            _linear_comment_body(title="AgenticOS Retry Error", prompt=prompt),
                         )
 
     threading.Thread(target=_do_retry, daemon=True).start()
@@ -1822,7 +2147,7 @@ def api_runtime():
 def api_windows():
     agent = request.args.get("agent", "claude")
     try:
-        return jsonify(_compute_windows(agent, RUN_LOG))
+        return jsonify(_normalize_windows(_compute_windows(agent, RUN_LOG)))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1832,7 +2157,7 @@ def api_windows_all():
     try:
         all_data: dict = {}
         for ag in ("claude", "codex", "deepseek"):
-            w = _compute_windows(ag, RUN_LOG)
+            w = _normalize_windows(_compute_windows(ag, RUN_LOG))
             all_data[ag] = w
         return jsonify(all_data)
     except Exception as e:

@@ -355,12 +355,24 @@ def update_usage() -> dict[str, Any]:
     # ── Track session transitions ────────────────────────────────────────
     last_session_id = prev.get("_last_session_id")
     current_session = prev.get("_current_session")
+    last_ckpt_tokens = prev.get("_last_checkpoint_tokens", 0)
 
     if checkpoint:
         sid = checkpoint["session_id"]
         model = checkpoint["model"]
         total_tokens = checkpoint["total_tokens"]
         msg_count = checkpoint["message_count"]
+        # checkpoint total_tokens is cumulative across TUI process lifetime;
+        # use delta since last read for per-session token counting.
+        # On first read (last_ckpt_tokens==0), count total_tokens fully.
+        if last_ckpt_tokens > 0 and total_tokens > last_ckpt_tokens:
+            delta_tokens = total_tokens - last_ckpt_tokens
+        elif last_ckpt_tokens == 0:
+            delta_tokens = total_tokens
+        else:
+            # No new tokens since last read; keep current_session's existing total
+            delta_tokens = 0
+        last_ckpt_tokens = total_tokens
 
         if last_session_id and last_session_id != sid and current_session:
             # Session changed — archive the previous one
@@ -382,13 +394,18 @@ def update_usage() -> dict[str, Any]:
             bm["cost_cny"] = round(bm["cost_cny"] + archived_cost.get("cost_cny", 0), 4)
             bm["sessions"] += 1
 
-        # Update current session
-        cost_est = _estimate_cost(model, total_tokens, _DEFAULT_CACHE_HIT_RATE)
+        # Update current session: accumulate delta_tokens into running total
+        if current_session and current_session.get("session_id") == sid:
+            old_tok = current_session.get("total_tokens", 0) or 0
+            new_total = old_tok + delta_tokens
+        else:
+            new_total = delta_tokens
+        cost_est = _estimate_cost(model, new_total, _DEFAULT_CACHE_HIT_RATE)
         current_session = {
             "session_id": sid,
             "model": model,
             "message_count": msg_count,
-            "total_tokens": total_tokens,
+            "total_tokens": new_total,
             "created_at": checkpoint.get("created_at", ""),
             "updated_at": checkpoint.get("updated_at", ""),
             "_cost_estimate": cost_est,
@@ -404,10 +421,10 @@ def update_usage() -> dict[str, Any]:
         archived_cost = archived.get("_cost_estimate", {})
         archived_tokens = archived.get("total_tokens", 0) or 0
         archived_model = archived.get("model", "unknown")
-        bm = prev_by_model.setdefault(archived_model, {
-            "total_tokens": 0, "input_tokens": 0, "output_tokens": 0,
-            "cost_usd": 0.0, "cost_cny": 0.0, "sessions": 0,
-        })
+        _bm_defaults = {"total_tokens": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "cost_cny": 0.0, "sessions": 0}
+        bm = prev_by_model.setdefault(archived_model, {})
+        for _k, _v in _bm_defaults.items():
+            bm.setdefault(_k, _v)
         bm["total_tokens"] += archived_tokens
         bm["input_tokens"] += archived_cost.get("input_tokens", 0)
         bm["output_tokens"] += archived_cost.get("output_tokens", 0)
@@ -517,6 +534,7 @@ def update_usage() -> dict[str, Any]:
         "_topup_events": topup_events,
         "_known_total_cost_cny": prev.get("_known_total_cost_cny"),
         "_seed_initial_balance_cny": prev.get("_seed_initial_balance_cny"),
+        "_last_checkpoint_tokens": last_ckpt_tokens,
         daily_key: daily_initial,
     }
 
