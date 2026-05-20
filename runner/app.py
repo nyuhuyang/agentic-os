@@ -1244,12 +1244,48 @@ def _ai_cli(agent: str) -> list[str]:
     return [bin_str, "-p", "--permission-mode", "bypassPermissions"]
 
 
-def _ai_command(agent: str, prompt: str, output_format: str = "json") -> list[str]:
-    """Build a non-interactive agent command with agent-specific flags."""
+def _load_skill_md(skill_name: str | None, registry: dict[str, dict]) -> str:
+    """Return the SKILL.md body for skill_name (frontmatter stripped), or empty string."""
+    if not skill_name:
+        return ""
+    entry = registry.get(skill_name, {})
+    skill_path = entry.get("skill_path")
+    if not skill_path:
+        return ""
+    p = Path(skill_path)
+    if not p.exists():
+        return ""
+    text = p.read_text(encoding="utf-8")
+    # Strip YAML frontmatter (---...--- block at top)
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            text = text[end + 4:].lstrip("\n")
+    return text.strip()
+
+
+def _ai_command(
+    agent: str,
+    prompt: str,
+    output_format: str = "json",
+    skill_name: str | None = None,
+    registry: dict[str, dict] | None = None,
+) -> list[str]:
+    """Build a non-interactive agent command with agent-specific flags.
+
+    For Claude, the harness loads SKILL.md from ~/.claude/skills/ automatically.
+    For Codex and DeepSeek, we prepend SKILL.md content to the prompt directly.
+    """
     cli = _ai_cli(agent)
     if agent == "claude":
         return cli + [prompt, "--output-format", output_format]
-    return cli + [prompt]
+    # Codex / DeepSeek: inject skill instructions into prompt
+    skill_content = _load_skill_md(skill_name, registry or {})
+    if skill_content:
+        full_prompt = f"## Skill Instructions\n\n{skill_content}\n\n## Task\n\n{prompt}"
+    else:
+        full_prompt = prompt
+    return cli + [full_prompt]
 
 
 def _agent_model(agent: str, cfg: dict | None = None) -> str:
@@ -1498,10 +1534,12 @@ def run():
                 fmt, _timeout = "stream-json", 600
             else:
                 fmt, _timeout = "json", 120
+            _run_registry = _load_registry(agent)
             proc = subprocess.Popen(
-                _ai_command(agent, prompt, output_format=fmt),
+                _ai_command(agent, prompt, output_format=fmt,
+                            skill_name=skill_name, registry=_run_registry),
                 cwd=str(ROOT),
-                env=_registry_exec_env(agent, _load_registry(agent)),
+                env=_registry_exec_env(agent, _run_registry),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
@@ -1601,7 +1639,8 @@ def stream():
         if entry.get("schedule_eligible") and entry.get("entrypoint"):
             cmd = [str(_python_path()), str(RUNNER), skill]
         else:
-            cmd = _ai_command(agent, prompt, output_format="text")
+            cmd = _ai_command(agent, prompt, output_format="text",
+                              skill_name=skill, registry=registry)
 
         chunk_count = 0
         try:
@@ -1980,7 +2019,8 @@ def api_run_retry(run_id: str):
                     if entry.get("schedule_eligible") and entry.get("entrypoint"):
                         cmd = [_python_path(), str(RUNNER), skill]
                     else:
-                        cmd = _ai_command(agent, prompt, output_format="json")
+                        cmd = _ai_command(agent, prompt, output_format="json",
+                                          skill_name=skill, registry=registry)
                     proc = subprocess.Popen(
                         cmd,
                         cwd=str(ROOT),
