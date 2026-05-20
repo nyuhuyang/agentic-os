@@ -75,6 +75,8 @@ from usage_reader import (
     cross_check_stats_cache as _cross_check,
     _collect_jsonl_usage,
     _fmt as _fmt_tok_usage,
+    MODEL_PRICES as _MODEL_PRICES,
+    DEFAULT_PRICE as _DEFAULT_PRICE,
 )
 
 # Lazy import — deepseek_monitor may not be installed
@@ -995,6 +997,34 @@ def load_usage() -> dict:
 # Logging helpers
 # ---------------------------------------------------------------------------
 
+def _parse_run_footer(output: str) -> dict:
+    """Scan last 20 lines of output for OUTPUT_PATH: and QUALITY: markers."""
+    result: dict = {"output_path": "", "quality_score": None}
+    for line in output.splitlines()[-20:]:
+        s = line.strip()
+        if s.startswith("OUTPUT_PATH:"):
+            result["output_path"] = s[len("OUTPUT_PATH:"):].strip()
+        elif s.startswith("QUALITY:"):
+            try:
+                result["quality_score"] = float(s[len("QUALITY:"):].strip())
+            except ValueError:
+                pass
+    return result
+
+
+def _compute_token_cost(
+    output_tokens: int | None,
+    input_tokens: int | None,
+    model: str | None,
+) -> float | None:
+    """Estimate cost in USD using output-token pricing from MODEL_PRICES."""
+    if not output_tokens and not input_tokens:
+        return None
+    price_per_m = _MODEL_PRICES.get(model or "", _DEFAULT_PRICE)
+    total = (output_tokens or 0) + (input_tokens or 0)
+    return round(total / 1_000_000 * price_per_m, 6)
+
+
 def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
                    prompt: str = "", output: str = "", error: str = "",
                    run_id: str | None = None, output_path: str = "",
@@ -1005,7 +1035,9 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
                    output_tokens: int | None = None,
                    agent: str | None = None,
                    model: str | None = None,
-                   task_id: str | None = None) -> str:
+                   task_id: str | None = None,
+                   quality_score: float | None = None,
+                   token_cost_usd: float | None = None) -> str:
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if run_id is None:
@@ -1037,6 +1069,10 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
         record["agent"] = agent
     if model:
         record["model"] = model
+    if quality_score is not None:
+        record["quality_score"] = quality_score
+    if token_cost_usd is not None:
+        record["token_cost_usd"] = token_cost_usd
     progress_path = _run_progress_path(run_id)
     if progress_path.exists():
         record["log_path"] = str(progress_path)
@@ -1383,8 +1419,11 @@ def run():
                 _running_jobs.pop(run_id, None)
                 _running_procs.pop(run_id, None)
                 final_state = "review"
+                _footer = _parse_run_footer(output)
                 _write_run_log(skill, final_state, started_at, dur,
-                               prompt=prompt, output=output, error=stderr_s, run_id=run_id)
+                               prompt=prompt, output=output, error=stderr_s, run_id=run_id,
+                               output_path=_footer["output_path"],
+                               quality_score=_footer["quality_score"])
                 socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": skill})
                 socketio.emit("run_logged", {"skill": skill, "run_id": run_id})
                 return jsonify({
@@ -1437,11 +1476,16 @@ def run():
             ok = agent_result.get("ok", False)
             _running_jobs.pop(run_id, None)
             final_state = "review"
+            _footer = _parse_run_footer(output)
+            _cost = _compute_token_cost(output_tokens, input_tokens, parsed_model or _agent_model(agent))
             _write_run_log(skill_name, final_state, started_at, dur,
                            prompt=prompt, output=output, error=error_s, run_id=run_id,
                            input_tokens=input_tokens, output_tokens=output_tokens, agent=agent,
                            model=parsed_model or _agent_model(agent),
-                           task_id=run_id)
+                           task_id=run_id,
+                           output_path=_footer["output_path"],
+                           quality_score=_footer["quality_score"],
+                           token_cost_usd=_cost)
             socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": skill_name})
             socketio.emit("run_logged", {"skill": skill_name, "run_id": run_id})
             return jsonify({
@@ -1486,11 +1530,16 @@ def run():
             _running_jobs.pop(run_id, None)
             _running_procs.pop(run_id, None)
             final_state = "review"
+            _footer = _parse_run_footer(output)
+            _cost = _compute_token_cost(output_tokens, input_tokens, parsed_model or _agent_model(agent))
             _write_run_log(skill_name, final_state, started_at, dur,
                            prompt=prompt, output=output, error="" if ok else stderr_s, run_id=run_id,
                            input_tokens=input_tokens, output_tokens=output_tokens, agent=agent,
                            model=parsed_model or _agent_model(agent),
-                           task_id=run_id)
+                           task_id=run_id,
+                           output_path=_footer["output_path"],
+                           quality_score=_footer["quality_score"],
+                           token_cost_usd=_cost)
             socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": skill_name})
             socketio.emit("run_logged", {"skill": skill_name, "run_id": run_id})
             return jsonify({
@@ -1596,8 +1645,12 @@ def stream():
             _running_jobs.pop(run_id, None)
             _running_procs.pop(run_id, None)
             final_state = "review"
+            _full_output = "".join(output_buf)
+            _footer = _parse_run_footer(_full_output)
             _write_run_log(skill, final_state, started_at, dur,
-                           prompt=prompt, output="".join(output_buf), run_id=run_id)
+                           prompt=prompt, output=_full_output, run_id=run_id,
+                           output_path=_footer["output_path"],
+                           quality_score=_footer["quality_score"])
             socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": skill})
             socketio.emit("run_logged", {"skill": skill, "run_id": run_id})
             yield _sse({"type": "done", "ok": ok, "run_id": run_id, "duration_s": round(dur, 2)})
@@ -1916,13 +1969,18 @@ def api_run_retry(run_id: str):
                     ok = agent_result.get("ok", False)
                     _running_jobs.pop(new_run_id, None)
                     final_state = "review"
+                    _footer = _parse_run_footer(output)
+                    _cost = _compute_token_cost(output_tokens, input_tokens, parsed_model or _agent_model(agent, cfg))
                     _write_run_log(skill, final_state, started_at, dur,
                                    prompt=prompt, output=output, error=error_s,
                                    run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
                                    linear_issue_id=linear_issue_id,
                                    input_tokens=input_tokens, output_tokens=output_tokens,
                                    agent=agent, model=parsed_model or _agent_model(agent, cfg),
-                                   task_id=task_id)
+                                   task_id=task_id,
+                                   output_path=_footer["output_path"],
+                                   quality_score=_footer["quality_score"],
+                                   token_cost_usd=_cost)
                     if linear_issue_id:
                         _push_linear_state_async(linear_issue_id, final_state)
                         _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry", prompt=prompt, output=output))
@@ -1965,13 +2023,18 @@ def api_run_retry(run_id: str):
                     _running_jobs.pop(new_run_id, None)
                     _running_procs.pop(new_run_id, None)
                     final_state = "review"
+                    _footer = _parse_run_footer(output)
+                    _cost = _compute_token_cost(output_tokens, input_tokens, parsed_model or _agent_model(agent, cfg))
                     _write_run_log(skill, final_state, started_at, dur,
                                    prompt=prompt, output=output, error=error_s,
                                    run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
                                    linear_issue_id=linear_issue_id,
                                    input_tokens=input_tokens, output_tokens=output_tokens,
                                    agent=agent, model=parsed_model or _agent_model(agent, cfg),
-                                   task_id=task_id)
+                                   task_id=task_id,
+                                   output_path=_footer["output_path"],
+                                   quality_score=_footer["quality_score"],
+                                   token_cost_usd=_cost)
                     if linear_issue_id:
                         _push_linear_state_async(linear_issue_id, final_state)
                         _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry", prompt=prompt, output=output))
