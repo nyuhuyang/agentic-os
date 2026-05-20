@@ -38,6 +38,7 @@ from flask_socketio import SocketIO, emit
 _HERE = Path(__file__).resolve().parent              # runner/
 _PROTO = _HERE.parent                                # agentic-os root
 WORKSPACE_ROOT = _PROTO.parent.parent
+KNOWLEDGE_BASE_ROOT = WORKSPACE_ROOT / "obsidian" / "knowledge_base"
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 CODEX_CONFIG = CODEX_HOME / "config.toml"
 
@@ -102,10 +103,12 @@ _AVAILABLE_MODULES: list[str] = []
 MASTER_REGISTRY_JSON = Path(os.environ.get("REGISTRY_JSON", str(_PROTO / ".codex" / "registry.json")))
 CLAUDE_REGISTRY_JSON = WORKSPACE_ROOT / ".claude" / "registry.json"
 CLAUDE_REGISTRY_MD = WORKSPACE_ROOT / ".claude" / "registry.md"
-OUTPUTS_DIR = _PROTO / "outputs"
+OUTPUTS_DIR = _PROTO / "outputs"          # runner-internal state (job_state, cache, etc.)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-RUN_LOG = OUTPUTS_DIR / "run_log.jsonl"
-JOB_STATE = OUTPUTS_DIR / "job_state.json"
+KB_OUTPUTS_DIR = KNOWLEDGE_BASE_ROOT / "outputs"   # skill run artifacts → knowledge base
+KB_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+RUN_LOG = KB_OUTPUTS_DIR / "run_log.jsonl"         # skill runs visible in knowledge base
+JOB_STATE = OUTPUTS_DIR / "job_state.json"          # runner-internal, stays in proto
 REGISTRY_CACHE_DIR = OUTPUTS_DIR / "registry-cache"
 RUN_PROGRESS_DIR = OUTPUTS_DIR / "logs"
 
@@ -114,7 +117,7 @@ STATE_DIR = _PROTO / "state"
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 STATE_RUN_LOG = STATE_DIR / "runs.jsonl"
 STATE_TASK_STATE = STATE_DIR / "task_state.json"
-WIKI_LOG = ROOT / "wiki" / "log.md"
+WIKI_LOG = KNOWLEDGE_BASE_ROOT / "wiki" / "log.md"
 RUNNER = _HERE / "run_skill.py"
 VAULT_PULSE_ROOTS = ("wiki", "raw", "outputs")
 
@@ -776,20 +779,20 @@ def _load_log_pulse(limit: int) -> list[tuple[float, str]]:
 def load_vault_pulse(limit: int = 8) -> list[str]:
     records: list[tuple[float, str]] = []
     for root_name in VAULT_PULSE_ROOTS:
-        base = ROOT / root_name
+        base = KNOWLEDGE_BASE_ROOT / root_name
         if not base.exists():
             continue
         for path in base.rglob("*.md"):
             if path == WIKI_LOG:
                 continue
-            if any(part.startswith(".") for part in path.relative_to(ROOT).parts):
+            if any(part.startswith(".") for part in path.relative_to(KNOWLEDGE_BASE_ROOT).parts):
                 continue
             try:
                 ts = path.stat().st_mtime
             except OSError:
                 continue
             stamp = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-            rel = path.relative_to(ROOT).as_posix()
+            rel = path.relative_to(KNOWLEDGE_BASE_ROOT).as_posix()
             records.append((ts, f"{stamp} - {_shorten_pulse(rel)}"))
 
     if records:
