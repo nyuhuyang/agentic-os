@@ -631,6 +631,54 @@ def _extract_text_from_codex_item(item: dict) -> str:
     return ""
 
 
+def _stream_text_run(
+    proc: "subprocess.Popen[bytes]",
+    run_id: str,
+    timeout: float = 600,
+) -> tuple[str, str]:
+    """Stream proc stdout line-by-line to a live log file. Returns (stdout_str, stderr_str).
+
+    stderr collected at end only (kept separate for error parsing).
+    Raises subprocess.TimeoutExpired if timeout exceeded.
+    """
+    stream_path = _claude_stream_log_path(run_id)
+    RUN_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
+    collected: list[str] = []
+
+    def _reader() -> None:
+        with stream_path.open("w", encoding="utf-8") as sf:
+            for raw in proc.stdout:  # type: ignore[union-attr]
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if line:
+                    collected.append(line)
+                    sf.write(line + "\n")
+                    sf.flush()
+                    _write_run_progress_json(run_id, {
+                        "state": "running",
+                        "stream_log": str(stream_path),
+                        "last_event_type": "text",
+                    })
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    if t.is_alive():
+        proc.kill()
+        raise subprocess.TimeoutExpired(proc.args, timeout)
+    proc.wait()
+    stderr_b = (proc.stderr.read() if proc.stderr else b"") or b""
+    return "\n".join(collected), stderr_b.decode("utf-8", errors="replace").strip()
+
+
+def _tail_text_stream(path: Path, max_lines: int = 80) -> list[dict]:
+    """Return recent lines from a plain-text stream log as events."""
+    events = []
+    for line in _tail_text_lines(path, max_lines):
+        if line.strip():
+            events.append({"ts": "", "text": line, "role": "runner"})
+    return events
+
+
 def _tail_codex_session(path: Path, max_events: int = 40) -> list[dict]:
     events: list[dict] = []
     for line in _tail_text_lines(path, 240):
@@ -767,6 +815,17 @@ def _build_progress_payload(run_id: str, *, issue_id: str | None = None) -> dict
                 status = "session"
 
     events = _tail_codex_session(session_path) if session_path else []
+    if not events:
+        prog_path = _run_progress_path(run_id)
+        if prog_path.exists():
+            try:
+                sl = json.loads(prog_path.read_text(encoding="utf-8")).get("stream_log")
+                if sl:
+                    events = _tail_text_stream(Path(sl))
+                    if events and status == "unknown":
+                        status = "running"
+            except Exception:
+                pass
     payload = {
         "ok": True,
         "run_id": run_id,
@@ -1447,11 +1506,9 @@ def run():
                     stderr=subprocess.PIPE,
                 )
                 _running_procs[run_id] = proc
-                stdout_b, stderr_b = proc.communicate(timeout=300)
+                output, stderr_s = _stream_text_run(proc, run_id, timeout=AI_RUN_TIMEOUT_S)
                 dur = time.monotonic() - t0
                 ok = proc.returncode == 0
-                output = stdout_b.decode("utf-8", errors="replace").strip()
-                stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
                 _running_jobs.pop(run_id, None)
                 _running_procs.pop(run_id, None)
                 final_state = "review"
@@ -1527,13 +1584,12 @@ def run():
             socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill_name})
             return jsonify({"ok": False, "error": str(e)})
     else:
-        # Claude — streaming dispatch (stream-json, progress written per-event)
-        # Codex / DeepSeek TUI — subprocess dispatch via CLI (communicate)
+        # All agents: stream stdout live to log file, stderr collected at end
         try:
             if agent == "claude":
-                fmt, _timeout = "stream-json", 600
+                fmt, _timeout = "stream-json", AI_RUN_TIMEOUT_S
             else:
-                fmt, _timeout = "json", 120
+                fmt, _timeout = "json", AI_RUN_TIMEOUT_S
             _run_registry = _load_registry(agent)
             proc = subprocess.Popen(
                 _ai_command(agent, prompt, output_format=fmt,
@@ -1549,10 +1605,8 @@ def run():
                     _stream_claude_run(proc, run_id, timeout=_timeout)
                 ok = proc.returncode == 0
             else:
-                stdout_b, stderr_b = proc.communicate(timeout=_timeout)
+                stdout_s, stderr_s = _stream_text_run(proc, run_id, timeout=_timeout)
                 ok = proc.returncode == 0
-                stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
-                stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
                 output, input_tokens, output_tokens, parsed_model = _parse_agent_output(agent, stdout_s)
             if not output:
                 output = stderr_s
@@ -2014,7 +2068,7 @@ def api_run_retry(run_id: str):
                         _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry Error", prompt=prompt))
                     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "review", "skill": skill})
             else:
-                # Claude / Codex / DeepSeek TUI — subprocess dispatch
+                # All agents: stream stdout live, stderr collected at end
                 try:
                     if entry.get("schedule_eligible") and entry.get("entrypoint"):
                         cmd = [_python_path(), str(RUNNER), skill]
@@ -2029,11 +2083,9 @@ def api_run_retry(run_id: str):
                         stderr=subprocess.PIPE,
                     )
                     _running_procs[new_run_id] = proc
-                    stdout_b, stderr_b = proc.communicate(timeout=AI_RUN_TIMEOUT_S)
+                    stdout_s, stderr_s = _stream_text_run(proc, new_run_id, timeout=AI_RUN_TIMEOUT_S)
                     dur = time.monotonic() - t0
                     ok = proc.returncode == 0
-                    stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
-                    stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
                     output, input_tokens, output_tokens, parsed_model = _parse_agent_output(agent, stdout_s)
                     error_s = _extract_real_errors(stderr_s)
                     if not output:

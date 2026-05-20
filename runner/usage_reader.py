@@ -44,6 +44,7 @@ PROJECTS_DIR = CLAUDE_DIR / "projects"
 STATS_CACHE = CLAUDE_DIR / "stats-cache.json"
 CODEX_DB = Path.home() / ".codex" / "state_5.sqlite"
 CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
+CODEX_LIVE_RATE_LIMITS_PATH = Path.home() / ".codex" / "rate-limits-live.json"
 DEEPSEEK_USAGE_PATH = Path.home() / ".deepseek" / "usage.json"
 BUDGET_CONFIG_PATH = CLAUDE_DIR / "budget.json"
 CLAUDE_LIVE_RATE_LIMITS_PATH = WORKSPACE_CLAUDE_DIR / "rate-limits-live.json"
@@ -381,13 +382,28 @@ def _window_percent_from_snapshot(
 
 
 def load_latest_codex_rate_limits() -> dict[str, Any]:
-    """Read the latest server-reported Codex rate limit snapshot from session logs.
+    """Read the latest server-reported Codex rate limit snapshot.
 
-    Scans all session files and returns the record with the most recent timestamp,
-    not just the last record in the alphabetically-last file. Sessions can overlap:
-    a session started earlier (lower filename sort) may have newer token_count events
-    than a session started later.
+    Checks ~/.codex/rate-limits-live.json first (written by codex_snap_rate_limits.py
+    hook after each session). Falls back to scanning session JSONL files directly.
     """
+    now = datetime.now(timezone.utc)
+
+    # Live file written by hook — use if < 30 min old
+    if CODEX_LIVE_RATE_LIMITS_PATH.exists():
+        try:
+            live = json.loads(CODEX_LIVE_RATE_LIMITS_PATH.read_text(encoding="utf-8"))
+            captured = _parse_iso_utc(live.get("captured_at"))
+            if captured and now - captured <= timedelta(minutes=30):
+                return {
+                    "timestamp": live.get("captured_at"),
+                    "plan_type": live.get("plan_type"),
+                    "primary":   live.get("primary") or {},
+                    "secondary": live.get("secondary") or {},
+                }
+        except Exception:
+            pass
+
     if not CODEX_SESSIONS_DIR.exists():
         return {}
 
@@ -1017,7 +1033,12 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
         _sec_resets_dt = datetime.fromtimestamp(float(_sec_resets_at), tz=timezone.utc) if _sec_resets_at else None
         _server_5h_reset_valid = _pri_resets_dt and _pri_resets_dt > now
         _server_7d_reset_valid = _sec_resets_dt and _sec_resets_dt > now
-        snapshot_fresh = codex_captured and now - codex_captured <= timedelta(hours=2)
+        # Use server pct whenever reset is still in the future (same quota window),
+        # regardless of snapshot age — pct only goes up within a window.
+        snapshot_fresh = codex_captured and (
+            _server_5h_reset_valid
+            or now - codex_captured <= timedelta(hours=2)
+        )
         if snapshot_fresh:
             used_5h = _window_percent_from_snapshot(
                 pri.get("used_percent", 0),
@@ -1035,10 +1056,12 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
             # the reset boundary, _window_percent_from_snapshot returns 0 = fresh window.
             _pct_5h = used_5h
             _pct_7d = used_7d
-            # When the window just reset, local JSONL still contains old-window sessions;
-            # show 0 tokens rather than the stale accumulated count.
-            _disp_tok_5h = 0 if used_5h == 0 else cur_5h["tokens"]
-            _disp_tok_7d = 0 if used_7d == 0 else cur_7d["tokens"]
+            # Derive used tokens from server pct × budget limit for honest display.
+            # Local JSONL spans windows and overcounts; pct×limit is more accurate.
+            _disp_tok_5h = int(used_5h * lim_5h / 100) if used_5h > 0 else 0
+            _disp_tok_7d = int(used_7d * lim_7d / 100) if used_7d > 0 else 0
+            _eff_lim_5h = lim_5h
+            _eff_lim_7d = lim_7d
             _reset_5h_label = _reset_label_from_epoch(_pri_resets_at, now)
             _reset_7d_label = _reset_label_from_epoch(_sec_resets_at, now)
             _win_min_5h = pri.get("window_minutes", 300)
@@ -1053,6 +1076,8 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
             _pct_7d = _real_7d_pct
             _disp_tok_5h = cur_5h["tokens"]
             _disp_tok_7d = cur_7d["tokens"]
+            _eff_lim_5h = lim_5h
+            _eff_lim_7d = lim_7d
             _reset_5h_label = (
                 _reset_label_from_epoch(_pri_resets_at, now) if _server_5h_reset_valid
                 else _next_daily_reset_label(limits["window_5h_reset"], now) if limits.get("window_5h_reset")
@@ -1073,24 +1098,26 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
             "quota_source": _quota_src,
             "window_5h": {
                 "tokens":        _disp_tok_5h,
-                "limit":         lim_5h,
+                "limit":         _eff_lim_5h,
                 "pct":           _pct_5h,
                 "remaining_pct": max(0, 100 - _pct_5h),
                 "sessions":      cur_5h["sessions"],
                 "reset":         _reset_5h_label,
-                "display_line":  f"{_fmt_tok(_disp_tok_5h)} / {_fmt_tok(lim_5h)} · {cur_5h['sessions']} sessions",
+                "display_line":  (f"{_fmt_tok(_disp_tok_5h)} / {_fmt_tok(_eff_lim_5h)} · {max(0, 100 - _pct_5h)}% remaining" if snapshot_fresh
+                                  else f"{_fmt_tok(_disp_tok_5h)} / {_fmt_tok(_eff_lim_5h)} · {cur_5h['sessions']} sessions"),
                 "resets_at_unix": _pri_resets_at if _server_5h_reset_valid else None,
                 "window_minutes": _win_min_5h,
             },
             "window_7d": {
                 "tokens":        _disp_tok_7d,
-                "limit":         lim_7d,
+                "limit":         _eff_lim_7d,
                 "pct":           _pct_7d,
                 "remaining_pct": max(0, 100 - _pct_7d),
                 "sessions":      cur_7d["sessions"],
                 "reset":         _reset_7d_label,
-                "display_line":  f"{_fmt_tok(_disp_tok_7d)} / {_fmt_tok(lim_7d)}"
-                                 f" · {cur_7d['sessions']} sessions",
+                "display_line":  (f"{_fmt_tok(_disp_tok_7d)} / {_fmt_tok(_eff_lim_7d)} · {max(0, 100 - _pct_7d)}% remaining" if snapshot_fresh
+                                  else f"{_fmt_tok(_disp_tok_7d)} / {_fmt_tok(_eff_lim_7d)}"
+                                       f" · {cur_7d['sessions']} sessions"),
                 "resets_at_unix": _sec_resets_at if _server_7d_reset_valid else None,
                 "window_minutes": _win_min_7d,
             },

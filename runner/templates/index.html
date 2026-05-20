@@ -62,7 +62,7 @@
   .win-pace-marker {
     position: absolute; top: -5px; width: 2px; height: 14px;
     border-radius: 1px; transition: left .5s, background .5s;
-    pointer-events: none;
+    pointer-events: none; z-index: 2; transform: translateX(-50%);
   }
   .win-pace-marker.ahead  { background: var(--green); }
   .win-pace-marker.behind { background: var(--red); }
@@ -340,6 +340,10 @@
     0%, 100% { opacity: 1; transform: scale(1); }
     50%       { opacity: 0.45; transform: scale(0.65); }
   }
+  @keyframes mic-pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.45; }
+  }
 
   /* Skill cards */
   .skill-card.agent-disabled { opacity: 0.28; pointer-events: none; }
@@ -470,12 +474,14 @@
   .detail-section-label { font-size: 10px; color: var(--text-dim); letter-spacing: 2px; text-transform: uppercase; margin-bottom: 6px; }
   .detail-section-body { font-size: 12px; color: var(--text); background: var(--bg); border-radius: 4px; padding: 10px 12px; white-space: pre-wrap; word-break: break-word; max-height: 360px; overflow-y: auto; line-height: 1.5; }
   .detail-section-body.empty { color: var(--text-dim); font-style: italic; }
-  .detail-output-tabs { display:flex; margin-bottom:6px; }
-  .detail-tab { background:none; border:1px solid #444; color:var(--text-dim); font-size:10px; letter-spacing:1.5px; text-transform:uppercase; padding:3px 10px; cursor:pointer; font-family:inherit; transition:all .15s; }
-  .detail-tab:first-child { border-radius:3px 0 0 3px; border-right:none; }
-  .detail-tab:last-child { border-radius:0 3px 3px 0; }
-  .detail-tab.active { background:rgba(232,114,58,.12); border-color:var(--accent); color:var(--accent); }
-  .detail-tab.error-tab.active { background:rgba(229,57,53,.10); border-color:#b71c1c; color:var(--red); }
+  .detail-output-tab-bar { display:flex; gap:0; border-bottom:1px solid var(--border); margin-bottom:10px; }
+  .detail-output-tab { background:none; border:none; border-bottom:2px solid transparent; color:var(--text-dim); font-family:inherit; font-size:10px; letter-spacing:2px; text-transform:uppercase; padding:6px 14px 5px; cursor:pointer; transition:color .15s,border-color .15s; margin-bottom:-1px; }
+  .detail-output-tab:hover { color:var(--text); }
+  .detail-output-tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+  .detail-output-tab-content { display:none; }
+  .detail-output-tab-content.active { display:block; }
+  .detail-output-tab-content .detail-section-body { max-height:260px; }
+  .detail-output-tab-content .detail-section-body.error-panel { color:var(--red); }
   .detail-footer { padding: 12px 20px; display: flex; gap: 8px; justify-content: flex-end; border-top: 1px solid var(--border); }
   .attach-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
   .attach-btn { cursor: pointer; padding: 3px 10px; border-radius: 4px; font-size: 11px; border: 1px dashed var(--border); color: var(--text-dim); background: transparent; user-select: none; transition: border-color .15s, color .15s; font-family: inherit; }
@@ -528,6 +534,7 @@
                style="width:{{ w5.pct }}%"></div>
           <div class="win-pace-marker on-pace"
                data-resets-at="{{ w5.resets_at_unix or '' }}"
+               data-reset-label="{{ w5.reset or '' }}"
                data-window-minutes="{{ w5.window_minutes or 300 }}"></div>
         </div>
         <div class="win-remaining">
@@ -551,6 +558,7 @@
                style="width:{{ w7.pct }}%"></div>
           <div class="win-pace-marker on-pace"
                data-resets-at="{{ w7.resets_at_unix or '' }}"
+               data-reset-label="{{ w7.reset or '' }}"
                data-window-minutes="{{ w7.window_minutes or 10080 }}"></div>
           <div class="win-balance-marker" data-balance-pct="{{ w7.balance_marker_pct or w7.limit }}"
                style="left:{{ w7.balance_marker_pct or w7.limit }}%"></div>
@@ -734,7 +742,7 @@
               <option value="browser">Browser STT</option>
               <option value="openai:gpt-4o-mini-transcribe">OpenAI 4o mini</option>
             </select>
-            <button id="mic-btn-desc" onclick="toggleMicFor('linear-edit-desc','mic-btn-desc','mic-status-desc')" title="Voice input" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:14px;padding:2px 8px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
+            <button id="mic-btn-desc" onclick="toggleMicFor('linear-edit-desc','mic-btn-desc','mic-status-desc')" title="Voice input" style="background:none;border:1px solid var(--accent);font-size:14px;padding:2px 8px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
           </div>
         </div>
         <div id="mic-status-desc" style="font-size:10px;color:var(--text-dim);margin-top:2px;display:none"></div>
@@ -764,14 +772,20 @@
       <div class="detail-section-body" id="detail-prompt"></div>
     </div>
     <div class="detail-section" id="detail-output-section">
-      <div class="detail-output-tabs">
-        <button class="detail-tab active" id="tab-output" onclick="_switchOutputTab('output')">Output</button>
-        <button class="detail-tab" id="tab-log" onclick="_switchOutputTab('log')" style="display:none">Log</button>
-        <button class="detail-tab error-tab" id="tab-error" onclick="_switchOutputTab('error')" style="display:none">Error</button>
+      <div class="detail-output-tab-bar">
+        <button class="detail-output-tab active" data-tab="output" onclick="switchOutputTab('output')">Output</button>
+        <button class="detail-output-tab" data-tab="log" onclick="switchOutputTab('log')">Log</button>
+        <button class="detail-output-tab" data-tab="error" onclick="switchOutputTab('error')">Error</button>
       </div>
-      <div class="detail-section-body" id="detail-output"></div>
-      <div class="detail-section-body" style="display:none" id="detail-log"></div>
-      <div class="detail-section-body" style="color:var(--red);display:none" id="detail-error"></div>
+      <div class="detail-output-tab-content active" id="detail-output-content">
+        <div class="detail-section-body" id="detail-output"></div>
+      </div>
+      <div class="detail-output-tab-content" id="detail-log-content">
+        <div class="detail-section-body" id="detail-log"></div>
+      </div>
+      <div class="detail-output-tab-content" id="detail-error-content">
+        <div class="detail-section-body error-panel" id="detail-error"></div>
+      </div>
     </div>
     <div class="detail-section" id="detail-path-section" style="display:none">
       <div class="detail-section-label">Output Path</div>
@@ -785,7 +799,7 @@
             <option value="browser">Browser STT</option>
             <option value="openai:gpt-4o-mini-transcribe">OpenAI 4o mini</option>
           </select>
-          <button id="mic-btn" onclick="toggleMic()" title="Voice input" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:14px;padding:2px 8px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
+          <button id="mic-btn" onclick="toggleMic()" title="Voice input" style="background:none;border:1px solid var(--accent);font-size:14px;padding:2px 8px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
         </div>
       </div>
       <textarea class="detail-reply-input" id="detail-reply-input" placeholder="Add feedback or instructions for the next run…" rows="3"></textarea>
@@ -889,6 +903,29 @@ function _pacePct(resets_at_unix, window_minutes) {
   return Math.max(0, Math.min(100, elapsed / windowSec * 100));
 }
 
+function _secondsFromResetLabel(label) {
+  if (!label) return null;
+  const text = String(label).trim().toLowerCase();
+  const dayHour = text.match(/^(\d+)d(\d{1,2})h$/);
+  if (dayHour) return (parseInt(dayHour[1], 10) * 24 + parseInt(dayHour[2], 10)) * 3600;
+  const hourMin = text.match(/^(\d+)h(\d{1,2})m$/);
+  if (hourMin) return (parseInt(hourMin[1], 10) * 60 + parseInt(hourMin[2], 10)) * 60;
+  const mins = text.match(/^(\d+)m$/);
+  if (mins) return parseInt(mins[1], 10) * 60;
+  return null;
+}
+
+function _pacePctFromResetLabel(resetLabel, window_minutes) {
+  if (!window_minutes) return null;
+  const remaining = _secondsFromResetLabel(resetLabel);
+  if (remaining === null) return null;
+  const windowSec = window_minutes * 60;
+  let remainingInWindow = remaining % windowSec;
+  if (remainingInWindow === 0 && remaining > 0) remainingInWindow = windowSec;
+  const elapsed = windowSec - remainingInWindow;
+  return Math.max(0, Math.min(100, elapsed / windowSec * 100));
+}
+
 function _applyPaceMarker(marker, elapsedPct, usedPct) {
   if (elapsedPct === null) { marker.style.display = 'none'; return; }
   marker.style.display = '';
@@ -903,10 +940,11 @@ function initPaceMarkers() {
   document.querySelectorAll('.win-pace-marker').forEach(marker => {
     const resetsAt = parseFloat(marker.dataset.resetsAt);
     const winMin   = parseFloat(marker.dataset.windowMinutes);
+    const resetLabel = marker.dataset.resetLabel;
     const wrap     = marker.closest('.win-bar-wrap');
     const bar      = wrap ? wrap.querySelector('.win-bar') : null;
     const usedPct  = bar ? parseFloat(bar.style.width) || 0 : 0;
-    _applyPaceMarker(marker, _pacePct(resetsAt, winMin), usedPct);
+    _applyPaceMarker(marker, _pacePct(resetsAt, winMin) ?? _pacePctFromResetLabel(resetLabel, winMin), usedPct);
   });
 }
 
@@ -1006,8 +1044,13 @@ function _updateOneRow(row, w) {
     if (marker) {
       if (d.window_minutes > 0) {
         marker.style.display = '';
-        _applyPaceMarker(marker, _pacePct(d.resets_at_unix, d.window_minutes), d.pct);
+        _applyPaceMarker(
+          marker,
+          _pacePct(d.resets_at_unix, d.window_minutes) ?? _pacePctFromResetLabel(d.reset, d.window_minutes),
+          d.pct
+        );
         marker.dataset.resetsAt = d.resets_at_unix || '';
+        marker.dataset.resetLabel = d.reset || '';
         marker.dataset.windowMinutes = d.window_minutes || '';
       } else {
         marker.style.display = 'none';
@@ -1820,7 +1863,6 @@ function _renderProgressLog(data) {
   }).join('\n\n');
   logEl.textContent = [header, body || '(no live log yet)'].filter(Boolean).join('\n\n');
   logEl.classList.toggle('empty', !body);
-  document.getElementById('tab-log').style.display = '';
 }
 
 async function _refreshDetailProgress(runId, issueId = '') {
@@ -2319,22 +2361,17 @@ async function openDetailModal(run_id) {
   _detailLinearInitial = null;
   _detailLinearUpdatedAt = '';
   document.getElementById('detail-modal').classList.add('open');
+  switchOutputTab('output');
   document.getElementById('detail-skill').textContent = '…';
   document.getElementById('detail-meta').textContent = '';
   document.getElementById('detail-prompt').textContent = '';
   document.getElementById('detail-prompt').classList.add('empty');
   document.getElementById('detail-output').textContent = '';
   document.getElementById('detail-output').classList.add('empty');
-  document.getElementById('detail-output').style.display = '';
   document.getElementById('detail-log').textContent = '';
-  document.getElementById('detail-log').style.display = 'none';
-  document.getElementById('tab-log').style.display = 'none';
-  document.getElementById('tab-log').classList.remove('active');
+  document.getElementById('detail-log').classList.add('empty');
   document.getElementById('detail-error').textContent = '';
-  document.getElementById('detail-error').style.display = 'none';
-  document.getElementById('tab-error').style.display = 'none';
-  document.getElementById('tab-error').classList.remove('active');
-  document.getElementById('tab-output').classList.add('active');
+  document.getElementById('detail-error').classList.add('empty');
   document.getElementById('detail-path-section').style.display = 'none';
   document.getElementById('linear-edit-section').style.display = 'none';
   document.getElementById('linear-edit-status').textContent = '';
@@ -2406,22 +2443,17 @@ async function openDetailModal(run_id) {
 
     const output = (r.output || '').trim();
     const errorRaw = (r.error || '').trim();
-    const hasError = !!errorRaw || r.status === 'error' || r.status === 'timeout';
     const hasLog = !!r.log_path || r.status === 'running' || state === 'in_progress';
     const outputEl = document.getElementById('detail-output');
     outputEl.textContent = output || '(no output)';
     outputEl.classList.toggle('empty', !output);
 
-    if (hasLog) {
-      document.getElementById('tab-log').style.display = '';
-      _startDetailProgressPoll(run_id, r.linear_issue_id || '');
-    }
+    const errorEl = document.getElementById('detail-error');
+    errorEl.textContent = errorRaw || '';
+    errorEl.classList.toggle('empty', !errorRaw);
 
-    if (hasError) {
-      const errorEl = document.getElementById('detail-error');
-      errorEl.textContent = errorRaw || '(no error details recorded)';
-      errorEl.classList.toggle('empty', !errorRaw);
-      document.getElementById('tab-error').style.display = '';
+    if (hasLog) {
+      _startDetailProgressPoll(run_id, r.linear_issue_id || '');
     }
 
     const path = (r.output_path || '').trim();
@@ -2471,15 +2503,17 @@ async function openDetailModal(run_id) {
   }
 }
 
-function _switchOutputTab(tab) {
-  const isError = tab === 'error';
-  const isLog = tab === 'log';
-  document.getElementById('detail-output').style.display = (isError || isLog) ? 'none' : '';
-  document.getElementById('detail-log').style.display = isLog ? '' : 'none';
-  document.getElementById('detail-error').style.display = isError ? '' : 'none';
-  document.getElementById('tab-output').classList.toggle('active', !isError && !isLog);
-  document.getElementById('tab-log').classList.toggle('active', isLog);
-  document.getElementById('tab-error').classList.toggle('active', isError);
+function _switchOutputTab(_tab) {
+  // panels always visible; no-op
+}
+
+function switchOutputTab(name) {
+  document.querySelectorAll('.detail-output-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.tab === name);
+  });
+  document.querySelectorAll('.detail-output-tab-content').forEach(el => {
+    el.classList.toggle('active', el.id === `detail-${name}-content`);
+  });
 }
 
 function closeDetailModal({ flush = true } = {}) {
@@ -3147,7 +3181,7 @@ function _startOpenAiMic(targetId, btnId, statusId, model = 'gpt-4o-mini-transcr
 
     _openAiMediaRecorder.start();
 
-    if (btn) { btn.style.color = 'var(--red)'; btn.style.borderColor = 'var(--red)'; btn.textContent = '⏹'; }
+    if (btn) { btn.style.color = 'var(--red)'; btn.style.borderColor = 'var(--red)'; btn.style.animation = 'mic-pulse 1.2s ease-in-out infinite'; btn.textContent = '⏹'; }
     if (stEl) { stEl.style.display = ''; stEl.textContent = '● Recording…'; stEl.style.color = 'var(--red)'; }
   }).catch(err => {
     _cleanupOpenAiMic();
@@ -3159,7 +3193,7 @@ function _stopOpenAiMic() {
   if (!_openAiMediaRecorder || _openAiMediaRecorder.state === 'inactive') return;
   const btn = document.getElementById(_micBtnId);
   const stEl = document.getElementById(_micStatusId);
-  if (btn) { btn.style.color = ''; btn.style.borderColor = ''; btn.textContent = '🎙'; }
+  if (btn) { btn.style.color = ''; btn.style.borderColor = 'var(--accent)'; btn.style.animation = ''; btn.textContent = '🎙'; }
   if (stEl) { stEl.style.display = ''; stEl.textContent = '⏳ Uploading…'; stEl.style.color = 'var(--accent)'; }
   _openAiMediaRecorder.stop();
   _openAiMediaRecorder = null;
@@ -3201,13 +3235,13 @@ function _uploadOpenAiAudio(targetId, btnId, statusId, model, language = 'auto')
       }
       if (stEl) { stEl.style.display = 'none'; }
     }
-    if (btn) { btn.style.color = ''; btn.style.borderColor = ''; btn.textContent = '🎙'; }
+    if (btn) { btn.style.color = ''; btn.style.borderColor = 'var(--accent)'; btn.style.animation = ''; btn.textContent = '🎙'; }
     _cleanupOpenAiMic();
     _openAiUploading = false;
   })
   .catch(err => {
     if (stEl) { stEl.style.display = ''; stEl.textContent = `Upload error: ${err.message}`; stEl.style.color = 'var(--red)'; }
-    if (btn) { btn.style.color = ''; btn.style.borderColor = ''; btn.textContent = '🎙'; }
+    if (btn) { btn.style.color = ''; btn.style.borderColor = 'var(--accent)'; btn.style.animation = ''; btn.textContent = '🎙'; }
     _cleanupOpenAiMic();
     _openAiUploading = false;
   });
@@ -3236,7 +3270,7 @@ function _startMic(targetId, btnId, statusId, language = 'auto') {
 
   rec.onstart = () => {
     const btn = document.getElementById(btnId);
-    if (btn) { btn.style.color = 'var(--red)'; btn.style.borderColor = 'var(--red)'; btn.textContent = '⏹'; }
+    if (btn) { btn.style.color = 'var(--red)'; btn.style.borderColor = 'var(--red)'; btn.style.animation = 'mic-pulse 1.2s ease-in-out infinite'; btn.textContent = '⏹'; }
     if (stEl) { stEl.style.display = ''; stEl.textContent = '● Listening…'; stEl.style.color = 'var(--red)'; }
   };
 
@@ -3271,7 +3305,7 @@ function _startMic(targetId, btnId, statusId, language = 'auto') {
 function _stopMic() {
   if (_micRecognition) { try { _micRecognition.stop(); } catch (_) {} _micRecognition = null; }
   const btn = document.getElementById(_micBtnId);
-  if (btn) { btn.style.color = ''; btn.style.borderColor = ''; btn.textContent = '🎙'; }
+  if (btn) { btn.style.color = ''; btn.style.borderColor = 'var(--accent)'; btn.style.animation = ''; btn.textContent = '🎙'; }
   const st = document.getElementById(_micStatusId);
   if (st) { st.style.display = 'none'; st.style.color = ''; }
   _micTargetId = _micBtnId = _micStatusId = null;
@@ -3333,10 +3367,11 @@ setInterval(() => {
   document.querySelectorAll('.win-pace-marker').forEach(marker => {
     const resetsAt = parseFloat(marker.dataset.resetsAt);
     const winMin   = parseFloat(marker.dataset.windowMinutes);
+    const resetLabel = marker.dataset.resetLabel;
     const wrap     = marker.closest('.win-bar-wrap');
     const bar      = wrap ? wrap.querySelector('.win-bar') : null;
     const usedPct  = bar ? parseFloat(bar.style.width) || 0 : 0;
-    _applyPaceMarker(marker, _pacePct(resetsAt, winMin), usedPct);
+    _applyPaceMarker(marker, _pacePct(resetsAt, winMin) ?? _pacePctFromResetLabel(resetLabel, winMin), usedPct);
   });
 }, 60000);
 </script>
@@ -3544,7 +3579,7 @@ terminalEl.addEventListener('drop', async (e) => {
             <option value="browser">Browser STT</option>
             <option value="openai:gpt-4o-mini-transcribe">OpenAI 4o mini</option>
           </select>
-          <button id="mic-btn-desc" onclick="toggleMicFor('new-issue-desc','mic-btn-desc','mic-status-desc')" title="Voice input" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:13px;padding:1px 7px;border-radius:4px;cursor:pointer;font-family:inherit">🎙</button>
+          <button id="mic-btn-desc" onclick="toggleMicFor('new-issue-desc','mic-btn-desc','mic-status-desc')" title="Voice input" style="background:none;border:1px solid var(--accent);font-size:13px;padding:1px 7px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
         </div>
       </div>
       <div id="mic-status-desc" style="font-size:10px;color:var(--text-dim);margin-top:2px;display:none"></div>
