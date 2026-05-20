@@ -791,6 +791,10 @@
       <div class="detail-section-label">Output Path</div>
       <div class="detail-section-body" id="detail-path"></div>
     </div>
+    <div class="detail-section" id="detail-quality-section" style="display:none">
+      <div class="detail-section-label">Quality / Cost</div>
+      <div class="detail-section-body" id="detail-quality-cost" style="font-size:12px;color:var(--text-dim)"></div>
+    </div>
     <div class="detail-section" id="detail-reply-section" style="display:none">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div class="detail-section-label" style="margin-bottom:0">Comment / Feedback</div>
@@ -2373,6 +2377,7 @@ async function openDetailModal(run_id) {
   document.getElementById('detail-error').textContent = '';
   document.getElementById('detail-error').classList.add('empty');
   document.getElementById('detail-path-section').style.display = 'none';
+  document.getElementById('detail-quality-section').style.display = 'none';
   document.getElementById('linear-edit-section').style.display = 'none';
   document.getElementById('linear-edit-status').textContent = '';
   document.getElementById('linear-issue-link').style.display = 'none';
@@ -2460,6 +2465,16 @@ async function openDetailModal(run_id) {
     if (path) {
       document.getElementById('detail-path').textContent = path;
       document.getElementById('detail-path-section').style.display = '';
+    }
+
+    const qualScore = r.quality_score != null ? r.quality_score : null;
+    const tokenCost = r.token_cost_usd != null ? r.token_cost_usd : null;
+    if (qualScore != null || tokenCost != null) {
+      const parts = [];
+      if (qualScore != null) parts.push(`Quality: ${(qualScore * 100).toFixed(0)}%`);
+      if (tokenCost != null) parts.push(`Cost: $${tokenCost.toFixed(4)}`);
+      document.getElementById('detail-quality-cost').textContent = parts.join('  ·  ');
+      document.getElementById('detail-quality-section').style.display = '';
     }
 
     const canRetry = !!r.linear_issue_id && state !== 'done' && state !== 'cancelled' && state !== 'todo' && r.status !== 'running';
