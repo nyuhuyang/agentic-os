@@ -1217,7 +1217,7 @@ def _check_deepseek_tui_version(ds_bin: str) -> None:
 def _ai_cli(agent: str) -> list[str]:
     """Return the CLI command prefix for the selected agent."""
     if agent == "codex":
-        return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
+        return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--json"]
     if agent == "deepseek-tui":
         _ds_bin = shutil.which("deepseek")
         if not _ds_bin:
@@ -1278,6 +1278,27 @@ def _parse_agent_output(agent: str, stdout_s: str) -> tuple[str, int | None, int
         except (json.JSONDecodeError, TypeError):
             pass
         return stdout_s, None, None, None
+    if agent == "codex":
+        # Parse NDJSON events from codex --json output
+        content_parts: list[str] = []
+        input_tokens: int | None = None
+        output_tokens: int | None = None
+        for line in stdout_s.splitlines():
+            try:
+                ev = json.loads(line)
+                ev_type = ev.get("type", "")
+                if ev_type == "item.completed":
+                    item = ev.get("item", {})
+                    if item.get("type") == "agent_message":
+                        content_parts.append(item.get("text", ""))
+                elif ev_type == "turn.completed":
+                    usage = ev.get("usage", {})
+                    input_tokens = usage.get("input_tokens")
+                    output_tokens = usage.get("output_tokens")
+            except Exception:
+                pass
+        output = "".join(content_parts) or stdout_s
+        return output, input_tokens, output_tokens, None
     if agent != "claude" or not stdout_s:
         return stdout_s, None, None, None
     try:
@@ -1290,6 +1311,16 @@ def _parse_agent_output(agent: str, stdout_s: str) -> tuple[str, int | None, int
         return stdout_s, None, None, None
 
 
+def _extract_codex_thread_id(stdout_s: str) -> str | None:
+    """Extract thread_id from codex --json NDJSON output."""
+    for line in stdout_s.splitlines():
+        try:
+            ev = json.loads(line)
+            if ev.get("type") == "thread.started":
+                return ev.get("thread_id")
+        except Exception:
+            pass
+    return None
 
 
 def _claude_stream_log_path(run_id: str) -> Path:
@@ -1301,16 +1332,17 @@ def _stream_claude_run(
     proc: "subprocess.Popen[bytes]",
     run_id: str,
     timeout: float = 600,
-) -> tuple[str, int | None, int | None, str | None, str]:
+) -> tuple[str, int | None, int | None, str | None, str | None, str]:
     """Stream Claude stream-json stdout to a JSONL progress file.
 
-    Returns (output, input_tokens, output_tokens, model, stderr).
+    Returns (output, input_tokens, output_tokens, model, session_id, stderr).
     """
     stream_path = _claude_stream_log_path(run_id)
     RUN_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
 
     lines: list[str] = []
     result_event: dict = {}
+    session_id_holder: list[str | None] = [None]
 
     def _reader() -> None:
         with stream_path.open("w", encoding="utf-8") as sf:
@@ -1325,6 +1357,8 @@ def _stream_claude_run(
                     ev = json.loads(line)
                     if ev.get("type") == "result":
                         result_event.update(ev)
+                    if not session_id_holder[0] and ev.get("session_id"):
+                        session_id_holder[0] = ev["session_id"]
                     _write_run_progress_json(run_id, {
                         "state": "running",
                         "stream_log": str(stream_path),
@@ -1349,9 +1383,10 @@ def _stream_claude_run(
     model = result_event.get("model")
     if not output and lines:
         output = lines[-1]
+    session_id = session_id_holder[0] or result_event.get("session_id")
 
     _write_run_progress_json(run_id, {"stream_log": str(stream_path)})
-    return output, usage.get("input_tokens"), usage.get("output_tokens"), model, stderr_s
+    return output, usage.get("input_tokens"), usage.get("output_tokens"), model, session_id, stderr_s
 
 
 def _stream_deepseek_tui_run(
@@ -1436,6 +1471,53 @@ def _stream_deepseek_tui_run(
         session_id,
         stderr_s,
     )
+
+
+def _get_task_agent_lock(task_id: str) -> dict | None:
+    """Return {agent, agent_session_id} if task is locked, else None.
+
+    Lock is active when the latest run for task_id has status NOT in {todo, rework}.
+    Lock is cleared when the UI sets the run status to todo/rework.
+    """
+    if not RUN_LOG.exists():
+        return None
+    seen_run_ids: set[str] = set()
+    latest: dict | None = None
+    agent_session_id: str | None = None
+    for line in reversed(RUN_LOG.read_text(encoding="utf-8").strip().splitlines()):
+        try:
+            r = json.loads(line)
+            if r.get("task_id") != task_id:
+                continue
+            rid = r.get("run_id", "")
+            if rid not in seen_run_ids:
+                seen_run_ids.add(rid)
+                if latest is None:
+                    latest = r  # most recent distinct run
+            if not agent_session_id and r.get("agent_session_id"):
+                agent_session_id = r["agent_session_id"]
+        except Exception:
+            continue
+    if not latest:
+        return None
+    if latest.get("status") in {"todo", "rework"}:
+        return None  # human reset → lock cleared
+    agent = latest.get("agent")
+    if not agent or agent == "deepseek":
+        return None  # API agent has no CLI session lock
+    return {"agent": agent, "agent_session_id": agent_session_id}
+
+
+def _build_resume_cmd(agent: str, session_id: str, prompt: str) -> list[str]:
+    """Build the agent-specific --resume command for a given session."""
+    base = _ai_cli(agent)
+    if agent == "claude":
+        return base + ["--resume", session_id, "--output-format", "stream-json", prompt]
+    if agent == "codex":
+        return base + ["resume", session_id, prompt]
+    if agent == "deepseek-tui":
+        return base + ["--resume", session_id, prompt]
+    return base + [prompt]
 
 
 def _extract_skill_name(raw: str, registry: dict) -> str:
@@ -1580,13 +1662,13 @@ def run():
                 stderr=subprocess.PIPE,
             )
             _running_procs[run_id] = proc
-            _ds_session_id: str | None = None
+            _agent_session_id: str | None = None
             if agent == "claude":
-                output, input_tokens, output_tokens, parsed_model, stderr_s = \
+                output, input_tokens, output_tokens, parsed_model, _agent_session_id, stderr_s = \
                     _stream_claude_run(proc, run_id, timeout=_timeout)
                 ok = proc.returncode == 0
             elif agent == "deepseek-tui":
-                output, input_tokens, output_tokens, parsed_model, _ds_session_id, stderr_s = \
+                output, input_tokens, output_tokens, parsed_model, _agent_session_id, stderr_s = \
                     _stream_deepseek_tui_run(proc, run_id, timeout=_timeout)
                 ok = proc.returncode == 0
             else:
@@ -1595,6 +1677,8 @@ def run():
                 stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
                 stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
                 output, input_tokens, output_tokens, parsed_model = _parse_agent_output(agent, stdout_s)
+                if agent == "codex":
+                    _agent_session_id = _extract_codex_thread_id(stdout_s)
             if not output:
                 output = stderr_s
             dur = time.monotonic() - t0
@@ -1606,7 +1690,7 @@ def run():
                            input_tokens=input_tokens, output_tokens=output_tokens, agent=agent,
                            model=parsed_model or _agent_model(agent),
                            task_id=run_id,
-                           agent_session_id=_ds_session_id)
+                           agent_session_id=_agent_session_id)
             socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": skill_name})
             socketio.emit("run_logged", {"skill": skill_name, "run_id": run_id})
             return jsonify({
@@ -1988,6 +2072,20 @@ def api_run_retry(run_id: str):
     preferred_agent = _preferred_task_agent(original)
     agent = agent_override if agent_override in {"claude", "codex", "deepseek", "deepseek-tui"} else None
     agent = agent or preferred_agent or original.get("agent") or cfg.get("agent", {}).get("backend", "claude")
+
+    # Agent lock: if task is in flight (in_progress / in_review), enforce same agent
+    _task_lock = _get_task_agent_lock(task_id)
+    _lock_session_id: str | None = None
+    if _task_lock:
+        locked_agent = _task_lock["agent"]
+        _lock_session_id = _task_lock.get("agent_session_id")
+        if agent_override and agent_override != locked_agent:
+            logger.warning(
+                "[retry] agent_override=%s rejected; task %s locked to %s",
+                agent_override, task_id, locked_agent,
+            )
+        agent = locked_agent
+
     registry = _load_registry(agent)
     entry = registry.get(skill, {})
 
@@ -2055,31 +2153,65 @@ def api_run_retry(run_id: str):
                         _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry Error", prompt=prompt))
                     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "review", "skill": skill})
             else:
-                # Claude / Codex / DeepSeek TUI — subprocess dispatch
-                try:
-                    if entry.get("schedule_eligible") and entry.get("entrypoint"):
-                        cmd = [_python_path(), str(RUNNER), skill]
-                    else:
-                        cmd = _ai_command(agent, prompt, output_format="json")
-                    proc = subprocess.Popen(
+                # Claude / Codex / DeepSeek TUI — subprocess dispatch with streaming + resume
+
+                def _dispatch_cmd(
+                    cmd: list[str],
+                ) -> tuple[str, int | None, int | None, str | None, str | None, str, bool]:
+                    """Run cmd; return (output, input_tokens, output_tokens, model, session_id, stderr, ok)."""
+                    p = subprocess.Popen(
                         cmd,
                         cwd=str(ROOT),
                         env=_registry_exec_env(agent, registry),
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE,
                     )
-                    _running_procs[new_run_id] = proc
-                    stdout_b, stderr_b = proc.communicate(timeout=AI_RUN_TIMEOUT_S)
-                    dur = time.monotonic() - t0
-                    ok = proc.returncode == 0
-                    stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
-                    stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
-                    output, input_tokens, output_tokens, parsed_model = _parse_agent_output(agent, stdout_s)
+                    _running_procs[new_run_id] = p
+                    try:
+                        if agent == "claude":
+                            _out, _it, _ot, _pm, _sid, _err = _stream_claude_run(p, new_run_id, timeout=AI_RUN_TIMEOUT_S)
+                            _ok = p.returncode == 0
+                        elif agent == "deepseek-tui":
+                            _out, _it, _ot, _pm, _sid, _err = _stream_deepseek_tui_run(p, new_run_id, timeout=AI_RUN_TIMEOUT_S)
+                            _ok = p.returncode == 0
+                        else:
+                            _sb, _eb = p.communicate(timeout=AI_RUN_TIMEOUT_S)
+                            _ok = p.returncode == 0
+                            _ss = _sb.decode("utf-8", errors="replace").strip()
+                            _err = _eb.decode("utf-8", errors="replace").strip()
+                            _out, _it, _ot, _pm = _parse_agent_output(agent, _ss)
+                            _sid = _extract_codex_thread_id(_ss) if agent == "codex" else None
+                    finally:
+                        _running_procs.pop(new_run_id, None)
+                    return _out, _it, _ot, _pm, _sid, _err, _ok
+
+                try:
+                    if entry.get("schedule_eligible") and entry.get("entrypoint"):
+                        cmd = [_python_path(), str(RUNNER), skill]
+                        _used_resume = False
+                    elif _lock_session_id:
+                        cmd = _build_resume_cmd(agent, _lock_session_id, prompt)
+                        _used_resume = True
+                    else:
+                        cmd = _ai_command(agent, prompt, output_format="json")
+                        _used_resume = False
+
+                    output, input_tokens, output_tokens, parsed_model, new_sid, stderr_s, ok = _dispatch_cmd(cmd)
+
+                    # Resume failure fallback: same agent, no --resume
+                    if _used_resume and not ok:
+                        logger.warning(
+                            "[retry] resume failed for %s session=%s; full retry without resume",
+                            agent, _lock_session_id,
+                        )
+                        fallback_cmd = _ai_command(agent, prompt, output_format="json")
+                        output, input_tokens, output_tokens, parsed_model, new_sid, stderr_s, ok = _dispatch_cmd(fallback_cmd)
+
                     error_s = _extract_real_errors(stderr_s)
                     if not output:
                         output = error_s or stderr_s
+                    dur = time.monotonic() - t0
                     _running_jobs.pop(new_run_id, None)
-                    _running_procs.pop(new_run_id, None)
                     final_state = "review"
                     _write_run_log(skill, final_state, started_at, dur,
                                    prompt=prompt, output=output, error=error_s,
@@ -2087,7 +2219,8 @@ def api_run_retry(run_id: str):
                                    linear_issue_id=linear_issue_id,
                                    input_tokens=input_tokens, output_tokens=output_tokens,
                                    agent=agent, model=parsed_model or _agent_model(agent, cfg),
-                                   task_id=task_id)
+                                   task_id=task_id,
+                                   agent_session_id=new_sid)
                     if linear_issue_id:
                         _push_linear_state_async(linear_issue_id, final_state)
                         _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry", prompt=prompt, output=output))
