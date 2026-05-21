@@ -2423,7 +2423,11 @@ async function openDetailModal(run_id) {
     document.getElementById('desc-stt-group').style.display = 'flex';
     document.getElementById('detail-dispatch-group').style.display = isTodoVirtual ? 'inline-flex' : 'none';
     document.getElementById('detail-retry-group').style.display = isInReviewVirtual ? 'inline-flex' : 'none';
-    if (isInReviewVirtual) _updateDetailRetryLock(boardItem?.preferred_agent || null);
+    if (isInReviewVirtual) {
+      const lockedAgent = (boardItem?.agent || '').toLowerCase() || null;
+      const prefAgent = (boardItem?.preferred_agent || lockedAgent || '').toLowerCase() || null;
+      _updateDetailRetryLock(prefAgent, !!lockedAgent);
+    }
     document.getElementById('detail-approve-btn').style.display = isInReviewVirtual ? '' : 'none';
     if (_linearConfigured) _loadLinearIssueIntoModal(issueId, boardItem);
     try {
@@ -2577,12 +2581,10 @@ function _updateDetailRetryLock(preferredAgent, sessionLocked = false) {
   for (const [agent, btn] of Object.entries(_detailBtns)) {
     if (!btn) continue;
     const isLocked = sessionLocked && agent !== preferredAgent;
-    if (!isLocked && preferredAgent === agent) btn.classList.remove('agent-hidden');
-    btn.classList.toggle('agent-locked-out', isLocked);
+    btn.style.display = isLocked ? 'none' : '';
+    btn.classList.remove('agent-locked-out');
     btn.classList.toggle('selected', !isLocked && preferredAgent === agent);
-    btn.title = isLocked
-      ? `Session locked to ${_labels[preferredAgent] || preferredAgent}`
-      : (preferredAgent === agent ? 'Preferred agent for retry' : `Retry with ${_labels[agent] || agent}`);
+    btn.title = preferredAgent === agent ? 'Preferred agent for retry' : `Retry with ${_labels[agent] || agent}`;
   }
 }
 
