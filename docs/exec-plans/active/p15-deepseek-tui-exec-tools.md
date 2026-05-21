@@ -205,26 +205,55 @@ streaming subprocess 超时使用 `AI_RUN_TIMEOUT_S`（`runner/app.py:144`，默
 
 ---
 
-### Phase 2 — Session / retry integration
+### Phase 2 — Session lock + resume（三个 agent 全部）
 
-**目标：** 利用 DeepSeek TUI 的 exec session 能力改善 retry 和 follow-up。
+**目标：** task 在 `in_progress` / `in_review` 期间，强制同一 agent 续接会话。只有打回 `todo` 时才允许换 agent。
 
-**具体改动：**
+#### 2a — Session ID 提取（每个 agent 的来源）
 
-1. 首次运行保存 `metadata.session_id`
-2. retry 时如果原 run 有 `deepseek_session_id`，优先使用：
+| Agent | Session ID 来源 | Resume 命令 |
+|---|---|---|
+| `claude` | 任意 event 的 `session_id` 字段 | `claude -p --resume <session_id> ...` |
+| `codex` | `thread.started` event 的 `thread_id` | `codex exec resume <thread_id> <prompt>` |
+| `deepseek-tui` | `metadata` event 的 `session_id` | `deepseek exec --auto --resume <session_id> <prompt>` |
 
-```bash
-deepseek exec --auto --output-format stream-json --resume <SESSION_ID> <feedback_prompt>
+首次 run 完成后，将 session id 写入 run log（需在 `_write_run_log` 加 `agent_session_id` 字段）。
+
+#### 2b — Agent 锁定规则（runner state machine）
+
+```
+task status: todo        → agent 可以自由选择
+task status: in_progress → agent 锁定为首次 run 使用的 agent；retry 必须用 --resume
+task status: in_review   → agent 锁定；follow-up feedback 必须用 --resume
+task status: todo        ← 打回时解锁 agent，允许换 agent 重新开始（不用 --resume）
 ```
 
-3. 如果 session resume 失败，降级为完整 prompt retry。
+实现要点：
+- run log 的 `task_id` 已存在，用它关联同一 task 的多次 run
+- 首次 run 写入 `agent` + `agent_session_id` 到 run log
+- retry / follow-up 时查找同 `task_id` 最近一次 run，读取 `agent` 和 `agent_session_id`
+- 若 task status 为 `in_progress` 或 `in_review`，强制使用已锁定 agent + `--resume`
+- 若 session resume 失败（agent 报错），降级为同 agent 全量 prompt retry（不换 agent）
+- 只有 UI 显式将 task 打回 `todo` 时，清空 agent 锁定
+
+#### 2c — Resume 失败降级策略
+
+```
+resume 失败
+  └─ 同 agent 全量 prompt retry（不换 agent，不带 --resume）
+       └─ 仍失败 → 状态留 in_progress，提示用户打回 todo 换 agent
+```
 
 **完成标准：**
 
-- [ ] 首次 run 保存 DeepSeek session id
-- [ ] retry 可用 `--resume` 继续同一 DeepSeek exec session
-- [ ] session resume 失败时有清晰错误或自动降级
+- [ ] `_write_run_log` 新增 `agent_session_id` 字段
+- [ ] claude: `system` event 提取 `session_id` 写入 run log
+- [ ] codex: `thread.started` event 提取 `thread_id` 写入 run log
+- [ ] deepseek-tui: `metadata` event 提取 `session_id` 写入 run log
+- [ ] task 在 `in_progress` / `in_review` 时，runner 拒绝切换 agent
+- [ ] retry 自动带 `--resume <agent_session_id>`
+- [ ] resume 失败时降级为同 agent 全量 retry，不自动换 agent
+- [ ] task 打回 `todo` 时 agent 锁定解除
 
 ---
 
