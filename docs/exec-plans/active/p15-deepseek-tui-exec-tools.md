@@ -30,19 +30,9 @@ deepseek exec --resume <SESSION_ID> "follow up"
 
 **目标：** 先升级并适配 upstream DeepSeek TUI 的 `exec --auto --output-format stream-json`。只有最新版仍不能满足真实工具调用或机器可读事件时，才 fork。
 
-### 与 P17 的关系
+### 与其他 plan 的关系
 
-**P15 的 Phase 0 研究结果直接决定 P17 Phase 2b 的实现方式。**
-
-当前 Elixir 版 DeepSeek backend（`prototypes/symphony/elixir/lib/symphony_elixir/deepseek/app_server.ex`）使用旧协议：
-- 命令：`deepseek --model deepseek-v4-pro --yolo --approval-policy never --prompt "$(cat file)"`
-- 纯文本 stdout 逐行输出，无结构化事件，无 session 续接
-
-P17 Phase 2b（`src/deepseek/app-server-client.ts`）需要决定：
-- 若 P15 Phase 0 成功 → 用新协议（`exec --auto --output-format stream-json`）实现 TS backend
-- 若 P15 Phase 0 失败 → 移植 Elixir 旧协议（plain-text 方式）
-
-**P15 先于 P17 Phase 2b 执行。**
+symphony-ts（P17）已废弃。P15 主要改动范围：`runner/modules/backends/deepseek.py`（Python runner）。
 
 ---
 
@@ -76,7 +66,8 @@ P17 Phase 2b（`src/deepseek/app-server-client.ts`）需要决定：
 **步骤：**
 
 1. 安装或构建 `deepseek >= 0.8.37`
-   - 优先用上游 release / npm wrapper / cargo install。
+   - 当前安装方式为 npm wrapper：`npm update -g deepseek`
+   - 若 npm 版本滞后，备选：`cargo install deepseek-tui` 或从 GitHub release 下载 binary。
    - 不使用 fork，除非上游版本验证失败。
 
 2. 验证 CLI surface
@@ -105,6 +96,14 @@ deepseek exec --auto --output-format stream-json "Run date and report the result
 deepseek exec --auto --output-format stream-json "Read runner/app.py and summarize _ai_cli."
 ```
 
+4. 验证 `--auto` sandbox 语义
+
+```bash
+deepseek exec --auto --output-format stream-json "Write a file /tmp/p15-test.txt with content 'ok'"
+```
+
+确认：工具调用限制在 cwd / project context；不写入 `/tmp` 或系统目录之外。与旧 `--yolo --approval-policy auto` 行为对比记录。
+
 **完成标准：**
 
 - [ ] 本地 `deepseek --version` 为支持 exec agent 的版本
@@ -112,6 +111,7 @@ deepseek exec --auto --output-format stream-json "Read runner/app.py and summari
 - [ ] `deepseek exec --auto ...` 实际产生 `tool_use` / `tool_result`
 - [ ] shell/file 工具结果来自真实执行，不是模型模拟
 - [ ] 输出末尾包含 `metadata` 和 `done`
+- [ ] `--auto` sandbox/cwd 语义已验证并记录（与 `--yolo` 差异）
 
 ---
 
@@ -121,12 +121,20 @@ deepseek exec --auto --output-format stream-json "Read runner/app.py and summari
 
 **改动范围：**
 
-主要目标：`src/deepseek/app-server-client.ts`（P17 symphony-ts fork）
-
-辅助验证（可选）：
-- `runner/modules/backends/deepseek.py`（Python runner，已不是主项目，但可用于快速验证协议）
+主要目标：`runner/modules/backends/deepseek.py`
 
 **具体改动：**
+
+0. 运行时版本检测
+
+dispatch 入口检查版本，不满足直接 fail fast：
+
+```python
+result = subprocess.run(["deepseek", "--version"], capture_output=True, text=True)
+# 期望输出含 "v0.8.3x" 或更高；低于 0.8.37 → raise RuntimeError with upgrade hint
+```
+
+错误信息应包含 `npm update -g deepseek` 升级指令。
 
 1. 更新 `deepseek-tui` 命令
 
@@ -158,19 +166,25 @@ done
 error
 ```
 
-3. 写入 run log
+3. 写入 run log — 映射至 P22 telemetry schema
 
-从 `metadata` 提取：
+`_write_run_log()` 字段映射（`runner/app.py:1245`）：
 
-```text
-model
-input_tokens
-output_tokens
-session_id
-status
-```
+| DeepSeek `metadata` 字段 | `_write_run_log` 参数 |
+|---|---|
+| `model` | `model` |
+| `input_tokens` | `input_tokens` |
+| `output_tokens` | `output_tokens` |
+| `session_id` | 写入 run log `extra` 或单独字段 |
+| `status` | 映射至 `status`（success / error / timeout） |
 
-4. UI 进度
+`agent` 固定写 `"deepseek-tui"`（区分 API agent `"deepseek"`）。
+
+4. Timeout 对齐
+
+streaming subprocess 超时使用 `AI_RUN_TIMEOUT_S`（`runner/app.py:144`，默认 1800s）。超时时 status 写 `"timeout"`，与其他 agent 一致。
+
+5. UI 进度
 
 - `tool_use` -> `run_progress`：显示工具名和参数摘要
 - `tool_result` -> `run_progress`：显示工具完成状态
@@ -179,8 +193,11 @@ status
 
 **完成标准：**
 
+- [ ] dispatch 入口有版本检测，< 0.8.37 fail fast with upgrade hint
 - [ ] `deepseek-tui` run log 记录 `agent=deepseek-tui`
-- [ ] run log 记录模型、token、session id
+- [ ] run log 记录 `model`、`input_tokens`、`output_tokens`（映射 P22 schema）
+- [ ] run log 记录 `session_id`
+- [ ] streaming subprocess 超时使用 `AI_RUN_TIMEOUT_S`，status 写 `"timeout"`
 - [ ] UI 能看到工具开始/完成进度
 - [ ] 最终 output 不混入原始 NDJSON 噪音
 - [ ] `deepseek` API agent 和 `deepseek-tui` CLI agent 仍有明确区别
@@ -217,6 +234,8 @@ deepseek exec --auto --output-format stream-json --resume <SESSION_ID> <feedback
 - 最新上游 `exec --auto` 不能真实调用工具
 - `stream-json` 缺少关键事件或 token/session metadata
 - 上游行为无法通过配置或小补丁满足 AgenticOS
+
+**决策截止：** Phase 0 验证结束后 1 周内决定是否进入 Phase 3。若届时上游 PR 无回应且问题未解决，视为触发。
 
 **原则：**
 
