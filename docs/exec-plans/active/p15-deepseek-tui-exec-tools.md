@@ -124,6 +124,11 @@ deepseek exec --auto --output-format stream-json "Write a file /tmp/p15-test.txt
 
 主要目标：`runner/modules/backends/deepseek.py`
 
+> **已知 Bug（顺带修）：** `runner/app.py` `_ai_cli("claude")`（line ~1459）缺少 `--verbose` flag。
+> `--output-format stream-json` 在 Claude CLI 中必须搭配 `--verbose` 才能输出事件流，否则报错：
+> `Error: When using --print, --output-format=stream-json requires --verbose`
+> 修复：在 `_ai_cli` 返回值中加入 `"--verbose"`。
+
 **具体改动：**
 
 0. 运行时版本检测
