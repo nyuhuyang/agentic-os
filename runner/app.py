@@ -1005,7 +1005,8 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
                    output_tokens: int | None = None,
                    agent: str | None = None,
                    model: str | None = None,
-                   task_id: str | None = None) -> str:
+                   task_id: str | None = None,
+                   agent_session_id: str | None = None) -> str:
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if run_id is None:
@@ -1037,6 +1038,8 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
         record["agent"] = agent
     if model:
         record["model"] = model
+    if agent_session_id:
+        record["agent_session_id"] = agent_session_id
     progress_path = _run_progress_path(run_id)
     if progress_path.exists():
         record["log_path"] = str(progress_path)
@@ -1185,14 +1188,37 @@ def index():
     return jsonify({"path": str(dest)})
 
 
+_DEEPSEEK_TUI_MIN_VERSION = (0, 8, 37)
+
+
+def _check_deepseek_tui_version(ds_bin: str) -> None:
+    """Raise RuntimeError if deepseek version < 0.8.37."""
+    try:
+        out = subprocess.check_output(
+            [ds_bin, "--version"], text=True, stderr=subprocess.STDOUT, timeout=10
+        )
+        m = re.search(r"v(\d+)\.(\d+)\.(\d+)", out)
+        if m:
+            ver = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            if ver < _DEEPSEEK_TUI_MIN_VERSION:
+                raise RuntimeError(
+                    f"deepseek-tui v{m.group(1)}.{m.group(2)}.{m.group(3)} too old "
+                    f"(need >= {'.'.join(str(v) for v in _DEEPSEEK_TUI_MIN_VERSION)}). "
+                    "Upgrade: npm update -g deepseek-tui"
+                )
+    except subprocess.TimeoutExpired:
+        pass
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+
+
 def _ai_cli(agent: str) -> list[str]:
     """Return the CLI command prefix for the selected agent."""
     if agent == "codex":
         return ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
     if agent == "deepseek-tui":
-        # Resolve deepseek binary — try shutil.which first, fallback to
-        # common install paths (e.g. Homebrew) for environments where PATH
-        # may not include the install prefix (e.g. subprocess env).
         _ds_bin = shutil.which("deepseek")
         if not _ds_bin:
             for _p in ("/opt/homebrew/bin/deepseek", "/usr/local/bin/deepseek"):
@@ -1201,11 +1227,12 @@ def _ai_cli(agent: str) -> list[str]:
                     break
         if not _ds_bin:
             _ds_bin = "deepseek"  # let subprocess raise FileNotFoundError
-        return [_ds_bin, "--yolo", "--approval-policy", "auto", "exec"]
+        _check_deepseek_tui_version(_ds_bin)
+        return [_ds_bin, "exec", "--auto", "--output-format", "stream-json"]
     # default: claude
     claude_bin = _PROTO / ".venv" / "bin" / "claude"
     bin_str = str(claude_bin) if claude_bin.exists() else "claude"
-    return [bin_str, "-p", "--permission-mode", "bypassPermissions"]
+    return [bin_str, "-p", "--verbose", "--permission-mode", "bypassPermissions"]
 
 
 def _ai_command(agent: str, prompt: str, output_format: str = "json") -> list[str]:
@@ -1325,6 +1352,90 @@ def _stream_claude_run(
 
     _write_run_progress_json(run_id, {"stream_log": str(stream_path)})
     return output, usage.get("input_tokens"), usage.get("output_tokens"), model, stderr_s
+
+
+def _stream_deepseek_tui_run(
+    proc: "subprocess.Popen[bytes]",
+    run_id: str,
+    timeout: float = 1800,
+) -> tuple[str, int | None, int | None, str | None, str | None, str]:
+    """Stream deepseek exec --output-format stream-json events to a JSONL progress file.
+
+    Returns (output, input_tokens, output_tokens, model, session_id, stderr).
+    """
+    stream_path = _claude_stream_log_path(run_id)
+    RUN_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
+
+    content_parts: list[str] = []
+    metadata: dict = {}
+    session_id_holder: list[str | None] = [None]
+
+    def _reader() -> None:
+        with stream_path.open("w", encoding="utf-8") as sf:
+            for raw in proc.stdout:  # type: ignore[union-attr]
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if not line:
+                    continue
+                sf.write(line + "\n")
+                sf.flush()
+                try:
+                    ev = json.loads(line)
+                    ev_type = ev.get("type", "")
+                    if ev_type == "content":
+                        content_parts.append(ev.get("content", ""))
+                    elif ev_type == "metadata":
+                        metadata.update(ev.get("meta", {}))
+                    elif ev_type == "session_capture":
+                        session_id_holder[0] = ev.get("content")
+                    elif ev_type == "tool_use":
+                        tool_name = ev.get("name", "tool")
+                        snippet = f"[tool] {tool_name}: {str(ev.get('input', {}))[:80]}"
+                        socketio.emit("run_progress", {"run_id": run_id, "snippet": snippet, "event": "tool_use"})
+                        _write_run_progress_json(run_id, {
+                            "state": "running",
+                            "stream_log": str(stream_path),
+                            "last_event_type": "tool_use",
+                            "tool_name": tool_name,
+                        })
+                    elif ev_type == "tool_result":
+                        status = ev.get("status", "")
+                        socketio.emit("run_progress", {"run_id": run_id, "snippet": f"[tool_result] {status}", "event": "tool_result"})
+                        _write_run_progress_json(run_id, {
+                            "state": "running",
+                            "stream_log": str(stream_path),
+                            "last_event_type": "tool_result",
+                        })
+                    else:
+                        _write_run_progress_json(run_id, {
+                            "state": "running",
+                            "stream_log": str(stream_path),
+                            "last_event_type": ev_type,
+                        })
+                except Exception:
+                    pass
+
+    t = threading.Thread(target=_reader, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+
+    if t.is_alive():
+        proc.kill()
+        raise subprocess.TimeoutExpired(proc.args, timeout)
+
+    proc.wait()
+    stderr_s = (proc.stderr.read() or b"").decode("utf-8", errors="replace").strip()  # type: ignore[union-attr]
+
+    output = "".join(content_parts)
+    session_id = session_id_holder[0] or metadata.get("session_id")
+    _write_run_progress_json(run_id, {"stream_log": str(stream_path)})
+    return (
+        output,
+        metadata.get("input_tokens"),
+        metadata.get("output_tokens"),
+        metadata.get("model"),
+        session_id,
+        stderr_s,
+    )
 
 
 def _extract_skill_name(raw: str, registry: dict) -> str:
@@ -1456,12 +1567,11 @@ def run():
             return jsonify({"ok": False, "error": str(e)})
     else:
         # Claude — streaming dispatch (stream-json, progress written per-event)
-        # Codex / DeepSeek TUI — subprocess dispatch via CLI (communicate)
+        # DeepSeek TUI — stream-json NDJSON events parsed live
+        # Codex — subprocess communicate
         try:
-            if agent == "claude":
-                fmt, _timeout = "stream-json", 600
-            else:
-                fmt, _timeout = "json", 120
+            _timeout = AI_RUN_TIMEOUT_S
+            fmt = "stream-json" if agent == "claude" else "json"
             proc = subprocess.Popen(
                 _ai_command(agent, prompt, output_format=fmt),
                 cwd=str(ROOT),
@@ -1470,9 +1580,14 @@ def run():
                 stderr=subprocess.PIPE,
             )
             _running_procs[run_id] = proc
+            _ds_session_id: str | None = None
             if agent == "claude":
                 output, input_tokens, output_tokens, parsed_model, stderr_s = \
                     _stream_claude_run(proc, run_id, timeout=_timeout)
+                ok = proc.returncode == 0
+            elif agent == "deepseek-tui":
+                output, input_tokens, output_tokens, parsed_model, _ds_session_id, stderr_s = \
+                    _stream_deepseek_tui_run(proc, run_id, timeout=_timeout)
                 ok = proc.returncode == 0
             else:
                 stdout_b, stderr_b = proc.communicate(timeout=_timeout)
@@ -1490,7 +1605,8 @@ def run():
                            prompt=prompt, output=output, error="" if ok else stderr_s, run_id=run_id,
                            input_tokens=input_tokens, output_tokens=output_tokens, agent=agent,
                            model=parsed_model or _agent_model(agent),
-                           task_id=run_id)
+                           task_id=run_id,
+                           agent_session_id=_ds_session_id)
             socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": skill_name})
             socketio.emit("run_logged", {"skill": skill_name, "run_id": run_id})
             return jsonify({
