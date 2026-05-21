@@ -1,8 +1,8 @@
 # P15 — DeepSeek TUI exec agent integration
 
-**状态:** Deferred  
+**状态:** Phase 0 完成；Phase 1+2 待实现 (2026-05-21)  
 **优先级:** P3  
-**开始:** —  
+**开始:** 2026-05-20  
 **负责人:** yanghu  
 
 ---
@@ -107,12 +107,12 @@ deepseek exec --auto --output-format stream-json "Write a file /tmp/p15-test.txt
 
 **完成标准：**
 
-- [ ] 本地 `deepseek --version` 为支持 exec agent 的版本
-- [ ] `deepseek exec --help` 暴露 `--auto` 和 `--output-format stream-json`
-- [ ] `deepseek exec --auto ...` 实际产生 `tool_use` / `tool_result`
-- [ ] shell/file 工具结果来自真实执行，不是模型模拟
-- [ ] 输出末尾包含 `metadata` 和 `done`
-- [ ] `--auto` sandbox/cwd 语义已验证并记录（与 `--yolo` 差异）
+- [x] 本地 `deepseek --version` 为支持 exec agent 的版本
+- [x] `deepseek exec --help` 暴露 `--auto` 和 `--output-format stream-json`
+- [x] `deepseek exec --auto ...` 实际产生 `tool_use` / `tool_result`
+- [x] shell/file 工具结果来自真实执行，不是模型模拟
+- [x] 输出末尾包含 `metadata` 和 `done`
+- [x] `--auto` sandbox/cwd 语义已验证并记录（与 `--yolo` 差异）
 
 ---
 
