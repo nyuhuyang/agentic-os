@@ -2219,6 +2219,17 @@ def api_run_history(run_id: str):
         except Exception:
             continue
 
+    # Virtual linear card: run_id is "linear-{issue_id}"
+    if run_id.startswith("linear-"):
+        issue_id = run_id[len("linear-"):]
+        issue_runs = [
+            r for r in lookup.values()
+            if r.get("linear_issue_id") == issue_id
+            and r.get("status") != "archived"
+        ]
+        issue_runs.sort(key=lambda r: r.get("started_at", ""))
+        return jsonify(issue_runs)
+
     target = lookup.get(run_id)
     if target and target.get("linear_issue_id"):
         issue_id = target["linear_issue_id"]

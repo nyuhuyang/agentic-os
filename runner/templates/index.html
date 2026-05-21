@@ -2409,7 +2409,7 @@ async function openDetailModal(run_id) {
     const isInProgressVirtual = (boardItem?._boardStatus || '') === 'in_progress';
     const isInReviewVirtual = (boardItem?._boardStatus || '') === 'in_review';
     const isTodoVirtual = (boardItem?._boardStatus || '') === 'todo';
-    document.getElementById('detail-output-section').style.display = (isInProgressVirtual || isInReviewVirtual) ? '' : 'none';
+    document.getElementById('detail-output-section').style.display = isTodoVirtual ? 'none' : '';
     if (isInProgressVirtual) {
       _switchOutputTab('log');
       _startDetailProgressPoll(run_id, issueId);
@@ -2421,6 +2421,14 @@ async function openDetailModal(run_id) {
     if (isInReviewVirtual) _updateDetailRetryLock(boardItem?.preferred_agent || null);
     document.getElementById('detail-approve-btn').style.display = isInReviewVirtual ? '' : 'none';
     if (_linearConfigured) _loadLinearIssueIntoModal(issueId, boardItem);
+    try {
+      const histRes = await fetch(`/api/runs/linear-${issueId}/history`);
+      if (histRes.ok) {
+        const history = await histRes.json();
+        if (requestSeq !== _detailModalLoadSeq || _detailRunId !== run_id || !_isModalOpen('detail-modal')) return;
+        _renderHistory(history, run_id);
+      }
+    } catch (_) {}
     return;
   }
 
