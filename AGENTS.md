@@ -37,7 +37,9 @@ agentic-os/
 ├── state/                  # Operational source of truth (JSON/JSONL — do not edit manually)
 │   ├── roadmap.json        # Structured roadmap — edit here, then run render_roadmap_md.py
 │   ├── task_state.json     # Per-run task state (written by app.py)
-│   └── events.jsonl        # Append-only event log
+│   ├── events.jsonl        # Append-only event log
+│   ├── runs.jsonl          # Run event stream
+│   └── tasks.json          # Task records
 ├── scripts/
 │   └── render_roadmap_md.py  # Generates docs/generated/ + docs/exec-plans/ROADMAP.md
 ├── docs/
@@ -71,7 +73,6 @@ agentic-os/
 | `SPEC.md` | Authoritative FR/NFR/AC — check before implementing any feature |
 | `docs/design-docs/` | Design decisions and core beliefs |
 | `state/roadmap.json` | Authoritative roadmap — edit this, not the generated files |
-| `docs/generated/ACTIVE_TASKS.md` | Quick summary of active work (generated) |
 | `docs/exec-plans/active/` | Full exec plans for active work |
 | `docs/exec-plans/completed/` | Archived plans |
 | `docs/references/` | Run log format, registry schema, data sources |

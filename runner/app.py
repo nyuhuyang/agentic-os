@@ -112,11 +112,14 @@ MASTER_REGISTRY_JSON = Path(os.environ.get(
 ))
 CLAUDE_REGISTRY_JSON = WORKSPACE_ROOT / ".claude" / "registry.json"
 CLAUDE_REGISTRY_MD = WORKSPACE_ROOT / ".claude" / "registry.md"
+CLAUDE_BUDGET_JSON = Path.home() / ".claude" / "budget.json"
 OUTPUTS_DIR = _PROTO / "outputs"          # runner-internal state (job_state, cache, etc.)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 KB_OUTPUTS_DIR = KNOWLEDGE_BASE_ROOT / "outputs"   # skill run artifacts → knowledge base
 KB_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
 RUN_LOG = Path(os.environ.get("RUN_LOG_PATH", str(KB_OUTPUTS_DIR / "run_log.jsonl")))
+PROTO_RUN_LOG = OUTPUTS_DIR / "run_log.jsonl"      # runner-local legacy run log
+CLAUDE_RATE_LIMITS_LIVE = _PROTO / ".claude" / "rate-limits-live.json"
 JOB_STATE = OUTPUTS_DIR / "job_state.json"          # runner-internal, stays in proto
 REGISTRY_CACHE_DIR = OUTPUTS_DIR / "registry-cache"
 RUN_PROGRESS_DIR = OUTPUTS_DIR / "logs"
@@ -1004,9 +1007,128 @@ def _normalize_windows(w: dict) -> dict:
     return out
 
 
+def _parse_run_started_at(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _observed_run_window_usage(agent: str, minutes: int, now: datetime | None = None) -> dict:
+    """Count observed local run tokens when quota APIs omit a current window."""
+    now_dt = now or datetime.now(timezone.utc)
+    cutoff = now_dt - timedelta(minutes=minutes)
+    latest_by_run_id: dict[str, dict] = {}
+    for path in (RUN_LOG, PROTO_RUN_LOG, STATE_RUN_LOG):
+        if not path.exists():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for idx, line in enumerate(lines):
+            try:
+                record = json.loads(line)
+            except Exception:
+                continue
+            if (record.get("agent") or "claude") != agent:
+                continue
+            started = _parse_run_started_at(record.get("started_at"))
+            if not started or started < cutoff or started > now_dt:
+                continue
+            tokens = int(record.get("input_tokens") or 0) + int(record.get("output_tokens") or 0)
+            if tokens <= 0:
+                continue
+            run_id = str(record.get("run_id") or f"{path}:{idx}")
+            prior = latest_by_run_id.get(run_id)
+            prior_started = _parse_run_started_at(prior.get("started_at")) if prior else None
+            if prior is None or (prior_started and started >= prior_started):
+                latest_by_run_id[run_id] = record
+    tokens = sum(int(r.get("input_tokens") or 0) + int(r.get("output_tokens") or 0)
+                 for r in latest_by_run_id.values())
+    return {"tokens": tokens, "sessions": len(latest_by_run_id)}
+
+
+def _load_budget_limit(agent: str, key: str) -> int:
+    try:
+        data = json.loads(CLAUDE_BUDGET_JSON.read_text(encoding="utf-8"))
+        return int((data.get(agent) or {}).get(key) or 0)
+    except Exception:
+        return 0
+
+
+def _load_claude_live_limit(window_key: str) -> dict:
+    try:
+        data = json.loads(CLAUDE_RATE_LIMITS_LIVE.read_text(encoding="utf-8"))
+        limits = data.get("rate_limits") or {}
+        return dict(limits.get(window_key) or {})
+    except Exception:
+        return {}
+
+
+def _fill_observed_5h_usage(agent: str, windows: dict) -> dict:
+    if agent != "claude" or not isinstance(windows.get("window_5h"), dict):
+        return windows
+    live = _load_claude_live_limit("five_hour")
+    budget_limit = _load_budget_limit(agent, "window_5h")
+    observed = _observed_run_window_usage(agent, 300)
+    if observed["tokens"] <= 0 and not live and budget_limit <= 0:
+        return windows
+
+    out = dict(windows)
+    win = dict(out["window_5h"])
+    current_tokens = int(win.get("tokens") or 0)
+    current_limit = int(win.get("limit") or 0)
+    if current_tokens > 0 and current_limit > 0:
+        return windows
+
+    used_pct = live.get("used_percentage")
+    try:
+        used_pct = int(round(float(used_pct)))
+    except (TypeError, ValueError):
+        used_pct = None
+
+    limit = current_limit or budget_limit
+    if limit > 0 and used_pct is not None:
+        win["tokens"] = int(round(limit * min(100, max(0, used_pct)) / 100))
+    else:
+        win["tokens"] = max(current_tokens, observed["tokens"])
+    win["limit"] = limit
+    win["sessions"] = max(int(win.get("sessions") or 0), observed["sessions"])
+
+    if isinstance(live.get("resets_at"), (int, float)) and live.get("resets_at"):
+        win["resets_at_unix"] = int(live["resets_at"])
+        remaining = int(live["resets_at"]) - datetime.now(timezone.utc).timestamp()
+        if remaining > 0:
+            win["reset"] = _fmt_window_reset(remaining)
+
+    if limit > 0:
+        win["pct"] = min(100, used_pct if used_pct is not None else round(win["tokens"] / limit * 100))
+        win["remaining_pct"] = max(0, 100 - int(win["pct"]))
+        win["display_line"] = (
+            f"{_fmt_tok(win['tokens'])} / {_fmt_tok(limit)} · "
+            f"{win['remaining_pct']}% remaining"
+        )
+    else:
+        win["pct"] = 0
+        win["remaining_pct"] = None
+        win["display_line"] = f"{_fmt_tok(win['tokens'])} tokens · {win['sessions']} sessions"
+    out["window_5h"] = win
+    return out
+
+
+def _compute_display_windows(agent: str) -> dict:
+    return _fill_observed_5h_usage(agent, _normalize_windows(_compute_windows(agent, RUN_LOG)))
+
+
 def load_windows(agent: str = "claude") -> dict:
     try:
-        w = _normalize_windows(_compute_windows(agent, RUN_LOG))
+        w = _compute_display_windows(agent)
         # Format token counts for template
         def _fmt_win(d: dict) -> dict:
             tokens_fmt = _fmt_tok(d["tokens"])
@@ -2623,7 +2745,7 @@ def api_runtime():
 def api_windows():
     agent = request.args.get("agent", "claude")
     try:
-        return jsonify(_normalize_windows(_compute_windows(agent, RUN_LOG)))
+        return jsonify(_compute_display_windows(agent))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2633,7 +2755,7 @@ def api_windows_all():
     try:
         all_data: dict = {}
         for ag in ("claude", "codex", "deepseek"):
-            w = _normalize_windows(_compute_windows(ag, RUN_LOG))
+            w = _compute_display_windows(ag)
             all_data[ag] = w
         return jsonify(all_data)
     except Exception as e:

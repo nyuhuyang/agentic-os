@@ -184,6 +184,7 @@
   .job-btn.retry-deepseek:hover { background: rgba(126,200,160,.1); }
   .job-btn.retry-deepseek-tui { color: #2e8b57; border-color: #1a5c38; }
   .job-btn.retry-deepseek-tui:hover { background: rgba(46,139,87,.1); }
+  .job-btn.agent-locked-out { opacity: 0.25; filter: grayscale(1); pointer-events: none; }
   .job-btn.retry-claude.selected { background: rgba(232,114,58,.10); border-color: var(--accent); }
   .job-btn.retry-codex.selected { background: rgba(111,181,212,.10); border-color: #6fb5d4; }
   .job-btn.retry-deepseek.selected { background: rgba(126,200,160,.10); border-color: #7ec8a0; }
@@ -821,13 +822,13 @@
         <button class="job-btn retry-claude" id="detail-dispatch-claude" onclick="dispatchFromDetail('claude')">▶ Claude</button>
         <button class="job-btn retry-codex" id="detail-dispatch-codex" onclick="dispatchFromDetail('codex')">▶ Codex</button>
         <button class="job-btn retry-deepseek" id="detail-dispatch-deepseek" onclick="dispatchFromDetail('deepseek')">▶ DeepSeek</button>
-        <button class="job-btn retry-deepseek agent-hidden" id="detail-dispatch-deepseek-tui" onclick="dispatchFromDetail('deepseek-tui')">▶ DS TUI</button>
+        <button class="job-btn retry-deepseek-tui agent-hidden" id="detail-dispatch-deepseek-tui" onclick="dispatchFromDetail('deepseek-tui')">▶ DS TUI</button>
       </div>
       <div class="job-btn-group" id="detail-retry-group" style="display:none;margin-top:0">
         <button class="job-btn retry-claude" id="detail-retry-claude" onclick="retryFromDetail('claude')">↺ Claude</button>
         <button class="job-btn retry-codex" id="detail-retry-codex" onclick="retryFromDetail('codex')">↺ Codex</button>
         <button class="job-btn retry-deepseek" id="detail-retry-deepseek" onclick="retryFromDetail('deepseek')">↺ DeepSeek</button>
-        <button class="job-btn retry-deepseek agent-hidden" id="detail-retry-deepseek-tui" onclick="retryFromDetail('deepseek-tui')">↺ DS TUI</button>
+        <button class="job-btn retry-deepseek-tui agent-hidden" id="detail-retry-deepseek-tui" onclick="retryFromDetail('deepseek-tui')">↺ DS TUI</button>
       </div>
     </div>
   </div>
@@ -1186,8 +1187,8 @@ function _updateAgentVisibility() {
     const visible = _availableBackends.includes(agent);
     const toggle = document.getElementById('agent-' + agent);
     const newToggle = document.getElementById('new-issue-agent-' + agent);
-    const dispatchBtn = document.getElementById('detail-dispatch-' + agent.replace(/-/g, '-'));
-    const retryBtn = document.getElementById('detail-retry-' + agent.replace(/-/g, '-'));
+    const dispatchBtn = document.getElementById('detail-dispatch-' + agent);
+    const retryBtn = document.getElementById('detail-retry-' + agent);
     if (toggle) toggle.classList.toggle('agent-hidden', !visible);
     if (newToggle) newToggle.classList.toggle('agent-hidden', !visible);
     if (dispatchBtn) dispatchBtn.classList.toggle('agent-hidden', !visible);
@@ -2040,30 +2041,28 @@ function _buildColCard(run) {
   }
   if (canRetry) {
     const preferredAgent = (run.preferred_agent || run.agent || '').toLowerCase() || null;
+    // Session lock: if agent_session_id exists and status is not todo, dim non-locked agents
+    // Lock to run.agent once a run has completed (todo reset clears the lock visually)
+    const sessionLocked = !!(run.agent && state !== 'todo' && state !== 'running' && state !== 'unknown');
+    const lockedAgent = sessionLocked ? (run.agent || '').toLowerCase() : null;
+
     const group = document.createElement('div');
     group.className = 'job-btn-group';
-    const btnC = document.createElement('button');
-    btnC.className = `job-btn retry-claude${preferredAgent === 'claude' ? ' selected' : ''}`;
-    btnC.textContent = '↺ Claude';
-    btnC.title = preferredAgent === 'claude' ? 'Preferred agent for retry' : 'Retry with Claude';
-    btnC.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, 'claude'); };
-    group.appendChild(btnC);
-
-    const btnX = document.createElement('button');
-    btnX.className = `job-btn retry-codex${preferredAgent === 'codex' ? ' selected' : ''}`;
-    btnX.textContent = '↺ Codex';
-    btnX.title = preferredAgent === 'codex' ? 'Preferred agent for retry' : 'Retry with Codex';
-    btnX.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, 'codex'); };
-    group.appendChild(btnX);
-
-    const btnD = document.createElement('button');
-    btnD.className = `job-btn retry-deepseek${preferredAgent === 'deepseek' ? ' selected' : ''}`;
-    btnD.textContent = '↺ DeepSeek';
-    btnD.title = preferredAgent === 'deepseek' ? 'Preferred agent for retry' : 'Retry with DeepSeek';
-    btnD.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, 'deepseek'); };
-    group.appendChild(btnD);
-
-
+    const _cardAgents = [
+      { key: 'claude',        label: '↺ Claude',   cls: 'retry-claude' },
+      { key: 'codex',         label: '↺ Codex',    cls: 'retry-codex' },
+      { key: 'deepseek',      label: '↺ DeepSeek', cls: 'retry-deepseek' },
+      { key: 'deepseek-tui',  label: '↺ DS TUI',   cls: 'retry-deepseek-tui' },
+    ];
+    for (const { key, label, cls } of _cardAgents) {
+      if (sessionLocked && lockedAgent !== key) continue; // hide non-locked agents
+      const btn = document.createElement('button');
+      btn.className = `job-btn ${cls}${preferredAgent === key ? ' selected' : ''}`;
+      btn.textContent = label;
+      btn.title = preferredAgent === key ? 'Preferred agent for retry' : `Retry with ${label.replace('↺ ', '')}`;
+      btn.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, key); };
+      group.appendChild(btn);
+    }
     card.appendChild(group);
   }
   card.addEventListener('click', (e) => {
@@ -2497,7 +2496,7 @@ async function openDetailModal(run_id) {
 
     const canRetry = !!r.linear_issue_id && state !== 'done' && state !== 'cancelled' && state !== 'todo' && r.status !== 'running';
     document.getElementById('detail-retry-group').style.display = canRetry ? 'inline-flex' : 'none';
-    if (canRetry) _updateDetailRetryLock(r.preferred_agent || r.agent || null);
+    if (canRetry) _updateDetailRetryLock(r.preferred_agent || r.agent || null, !!(r.agent));
 
     const isTodo = state === 'todo';
     document.getElementById('detail-dispatch-group').style.display = (isTodo && r.linear_issue_id) ? 'inline-flex' : 'none';
@@ -2565,21 +2564,26 @@ function closeDetailModal({ flush = true } = {}) {
   if (flush) _flushPendingBoardRefresh();
 }
 
-function _updateDetailRetryLock(preferredAgent) {
+function _updateDetailRetryLock(preferredAgent, sessionLocked = false) {
   const retryGroup = document.getElementById('detail-retry-group');
   if (!retryGroup || retryGroup.style.display === 'none') return;
-  const btnC = document.getElementById('detail-retry-claude');
-  const btnX = document.getElementById('detail-retry-codex');
-  const btnA = document.getElementById('detail-retry-deepseek');
-  const btnD = document.getElementById('detail-retry-deepseek-tui');
-  if (btnC) btnC.classList.toggle('selected', preferredAgent === 'claude');
-  if (btnX) btnX.classList.toggle('selected', preferredAgent === 'codex');
-  if (btnA) btnA.classList.toggle('selected', preferredAgent === 'deepseek');
-  if (btnD) btnD.classList.toggle('selected', preferredAgent === 'deepseek-tui');
-  if (btnC) btnC.title = preferredAgent === 'claude' ? 'Preferred agent for retry' : 'Retry with Claude';
-  if (btnX) btnX.title = preferredAgent === 'codex' ? 'Preferred agent for retry' : 'Retry with Codex';
-  if (btnA) btnA.title = preferredAgent === 'deepseek' ? 'Preferred agent for retry' : 'Retry with DeepSeek';
-  if (btnD) btnD.title = preferredAgent === 'deepseek-tui' ? 'Preferred agent for retry' : 'Retry with DS TUI';
+  const _detailBtns = {
+    'claude':       document.getElementById('detail-retry-claude'),
+    'codex':        document.getElementById('detail-retry-codex'),
+    'deepseek':     document.getElementById('detail-retry-deepseek'),
+    'deepseek-tui': document.getElementById('detail-retry-deepseek-tui'),
+  };
+  const _labels = { 'claude': 'Claude', 'codex': 'Codex', 'deepseek': 'DeepSeek', 'deepseek-tui': 'DS TUI' };
+  for (const [agent, btn] of Object.entries(_detailBtns)) {
+    if (!btn) continue;
+    const isLocked = sessionLocked && agent !== preferredAgent;
+    if (!isLocked && preferredAgent === agent) btn.classList.remove('agent-hidden');
+    btn.classList.toggle('agent-locked-out', isLocked);
+    btn.classList.toggle('selected', !isLocked && preferredAgent === agent);
+    btn.title = isLocked
+      ? `Session locked to ${_labels[preferredAgent] || preferredAgent}`
+      : (preferredAgent === agent ? 'Preferred agent for retry' : `Retry with ${_labels[agent] || agent}`);
+  }
 }
 
 async function dispatchFromDetail(agent) {
