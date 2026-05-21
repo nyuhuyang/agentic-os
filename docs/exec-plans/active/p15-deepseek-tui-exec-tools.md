@@ -1,8 +1,8 @@
 # P15 — DeepSeek TUI exec agent integration
 
-**状态:** Deferred  
+**状态:** Phase 1 完成 (2026-05-20)  
 **优先级:** P3  
-**开始:** —  
+**开始:** 2026-05-20  
 **负责人:** yanghu  
 
 ---
@@ -107,11 +107,12 @@ deepseek exec --auto --output-format stream-json "Read runner/app.py and summari
 
 **完成标准：**
 
-- [ ] 本地 `deepseek --version` 为支持 exec agent 的版本
-- [ ] `deepseek exec --help` 暴露 `--auto` 和 `--output-format stream-json`
-- [ ] `deepseek exec --auto ...` 实际产生 `tool_use` / `tool_result`
-- [ ] shell/file 工具结果来自真实执行，不是模型模拟
-- [ ] 输出末尾包含 `metadata` 和 `done`
+- [x] 本地 `deepseek --version` 为支持 exec agent 的版本（v0.8.39，2026-05-20）
+- [x] `deepseek exec --help` 暴露 `--auto` 和 `--output-format stream-json`
+- [x] `deepseek exec --auto ...` 实际产生 `tool_use` / `tool_result`
+- [x] shell/file 工具结果来自真实执行，不是模型模拟
+- [x] 输出末尾包含 `metadata` 和 `done`
+- [x] `--auto` sandbox 语义验证：无 cwd 限制，可写 /tmp 等系统目录；比旧版 `--yolo` 更宽松
 
 ---
 
@@ -179,11 +180,11 @@ status
 
 **完成标准：**
 
-- [ ] `deepseek-tui` run log 记录 `agent=deepseek-tui`
-- [ ] run log 记录模型、token、session id
-- [ ] UI 能看到工具开始/完成进度
-- [ ] 最终 output 不混入原始 NDJSON 噪音
-- [ ] `deepseek` API agent 和 `deepseek-tui` CLI agent 仍有明确区别
+- [x] `deepseek-tui` run log 记录 `agent=deepseek-tui`（由 dispatch 传入）
+- [x] run log 记录模型、token、session id（`agent_session_id` 字段）
+- [x] UI 能看到工具开始/完成进度（`tool_use`/`tool_result` → socketio `run_progress`）
+- [x] 最终 output 不混入原始 NDJSON 噪音（只累积 `content` 事件）
+- [x] `deepseek` API agent 和 `deepseek-tui` CLI agent 仍有明确区别
 
 ---
 
