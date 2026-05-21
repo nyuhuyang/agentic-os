@@ -1,6 +1,8 @@
 # P15 — DeepSeek TUI exec agent integration
 
-**状态:** Phase 0 完成；Phase 1+2 待实现 (2026-05-21)  
+**状态:** Phase 0 完成；Phase 1+2 待实现 (2026-05-21)
+
+> **本地环境就绪：** deepseek v0.8.39 已从 source build 并安装至 `/opt/homebrew/bin/deepseek`（软链至 `prototypes/DeepSeek-TUI/target/release/deepseek`）。可直接本地测试，无需额外安装步骤。  
 **优先级:** P3  
 **开始:** 2026-05-20  
 **负责人:** yanghu  
