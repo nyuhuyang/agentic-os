@@ -28,7 +28,7 @@ deepseek exec --resume <SESSION_ID> "follow up"
 
 源码中 `crates/tui/src/main.rs` 的 `run_exec_agent()` 已经走 TUI engine，构造 `EngineConfig`，注入 `mcp_config_path`、`skills_dir`、`instructions`、project context、shell allow，并输出 `tool_use`、`tool_result`、`metadata`、`done` 等 NDJSON 事件。
 
-**目标：** 先升级并适配 upstream DeepSeek TUI 的 `exec --auto --output-format stream-json`。只有最新版仍不能满足真实工具调用或机器可读事件时，才 fork。
+**目标：** 直接在本地 source 上改。DeepSeek-TUI v0.8.39 已下载至 `prototypes/DeepSeek-TUI/`，这是主要改动源。先验证 `exec --auto --output-format stream-json` 是否满足需求；不足时在此 source 上直接 patch 并 build。
 
 ### 与其他 plan 的关系
 
@@ -65,10 +65,11 @@ symphony-ts（P17）已废弃。P15 主要改动范围：`runner/modules/backend
 
 **步骤：**
 
-1. 安装或构建 `deepseek >= 0.8.37`
-   - 当前安装方式为 npm wrapper：`npm update -g deepseek`
-   - 若 npm 版本滞后，备选：`cargo install deepseek-tui` 或从 GitHub release 下载 binary。
-   - 不使用 fork，除非上游版本验证失败。
+1. 构建本地 source
+   - Source：`prototypes/DeepSeek-TUI/`（v0.8.39）
+   - Build：`cd prototypes/DeepSeek-TUI && cargo build --release`
+   - Binary：`target/release/deepseek`；可软链至 `/opt/homebrew/bin/deepseek` 替换旧版
+   - npm wrapper 已过时（v0.8.29），不再依赖。
 
 2. 验证 CLI surface
 
@@ -235,14 +236,14 @@ deepseek exec --auto --output-format stream-json --resume <SESSION_ID> <feedback
 - `stream-json` 缺少关键事件或 token/session metadata
 - 上游行为无法通过配置或小补丁满足 AgenticOS
 
-**决策截止：** Phase 0 验证结束后 1 周内决定是否进入 Phase 3。若届时上游 PR 无回应且问题未解决，视为触发。
+**决策截止：** Phase 0 验证结束后 1 周内决定是否进入 Phase 3。
 
 **原则：**
 
+- Source 在 `prototypes/DeepSeek-TUI/`，直接改，不需要 fork 流程。
 - 不复制交互模式 tool loop。
-- 复用上游 `run_exec_agent()` / `spawn_engine()` 路径。
-- 尽量向上游提交 PR，减少长期 fork 维护。
-- fork 保持 rebase，而不是 merge。
+- 复用 `run_exec_agent()` / `spawn_engine()` 路径。
+- 如有价值可向上游提 PR，但不是必须。
 
 **可能改动：**
 
@@ -274,9 +275,9 @@ deepseek exec --auto --output-format stream-json --resume <SESSION_ID> <feedback
 ## 参考
 
 - TUI 仓库：https://github.com/Hmbown/DeepSeek-TUI
-- 本机当前版本：v0.8.29
-- 上游源码观察版本：v0.8.37
-- 本机 binary：`/opt/homebrew/bin/deepseek`
+- 本地 source：`prototypes/DeepSeek-TUI/`（v0.8.39）
+- npm wrapper（已废弃）：v0.8.29
+- 构建后 binary：`prototypes/DeepSeek-TUI/target/release/deepseek`
 - 关键源码：
   - `crates/cli/src/lib.rs`：dispatcher help / exec passthrough
   - `crates/tui/src/main.rs`：`ExecArgs`、`ExecOutputFormat`、`run_exec_agent()`
