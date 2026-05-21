@@ -730,6 +730,17 @@ def _build_progress_payload(run_id: str, *, issue_id: str | None = None) -> dict
             if session_path:
                 status = "session"
 
+    if not session_path:
+        existing_progress = {}
+        progress_path = _run_progress_path(run_id)
+        if progress_path.exists():
+            try:
+                existing_progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        saved_stream = existing_progress.get("stream_log")
+        if saved_stream:
+            session_path = Path(saved_stream)
     events = _tail_codex_session(session_path) if session_path else []
     payload = {
         "ok": True,
