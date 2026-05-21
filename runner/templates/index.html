@@ -821,11 +821,13 @@
         <button class="job-btn retry-claude" id="detail-dispatch-claude" onclick="dispatchFromDetail('claude')">▶ Claude</button>
         <button class="job-btn retry-codex" id="detail-dispatch-codex" onclick="dispatchFromDetail('codex')">▶ Codex</button>
         <button class="job-btn retry-deepseek" id="detail-dispatch-deepseek" onclick="dispatchFromDetail('deepseek')">▶ DeepSeek</button>
+        <button class="job-btn retry-deepseek agent-hidden" id="detail-dispatch-deepseek-tui" onclick="dispatchFromDetail('deepseek-tui')">▶ DS TUI</button>
       </div>
       <div class="job-btn-group" id="detail-retry-group" style="display:none;margin-top:0">
         <button class="job-btn retry-claude" id="detail-retry-claude" onclick="retryFromDetail('claude')">↺ Claude</button>
         <button class="job-btn retry-codex" id="detail-retry-codex" onclick="retryFromDetail('codex')">↺ Codex</button>
         <button class="job-btn retry-deepseek" id="detail-retry-deepseek" onclick="retryFromDetail('deepseek')">↺ DeepSeek</button>
+        <button class="job-btn retry-deepseek agent-hidden" id="detail-retry-deepseek-tui" onclick="retryFromDetail('deepseek-tui')">↺ DS TUI</button>
       </div>
     </div>
   </div>
@@ -1184,8 +1186,12 @@ function _updateAgentVisibility() {
     const visible = _availableBackends.includes(agent);
     const toggle = document.getElementById('agent-' + agent);
     const newToggle = document.getElementById('new-issue-agent-' + agent);
-    if (toggle) toggle.style.display = visible ? '' : 'none';
-    if (newToggle) newToggle.style.display = visible ? '' : 'none';
+    const dispatchBtn = document.getElementById('detail-dispatch-' + agent.replace(/-/g, '-'));
+    const retryBtn = document.getElementById('detail-retry-' + agent.replace(/-/g, '-'));
+    if (toggle) toggle.classList.toggle('agent-hidden', !visible);
+    if (newToggle) newToggle.classList.toggle('agent-hidden', !visible);
+    if (dispatchBtn) dispatchBtn.classList.toggle('agent-hidden', !visible);
+    if (retryBtn) retryBtn.classList.toggle('agent-hidden', !visible);
   }
   // If current selectedAgent is not available, fallback to first available
   if (!_availableBackends.includes(selectedAgent) && _availableBackends.length > 0) {
@@ -2565,12 +2571,15 @@ function _updateDetailRetryLock(preferredAgent) {
   const btnC = document.getElementById('detail-retry-claude');
   const btnX = document.getElementById('detail-retry-codex');
   const btnA = document.getElementById('detail-retry-deepseek');
+  const btnD = document.getElementById('detail-retry-deepseek-tui');
   if (btnC) btnC.classList.toggle('selected', preferredAgent === 'claude');
   if (btnX) btnX.classList.toggle('selected', preferredAgent === 'codex');
   if (btnA) btnA.classList.toggle('selected', preferredAgent === 'deepseek');
+  if (btnD) btnD.classList.toggle('selected', preferredAgent === 'deepseek-tui');
   if (btnC) btnC.title = preferredAgent === 'claude' ? 'Preferred agent for retry' : 'Retry with Claude';
   if (btnX) btnX.title = preferredAgent === 'codex' ? 'Preferred agent for retry' : 'Retry with Codex';
   if (btnA) btnA.title = preferredAgent === 'deepseek' ? 'Preferred agent for retry' : 'Retry with DeepSeek';
+  if (btnD) btnD.title = preferredAgent === 'deepseek-tui' ? 'Preferred agent for retry' : 'Retry with DS TUI';
 }
 
 async function dispatchFromDetail(agent) {

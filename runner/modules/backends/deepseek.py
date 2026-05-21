@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -81,38 +82,71 @@ class DeepSeekModule(AgenticModule):
         if not ds_bin:
             return {"ok": False, "error": "deepseek CLI not found"}
 
-        cmd = [ds_bin, "--yolo", "--approval-policy", "auto", "exec", prompt]
+        cmd = [ds_bin, "exec", "--auto", "--output-format", "stream-json", prompt]
 
         import app as _app
+        import json as _json
+        timeout_s = int(os.environ.get("AI_RUN_TIMEOUT_S", "1800"))
         t0 = time.monotonic()
+        proc = None
         try:
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(_app.ROOT),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
             )
-            stdout_s, stderr_s = proc.communicate(timeout=300)
+            content_parts: list[str] = []
+            meta: dict = {}
+            session_id: str | None = None
+            deadline = t0 + timeout_s
+
+            for raw in proc.stdout:  # type: ignore[union-attr]
+                if time.monotonic() > deadline:
+                    proc.kill()
+                    raise subprocess.TimeoutExpired(cmd, timeout_s)
+                line = raw.decode("utf-8", errors="replace").rstrip("\n")
+                if not line:
+                    continue
+                try:
+                    ev = _json.loads(line)
+                    ev_type = ev.get("type", "")
+                    if ev_type == "content":
+                        content_parts.append(ev.get("content", ""))
+                    elif ev_type == "metadata":
+                        meta.update(ev.get("meta", {}))
+                    elif ev_type == "session_capture":
+                        session_id = ev.get("content")
+                    elif ev_type == "tool_use" and socket_room and self._socketio:
+                        self._socketio.emit("run_progress", {
+                            "run_id": run_id,
+                            "snippet": f"[tool] {ev.get('name', 'tool')}",
+                        }, room=socket_room)
+                except Exception:
+                    pass
+
+            proc.wait()
+            stderr_s = (proc.stderr.read() or b"").decode("utf-8", errors="replace").strip()  # type: ignore[union-attr]
             dur = round(time.monotonic() - t0, 2)
             ok = proc.returncode == 0
-            output = stdout_s.strip()
-            error_s = stderr_s.strip() if not ok else ""
+            output = "".join(content_parts)
+            error_s = stderr_s if not ok else ""
             if socket_room and self._socketio:
                 self._socketio.emit("run_output", {"run_id": run_id, "text": output}, room=socket_room)
             return {
                 "ok": ok,
                 "output": output or error_s,
                 "duration_s": dur,
-                "input_tokens": None,
-                "output_tokens": None,
-                "model": "deepseek-v4-flash",
+                "input_tokens": meta.get("input_tokens"),
+                "output_tokens": meta.get("output_tokens"),
+                "model": meta.get("model", "deepseek-v4-flash"),
+                "session_id": session_id or meta.get("session_id"),
                 "error": error_s or None,
             }
         except subprocess.TimeoutExpired:
             if proc:
                 proc.kill()
-            return {"ok": False, "error": "DeepSeek exec timed out after 300s", "duration_s": round(time.monotonic() - t0, 2)}
+            return {"ok": False, "error": f"DeepSeek exec timed out after {timeout_s}s", "duration_s": round(time.monotonic() - t0, 2)}
         except Exception as e:
             return {"ok": False, "error": str(e), "duration_s": round(time.monotonic() - t0, 2)}
 

@@ -1,6 +1,6 @@
 # P15 — DeepSeek TUI exec agent integration
 
-**状态:** Phase 0 完成；Phase 1+2 待实现 (2026-05-21)
+**状态:** Phase 1+2 完成 (2026-05-21)  
 
 > **本地环境就绪：** deepseek v0.8.39 已从 source build 并安装至 `/opt/homebrew/bin/deepseek`（软链至 `prototypes/DeepSeek-TUI/target/release/deepseek`）。可直接本地测试，无需额外安装步骤。  
 **优先级:** P3  
@@ -201,14 +201,14 @@ streaming subprocess 超时使用 `AI_RUN_TIMEOUT_S`（`runner/app.py:144`，默
 
 **完成标准：**
 
-- [ ] dispatch 入口有版本检测，< 0.8.37 fail fast with upgrade hint
-- [ ] `deepseek-tui` run log 记录 `agent=deepseek-tui`
-- [ ] run log 记录 `model`、`input_tokens`、`output_tokens`（映射 P22 schema）
-- [ ] run log 记录 `session_id`
-- [ ] streaming subprocess 超时使用 `AI_RUN_TIMEOUT_S`，status 写 `"timeout"`
-- [ ] UI 能看到工具开始/完成进度
-- [ ] 最终 output 不混入原始 NDJSON 噪音
-- [ ] `deepseek` API agent 和 `deepseek-tui` CLI agent 仍有明确区别
+- [x] dispatch 入口有版本检测，< 0.8.37 fail fast with upgrade hint
+- [x] `deepseek-tui` run log 记录 `agent=deepseek-tui`
+- [x] run log 记录 `model`、`input_tokens`、`output_tokens`（映射 P22 schema）
+- [x] run log 记录 `session_id`
+- [x] streaming subprocess 超时使用 `AI_RUN_TIMEOUT_S`，status 写 `"timeout"`
+- [x] UI 能看到工具开始/完成进度
+- [x] 最终 output 不混入原始 NDJSON 噪音
+- [x] `deepseek` API agent 和 `deepseek-tui` CLI agent 仍有明确区别
 
 ---
 
@@ -253,14 +253,14 @@ resume 失败
 
 **完成标准：**
 
-- [ ] `_write_run_log` 新增 `agent_session_id` 字段
-- [ ] claude: `system` event 提取 `session_id` 写入 run log
-- [ ] codex: `thread.started` event 提取 `thread_id` 写入 run log
-- [ ] deepseek-tui: `metadata` event 提取 `session_id` 写入 run log
-- [ ] task 在 `in_progress` / `in_review` 时，runner 拒绝切换 agent
-- [ ] retry 自动带 `--resume <agent_session_id>`
-- [ ] resume 失败时降级为同 agent 全量 retry，不自动换 agent
-- [ ] task 打回 `todo` 时 agent 锁定解除
+- [x] `_write_run_log` 新增 `agent_session_id` 字段
+- [x] claude: `system` event 提取 `session_id` 写入 run log
+- [x] codex: `thread.started` event 提取 `thread_id` 写入 run log
+- [x] deepseek-tui: `metadata` event 提取 `session_id` 写入 run log
+- [x] task 在 `in_progress` / `in_review` 时，runner 拒绝切换 agent
+- [x] retry 自动带 `--resume <agent_session_id>`
+- [x] resume 失败时降级为同 agent 全量 retry，不自动换 agent
+- [x] task 打回 `todo` 时 agent 锁定解除
 
 ---
 
