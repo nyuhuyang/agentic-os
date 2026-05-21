@@ -104,7 +104,7 @@ CLAUDE_REGISTRY_JSON = WORKSPACE_ROOT / ".claude" / "registry.json"
 CLAUDE_REGISTRY_MD = WORKSPACE_ROOT / ".claude" / "registry.md"
 OUTPUTS_DIR = _PROTO / "outputs"
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-RUN_LOG = OUTPUTS_DIR / "run_log.jsonl"
+RUN_LOG = Path(os.environ.get("RUN_LOG_PATH", str(OUTPUTS_DIR / "run_log.jsonl")))
 JOB_STATE = OUTPUTS_DIR / "job_state.json"
 REGISTRY_CACHE_DIR = OUTPUTS_DIR / "registry-cache"
 RUN_PROGRESS_DIR = OUTPUTS_DIR / "logs"
@@ -1204,7 +1204,7 @@ def _check_deepseek_tui_version(ds_bin: str) -> None:
                 raise RuntimeError(
                     f"deepseek-tui v{m.group(1)}.{m.group(2)}.{m.group(3)} too old "
                     f"(need >= {'.'.join(str(v) for v in _DEEPSEEK_TUI_MIN_VERSION)}). "
-                    "Upgrade: npm update -g deepseek-tui"
+                    "Rebuild: cd prototypes/DeepSeek-TUI && cargo build --release"
                 )
     except subprocess.TimeoutExpired:
         pass
@@ -2359,6 +2359,16 @@ def api_capabilities():
     # Add deepseek-tui as a synthetic backend when deepseek module is available
     if "deepseek" in result.get("backends", []):
         result["backends"].append("deepseek-tui")
+    # Also add deepseek-tui if the binary exists regardless of API key
+    elif "deepseek-tui" not in result.get("backends", []):
+        ds_bin = shutil.which("deepseek")
+        if not ds_bin:
+            for _p in ("/opt/homebrew/bin/deepseek", "/usr/local/bin/deepseek"):
+                if Path(_p).exists():
+                    ds_bin = _p
+                    break
+        if ds_bin:
+            result.setdefault("backends", []).append("deepseek-tui")
     return jsonify(result)
 
 
