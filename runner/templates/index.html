@@ -2365,15 +2365,19 @@ async function openDetailModal(run_id) {
     document.getElementById('detail-meta').textContent = 'Linear issue';
     document.getElementById('detail-prompt-section').style.display = 'none';
     const isInProgressVirtual = (boardItem?._boardStatus || '') === 'in_progress';
-    document.getElementById('detail-output-section').style.display = isInProgressVirtual ? '' : 'none';
+    const isInReviewVirtual = (boardItem?._boardStatus || '') === 'in_review';
+    const isTodoVirtual = (boardItem?._boardStatus || '') === 'todo';
+    document.getElementById('detail-output-section').style.display = (isInProgressVirtual || isInReviewVirtual) ? '' : 'none';
     if (isInProgressVirtual) {
       _switchOutputTab('log');
       _startDetailProgressPoll(run_id, issueId);
     }
-    document.getElementById('detail-reply-section').style.display = 'none';
+    document.getElementById('detail-reply-section').style.display = isInReviewVirtual ? '' : 'none';
     document.getElementById('desc-stt-group').style.display = 'flex';
-    const isTodoVirtual = (boardItem?._boardStatus || '') === 'todo';
     document.getElementById('detail-dispatch-group').style.display = isTodoVirtual ? 'inline-flex' : 'none';
+    document.getElementById('detail-retry-group').style.display = isInReviewVirtual ? 'inline-flex' : 'none';
+    if (isInReviewVirtual) _updateDetailRetryLock(boardItem?.preferred_agent || null);
+    document.getElementById('detail-approve-btn').style.display = isInReviewVirtual ? '' : 'none';
     if (_linearConfigured) _loadLinearIssueIntoModal(issueId, boardItem);
     return;
   }
