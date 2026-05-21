@@ -28,21 +28,11 @@ deepseek exec --resume <SESSION_ID> "follow up"
 
 源码中 `crates/tui/src/main.rs` 的 `run_exec_agent()` 已经走 TUI engine，构造 `EngineConfig`，注入 `mcp_config_path`、`skills_dir`、`instructions`、project context、shell allow，并输出 `tool_use`、`tool_result`、`metadata`、`done` 等 NDJSON 事件。
 
-**目标：** 先升级并适配 upstream DeepSeek TUI 的 `exec --auto --output-format stream-json`。只有最新版仍不能满足真实工具调用或机器可读事件时，才 fork。
+**目标：** 直接在本地 source 上改。DeepSeek-TUI v0.8.39 已下载至 `prototypes/DeepSeek-TUI/`，这是主要改动源。先验证 `exec --auto --output-format stream-json` 是否满足需求；不足时在此 source 上直接 patch 并 build。
 
-### 与 P17 的关系
+### 与其他 plan 的关系
 
-**P15 的 Phase 0 研究结果直接决定 P17 Phase 2b 的实现方式。**
-
-当前 Elixir 版 DeepSeek backend（`prototypes/symphony/elixir/lib/symphony_elixir/deepseek/app_server.ex`）使用旧协议：
-- 命令：`deepseek --model deepseek-v4-pro --yolo --approval-policy never --prompt "$(cat file)"`
-- 纯文本 stdout 逐行输出，无结构化事件，无 session 续接
-
-P17 Phase 2b（`src/deepseek/app-server-client.ts`）需要决定：
-- 若 P15 Phase 0 成功 → 用新协议（`exec --auto --output-format stream-json`）实现 TS backend
-- 若 P15 Phase 0 失败 → 移植 Elixir 旧协议（plain-text 方式）
-
-**P15 先于 P17 Phase 2b 执行。**
+symphony-ts（P17）已废弃。P15 主要改动范围：`runner/modules/backends/deepseek.py`（Python runner）。
 
 ---
 
@@ -75,9 +65,11 @@ P17 Phase 2b（`src/deepseek/app-server-client.ts`）需要决定：
 
 **步骤：**
 
-1. 安装或构建 `deepseek >= 0.8.37`
-   - 优先用上游 release / npm wrapper / cargo install。
-   - 不使用 fork，除非上游版本验证失败。
+1. 构建本地 source
+   - Source：`prototypes/DeepSeek-TUI/`（v0.8.39）
+   - Build：`cd prototypes/DeepSeek-TUI && cargo build --release`
+   - Binary：`target/release/deepseek`；可软链至 `/opt/homebrew/bin/deepseek` 替换旧版
+   - npm wrapper 已过时（v0.8.29），不再依赖。
 
 2. 验证 CLI surface
 
@@ -105,6 +97,14 @@ deepseek exec --auto --output-format stream-json "Run date and report the result
 deepseek exec --auto --output-format stream-json "Read runner/app.py and summarize _ai_cli."
 ```
 
+4. 验证 `--auto` sandbox 语义
+
+```bash
+deepseek exec --auto --output-format stream-json "Write a file /tmp/p15-test.txt with content 'ok'"
+```
+
+确认：工具调用限制在 cwd / project context；不写入 `/tmp` 或系统目录之外。与旧 `--yolo --approval-policy auto` 行为对比记录。
+
 **完成标准：**
 
 - [ ] 本地 `deepseek --version` 为支持 exec agent 的版本
@@ -112,6 +112,7 @@ deepseek exec --auto --output-format stream-json "Read runner/app.py and summari
 - [ ] `deepseek exec --auto ...` 实际产生 `tool_use` / `tool_result`
 - [ ] shell/file 工具结果来自真实执行，不是模型模拟
 - [ ] 输出末尾包含 `metadata` 和 `done`
+- [ ] `--auto` sandbox/cwd 语义已验证并记录（与 `--yolo` 差异）
 
 ---
 
@@ -121,12 +122,25 @@ deepseek exec --auto --output-format stream-json "Read runner/app.py and summari
 
 **改动范围：**
 
-主要目标：`src/deepseek/app-server-client.ts`（P17 symphony-ts fork）
+主要目标：`runner/modules/backends/deepseek.py`
 
-辅助验证（可选）：
-- `runner/modules/backends/deepseek.py`（Python runner，已不是主项目，但可用于快速验证协议）
+> **已知 Bug（顺带修）：** `runner/app.py` `_ai_cli("claude")`（line ~1459）缺少 `--verbose` flag。
+> `--output-format stream-json` 在 Claude CLI 中必须搭配 `--verbose` 才能输出事件流，否则报错：
+> `Error: When using --print, --output-format=stream-json requires --verbose`
+> 修复：在 `_ai_cli` 返回值中加入 `"--verbose"`。
 
 **具体改动：**
+
+0. 运行时版本检测
+
+dispatch 入口检查版本，不满足直接 fail fast：
+
+```python
+result = subprocess.run(["deepseek", "--version"], capture_output=True, text=True)
+# 期望输出含 "v0.8.3x" 或更高；低于 0.8.37 → raise RuntimeError with upgrade hint
+```
+
+错误信息应包含 `npm update -g deepseek` 升级指令。
 
 1. 更新 `deepseek-tui` 命令
 
@@ -158,19 +172,25 @@ done
 error
 ```
 
-3. 写入 run log
+3. 写入 run log — 映射至 P22 telemetry schema
 
-从 `metadata` 提取：
+`_write_run_log()` 字段映射（`runner/app.py:1245`）：
 
-```text
-model
-input_tokens
-output_tokens
-session_id
-status
-```
+| DeepSeek `metadata` 字段 | `_write_run_log` 参数 |
+|---|---|
+| `model` | `model` |
+| `input_tokens` | `input_tokens` |
+| `output_tokens` | `output_tokens` |
+| `session_id` | 写入 run log `extra` 或单独字段 |
+| `status` | 映射至 `status`（success / error / timeout） |
 
-4. UI 进度
+`agent` 固定写 `"deepseek-tui"`（区分 API agent `"deepseek"`）。
+
+4. Timeout 对齐
+
+streaming subprocess 超时使用 `AI_RUN_TIMEOUT_S`（`runner/app.py:144`，默认 1800s）。超时时 status 写 `"timeout"`，与其他 agent 一致。
+
+5. UI 进度
 
 - `tool_use` -> `run_progress`：显示工具名和参数摘要
 - `tool_result` -> `run_progress`：显示工具完成状态
@@ -179,34 +199,66 @@ status
 
 **完成标准：**
 
+- [ ] dispatch 入口有版本检测，< 0.8.37 fail fast with upgrade hint
 - [ ] `deepseek-tui` run log 记录 `agent=deepseek-tui`
-- [ ] run log 记录模型、token、session id
+- [ ] run log 记录 `model`、`input_tokens`、`output_tokens`（映射 P22 schema）
+- [ ] run log 记录 `session_id`
+- [ ] streaming subprocess 超时使用 `AI_RUN_TIMEOUT_S`，status 写 `"timeout"`
 - [ ] UI 能看到工具开始/完成进度
 - [ ] 最终 output 不混入原始 NDJSON 噪音
 - [ ] `deepseek` API agent 和 `deepseek-tui` CLI agent 仍有明确区别
 
 ---
 
-### Phase 2 — Session / retry integration
+### Phase 2 — Session lock + resume（三个 agent 全部）
 
-**目标：** 利用 DeepSeek TUI 的 exec session 能力改善 retry 和 follow-up。
+**目标：** task 在 `in_progress` / `in_review` 期间，强制同一 agent 续接会话。只有打回 `todo` 时才允许换 agent。
 
-**具体改动：**
+#### 2a — Session ID 提取（每个 agent 的来源）
 
-1. 首次运行保存 `metadata.session_id`
-2. retry 时如果原 run 有 `deepseek_session_id`，优先使用：
+| Agent | Session ID 来源 | Resume 命令 |
+|---|---|---|
+| `claude` | 任意 event 的 `session_id` 字段 | `claude -p --resume <session_id> ...` |
+| `codex` | `thread.started` event 的 `thread_id` | `codex exec resume <thread_id> <prompt>` |
+| `deepseek-tui` | `metadata` event 的 `session_id` | `deepseek exec --auto --resume <session_id> <prompt>` |
 
-```bash
-deepseek exec --auto --output-format stream-json --resume <SESSION_ID> <feedback_prompt>
+首次 run 完成后，将 session id 写入 run log（需在 `_write_run_log` 加 `agent_session_id` 字段）。
+
+#### 2b — Agent 锁定规则（runner state machine）
+
+```
+task status: todo        → agent 可以自由选择
+task status: in_progress → agent 锁定为首次 run 使用的 agent；retry 必须用 --resume
+task status: in_review   → agent 锁定；follow-up feedback 必须用 --resume
+task status: todo        ← 打回时解锁 agent，允许换 agent 重新开始（不用 --resume）
 ```
 
-3. 如果 session resume 失败，降级为完整 prompt retry。
+实现要点：
+- run log 的 `task_id` 已存在，用它关联同一 task 的多次 run
+- 首次 run 写入 `agent` + `agent_session_id` 到 run log
+- retry / follow-up 时查找同 `task_id` 最近一次 run，读取 `agent` 和 `agent_session_id`
+- 若 task status 为 `in_progress` 或 `in_review`，强制使用已锁定 agent + `--resume`
+- 若 session resume 失败（agent 报错），降级为同 agent 全量 prompt retry（不换 agent）
+- 只有 UI 显式将 task 打回 `todo` 时，清空 agent 锁定
+
+#### 2c — Resume 失败降级策略
+
+```
+resume 失败
+  └─ 同 agent 全量 prompt retry（不换 agent，不带 --resume）
+       └─ 仍失败 → 状态留 in_progress，提示用户打回 todo 换 agent
+```
 
 **完成标准：**
 
-- [ ] 首次 run 保存 DeepSeek session id
-- [ ] retry 可用 `--resume` 继续同一 DeepSeek exec session
-- [ ] session resume 失败时有清晰错误或自动降级
+- [ ] `_write_run_log` 新增 `agent_session_id` 字段
+- [ ] claude: `system` event 提取 `session_id` 写入 run log
+- [ ] codex: `thread.started` event 提取 `thread_id` 写入 run log
+- [ ] deepseek-tui: `metadata` event 提取 `session_id` 写入 run log
+- [ ] task 在 `in_progress` / `in_review` 时，runner 拒绝切换 agent
+- [ ] retry 自动带 `--resume <agent_session_id>`
+- [ ] resume 失败时降级为同 agent 全量 retry，不自动换 agent
+- [ ] task 打回 `todo` 时 agent 锁定解除
 
 ---
 
@@ -218,12 +270,14 @@ deepseek exec --auto --output-format stream-json --resume <SESSION_ID> <feedback
 - `stream-json` 缺少关键事件或 token/session metadata
 - 上游行为无法通过配置或小补丁满足 AgenticOS
 
+**决策截止：** Phase 0 验证结束后 1 周内决定是否进入 Phase 3。
+
 **原则：**
 
+- Source 在 `prototypes/DeepSeek-TUI/`，直接改，不需要 fork 流程。
 - 不复制交互模式 tool loop。
-- 复用上游 `run_exec_agent()` / `spawn_engine()` 路径。
-- 尽量向上游提交 PR，减少长期 fork 维护。
-- fork 保持 rebase，而不是 merge。
+- 复用 `run_exec_agent()` / `spawn_engine()` 路径。
+- 如有价值可向上游提 PR，但不是必须。
 
 **可能改动：**
 
@@ -255,9 +309,9 @@ deepseek exec --auto --output-format stream-json --resume <SESSION_ID> <feedback
 ## 参考
 
 - TUI 仓库：https://github.com/Hmbown/DeepSeek-TUI
-- 本机当前版本：v0.8.29
-- 上游源码观察版本：v0.8.37
-- 本机 binary：`/opt/homebrew/bin/deepseek`
+- 本地 source：`prototypes/DeepSeek-TUI/`（v0.8.39）
+- npm wrapper（已废弃）：v0.8.29
+- 构建后 binary：`prototypes/DeepSeek-TUI/target/release/deepseek`
 - 关键源码：
   - `crates/cli/src/lib.rs`：dispatcher help / exec passthrough
   - `crates/tui/src/main.rs`：`ExecArgs`、`ExecOutputFormat`、`run_exec_agent()`
