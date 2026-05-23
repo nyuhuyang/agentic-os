@@ -27,7 +27,8 @@ agentic-os/
 │   ├── deepseek_agent.py   # DeepSeek agent dispatcher
 │   ├── deepseek_monitor.py # DeepSeek process monitor
 │   ├── core/               # Module registry, feature flags
-│   ├── modules/            # Linear and other connectors
+│   ├── modules/            # backends, linear, pty, stall_detection, stt
+│   ├── scripts/            # Runner-internal scripts
 │   └── templates/
 │       └── index.html      # Jinja2 dashboard — all CSS/JS inline, no build step
 ├── outputs/                # Runtime state (created on first run)
@@ -37,18 +38,18 @@ agentic-os/
 ├── state/                  # Operational source of truth (JSON/JSONL — do not edit manually)
 │   ├── roadmap.json        # Structured roadmap — edit here, then run render_roadmap_md.py
 │   ├── task_state.json     # Per-run task state (written by app.py)
-│   └── events.jsonl        # Append-only event log
-├── scripts/
-│   └── render_roadmap_md.py  # Generates docs/generated/ + docs/exec-plans/ROADMAP.md
+│   ├── events.jsonl        # Append-only event log
+│   ├── runs.jsonl          # Run event stream
+│   └── tasks.json          # Task records
+├── scripts/                # Utility scripts (roadmap render, state sync, migration, etc.)
 ├── docs/
 │   ├── generated/          # Auto-generated — do not edit manually
-│   │   ├── ACTIVE_TASKS.md
-│   │   └── COMPLETED.md
 │   ├── design-docs/        # Design decisions and core beliefs
 │   ├── exec-plans/
 │   │   ├── active/         # Work in progress
 │   │   └── completed/      # Archived plans
 │   ├── references/         # LLM-readable reference materials
+│   ├── context-maintenance.md  # Cross-session continuity — WIP, decisions, next action
 │   └── PLANS.md            # Roadmap and prioritized backlog
 ├── SPEC.md                 # Authoritative FR/NFR/AC spec
 ├── WORKFLOW.md             # Development workflow
@@ -76,6 +77,7 @@ agentic-os/
 | `docs/exec-plans/completed/` | Archived plans |
 | `docs/references/` | Run log format, registry schema, data sources |
 | `docs/PLANS.md` | Roadmap summary |
+| `docs/context-maintenance.md` | Cross-session continuity — WIP, decisions, next action |
 
 ## Conventions
 
