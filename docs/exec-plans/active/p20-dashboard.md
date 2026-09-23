@@ -2,7 +2,7 @@
 
 ## Status: Active
 
-> **Code changes: NONE made yet.** All items below are pending. Check box when done.
+> **Implementation in progress.** Completed items are checked; unchecked items remain pending.
 
 ---
 
@@ -28,6 +28,7 @@
 - [x] **2-E** `TokenPanel.tsx`: uses `<UsageGrid />` confirmed
 - [x] **2-F** Tokens button: in `App.tsx` — `tokensOpen` toggle + "Tokens" button rendered
 - [x] **2-G** `App.tsx`: `tokensOpen` state, `TokenPanel` rendered as overlay when open
+- [x] **2-H** Flask dashboard: Codex third card reads live reset credits and shows used/available of 3; deployed via launchd (2026-07-02)
 
 ### Track 3 — Create Issue from Board
 - [x] **3-A** `dashboard-server.ts`: `createLinearIssue?` + `CreateIssueInput` added

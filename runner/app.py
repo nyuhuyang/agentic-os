@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -1071,6 +1072,233 @@ def _load_claude_live_limit(window_key: str) -> dict:
         return {}
 
 
+_CLAUDE_LIVE_MAX_AGE_S = int(os.environ.get("CLAUDE_LIVE_MAX_AGE_S", "600"))
+_CLAUDE_USAGE_API = "https://api.anthropic.com/api/oauth/usage"
+_CLAUDE_USAGE_CACHE_TTL_S = 55.0
+_claude_usage_cache: tuple[float, dict | None] = (0.0, None)
+_claude_usage_lock = threading.Lock()
+
+
+def _fetch_claude_oauth_usage(timeout_s: float = 4.0) -> dict:
+    """Read the authenticated Claude usage endpoint without persisting its token."""
+    try:
+        credentials = subprocess.run(
+            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+        token = ((json.loads(credentials.stdout).get("claudeAiOauth") or {})
+                 .get("accessToken"))
+        if not isinstance(token, str) or not token:
+            return {}
+        request_obj = urllib.request.Request(
+            _CLAUDE_USAGE_API,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(request_obj, timeout=timeout_s) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError, subprocess.SubprocessError, TimeoutError):
+        return {}
+
+
+def _load_claude_oauth_usage() -> dict:
+    global _claude_usage_cache
+    cached_at, cached = _claude_usage_cache
+    now = time.monotonic()
+    if cached is not None and now - cached_at < _CLAUDE_USAGE_CACHE_TTL_S:
+        return cached
+    with _claude_usage_lock:
+        cached_at, cached = _claude_usage_cache
+        if cached is not None and time.monotonic() - cached_at < _CLAUDE_USAGE_CACHE_TTL_S:
+            return cached
+        usage = _fetch_claude_oauth_usage()
+        if usage:
+            _claude_usage_cache = (time.monotonic(), usage)
+        return usage or {}
+
+
+def _coerce_unix_timestamp(value: object) -> int | None:
+    """Return a Unix timestamp from Claude's numeric or ISO reset value."""
+    if isinstance(value, (int, float)) and value > 0:
+        return int(value)
+    if isinstance(value, str):
+        try:
+            numeric = float(value)
+            return int(numeric) if numeric > 0 else None
+        except ValueError:
+            parsed = _parse_run_started_at(value)
+            return int(parsed.timestamp()) if parsed else None
+    return None
+
+
+def _nested_mapping(data: object, *path: str) -> dict:
+    current = data
+    for key in path:
+        if not isinstance(current, dict):
+            return {}
+        current = current.get(key)
+    return dict(current) if isinstance(current, dict) else {}
+
+
+def _first_claude_limit(rate_limits: dict, paths: tuple[tuple[str, ...], ...]) -> dict:
+    for path in paths:
+        value = _nested_mapping(rate_limits, *path)
+        if value:
+            return value
+    return {}
+
+
+def _claude_quota_card(
+    title: str,
+    window_minutes: int,
+    limit_data: dict,
+    *,
+    captured_age_s: float | None,
+    source_status: str,
+) -> dict:
+    """Build one official Claude quota card; never derive quota from local tokens."""
+    raw_pct = limit_data.get("used_percentage", limit_data.get("used_percent"))
+    try:
+        used_pct = max(0, min(100, int(round(float(raw_pct)))))
+    except (TypeError, ValueError):
+        used_pct = None
+
+    resets_at = _coerce_unix_timestamp(
+        limit_data.get("resets_at", limit_data.get("reset_at"))
+    )
+    now_unix = datetime.now(timezone.utc).timestamp()
+    reset = "No live data"
+    if source_status == "live" and resets_at:
+        remaining = resets_at - now_unix
+        reset = _fmt_window_reset(remaining) if remaining > 0 else "Reset pending"
+    elif source_status == "stale":
+        reset = "Snapshot stale"
+    elif source_status == "missing":
+        reset = "Not reported"
+
+    if source_status == "live" and used_pct is not None and resets_at:
+        age_label = "just now" if (captured_age_s or 0) < 60 else _fmt_window_reset(captured_age_s or 0) + " ago"
+        display_line = f"Official Claude · updated {age_label}"
+    elif source_status == "stale" and captured_age_s is not None:
+        display_line = f"Official snapshot is {_fmt_window_reset(captured_age_s)} old"
+    elif source_status == "missing":
+        display_line = "This limit was not present in the official snapshot"
+    else:
+        display_line = "Official Claude data unavailable"
+
+    return {
+        "title": title,
+        "window_minutes": window_minutes,
+        "resets_at_unix": resets_at if source_status == "live" else None,
+        "reset": reset,
+        "pct": used_pct if source_status == "live" and used_pct is not None else 0,
+        "used_pct": used_pct if source_status == "live" else None,
+        "remaining_pct": (100 - used_pct) if source_status == "live" and used_pct is not None else None,
+        "tokens": 0,
+        "limit": 0,
+        "sessions": 0,
+        "display_line": display_line,
+        "quota_source": "official-claude",
+        "source_status": source_status,
+    }
+
+
+def _load_claude_official_windows() -> dict:
+    """Expose only a fresh Claude rate-limit snapshot as quota information.
+
+    Local run-token accounting is useful for activity, but cannot establish a
+    Claude subscription limit. In particular, never turn it into an exhausted
+    quota card when the official snapshot is absent or stale.
+    """
+    now = datetime.now(timezone.utc)
+    api_usage = _load_claude_oauth_usage()
+    if api_usage:
+        fable = {}
+        for entry in api_usage.get("limits") or []:
+            if not isinstance(entry, dict):
+                continue
+            model = _nested_mapping(entry, "scope", "model")
+            if str(model.get("display_name") or "").casefold() == "fable":
+                fable = {
+                    "used_percentage": entry.get("percent", entry.get("utilization")),
+                    "resets_at": entry.get("resets_at"),
+                }
+                break
+        return {
+            "agent": "claude",
+            "window_5h": _claude_quota_card(
+                "Current session", 300,
+                {"used_percentage": (api_usage.get("five_hour") or {}).get("utilization"),
+                 "resets_at": (api_usage.get("five_hour") or {}).get("resets_at")},
+                captured_age_s=0, source_status="live",
+            ),
+            "window_7d": _claude_quota_card(
+                "Weekly · All models", 10080,
+                {"used_percentage": (api_usage.get("seven_day") or {}).get("utilization"),
+                 "resets_at": (api_usage.get("seven_day") or {}).get("resets_at")},
+                captured_age_s=0, source_status="live",
+            ),
+            "aux": _claude_quota_card(
+                "Weekly · Fable", 10080, fable, captured_age_s=0,
+                source_status="live" if fable else "missing",
+            ),
+            "quota_source": "official-claude-api",
+            "plan_type": None,
+            "limits_estimated": False,
+            "captured_at": now.isoformat().replace("+00:00", "Z"),
+            "snapshot_age_seconds": 0,
+        }
+
+    payload: dict = {}
+    captured_at: datetime | None = None
+    try:
+        payload = json.loads(CLAUDE_RATE_LIMITS_LIVE.read_text(encoding="utf-8"))
+        captured_at = _parse_run_started_at(payload.get("captured_at"))
+    except (OSError, ValueError, TypeError):
+        pass
+
+    age_s = max(0.0, (now - captured_at).total_seconds()) if captured_at else None
+    snapshot_is_fresh = age_s is not None and age_s <= _CLAUDE_LIVE_MAX_AGE_S
+    rate_limits = payload.get("rate_limits") if isinstance(payload.get("rate_limits"), dict) else {}
+
+    current = _first_claude_limit(rate_limits, (
+        ("five_hour",), ("current_session",), ("session",),
+    ))
+    weekly = _first_claude_limit(rate_limits, (
+        ("seven_day",), ("weekly",), ("all_models",),
+    ))
+    fable = _first_claude_limit(rate_limits, (
+        ("fable",), ("seven_day_fable",), ("fable_seven_day",),
+        ("seven_day", "fable"), ("weekly", "fable"), ("models", "fable"),
+    ))
+
+    base_status = "live" if snapshot_is_fresh else ("stale" if captured_at else "unavailable")
+    fable_status = base_status if fable else ("missing" if snapshot_is_fresh else base_status)
+    return {
+        "agent": "claude",
+        "window_5h": _claude_quota_card(
+            "Current session", 300, current, captured_age_s=age_s, source_status=base_status,
+        ),
+        "window_7d": _claude_quota_card(
+            "Weekly · All models", 10080, weekly, captured_age_s=age_s, source_status=base_status,
+        ),
+        "aux": _claude_quota_card(
+            "Weekly · Fable", 10080, fable, captured_age_s=age_s, source_status=fable_status,
+        ),
+        "quota_source": "official-claude",
+        "plan_type": None,
+        "limits_estimated": False,
+        "captured_at": payload.get("captured_at"),
+        "snapshot_age_seconds": age_s,
+    }
+
+
 def _fill_observed_5h_usage(agent: str, windows: dict) -> dict:
     if agent != "claude" or not isinstance(windows.get("window_5h"), dict):
         return windows
@@ -1122,8 +1350,305 @@ def _fill_observed_5h_usage(agent: str, windows: dict) -> dict:
     return out
 
 
+_CODEX_RESET_WEEKLY_LIMIT = 3
+_CODEX_RESET_CACHE_TTL_S = 55.0
+_codex_reset_cache: tuple[float, dict | None] = (0.0, None)
+_codex_reset_lock = threading.Lock()
+
+
+def _fetch_codex_reset_credits(timeout_s: float = 4.0) -> dict | None:
+    """Read reset-credit inventory and expiry metadata from Codex app-server."""
+    codex_bin = shutil.which("codex")
+    if not codex_bin:
+        return None
+
+    proc: subprocess.Popen[bytes] | None = None
+    try:
+        proc = subprocess.Popen(
+            [codex_bin, "app-server", "--stdio"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        if proc.stdin is None or proc.stdout is None:
+            return None
+
+        initialize = {
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "agenticos", "version": "1.0.0"},
+                "capabilities": {"experimentalApi": True},
+            },
+        }
+        proc.stdin.write((json.dumps(initialize) + "\n").encode())
+        proc.stdin.flush()
+
+        deadline = time.monotonic() + timeout_s
+        buffer = b""
+        requested_limits = False
+        while time.monotonic() < deadline:
+            remaining = max(0.0, deadline - time.monotonic())
+            ready, _, _ = select.select([proc.stdout], [], [], remaining)
+            if not ready:
+                break
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            buffer += chunk
+            while b"\n" in buffer:
+                raw, buffer = buffer.split(b"\n", 1)
+                try:
+                    message = json.loads(raw)
+                except Exception:
+                    continue
+                if message.get("id") == 1 and not requested_limits:
+                    proc.stdin.write(b'{"method":"initialized"}\n')
+                    proc.stdin.write(
+                        b'{"id":2,"method":"account/rateLimits/read","params":null}\n'
+                    )
+                    proc.stdin.flush()
+                    requested_limits = True
+                elif message.get("id") == 2:
+                    result = message.get("result") or {}
+                    rate_limits = result.get("rateLimits") or {}
+                    raw_windows = {
+                        "primary": rate_limits.get("primary") or {},
+                        "secondary": rate_limits.get("secondary") or {},
+                    }
+                    normalized_windows = {}
+                    for name, raw_window in raw_windows.items():
+                        if not isinstance(raw_window, dict) or not raw_window:
+                            continue
+                        normalized_windows[name] = {
+                            "used_percent": raw_window.get("usedPercent"),
+                            "window_minutes": raw_window.get("windowDurationMins"),
+                            "resets_at": raw_window.get("resetsAt"),
+                        }
+
+                    summary = result.get("rateLimitResetCredits") or {}
+                    available = summary.get("availableCount")
+                    if type(available) is not int or available < 0:
+                        return None
+                    now_unix = int(time.time())
+                    credits = []
+                    for raw_credit in summary.get("credits") or []:
+                        if not isinstance(raw_credit, dict):
+                            continue
+                        granted_at = _coerce_unix_timestamp(raw_credit.get("grantedAt"))
+                        expires_at = _coerce_unix_timestamp(raw_credit.get("expiresAt"))
+                        credits.append({
+                            "id": raw_credit.get("id"),
+                            "title": raw_credit.get("title") or "Full reset",
+                            "status": raw_credit.get("status") or "unknown",
+                            "granted_at": granted_at,
+                            "expires_at": expires_at,
+                        })
+                    available_credits = [
+                        c for c in credits
+                        if c["status"] == "available"
+                    ]
+                    future_expiries = [
+                        c["expires_at"] for c in available_credits
+                        if c["expires_at"] and c["expires_at"] > now_unix
+                    ]
+                    granted_times = [
+                        c["granted_at"] for c in credits if c["granted_at"]
+                    ]
+                    return {
+                        "available": available,
+                        "limit": _CODEX_RESET_WEEKLY_LIMIT,
+                        "rate_limits": normalized_windows,
+                        "credits": credits,
+                        "latest_granted_at": max(granted_times, default=None),
+                        "next_expiry_at": min(future_expiries, default=None),
+                    }
+        return None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    finally:
+        if proc is not None:
+            if proc.stdin is not None:
+                try:
+                    proc.stdin.close()
+                except OSError:
+                    pass
+            try:
+                proc.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=0.5)
+
+
+def _load_codex_reset_credits() -> dict | None:
+    global _codex_reset_cache
+    now = time.monotonic()
+    cached_at, cached_value = _codex_reset_cache
+    if cached_value is not None and now - cached_at < _CODEX_RESET_CACHE_TTL_S:
+        return cached_value
+
+    with _codex_reset_lock:
+        cached_at, cached_value = _codex_reset_cache
+        if cached_value is not None and now - cached_at < _CODEX_RESET_CACHE_TTL_S:
+            return cached_value
+        value = _fetch_codex_reset_credits()
+        if value is not None:
+            _codex_reset_cache = (time.monotonic(), value)
+            return value
+        return cached_value
+
+
+def _codex_window_card(
+    fallback: dict,
+    live: dict,
+    title: str,
+    default_window_minutes: int,
+    limit_override: int | None = None,
+) -> dict:
+    """Overlay one current Codex server window onto the dashboard card."""
+    out = dict(fallback)
+    try:
+        used_pct = int(round(float(live.get("used_percent"))))
+    except (TypeError, ValueError):
+        return out
+
+    used_pct = max(0, min(100, used_pct))
+    resets_at = live.get("resets_at")
+    try:
+        resets_at = int(float(resets_at)) if resets_at else None
+    except (TypeError, ValueError):
+        resets_at = None
+    window_minutes = int(live.get("window_minutes") or default_window_minutes)
+    limit = int(limit_override or out.get("limit") or 0)
+    now_unix = datetime.now(timezone.utc).timestamp()
+    remaining_pct = max(0, 100 - used_pct)
+    reset = (
+        _fmt_window_reset(resets_at - now_unix)
+        if resets_at and resets_at > now_unix else
+        "Reset pending" if resets_at else out.get("reset", "—")
+    )
+    out.update({
+        "title": title,
+        "limit": limit,
+        "pct": used_pct,
+        "remaining_pct": remaining_pct,
+        "reset": reset,
+        "resets_at_unix": resets_at,
+        "window_minutes": window_minutes,
+        "display_line": (
+            f"{_fmt_tok(int(used_pct * limit / 100))} / {_fmt_tok(limit)} · "
+            f"{remaining_pct}% remaining"
+            if limit else f"{remaining_pct}% remaining"
+        ),
+    })
+    if limit:
+        out["tokens"] = int(used_pct * limit / 100)
+    return out
+
+
+def _with_codex_rate_limits(windows: dict, reset_info: dict | None) -> dict:
+    """Use Codex's current 5-hour + weekly windows when both are reported."""
+    if not reset_info:
+        return windows
+    live_windows = reset_info.get("rate_limits") or {}
+    primary = live_windows.get("primary") or {}
+    secondary = live_windows.get("secondary") or {}
+    if not primary and not secondary:
+        return windows
+
+    # The current API normally reports primary=5h and secondary=weekly. Keep
+    # duration-based selection for forward compatibility if the order changes.
+    candidates = [w for w in (primary, secondary) if w]
+    five_hour = next(
+        (w for w in candidates if int(w.get("window_minutes") or 0) <= 300),
+        None,
+    )
+    weekly = next(
+        (w for w in candidates if int(w.get("window_minutes") or 0) >= 10080),
+        None,
+    )
+    if weekly is None and candidates:
+        weekly = candidates[0]
+    if five_hour is None:
+        five_hour = weekly
+    if not five_hour or not weekly:
+        return windows
+
+    out = dict(windows)
+    out["window_5h"] = _codex_window_card(
+        out["window_5h"], five_hour, "5-Hour", 300,
+        _load_budget_limit("codex", "window_5h"),
+    )
+    out["window_7d"] = _codex_window_card(
+        out["window_7d"], weekly, "Weekly", 10080,
+        _load_budget_limit("codex", "window_7d"),
+    )
+    out["quota_source"] = "app-server"
+    out["limits_estimated"] = False
+    return out
+
+
+def _with_codex_reset_credits(windows: dict, reset_info: dict | None = None) -> dict:
+    out = dict(windows)
+    reset_info = reset_info if reset_info is not None else _load_codex_reset_credits()
+    limit = _CODEX_RESET_WEEKLY_LIMIT
+    if not reset_info:
+        out["aux"] = {
+            "title": "Reset Activity",
+            "reset": f"{limit} / week",
+            "pct": 0,
+            "remaining_pct": None,
+            "tokens": 0,
+            "value": None,
+            "display_line": "Codex reset data unavailable",
+        }
+        return out
+
+    available = max(0, min(limit, int(reset_info.get("available", 0))))
+    used = limit - available
+    latest_granted_at = reset_info.get("latest_granted_at")
+    next_expiry_at = reset_info.get("next_expiry_at")
+    latest_label = (
+        _fmt_dt(datetime.fromtimestamp(latest_granted_at, tz=timezone.utc).isoformat())
+        if latest_granted_at else "—"
+    )
+    expiry_label = (
+        datetime.fromtimestamp(next_expiry_at).strftime("%b %d").replace(" 0", " ")
+        if next_expiry_at else "—"
+    )
+    out["aux"] = {
+        "title": "Reset Activity",
+        "reset": f"{limit} / week",
+        "pct": round(used / limit * 100),
+        "remaining_pct": None,
+        "tokens": 0,
+        "value": available,
+        "value_suffix": " available",
+        "value_line": f"{available} available",
+        "display_line": f"latest credit {latest_label} · next expiry {expiry_label}",
+        "latest_granted_at": latest_granted_at,
+        "next_expiry_at": next_expiry_at,
+        "reset_credits": reset_info.get("credits", []),
+    }
+    return out
+
+
 def _compute_display_windows(agent: str) -> dict:
-    return _fill_observed_5h_usage(agent, _normalize_windows(_compute_windows(agent, RUN_LOG)))
+    if agent == "claude":
+        return _load_claude_official_windows()
+    windows = _fill_observed_5h_usage(
+        agent,
+        _normalize_windows(_compute_windows(agent, RUN_LOG)),
+    )
+    if agent == "codex":
+        reset_info = _load_codex_reset_credits()
+        windows = _with_codex_rate_limits(windows, reset_info)
+        windows = _with_codex_reset_credits(windows, reset_info)
+    return windows
 
 
 def load_windows(agent: str = "claude") -> dict:

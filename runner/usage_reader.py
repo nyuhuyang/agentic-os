@@ -1025,102 +1025,79 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
         codex_captured = _parse_iso_utc(codex_live.get("timestamp"))
         pri = codex_live.get("primary") or {}
         sec = codex_live.get("secondary") or {}
-        # resets_at is a plain epoch timestamp — valid regardless of snapshot age.
-        # Token/pct data goes stale after 2h; reset time does not.
-        _pri_resets_at = pri.get("resets_at")
-        _sec_resets_at = sec.get("resets_at")
-        _pri_resets_dt = datetime.fromtimestamp(float(_pri_resets_at), tz=timezone.utc) if _pri_resets_at else None
-        _sec_resets_dt = datetime.fromtimestamp(float(_sec_resets_at), tz=timezone.utc) if _sec_resets_at else None
-        _server_5h_reset_valid = _pri_resets_dt and _pri_resets_dt > now
-        _server_7d_reset_valid = _sec_resets_dt and _sec_resets_dt > now
-        # Use server pct whenever reset is still in the future (same quota window),
-        # regardless of snapshot age — pct only goes up within a window.
-        snapshot_fresh = codex_captured and (
-            _server_5h_reset_valid
-            or now - codex_captured <= timedelta(hours=2)
+
+        # Codex may move the only weekly window between primary and secondary.
+        # Identify it by duration so the dashboard does not mistake weekly data
+        # for the removed 5-hour limit.
+        quota_windows = [w for w in (pri, sec) if isinstance(w, dict) and w]
+        weekly = next(
+            (w for w in quota_windows
+             if int(w.get("window_minutes") or w.get("windowDurationMins") or 0) >= 10080),
+            None,
+        ) or (quota_windows[0] if quota_windows else {})
+        weekly_resets_at = weekly.get("resets_at")
+        weekly_resets_dt = (
+            datetime.fromtimestamp(float(weekly_resets_at), tz=timezone.utc)
+            if weekly_resets_at else None
         )
+        server_weekly_reset_valid = bool(weekly_resets_dt and weekly_resets_dt > now)
+        weekly_window_minutes = int(
+            weekly.get("window_minutes") or weekly.get("windowDurationMins") or 10080
+        )
+
+        # Use server pct whenever the snapshot is fresh or its weekly reset is
+        # still in the future. Local token counts span windows and are only a
+        # fallback when no trustworthy server snapshot is available.
+        snapshot_fresh = bool(codex_captured and (
+            server_weekly_reset_valid
+            or now - codex_captured <= timedelta(hours=2)
+        ))
         if snapshot_fresh:
-            used_5h = _window_percent_from_snapshot(
-                pri.get("used_percent", 0),
-                _pri_resets_at,
+            used_weekly = _window_percent_from_snapshot(
+                weekly.get("used_percent", 0),
+                weekly_resets_at,
                 codex_captured,
                 now,
             )
-            used_7d = _window_percent_from_snapshot(
-                sec.get("used_percent", 0),
-                _sec_resets_at,
-                codex_captured,
-                now,
-            )
-            # Use server-reported pct (staleness-corrected). If the snapshot predates
-            # the reset boundary, _window_percent_from_snapshot returns 0 = fresh window.
-            _pct_5h = used_5h
-            _pct_7d = used_7d
-            # Derive used tokens from server pct × budget limit for honest display.
-            # Local JSONL spans windows and overcounts; pct×limit is more accurate.
-            _disp_tok_5h = int(used_5h * lim_5h / 100) if used_5h > 0 else 0
-            _disp_tok_7d = int(used_7d * lim_7d / 100) if used_7d > 0 else 0
-            _eff_lim_5h = lim_5h
-            _eff_lim_7d = lim_7d
-            _reset_5h_label = _reset_label_from_epoch(_pri_resets_at, now)
-            _reset_7d_label = _reset_label_from_epoch(_sec_resets_at, now)
-            _win_min_5h = pri.get("window_minutes", 300)
-            _win_min_7d = sec.get("window_minutes", 10080)
+            _pct_weekly = used_weekly
+            _disp_tok_weekly = int(used_weekly * lim_7d / 100) if used_weekly > 0 else 0
+            _reset_weekly_label = _reset_label_from_epoch(weekly_resets_at, now)
             _quota_src = "server"
             _limits_est = False
         else:
-            # Snapshot stale: fall back to local token counts but keep server reset time if still valid.
-            _real_5h_pct = _pct(cur_5h["tokens"], lim_5h)
-            _real_7d_pct = _pct(cur_7d["tokens"], lim_7d)
-            _pct_5h = _real_5h_pct
-            _pct_7d = _real_7d_pct
-            _disp_tok_5h = cur_5h["tokens"]
-            _disp_tok_7d = cur_7d["tokens"]
-            _eff_lim_5h = lim_5h
-            _eff_lim_7d = lim_7d
-            _reset_5h_label = (
-                _reset_label_from_epoch(_pri_resets_at, now) if _server_5h_reset_valid
-                else _next_daily_reset_label(limits["window_5h_reset"], now) if limits.get("window_5h_reset")
-                else _reset_label(cur_5h.get("earliest_ts"), 5, now)
-            )
-            _reset_7d_label = (
-                _reset_label_from_epoch(_sec_resets_at, now) if _server_7d_reset_valid
+            _pct_weekly = _pct(cur_7d["tokens"], lim_7d)
+            _disp_tok_weekly = cur_7d["tokens"]
+            _reset_weekly_label = (
+                _reset_label_from_epoch(weekly_resets_at, now) if server_weekly_reset_valid
                 else _next_weekly_reset_label(weekly_reset_cfg, now) if weekly_reset_cfg
                 else _reset_label(cur_7d.get("earliest_ts"), 168, now)
             )
-            _win_min_5h = pri.get("window_minutes", 300) if _pri_resets_at else 300
-            _win_min_7d = sec.get("window_minutes", 10080) if _sec_resets_at else 10080
             _quota_src = "server+local"
             _limits_est = True
+
+        weekly_card = {
+            "title":         "Weekly",
+            "tokens":        _disp_tok_weekly,
+            "limit":         lim_7d,
+            "pct":           _pct_weekly,
+            "remaining_pct": max(0, 100 - _pct_weekly),
+            "sessions":      cur_7d["sessions"],
+            "reset":         _reset_weekly_label,
+            "display_line":  (
+                f"{_fmt_tok(_disp_tok_weekly)} / {_fmt_tok(lim_7d)} · "
+                f"{max(0, 100 - _pct_weekly)}% remaining"
+                if snapshot_fresh else
+                f"{_fmt_tok(_disp_tok_weekly)} / {_fmt_tok(lim_7d)} · {cur_7d['sessions']} sessions"
+            ),
+            "resets_at_unix": weekly_resets_at if server_weekly_reset_valid else None,
+            "window_minutes": weekly_window_minutes,
+        }
         return {
             "agent": agent,
             "limits_estimated": _limits_est,
             "quota_source": _quota_src,
-            "window_5h": {
-                "tokens":        _disp_tok_5h,
-                "limit":         _eff_lim_5h,
-                "pct":           _pct_5h,
-                "remaining_pct": max(0, 100 - _pct_5h),
-                "sessions":      cur_5h["sessions"],
-                "reset":         _reset_5h_label,
-                "display_line":  (f"{_fmt_tok(_disp_tok_5h)} / {_fmt_tok(_eff_lim_5h)} · {max(0, 100 - _pct_5h)}% remaining" if snapshot_fresh
-                                  else f"{_fmt_tok(_disp_tok_5h)} / {_fmt_tok(_eff_lim_5h)} · {cur_5h['sessions']} sessions"),
-                "resets_at_unix": _pri_resets_at if _server_5h_reset_valid else None,
-                "window_minutes": _win_min_5h,
-            },
-            "window_7d": {
-                "tokens":        _disp_tok_7d,
-                "limit":         _eff_lim_7d,
-                "pct":           _pct_7d,
-                "remaining_pct": max(0, 100 - _pct_7d),
-                "sessions":      cur_7d["sessions"],
-                "reset":         _reset_7d_label,
-                "display_line":  (f"{_fmt_tok(_disp_tok_7d)} / {_fmt_tok(_eff_lim_7d)} · {max(0, 100 - _pct_7d)}% remaining" if snapshot_fresh
-                                  else f"{_fmt_tok(_disp_tok_7d)} / {_fmt_tok(_eff_lim_7d)}"
-                                       f" · {cur_7d['sessions']} sessions"),
-                "resets_at_unix": _sec_resets_at if _server_7d_reset_valid else None,
-                "window_minutes": _win_min_7d,
-            },
+            "window_5h": dict(weekly_card),
+            "window_7d": dict(weekly_card),
             "aux": {
                 "title":      "Today Tokens",
                 "reset":      midnight_label,
@@ -1199,7 +1176,7 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
 
     # Reset labels: 5h uses window_5h_reset if configured, else earliest_ts; 7d uses weekly_reset if available
     _w5h_r = limits.get("window_5h_reset")
-    _reset_5h = _next_daily_reset_label(_w5h_r, now) if _w5h_r else _reset_label(cur_5h.get("earliest_ts"), 5, now)
+    _reset_5h = _next_daily_reset_label(_w5h_r, now) if _w5h_r and cur_5h.get("earliest_ts") else _reset_label(cur_5h.get("earliest_ts"), 5, now)
     _reset_7d = (
         _next_weekly_reset_label(weekly_reset_cfg, now)
         if weekly_reset_cfg

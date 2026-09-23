@@ -524,10 +524,11 @@
       {% set w5 = w.window_5h %}
       {% set w7 = w.window_7d %}
       {% set wa = w.aux %}
+      {% set codex_weekly = agent_name == "codex" %}
       <div class="windows-row-cards">
       <div class="win-card">
         <div class="win-header">
-          <span class="win-title">{{ w5.title or "5-Hour" }}</span>
+          <span class="win-title">{{ w5.title or ("Weekly" if codex_weekly else "5-Hour") }}</span>
           <span class="win-reset-label">{{ w5.reset }}</span>
         </div>
         <div class="win-bar-wrap">
@@ -539,7 +540,9 @@
                data-window-minutes="{{ w5.window_minutes or 300 }}"></div>
         </div>
         <div class="win-remaining">
-          {% if w5.remaining_pct is not none %}
+          {% if w5.used_pct is defined and w5.used_pct is not none %}
+            {{ w5.used_pct }}<span class="pct-label">% used</span>
+          {% elif w5.remaining_pct is not none %}
             {{ w5.remaining_pct }}<span class="pct-label">% remaining</span>
           {% elif w5.tokens > 0 %}
             {{ w5.tokens_fmt }}<span class="pct-label"> tokens</span>
@@ -565,7 +568,9 @@
                style="left:{{ w7.balance_marker_pct or w7.limit }}%"></div>
         </div>
         <div class="win-remaining">
-          {% if w7.remaining_pct is not none %}
+          {% if w7.used_pct is defined and w7.used_pct is not none %}
+            {{ w7.used_pct }}<span class="pct-label">% used</span>
+          {% elif w7.remaining_pct is not none %}
             {{ w7.remaining_pct }}<span class="pct-label">% remaining</span>
           {% elif w7.tokens > 0 %}
             {{ w7.tokens_fmt }}<span class="pct-label"> tokens</span>
@@ -577,7 +582,7 @@
       </div>
       <div class="win-card">
         <div class="win-header">
-          <span class="win-title">{{ wa.title }}</span>
+          <span class="win-title">{{ wa.title or ("Reset Activity" if codex_weekly else "Usage") }}</span>
           <span class="win-reset-label">{{ wa.reset }}</span>
         </div>
         <div class="win-bar-wrap">
@@ -587,7 +592,11 @@
                style="left:{{ wa.balance_marker_pct or 100 }}%"></div>
         </div>
         <div class="win-remaining">
-          {% if wa.remaining_pct is not none %}
+          {% if wa.value is defined and wa.value is not none %}
+            {{ wa.value }}<span class="pct-label">{{ wa.value_suffix or "" }}</span>
+          {% elif wa.used_pct is defined and wa.used_pct is not none %}
+            {{ wa.used_pct }}<span class="pct-label">% used</span>
+          {% elif wa.remaining_pct is not none %}
             {{ wa.remaining_pct }}<span class="pct-label">% remaining</span>
           {% elif wa.tokens > 0 %}
             {{ wa.tokens_fmt }}<span class="pct-label"> tokens</span>
@@ -1038,7 +1047,9 @@ function _updateOneRow(row, w) {
     bar.style.width = d.pct + '%';
     bar.className = _barClass(d.pct);
     const remEl = card.querySelector('.win-remaining');
-    if (d.remaining_pct !== null && d.remaining_pct !== undefined) {
+    if (d.used_pct !== null && d.used_pct !== undefined) {
+      remEl.innerHTML = `${d.used_pct}<span class="pct-label">% used</span>`;
+    } else if (d.remaining_pct !== null && d.remaining_pct !== undefined) {
       remEl.innerHTML = `${d.remaining_pct}<span class="pct-label">% remaining</span>`;
     } else if (d.tokens > 0) {
       remEl.innerHTML = `${_fmt(d.tokens)}<span class="pct-label"> tokens</span>`;
@@ -1085,7 +1096,11 @@ function _updateOneRow(row, w) {
   rbar.className = _barClass(r.pct);
   const remEl3 = rc.querySelector('.win-remaining');
   if (remEl3) {
-    if (r.remaining_pct !== null && r.remaining_pct !== undefined) {
+    if (r.value !== null && r.value !== undefined) {
+      remEl3.innerHTML = `${r.value}<span class=\"pct-label\">${_esc(r.value_suffix || '')}</span>`;
+    } else if (r.used_pct !== null && r.used_pct !== undefined) {
+      remEl3.innerHTML = `${r.used_pct}<span class="pct-label">% used</span>`;
+    } else if (r.remaining_pct !== null && r.remaining_pct !== undefined) {
       remEl3.innerHTML = `${r.remaining_pct}<span class=\"pct-label\">% remaining</span>`;
     } else if (r.tokens > 0) {
       remEl3.innerHTML = `${_fmt(r.tokens)}<span class=\"pct-label\"> tokens</span>`;
