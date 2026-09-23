@@ -14,11 +14,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
+import shutil
+import subprocess
+import threading
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 CLAUDE_DIR = Path.home() / ".claude"
 _PROTO = Path(__file__).resolve().parents[1]         # agentic-os/
@@ -81,6 +88,132 @@ DEFAULT_LIMITS: dict[str, dict] = {
     "codex":  {"window_5h": 30_000_000, "window_7d": 150_000_000,   "daily_runs_max": 5},
     "deepseek":  {"window_5h": 10_000_000, "window_7d":  50_000_000,   "daily_runs_max": 20},
 }
+
+_AGY_CACHE_TTL_S = 55.0
+_AGY_MAX_AGE_S = 15 * 60
+_agy_lock = threading.Lock()
+_agy_groups: dict[str, dict] = {}
+_agy_attempt_at = 0.0
+_agy_error: str | None = None
+_agy_refreshing = False
+
+
+def parse_agy_usage(text: str) -> dict[str, dict]:
+    """Parse Antigravity's tab-separated weekly quota records."""
+    groups: dict[str, dict] = {}
+    for line in text.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 4:
+            continue
+        group, _, raw_pct, raw_reset = (field.strip() for field in fields)
+        name = group.casefold()
+        key = "gemini" if name.startswith("gemini") else "claude_gpt" if "claude" in name else None
+        if key is None:
+            continue
+        try:
+            if not raw_pct.endswith("%"):
+                continue
+            remaining_pct = max(0, min(100, int(raw_pct[:-1])))
+        except ValueError:
+            continue
+        try:
+            resets_at = datetime.fromisoformat(raw_reset.replace("Z", "+00:00"))
+            if resets_at.tzinfo is None:
+                resets_at = None
+        except ValueError:
+            resets_at = None
+        groups[key] = {"remaining_pct": remaining_pct, "resets_at": resets_at}
+    return groups
+
+
+def fetch_agy_usage(timeout_s: float = 15.0) -> tuple[dict, str | None]:
+    """Fetch Antigravity quotas without exposing CLI output in logs or errors."""
+    try:
+        agy_bin = shutil.which("agy") or str(Path.home() / ".local" / "bin" / "agy")
+        if not Path(agy_bin).is_file() or not os.access(agy_bin, os.X_OK):
+            logger.warning("agy quota fetch: not_installed")
+            return {}, "not_installed"
+        result = subprocess.run(
+            [agy_bin, "--log-file", "/dev/null", "-p", "/usage"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            errors="replace", timeout=timeout_s,
+        )
+        if result.returncode != 0:
+            code = f"exit_{result.returncode}"
+            logger.warning("agy quota fetch: %s rc=%s stdout_bytes=%s stderr_bytes=%s",
+                           code, result.returncode, len(result.stdout.encode("utf-8")),
+                           len(result.stderr.encode("utf-8")))
+            return {}, code
+        groups = parse_agy_usage(result.stdout)
+        if not groups:
+            logger.warning("agy quota fetch: unparseable rc=0 stdout_bytes=%s stderr_bytes=%s",
+                           len(result.stdout.encode("utf-8")), len(result.stderr.encode("utf-8")))
+            return {}, "unparseable"
+        return groups, None
+    except (FileNotFoundError, PermissionError):
+        logger.warning("agy quota fetch: not_installed")
+        return {}, "not_installed"
+    except subprocess.TimeoutExpired:
+        logger.warning("agy quota fetch: timeout")
+        return {}, "timeout"
+    except Exception:
+        logger.warning("agy quota fetch: error")
+        return {}, "error"
+
+
+def _refresh_agy(fetch: Callable[[], tuple[dict, str | None]]) -> None:
+    global _agy_error, _agy_refreshing
+    try:
+        groups, error = fetch()
+        fetched_at = datetime.now(timezone.utc)
+        with _agy_lock:
+            for key in ("gemini", "claude_gpt"):
+                if key in groups:
+                    _agy_groups[key] = {**groups[key], "fetched_at": fetched_at}
+            missing = {"gemini", "claude_gpt"} - groups.keys()
+            _agy_error = error or (
+                None if not missing else
+                "unparseable" if len(missing) == 2 else
+                f"partial_{missing.pop()}"
+            )
+    except Exception:
+        with _agy_lock:
+            _agy_error = "error"
+        logger.warning("agy quota refresh: error")
+    finally:
+        with _agy_lock:
+            _agy_refreshing = False
+
+
+def load_agy_usage(fetch: Callable[[], tuple[dict, str | None]] = fetch_agy_usage) -> tuple[dict, str | None]:
+    """Return cached quotas immediately, starting one background refresh when due."""
+    global _agy_attempt_at, _agy_error, _agy_refreshing
+    with _agy_lock:
+        now = time.monotonic()
+        if not _agy_refreshing and now - _agy_attempt_at >= _AGY_CACHE_TTL_S:
+            _agy_refreshing = True
+            _agy_attempt_at = now
+            try:
+                threading.Thread(target=_refresh_agy, args=(fetch,), daemon=True).start()
+            except Exception:
+                _agy_refreshing = False
+                _agy_error = "error"
+                logger.warning("agy quota refresh: error")
+        return {key: dict(value) for key, value in _agy_groups.items()}, _agy_error
+
+
+def agy_card_state(entry: dict | None, now: datetime) -> tuple[str, float | None]:
+    """Classify one cached group without Flask or mutable cache state."""
+    if entry is None:
+        return "missing", None
+    try:
+        age_s = max(0.0, (now - entry["fetched_at"]).total_seconds())
+        resets_at = entry.get("resets_at")
+        if age_s > _AGY_MAX_AGE_S or (resets_at is not None and resets_at <= now):
+            return "stale", age_s
+        return "fresh", age_s
+    except (KeyError, TypeError, ValueError):
+        return "stale", None
 
 
 def _today() -> str:

@@ -611,6 +611,44 @@
     {% endmacro %}
     {{ win_row("claude", "◆ Claude", windows_claude) if windows_claude else "" }}
     {{ win_row("codex", "✦ Codex", windows_codex) if windows_codex else "" }}
+    {% if windows_gemini %}
+    {% set wg = windows_gemini.window_5h %}
+    {% set wc = windows_gemini.window_7d %}
+    <div class="windows-row" id="windows-row-gemini">
+      <div class="win-agent-label">✧ Gemini</div>
+      <div class="windows-row-cards" style="grid-template-columns:1fr 1fr">
+      {% for w in (wg, wc) %}
+      <div class="win-card">
+        <div class="win-header">
+          <span class="win-title">{{ w.title }}</span>
+          <span class="win-reset-label">{{ w.reset }}</span>
+        </div>
+        <div class="win-bar-wrap">
+          <div class="win-bar {% if w.pct >= 80 %}high{% elif w.pct >= 50 %}medium{% else %}low{% endif %}"
+               style="width:{{ w.pct }}%"></div>
+          <div class="win-pace-marker on-pace"
+               {% if not w.window_minutes %}style="display:none"{% endif %}
+               data-resets-at="{{ w.resets_at_unix or '' }}"
+               data-reset-label="{{ w.reset or '' }}"
+               data-window-minutes="{{ w.window_minutes }}"></div>
+        </div>
+        <div class="win-remaining">
+          {% if w.used_pct is defined and w.used_pct is not none %}
+            {{ w.used_pct }}<span class="pct-label">% used</span>
+          {% elif w.remaining_pct is not none %}
+            {{ w.remaining_pct }}<span class="pct-label">% remaining</span>
+          {% elif w.tokens > 0 %}
+            {{ w.tokens_fmt }}<span class="pct-label"> tokens</span>
+          {% else %}
+            —<span class="pct-label">no data</span>
+          {% endif %}
+        </div>
+        <div class="win-main">{{ w.display_line }}</div>
+      </div>
+      {% endfor %}
+      </div>
+    </div>
+    {% endif %}
     {% if windows_deepseek %}
     {% set w5 = windows_deepseek.window_5h %}
     <div class="windows-row" id="windows-row-deepseek">
@@ -1126,7 +1164,7 @@ async function updateWindows(agent) {
   try {
     const res = await fetch('/api/windows/all');
     const all = await res.json();
-    ['claude', 'codex', 'deepseek', 'deepseek-tui'].forEach(ag => {
+    ['claude', 'codex', 'gemini', 'deepseek', 'deepseek-tui'].forEach(ag => {
       const row = document.getElementById('windows-row-' + ag);
       if (row && all[ag]) _updateOneRow(row, all[ag]);
     });

@@ -80,6 +80,7 @@ from usage_reader import (
     MODEL_PRICES as _MODEL_PRICES,
     DEFAULT_PRICE as _DEFAULT_PRICE,
 )
+import usage_reader
 
 # Lazy import — deepseek_monitor may not be installed
 try:
@@ -1637,9 +1638,65 @@ def _with_codex_reset_credits(windows: dict, reset_info: dict | None = None) -> 
     return out
 
 
+def _load_agy_windows() -> dict:
+    groups, error = usage_reader.load_agy_usage()
+    now = datetime.now(timezone.utc)
+
+    def _card(key: str, title: str, models: str) -> dict:
+        entry = groups.get(key)
+        state, age_s = usage_reader.agy_card_state(entry, now)
+        card = {
+            "title": title,
+            "pct": 0,
+            "remaining_pct": None,
+            "used_pct": None,
+            "tokens": 0,
+            "limit": 100,
+            "sessions": 0,
+            "resets_at_unix": None,
+            "window_minutes": 0,
+            "reset": "—",
+            "display_line": "loading…",
+        }
+        if state == "stale":
+            age_minutes = int((age_s or 0) // 60)
+            card["display_line"] = f"stale (last ok {age_minutes}m ago)"
+        elif state == "missing":
+            if groups:
+                card["display_line"] = "no data"
+            elif error:
+                card["display_line"] = f"agy unavailable ({error})"
+        else:
+            remaining_pct = entry["remaining_pct"]
+            resets_at = entry.get("resets_at")
+            card["pct"] = 100 - remaining_pct
+            card["remaining_pct"] = remaining_pct
+            card["display_line"] = f"{models} · updated {int(age_s or 0)}s ago"
+            if error:
+                card["display_line"] += f" · refresh failed ({error})"
+            if remaining_pct == 100:
+                card["reset"] = "Quota available"
+            elif resets_at is not None:
+                card["resets_at_unix"] = int(resets_at.timestamp())
+                card["window_minutes"] = 10080
+                card["reset"] = _fmt_window_reset((resets_at - now).total_seconds())
+        return card
+
+    return {
+        "agent": "gemini",
+        "window_5h": _card("gemini", "Weekly · Gemini", "Flash · Pro"),
+        "window_7d": _card("claude_gpt", "Weekly · Claude & GPT", "Opus · Sonnet · GPT-OSS"),
+        "aux": {},
+        "quota_source": "agy",
+        "limits_estimated": False,
+    }
+
+
 def _compute_display_windows(agent: str) -> dict:
     if agent == "claude":
         return _load_claude_official_windows()
+    if agent == "gemini":
+        return _load_agy_windows()
     windows = _fill_observed_5h_usage(
         agent,
         _normalize_windows(_compute_windows(agent, RUN_LOG)),
@@ -1946,6 +2003,7 @@ def index():
     cross_check = load_cross_check()
     windows_claude = load_windows("claude")
     windows_codex  = load_windows("codex")
+    windows_gemini = load_windows("gemini")
     windows_deepseek = load_windows("deepseek")
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -1968,6 +2026,7 @@ def index():
         cross_check=cross_check,
         windows_claude=windows_claude,
         windows_codex=windows_codex,
+        windows_gemini=windows_gemini,
         windows_deepseek=windows_deepseek,
         registry=registry,
         now=now,
@@ -3279,7 +3338,7 @@ def api_windows():
 def api_windows_all():
     try:
         all_data: dict = {}
-        for ag in ("claude", "codex", "deepseek"):
+        for ag in ("claude", "codex", "gemini", "deepseek"):
             w = _compute_display_windows(ag)
             all_data[ag] = w
         return jsonify(all_data)

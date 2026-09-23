@@ -53,3 +53,13 @@ Both implementation notes ACCEPTED and folded into the plan: executable check + 
 
 ## Resolution
 APPROVED at round 3 of MAX_ROUNDS=5.
+
+## Act 3 — Build
+### Round 1 — Codex build
+Codex (gpt-6-sol, thread 01a0ce5d-…) implemented the spec: parser/fetch/SWR cache/`agy_card_state` in `runner/usage_reader.py`; `_load_agy_windows` + wiring in `runner/app.py`; 2-card `windows-row-gemini` + poll list in `index.html`; `tests/test_agy_usage.py` (13 tests). Deviation: plan named `_reset_label_from_epoch` (lives in usage_reader, not app.py); Codex used app.py's existing `_fmt_window_reset` — same `NdHHh` format. Accepted.
+
+### Claude's verdict
+- Full diff read: matches spec; no out-of-scope edits; no CLI text in API or logs (test asserts `SECRET` absent from caplog); no shell; stdin DEVNULL; `--log-file /dev/null`.
+- Proof (Claude-run): `.venv/bin/python -m pytest tests -q` → 53 passed (40 baseline + 13 new).
+- Live check via Flask test client: cold `/api/windows/all` gemini card = "loading…" (not blocked by agy; 11s total came from Claude/Codex loaders); after 8s → Gemini 85% remaining, reset 6d22h, pace window 10080; Claude & GPT 100%, "Quota available", pace marker hidden. HTML row order Claude → Codex → Gemini → DeepSeek.
+- Fix rounds used: 0. Post-build inspection: Codex built → Claude inspected (codex-build design); no findings requiring fixes.
