@@ -6,6 +6,8 @@
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- Claude quota cards now display `remaining_pct` on initial render and live refresh; focused Jinja and Node checks cover live/missing Claude values and unaffected Codex/Gemini display, and `.venv/bin/python3 -m py_compile runner/*.py` passes — 2026-09-24
+- `com.agenticos.runner` is registered and running under launchd on 127.0.0.1:8510. Live `/api/windows/all` and `/` returned HTTP 200; all three served Claude card labels matched the API's `remaining_pct` values (`100% remaining`, `100% remaining`, `no data`) — 2026-09-24
 - Codex third usage card now reads `rateLimitResetCredits.availableCount`; current value `3` — 2026-07-02
 - `.venv/bin/python3 -m py_compile runner/*.py` passes; `/` and `/api/windows/all` return HTTP 200 with Usage Resets data after launchd redeploy — 2026-07-02
 - Codex now maps the server-reported 10080-minute window into both dashboard cards; Reset Activity exposes available credits, latest grant, and next expiry. `py_compile`, `/`, `/api/windows/all`, and `/api/usage` pass — 2026-07-14

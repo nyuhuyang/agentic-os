@@ -525,6 +525,7 @@
       {% set w7 = w.window_7d %}
       {% set wa = w.aux %}
       {% set codex_weekly = agent_name == "codex" %}
+      {% set prefer_remaining = agent_name == "claude" %}
       <div class="windows-row-cards">
       <div class="win-card">
         <div class="win-header">
@@ -540,7 +541,9 @@
                data-window-minutes="{{ w5.window_minutes or 300 }}"></div>
         </div>
         <div class="win-remaining">
-          {% if w5.used_pct is defined and w5.used_pct is not none %}
+          {% if prefer_remaining and w5.remaining_pct is not none %}
+            {{ w5.remaining_pct }}<span class="pct-label">% remaining</span>
+          {% elif w5.used_pct is defined and w5.used_pct is not none %}
             {{ w5.used_pct }}<span class="pct-label">% used</span>
           {% elif w5.remaining_pct is not none %}
             {{ w5.remaining_pct }}<span class="pct-label">% remaining</span>
@@ -568,7 +571,9 @@
                style="left:{{ w7.balance_marker_pct or w7.limit }}%"></div>
         </div>
         <div class="win-remaining">
-          {% if w7.used_pct is defined and w7.used_pct is not none %}
+          {% if prefer_remaining and w7.remaining_pct is not none %}
+            {{ w7.remaining_pct }}<span class="pct-label">% remaining</span>
+          {% elif w7.used_pct is defined and w7.used_pct is not none %}
             {{ w7.used_pct }}<span class="pct-label">% used</span>
           {% elif w7.remaining_pct is not none %}
             {{ w7.remaining_pct }}<span class="pct-label">% remaining</span>
@@ -594,6 +599,8 @@
         <div class="win-remaining">
           {% if wa.value is defined and wa.value is not none %}
             {{ wa.value }}<span class="pct-label">{{ wa.value_suffix or "" }}</span>
+          {% elif prefer_remaining and wa.remaining_pct is not none %}
+            {{ wa.remaining_pct }}<span class="pct-label">% remaining</span>
           {% elif wa.used_pct is defined and wa.used_pct is not none %}
             {{ wa.used_pct }}<span class="pct-label">% used</span>
           {% elif wa.remaining_pct is not none %}
@@ -1071,6 +1078,7 @@ async function _refreshRegistry(agent) {
 
 function _updateOneRow(row, w) {
   if (!w.window_5h) return;
+  const preferRemaining = row.id === 'windows-row-claude';
   const cards = row.querySelectorAll('.win-card');
   [
     { card: cards[0], d: w.window_5h },
@@ -1085,7 +1093,9 @@ function _updateOneRow(row, w) {
     bar.style.width = d.pct + '%';
     bar.className = _barClass(d.pct);
     const remEl = card.querySelector('.win-remaining');
-    if (d.used_pct !== null && d.used_pct !== undefined) {
+    if (preferRemaining && d.remaining_pct !== null && d.remaining_pct !== undefined) {
+      remEl.innerHTML = `${d.remaining_pct}<span class="pct-label">% remaining</span>`;
+    } else if (d.used_pct !== null && d.used_pct !== undefined) {
       remEl.innerHTML = `${d.used_pct}<span class="pct-label">% used</span>`;
     } else if (d.remaining_pct !== null && d.remaining_pct !== undefined) {
       remEl.innerHTML = `${d.remaining_pct}<span class="pct-label">% remaining</span>`;
@@ -1136,6 +1146,8 @@ function _updateOneRow(row, w) {
   if (remEl3) {
     if (r.value !== null && r.value !== undefined) {
       remEl3.innerHTML = `${r.value}<span class=\"pct-label\">${_esc(r.value_suffix || '')}</span>`;
+    } else if (preferRemaining && r.remaining_pct !== null && r.remaining_pct !== undefined) {
+      remEl3.innerHTML = `${r.remaining_pct}<span class="pct-label">% remaining</span>`;
     } else if (r.used_pct !== null && r.used_pct !== undefined) {
       remEl3.innerHTML = `${r.used_pct}<span class="pct-label">% used</span>`;
     } else if (r.remaining_pct !== null && r.remaining_pct !== undefined) {
