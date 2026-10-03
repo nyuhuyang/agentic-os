@@ -227,6 +227,73 @@ def _date_of(ts: str) -> str:
         return "?"
 
 
+# ponytail: unbounded per-file caches (one entry per session file); prune if file counts explode
+_file_caches: dict[str, dict[str, tuple[tuple[int, int], Any]]] = defaultdict(dict)
+
+
+def _cached_by_stat(kind: str, path: Path, st: os.stat_result, compute: Callable[[Path], Any]) -> Any:
+    """Re-run compute(path) only when the file's (mtime, size) changed since last call."""
+    key = (st.st_mtime_ns, st.st_size)
+    cache = _file_caches[kind]
+    hit = cache.get(str(path))
+    if hit and hit[0] == key:
+        return hit[1]
+    value = compute(path)
+    cache[str(path)] = (key, value)
+    return value
+
+
+def _claude_jsonl_files():
+    """Yield (path, stat) for every Claude project session JSONL."""
+    if not PROJECTS_DIR.exists():
+        return
+    for project_dir in PROJECTS_DIR.iterdir():
+        if not project_dir.is_dir():
+            continue
+        for jsonl_path in project_dir.glob("*.jsonl"):
+            try:
+                yield jsonl_path, jsonl_path.stat()
+            except OSError:
+                continue
+
+
+def _claude_usage_records(path: Path) -> list[tuple]:
+    """Assistant usage records in one Claude JSONL:
+    (ts_str, ts|None, model, session_id, input, output, cache_read, cache_creation)."""
+    records: list[tuple] = []
+    try:
+        for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if '"assistant"' not in raw:
+                continue
+            try:
+                record = json.loads(raw)
+            except Exception:
+                continue
+            if record.get("type") != "assistant":
+                continue
+            msg = record.get("message", {})
+            usage = msg.get("usage", {})
+            if not usage:
+                continue
+            ts_str = record.get("timestamp", "")
+            ts = None
+            if ts_str:
+                try:
+                    ts = datetime.fromisoformat(ts_str)
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                except Exception:
+                    ts = None
+            records.append((
+                ts_str, ts, msg.get("model", "unknown"), record.get("sessionId", ""),
+                usage.get("input_tokens", 0), usage.get("output_tokens", 0),
+                usage.get("cache_read_input_tokens", 0), usage.get("cache_creation_input_tokens", 0),
+            ))
+    except Exception:
+        pass
+    return records
+
+
 def _collect_jsonl_usage(since_date: str) -> dict[str, Any]:
     """Scan all project JSONL files and aggregate token usage since since_date."""
     daily: dict[str, dict] = defaultdict(lambda: {
@@ -248,58 +315,29 @@ def _collect_jsonl_usage(since_date: str) -> dict[str, Any]:
     if not PROJECTS_DIR.exists():
         return {"daily": {}, "by_model": {}, "total_messages": 0}
 
-    for project_dir in PROJECTS_DIR.iterdir():
-        if not project_dir.is_dir():
-            continue
-        for jsonl_path in project_dir.glob("*.jsonl"):
-            try:
-                for raw in jsonl_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                    if not raw.strip():
-                        continue
-                    try:
-                        record = json.loads(raw)
-                    except Exception:
-                        continue
-
-                    if record.get("type") != "assistant":
-                        continue
-
-                    ts = record.get("timestamp", "")
-                    date = _date_of(ts) if ts else "?"
-                    if date < since_date:
-                        continue
-
-                    msg = record.get("message", {})
-                    usage = msg.get("usage", {})
-                    if not usage:
-                        continue
-
-                    model = msg.get("model", "unknown")
-                    session_id = record.get("sessionId", "")
-
-                    inp = usage.get("input_tokens", 0)
-                    out = usage.get("output_tokens", 0)
-                    cr  = usage.get("cache_read_input_tokens", 0)
-                    cc  = usage.get("cache_creation_input_tokens", 0)
-
-                    day = daily[date]
-                    day["input_tokens"]  += inp
-                    day["output_tokens"] += out
-                    day["cache_read"]    += cr
-                    day["cache_creation"] += cc
-                    day["messages"]      += 1
-                    if session_id:
-                        day["sessions"].add(session_id)
-
-                    bm = by_model[model]
-                    bm["input_tokens"]  += inp
-                    bm["output_tokens"] += out
-                    bm["cache_read"]    += cr
-                    bm["cache_creation"] += cc
-
-                    total_messages += 1
-            except Exception:
+    for jsonl_path, st in _claude_jsonl_files():
+        for ts_str, _ts, model, session_id, inp, out, cr, cc in _cached_by_stat(
+                "claude", jsonl_path, st, _claude_usage_records):
+            date = _date_of(ts_str) if ts_str else "?"
+            if date < since_date:
                 continue
+
+            day = daily[date]
+            day["input_tokens"]  += inp
+            day["output_tokens"] += out
+            day["cache_read"]    += cr
+            day["cache_creation"] += cc
+            day["messages"]      += 1
+            if session_id:
+                day["sessions"].add(session_id)
+
+            bm = by_model[model]
+            bm["input_tokens"]  += inp
+            bm["output_tokens"] += out
+            bm["cache_read"]    += cr
+            bm["cache_creation"] += cc
+
+            total_messages += 1
 
     # Convert sets to counts
     for day in daily.values():
@@ -514,6 +552,46 @@ def _window_percent_from_snapshot(
     return max(0, min(100, pct))
 
 
+def _codex_last_rate_event(path: Path) -> tuple[str, datetime, dict] | None:
+    """Classify the last token_count rate-limit event in one session JSONL:
+    ("codex", ts, snapshot) | ("limit_hit", ts, {}) | ("other", ts, {}) | None."""
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return None
+    # Scan from newest to oldest; only the last token_count per file counts.
+    for raw in reversed(lines):
+        if '"type":"token_count"' not in raw or '"rate_limits"' not in raw:
+            continue
+        try:
+            record = json.loads(raw)
+        except Exception:
+            continue
+        payload = record.get("payload", {})
+        if payload.get("type") != "token_count":
+            continue
+        rate = payload.get("rate_limits") or {}
+        ts = _parse_iso_utc(record.get("timestamp"))
+        if ts is None:
+            continue
+        if rate.get("limit_id") == "codex":
+            info = payload.get("info") or {}
+            total = (info.get("total_token_usage") or {}).get("total_tokens")
+            return "codex", ts, {
+                "timestamp": record.get("timestamp"),
+                "plan_type": rate.get("plan_type"),
+                "primary": rate.get("primary") or {},
+                "secondary": rate.get("secondary") or {},
+                "total_tokens": int(total) if isinstance(total, (int, float)) else None,
+                "model_context_window": info.get("model_context_window"),
+            }
+        if rate.get("primary") is None and not (rate.get("credits") or {}).get("has_credits", True):
+            # limit_id switched away from "codex" with null windows = limit hit
+            return "limit_hit", ts, {}
+        return "other", ts, {}
+    return None
+
+
 def load_latest_codex_rate_limits() -> dict[str, Any]:
     """Read the latest server-reported Codex rate limit snapshot.
 
@@ -548,43 +626,20 @@ def load_latest_codex_rate_limits() -> dict[str, Any]:
 
         for path in CODEX_SESSIONS_DIR.rglob("*.jsonl"):
             try:
-                lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
-            except Exception:
+                st = path.stat()
+            except OSError:
                 continue
-            # Scan from newest to oldest; capture both codex quota events and limit-hit signals.
-            for raw in reversed(lines):
-                if '"type":"token_count"' not in raw or '"rate_limits"' not in raw:
-                    continue
-                try:
-                    record = json.loads(raw)
-                except Exception:
-                    continue
-                payload = record.get("payload", {})
-                if payload.get("type") != "token_count":
-                    continue
-                rate = payload.get("rate_limits") or {}
-                ts = _parse_iso_utc(record.get("timestamp"))
-                if ts is None:
-                    continue
-
-                if rate.get("limit_id") == "codex":
-                    if best_ts is None or ts > best_ts:
-                        best_ts = ts
-                        info = payload.get("info") or {}
-                        total = (info.get("total_token_usage") or {}).get("total_tokens")
-                        best = {
-                            "timestamp": record.get("timestamp"),
-                            "plan_type": rate.get("plan_type"),
-                            "primary": rate.get("primary") or {},
-                            "secondary": rate.get("secondary") or {},
-                            "total_tokens": int(total) if isinstance(total, (int, float)) else None,
-                            "model_context_window": info.get("model_context_window"),
-                        }
-                elif rate.get("primary") is None and not (rate.get("credits") or {}).get("has_credits", True):
-                    # limit_id switched away from "codex" with null windows = limit hit
-                    if limit_hit_ts is None or ts > limit_hit_ts:
-                        limit_hit_ts = ts
-                break  # Only the last token_count per file.
+            event = _cached_by_stat("codex_rate", path, st, _codex_last_rate_event)
+            if event is None:
+                continue
+            kind, ts, snapshot = event
+            if kind == "codex":
+                if best_ts is None or ts > best_ts:
+                    best_ts = ts
+                    best = dict(snapshot)
+            elif kind == "limit_hit":
+                if limit_hit_ts is None or ts > limit_hit_ts:
+                    limit_hit_ts = ts
 
         # If a limit-hit event is newer than the last codex quota snapshot, mark as exhausted.
         if limit_hit_ts and (best_ts is None or limit_hit_ts > best_ts):
@@ -634,53 +689,63 @@ def _claude_window_range(since: datetime, until: datetime) -> dict[str, Any]:
     sessions: set[str] = set()
     earliest_ts: datetime | None = None
 
-    if not PROJECTS_DIR.exists():
-        return {"tokens": 0, "sessions": 0, "output": 0, "earliest_ts": None}
-
-    for project_dir in PROJECTS_DIR.iterdir():
-        if not project_dir.is_dir():
+    for jsonl_path, st in _claude_jsonl_files():
+        # Last write precedes window start → no record inside it; skip without reading.
+        if st.st_mtime < since.timestamp():
             continue
-        for jsonl_path in project_dir.glob("*.jsonl"):
-            try:
-                for raw in jsonl_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                    if not raw.strip():
-                        continue
-                    try:
-                        record = json.loads(raw)
-                    except Exception:
-                        continue
-                    if record.get("type") != "assistant":
-                        continue
-                    ts_str = record.get("timestamp", "")
-                    if not ts_str:
-                        continue
-                    try:
-                        ts = datetime.fromisoformat(ts_str)
-                        if ts.tzinfo is None:
-                            ts = ts.replace(tzinfo=timezone.utc)
-                    except Exception:
-                        continue
-                    if not (since <= ts < until):
-                        continue
-                    msg = record.get("message", {})
-                    usage = msg.get("usage", {})
-                    if not usage:
-                        continue
-                    i = usage.get("input_tokens", 0)
-                    o = usage.get("output_tokens", 0)
-                    c = usage.get("cache_creation_input_tokens", 0)
-                    # Exclude cache_read_input_tokens: billed at 0.1x, inflates count 10-20x
-                    tokens += i + o + c
-                    out += o
-                    sid = record.get("sessionId", "")
-                    if sid:
-                        sessions.add(sid)
-                    if earliest_ts is None or ts < earliest_ts:
-                        earliest_ts = ts
-            except Exception:
+        for _ts_str, ts, _model, sid, i, o, _cr, c in _cached_by_stat(
+                "claude", jsonl_path, st, _claude_usage_records):
+            if ts is None or not (since <= ts < until):
                 continue
+            # Exclude cache_read_input_tokens: billed at 0.1x, inflates count 10-20x
+            tokens += i + o + c
+            out += o
+            if sid:
+                sessions.add(sid)
+            if earliest_ts is None or ts < earliest_ts:
+                earliest_ts = ts
 
     return {"tokens": tokens, "sessions": len(sessions), "output": out, "earliest_ts": earliest_ts}
+
+
+def _codex_session_summary(path: Path) -> tuple[datetime, str, int] | None:
+    """(start ts, session id, total tokens) for one Codex session JSONL."""
+    summary = None
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        first = next((json.loads(l) for l in lines if l.strip()), None)
+        ts_str = (first or {}).get("timestamp", "")
+        if ts_str:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            # Session ID is in payload.id for session_meta events, or in the filename
+            sid = (first.get("payload") or {}).get("id", "")
+            if not sid:
+                sid = first.get("sessionId", "") or first.get("session_id", "")
+            if not sid:
+                _m = __import__("re").search(r"[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}", path.name)
+                if _m:
+                    sid = _m.group()
+            tokens = 0
+            # Find the last token_count event with actual info (skip null info entries)
+            for raw in reversed(lines):
+                if '"type":"token_count"' not in raw:
+                    continue
+                try:
+                    payload = json.loads(raw).get("payload", {})
+                except Exception:
+                    continue
+                if payload.get("type") != "token_count":
+                    continue
+                ttu = (payload.get("info") or {}).get("total_token_usage", {})
+                if not ttu:
+                    continue
+                tokens = ((ttu.get("input_tokens", 0) or 0) + (ttu.get("output_tokens", 0) or 0)
+                          + (ttu.get("cached_input_tokens", 0) or 0))
+                break
+            summary = (ts, sid, tokens)
+    except Exception:
+        summary = None
+    return summary
 
 
 def _codex_window_range(since: datetime, until: datetime) -> dict[str, Any]:
@@ -698,60 +763,23 @@ def _codex_window_range(since: datetime, until: datetime) -> dict[str, Any]:
         try:
             for path in CODEX_SESSIONS_DIR.rglob("*.jsonl"):
                 try:
-                    content = path.read_text(encoding="utf-8", errors="ignore")
-                    lines = content.splitlines()
-                except Exception:
+                    st = path.stat()
+                except OSError:
                     continue
-                first = next((json.loads(l) for l in lines if l.strip()), None)
-                if not first:
+                # Last write precedes session start? Impossible — skip without reading.
+                if st.st_mtime < since.timestamp():
                     continue
-                ts_str = first.get("timestamp", "")
-                if not ts_str:
+                summary = _cached_by_stat("codex_session", path, st, _codex_session_summary)
+                if summary is None:
                     continue
-                try:
-                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-                except Exception:
-                    continue
+                ts, sid, tokens = summary
                 if not (since <= ts < until):
                     continue
-
-                # Session ID is in payload.id for session_meta events, or in the filename
-                sid = (first.get("payload") or {}).get("id", "")
-                if not sid:
-                    sid = first.get("sessionId", "") or first.get("session_id", "")
-                if not sid:
-                    _m = __import__("re").search(r"[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}", path.name)
-                    if _m:
-                        sid = _m.group()
                 if sid:
                     sessions.add(sid)
                 if earliest_ts is None or ts < earliest_ts:
                     earliest_ts = ts
-
-                # Find the last token_count event with actual info (skip null info entries)
-                for raw in reversed(lines):
-                    if not raw.strip():
-                        continue
-                    if '"type":"token_count"' not in raw:
-                        continue
-                    try:
-                        rec = json.loads(raw)
-                    except Exception:
-                        continue
-                    payload = rec.get("payload", {})
-                    if payload.get("type") != "token_count":
-                        continue
-                    info = payload.get("info")
-                    if not info:
-                        continue
-                    ttu = info.get("total_token_usage", {})
-                    if not ttu:
-                        continue
-                    inp = ttu.get("input_tokens", 0) or 0
-                    out = ttu.get("output_tokens", 0) or 0
-                    cached = ttu.get("cached_input_tokens", 0) or 0
-                    total_tokens += inp + out + cached
-                    break
+                total_tokens += tokens
         except Exception:
             pass
 
