@@ -1,0 +1,17 @@
+# Project registry schema. Copy to projects.yaml (gitignored) and fill in real entries.
+# Override location with AGENTIC_OS_PROJECTS=/path/to/projects.yaml
+projects:
+  example-r-app:
+    path: ~/code/example-r-app          # absolute or ~-relative repo root
+    kind: r-shiny                       # free text: r-shiny | python | wiki | ...
+    verify: Rscript tests/testthat.R    # run from path; exit 0 = pass
+    env:
+      PATH: ~/miniforge3/bin            # prepended to PATH for verify and dispatch
+    confidential: true                  # only the verify summary may leave the machine
+    no_push: true                       # dispatch prompt forbids push/deploy
+  example-py-tool:
+    path: ~/code/example-py-tool
+    kind: python
+    verify: .venv/bin/python -m pytest -q
+    confidential: false
+    no_push: false

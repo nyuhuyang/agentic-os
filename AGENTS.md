@@ -57,7 +57,7 @@ agentic-os/
 → [`ARCHITECTURE.md`](ARCHITECTURE.md) — component map, data flow, storage invariants
 
 - Flask + SocketIO dispatches agents; `usage_reader.py` aggregates budgets; rebuild the dashboard-read-only registry externally
-- P20 React/TypeScript dashboard work lives in sibling workspace `../symphony-ts/`
+- Linear polling + dispatch are built in (`runner/modules/linear/`); no Symphony or `symphony-ts` dependency. The dashboard is `runner/templates/index.html` only
 
 ## Docs Index
 

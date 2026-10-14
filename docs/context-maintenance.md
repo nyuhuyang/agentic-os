@@ -2,7 +2,7 @@
 
 ## Current WIP (WIP = 1)
 <!-- One active task at a time. What is it? -->
-- P20 — Dashboard Fixes & Token Panel Redesign. Codex Usage Resets card is complete; other unchecked P20 items remain.
+- Multi-Project Dispatch — `docs/exec-plans/active/2026-10-13-multi-project-dispatch.md` (plan approved by Codex review 2026-10-13; build not started)
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
@@ -15,11 +15,10 @@
 
 ## Open Decisions
 <!-- Decisions made and their rationale — so a new session knows the "why" -->
-- P23 (Shared agent context injection) deferred pending research — not started
+- P15, P20, P23 parked in `docs/exec-plans/deferred/` (2026-10-13); P20 depended on `../symphony-ts`, which no longer exists
 - Server bound to 127.0.0.1 only — multi-host/remote scope is explicitly out of scope
 - Usage reset weekly limit is fixed at 3; unavailable Codex app-server data renders as no data
 
 ## Next Action
 <!-- Concrete first step for the next session -->
-- Continue P20 from unchecked items, starting with 1-H validation and 1-J `pnpm build`
-- Reconcile generated roadmap links with actual active plans before regenerating docs
+- Start Multi-Project Dispatch Phase 0 (first unchecked item in its plan) once the build is authorized

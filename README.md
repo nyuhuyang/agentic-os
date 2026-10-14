@@ -59,11 +59,9 @@ Two backends, user-selectable from the dashboard:
 | `claude` | `claude -p <prompt>` | JSONL session logs in `~/.claude/` |
 | `codex` | `codex exec <prompt>` | SQLite DB in Codex data dir |
 
-## Symphony Integration
+## Issue-Driven Dispatch
 
-For issue-driven agentic workflows, this project pairs with a modified fork of OpenAI's Symphony orchestrator that supports both Codex and Claude Code as agent backends:
-
-**[nyuhuyang/symphony](https://github.com/nyuhuyang/symphony)** — adds `agent.backend: claude | codex` hot-swap to Symphony, wired through the LiveView dashboard toggle. Switch backends at runtime by editing `WORKFLOW.md` or clicking the dashboard button — no restart required.
+Linear polling, dispatch and state write-back are built into the runner (`runner/modules/linear/`); there is no external orchestrator. `WORKFLOW.md` keeps a Symphony-style front matter (`tracker`, `polling`, `agent.backend`), but the runner itself reads it. Switch the default backend by editing `WORKFLOW.md` or from the dashboard, with no restart needed.
 
 ## Inspiration and Prior Art
 
@@ -71,6 +69,6 @@ This project was built on ideas from three sources:
 
 - **[Chase AI — "Claude Code Agentic OS = UNSTOPPABLE"](https://www.youtube.com/watch?v=pfPi04pIfaw&t=82s)** — the original framing of Claude Code as an operating system layer for agentic workflows. Directly inspired the architecture of this project.
 
-- **[OpenAI — Open-source Codex Orchestration: Symphony](https://openai.com/index/open-source-codex-orchestration-symphony/)** — production-grade issue-driven orchestration pattern: poll Linear, isolate per-issue workspaces, run coding agents. The execution model AgenticOS extends.
+- **[OpenAI — Open-source Codex Orchestration: Symphony](https://openai.com/index/open-source-codex-orchestration-symphony/)** — production-grade issue-driven orchestration pattern: poll Linear, isolate per-issue workspaces, run coding agents. AgenticOS reimplements this pattern in its own Python runner and does not depend on Symphony.
 
 - **[Harness Engineering](https://openai.com/index/harness-engineering/)** — operational discipline for running coding agents at scale: exec plans as repo artifacts, structured logging, skill registries, run state persistence. The planning and logging conventions in `docs/exec-plans/` and `outputs/` follow this methodology directly.
