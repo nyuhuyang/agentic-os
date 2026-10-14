@@ -1,0 +1,29 @@
+# Generic STT keywords (public repo: no private project names here).
+# Private extras: point STT_GLOSSARY_EXTRA at an untracked file, one term per line.
+OpenAI
+Claude
+Claude Code
+Codex
+Linear
+AgenticOS
+DeepSeek
+Gemini
+STT
+LLM
+API
+worktree
+commit
+branch
+merge
+dispatch
+issue
+In Review
+dashboard
+runner
+skill
+exec-plan
+Shiny
+R
+Python
+pytest
+Obsidian

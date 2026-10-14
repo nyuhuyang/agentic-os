@@ -2,10 +2,12 @@
 
 ## Current WIP (WIP = 1)
 <!-- One active task at a time. What is it? -->
+- STT two-pass: committed; open = real-mic manual check, private glossary, one cross-provider Codex inspection, low-severity Open Issues in its review log
 - Multi-Project Dispatch — `docs/exec-plans/active/2026-10-13-multi-project-dispatch.md` (plan approved by Codex review 2026-10-13; build not started)
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- STT two-pass (Browser STT live → `gpt-transcribe` + `gpt-6-luna` polish) built per `docs/exec-plans/active/2026-10-14-stt-two-pass.md`: 65 pytest + 5 node tests pass; live `/api/stt` via launchd 4.0 s; headless Chrome smoke (fake mic) 17/17. A real-mic manual check is still pending — 2026-10-14
 - Claude quota cards now display `remaining_pct` on initial render and live refresh; focused Jinja and Node checks cover live/missing Claude values and unaffected Codex/Gemini display, and `.venv/bin/python3 -m py_compile runner/*.py` passes — 2026-09-24
 - `com.agenticos.runner` is registered and running under launchd on 127.0.0.1:8510. Live `/api/windows/all` and `/` returned HTTP 200; all three served Claude card labels matched the API's `remaining_pct` values (`100% remaining`, `100% remaining`, `no data`) — 2026-09-24
 - Codex third usage card now reads `rateLimitResetCredits.availableCount`; current value `3` — 2026-07-02

@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -29,6 +30,28 @@ logger = logging.getLogger(__name__)
 _HERE = Path(__file__).resolve().parent
 _PROTO = _HERE.parent.parent.parent
 STATE_DIR = _PROTO / "state"
+ID_ALIASES_PATH = _PROTO / "outputs" / "id_aliases.json"
+_id_alias_lock = threading.Lock()
+
+
+def load_id_aliases() -> dict[str, str]:
+    """local-* id → Linear id map, kept so the dashboard can migrate per-issue browser state after a reload."""
+    try:
+        data = json.loads(ID_ALIASES_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def record_id_alias(local_id: str, real_id: str) -> None:
+    with _id_alias_lock:  # only the Flask process writes this file
+        aliases = load_id_aliases()
+        aliases[local_id] = real_id
+        ID_ALIASES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=ID_ALIASES_PATH.parent, prefix=".id_aliases.")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(aliases, f)
+        os.replace(tmp, ID_ALIASES_PATH)
 
 
 def _load_workflow_config() -> dict:
@@ -802,6 +825,8 @@ class LinearModule(AgenticModule):
                         return
                     n = _normalize_linear_issue(linear_issue)
                     real_id = linear_issue["id"]
+                    # Persist the alias before the local id disappears, so the dashboard can always recover it.
+                    record_id_alias(local_id, real_id)
                     # Swap local placeholder → real Linear ID in local tracker and cache
                     raw = local._load_raw()
                     raw.pop(local_id, None)
@@ -813,9 +838,10 @@ class LinearModule(AgenticModule):
                         team_cache = self._issues_by_team.setdefault(tid, {})
                         team_cache.pop(local_id, None)
                         team_cache[real_id] = n
+                    if self._socketio:  # emit before the slow comment call so the dashboard migrates early
+                        self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache),
+                                                                       "id_map": {local_id: real_id}})
                     _post_linear_comment_raw(real_id, _issue_agent_comment_body(n.get("preferred_agent")), ak)
-                    if self._socketio:
-                        self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
                 except Exception as e:
                     logger.error("Background Linear create failed: %s", e)
 
@@ -987,6 +1013,10 @@ class LinearModule(AgenticModule):
             ak = _linear_api_key_from_cfg(tc)
             ok = _post_linear_comment_raw(issue_id, body, ak)
             return (jsonify({"ok": ok}) if ok else (jsonify({"ok": False, "error": "comment failed"}), 500))
+
+        @app.route("/api/linear/id-aliases")
+        def _id_aliases():
+            return jsonify(load_id_aliases())
 
         @app.route("/api/linear/projects")
         def _projects():

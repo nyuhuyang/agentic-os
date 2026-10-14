@@ -464,3 +464,421 @@ Round 8 disposition (host = Claude):
 ## Status
 - Approved after 9 rounds (5 initial + 4 after user's ownership change); 18 findings, all accepted.
 - Remaining Phase 0: keyword/prompt limits from the official guide; one 5 s sample request. Build NOT authorized.
+
+## Build — 2026-10-14
+- Authorized by user: "先 STT，再 dispatch Phase 0+1 授权claude 开工"; dispatch later reassigned by user to the other session reviewing it.
+- Builder: Claude (host). Pre-build base: 301d437b9e53d673f3ac683f4beb89c7b6d93092 (plan+log committed as baseline). Other sessions' uncommitted dispatch/dsh plan edits left untouched.
+- Proof (host): py_compile ok; pytest 65 passed; node --test 5 passed; live /api/stt 4.0 s; headless smoke 17/17. Plan boxes ticked except private glossary (user) and real-mic manual check.
+
+## Inspection 1 — Codex (2026-10-14)
+- Result: `<session-scratchpad>/claudex-stt/i1/result.json` · fresh session 01a13be7… · base 301d437 · assurance cross_provider
+- Verdict: **REVISE** (1 high, 9 medium, 1 low)
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "The plan and manifest hashes match. Concrete defects remain in capture lifecycle, issue ownership, cancellation, and ID migration.",
+ "findings": [
+  {
+   "id": "STTI-01",
+   "severity": "high",
+   "path": "runner/templates/index.html:3222",
+   "evidence": "Live recognition checks only capture identity and attached state; _sttWrite also lacks an owner check. openDetailModal changes issue identity and reuses the textareas without synchronously detaching sessions. A delayed openLatestError request can open B while A is recording. Before the next one-second tick, A's first result can write into B's equally empty field and persist it as B's draft.",
+   "fix": "Detach sessions synchronously before retargeting the modal. Before every live write, verify the visible field's canonical owner, session identity, cancellation watermark, and expected value."
+  },
+  {
+   "id": "STTI-02",
+   "severity": "medium",
+   "path": "runner/templates/index.html:3202",
+   "evidence": "Recognition starts before asynchronous getUserMedia acquisition and recorder startup. Speech heard during that delay appears live but is absent from the recording. If polish subsequently fails, the incomplete raw transcript replaces the complete browser text. rec.start() also acquires its own microphone input rather than using the promised shared stream. See the [Web Speech methods specification](https://webaudio.github.io/web-speech-api/#speechrecognition-methods).",
+   "fix": "Coordinate startup so recording begins before announcing readiness or accepting live speech. Pass the acquired audio track to recognition where supported, with an explicit compatibility fallback."
+  },
+  {
+   "id": "STTI-03",
+   "severity": "medium",
+   "path": "runner/templates/index.html:3232",
+   "evidence": "Every recognition error and end event stops the entire capture. When browser recognition reports network, service-not-allowed, or language-not-supported while MediaRecorder is healthy, the recorder is stopped too. If microphone acquisition is still pending, its eventual stream is discarded and no final-only transcription occurs.",
+   "fix": "Handle recognition failure independently from recorder failure. Keep healthy recording active in final-only mode and report that live recognition is unavailable."
+  },
+  {
+   "id": "STTI-04",
+   "severity": "medium",
+   "path": "runner/templates/index.html:3257",
+   "evidence": "With SpeechRecognition unavailable, denying getUserMedia calls _sttEndSession without clearing capturing, _sttCapture, or the recording button. _sttEndSession then suppresses the error display because that same capture is still active. The UI remains on Recording despite permission denial, and the next click merely clears the dead capture.",
+   "fix": "Make terminal acquisition failures clear capture ownership, reset controls, and display the error. Ignore stale rejection callbacks except for owned-resource cleanup."
+  },
+  {
+   "id": "STTI-05",
+   "severity": "medium",
+   "path": "runner/templates/index.html:3283",
+   "evidence": "_sttStopCapture clears _sttCapture before calling recognition.stop(). The resulting final recognition event is rejected by the onresult identity check. In browser-only mode, or when refinement fails, the last phrase or corrected final result is lost. stop() explicitly attempts to return a result from already collected audio according to the [Web Speech specification](https://webaudio.github.io/web-speech-api/#speechrecognition-methods).",
+   "fix": "Separate microphone capture from recognition draining. Accept final results until recognition ends, provided the session remains current, uncancelled, attached to its owner, and unchanged."
+  },
+  {
+   "id": "STTI-06",
+   "severity": "medium",
+   "path": "runner/templates/index.html:3485",
+   "evidence": "Alias migration moves existing storage and session keys but leaves _detailLinearIssueId and the draft helpers using the local ID. Subsequent live or refined writes dispatch input and recreate the retired local draft key. Reapplying the same alias returns early. Closing and reopening under the UUID therefore restores the earlier migrated draft and loses the later refinement.",
+   "fix": "Canonicalize all draft reads, writes, and clears, and retarget the active issue context when its ID changes. Reconciliation must also handle writes occurring after the first migration."
+  },
+  {
+   "id": "STTI-07",
+   "severity": "medium",
+   "path": "runner/templates/index.html:3512",
+   "evidence": "Migration merges pending lists and cancellation watermarks independently, but neither migration nor hint rendering filters pending rows against the merged watermark. A local-ID pending result at seq 10 is restored under the UUID even when that UUID was cancelled at seq 20. Classification protects new completions only, so already stored cancelled results reappear.",
+   "fix": "Merge cancellation watermarks first, then remove covered pending rows and terminate covered sessions. Apply the same cancellation check when rendering persisted hints."
+  },
+  {
+   "id": "STTI-08",
+   "severity": "medium",
+   "path": "runner/templates/index.html:2642",
+   "evidence": "Card retry calls retryRun with no modal open, so replyOwner is empty and no STT cancellation occurs. Close A while refining, then retry A from its card: A's result can still produce a hint after dispatch. Dragging a Linear issue to In Progress through _moveLinearIssueToColumn likewise launches it without cancelling its STT state.",
+   "fix": "Derive cancellation ownership from the dispatched task rather than the visible modal. Cover card retry, drag-to-In-Progress, and other successful launch paths with one owner-aware cancellation helper."
+  },
+  {
+   "id": "STTI-09",
+   "severity": "medium",
+   "path": "runner/templates/index.html:3414",
+   "evidence": "Reply hints render only when the reply textarea is visible. For virtual issues, openDetailModal hides the entire reply section outside In Review (line 2449). Record a reply on a virtual In Review issue, close it, move it to Todo, and reopen: the pending result remains stored but its Copy hint is inaccessible, contrary to the cross-column recovery requirement.",
+   "fix": "Expose pending reply results in an issue-level area that remains visible across columns, independently of whether reply editing is available."
+  },
+  {
+   "id": "STTI-10",
+   "severity": "medium",
+   "path": "runner/modules/linear/__init__.py:828",
+   "evidence": "The local task is removed from persistent tasks.json and replaced in caches before record_id_alias runs. If alias persistence fails, or the process restarts between those operations, the real task survives but its local-to-real mapping is permanently missing. Browser drafts and pending results under the old ID cannot be recovered; the exception path only logs the failure.",
+   "fix": "Persist the alias successfully before removing the local identity or publishing the replacement. Preserve a recoverable placeholder and retry when persistence fails."
+  },
+  {
+   "id": "STTI-11",
+   "severity": "low",
+   "path": "runner/templates/index.html:3519",
+   "evidence": "The collision branch says it keeps the newer draft but always keeps the destination draft. Reply drafts already contain saved_at; a newer local draft loses active-draft precedence to an older UUID draft and becomes only a hint. No timestamp comparison occurs.",
+   "fix": "Compare draft timestamps and retain the newer draft as specified. Add equivalent ordering metadata for description drafts, preserving the other text as a pending hint."
+  }
+ ],
+ "coverage": [
+  "Verified the supplied plan SHA256, every manifest file SHA256, and tracked diff SHA256 against base 301d437b9e53d673f3ac683f4beb89c7b6d93092.",
+  "Inspected the STT backend, glossary, frontend changes, both added test files, plan, review log, and maintenance record.",
+  "Traced modal loading and reuse, draft serialization/restoration/deletion, attachment writers, creation, retry, dispatch, and board drag callers beyond the STT block.",
+  "Traced local-first creation, cache publication, local-tracker persistence, alias storage, endpoint reads, Socket.IO events, and reconnect handling.",
+  "Inspected installed OpenAI client cleanup and HTTPcore/AnyIO connection and DNS paths; consulted official transcription documentation and the Web Speech specification.",
+  "Read companion-plan documentation as manifest context; this verdict covers the STT implementation."
+ ],
+ "limitations": [
+  "Static review only. No files were edited, tests or compilation run, browser checks performed, provider calls made, services restarted, or work delegated.",
+  "Reported test passes, smoke checks, live latency, and account model access were not independently reproduced.",
+  "The JavaScript tests cover pure helpers, not integrated capture, migration, cancellation, or modal lifecycle behavior.",
+  "Real-microphone behavior and reply/description browser compatibility remain unverified. This review does not approve the separate browser-security or dispatch implementations."
+ ]
+}
+```
+
+### Host dispositions + fixes
+Fix round 1 for inspection i1 (host = builder = Claude). All 11 findings were accepted.
+- STTI-01: _sttWrite now also checks that the owner is the visible field's canonical owner and that seq > cancel watermark. The detail modal detaches reply/desc sessions synchronously at the start of openDetailModal and whenever the linear loader changes _detailLinearIssueId.
+- STTI-02: when refinement is available, recognition starts only after MediaRecorder.start() succeeds ("Starting mic…" until then), so the recording covers all live text. Passing the audio track into SpeechRecognition.start(track) was not adopted, because support varies; recognition still opens its own input.
+- STTI-03: recognition end/error no longer stops a healthy recorder; the status becomes "Recording… (live text paused)". In browser-only mode, recognition end still ends the capture.
+- STTI-04: _sttAbortCapture clears capture ownership, resets the button, releases the stream, then shows the error. Stale rejections only end or clean up.
+- STTI-05: stopping the mic sets draining=true and keeps accepting final results until onend. The upload waits up to 1.5 s for draining.
+- STTI-06: _sttApplyAliases re-runs the storage migration on every call and retargets _detailLinearIssueId.
+- STTI-07: rendering filters pending rows with seq <= cancel watermark. After migration, sessions covered by the merged watermark are terminated.
+- STTI-08: retryRun cancels from the task (reply.run.<run_id> plus the board item's linear issue), not only from the modal. Moving an issue to In Progress cancels its STT state.
+- STTI-09: the reply hint moved out of #detail-reply-section and renders whenever the detail modal is open.
+- STTI-10: record_id_alias runs before the local id is removed. If persistence fails, the local placeholder is kept, since the swap never happens. Automatic retry was not added.
+- STTI-11: on a draft collision, the newer draft is kept by saved_at (Linear description drafts now carry saved_at), and the other draft becomes a hint.
+Proof:
+- py_compile ok; pytest 65 passed; node --test 5 passed.
+- The headless Chrome smoke (fake mic, fake SpeechRecognition, /api/stt held and released) passes 27/27 across two runs, with new checks for STTI-01/02/03/04/05/06/07/09.
+- The dashboard was restarted to load the new template.
+
+## Inspection 2 — Codex (2026-10-14)
+- Result: `<session-scratchpad>/claudex-stt/i2/result.json` · fresh session 01a13bf7… · base 301d437 · assurance cross_provider
+- Verdict: **REVISE** (1 high, 5 medium, 1 low)
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "The supplied plan, file hashes and tracked diff match. Material defects remain in cancellation, recognition draining and alias migration, including microphone leakage and loss of unsent results.",
+ "findings": [
+  {
+   "id": "STTI-12",
+   "severity": "high",
+   "path": "runner/templates/index.html:3604",
+   "evidence": "Alias reconciliation handles sessions covered by the merged cancellation watermark by setting done=true and deleting them from the registry. It does not stop recognition, the recorder or microphone tracks, abort fetch, or clear _sttCapture. A local-ID capture covered by a real-ID cancellation therefore keeps recording after reconciliation. The subsequent tick cannot clean it up because it has been removed from _sttSessions.",
+   "fix": "Use targeted session disposal when applying merged cancellation: stop owned recognition and recorder resources, release tracks, abort fetch and clear capture ownership. Preserve the merged watermark and any newer valid sessions."
+  },
+  {
+   "id": "STTI-13",
+   "severity": "medium",
+   "path": "runner/templates/index.html:3237",
+   "evidence": "Draining recognition callbacks check attached state and capturing/draining, but neither they nor _sttWrite check whether the session has been superseded. Stop recording A and immediately start B in the same field. Before B's first write, A's late final result still passes its expected-value guard and changes the field. B then sees that change as an external edit and stops. Only final upload delivery applies the newest-sequence rule.",
+   "fix": "Require current-session classification before every live or draining field write. Older sessions may collect their final recognition text for refinement, but must not change the field after a newer recording starts."
+  },
+  {
+   "id": "STTI-14",
+   "severity": "medium",
+   "path": "runner/templates/index.html:2948",
+   "evidence": "Saving a state change to In Progress dispatches the issue through the backend at runner/modules/linear/__init__.py:942–960, but saveLinearIssue cancels only description STT. A reply still refining becomes detached on close and can create a hint after dispatch. The card's setIssueAgent path at index.html:2110–2118 also dispatches without cancelling either field.",
+   "fix": "Apply owner-aware cancellation to every reachable dispatch path, including Save to Linear with an In Progress state and setIssueAgent. Cancel both reply and description sessions for the dispatched issue."
+  },
+  {
+   "id": "STTI-15",
+   "severity": "medium",
+   "path": "runner/templates/index.html:1489",
+   "evidence": "Draft helpers still use raw issue IDs. _sttApplyAliases retargets only the currently open issue, while openDetailModal later assigns raw IDs from a card or run record at lines 2442 and 2543. Reopening a stale local-ID card after aliases have loaded, or a historical run retaining that ID, creates a canonical UUID STT session whose input events save into the retired local draft key. Opening the UUID then misses those later live/refined writes. Migration is not rerun by ordinary board refreshes.",
+   "fix": "Canonicalize draft keys at every read, write and clear, and canonicalize issue identity when loading cards and run records. Do not rely solely on retargeting the modal during an alias notification."
+  },
+  {
+   "id": "STTI-16",
+   "severity": "medium",
+   "path": "runner/templates/index.html:2657",
+   "evidence": "retryRun captures submitted text before awaiting the request, but cancellation creates its watermark only after the response. The mic remains usable during that wait. If the user starts another recording for the same owner, the successful response cancels that newer recording even though its audio/text was never submitted. In final-only mode this can discard the entire new utterance. The same response-time cancellation pattern occurs during issue creation.",
+   "fix": "Capture a submission cutoff when sending the request. On success, cancel only sessions and pending rows covered by that cutoff, preserving recordings started afterward."
+  },
+  {
+   "id": "STTI-17",
+   "severity": "medium",
+   "path": "runner/templates/index.html:3599",
+   "evidence": "_storageSet silently swallows setItem failures at lines 1473–1476, but alias migration unconditionally removes the source key after attempting the destination write. If storage is near quota, temporarily retaining both copies can make the write fail; migration then deletes the only persisted draft, pending list or cancellation watermark.",
+   "fix": "Make migration writes report success and remove source keys only after destination persistence succeeds. Retain recoverable source data and retry reconciliation when a write fails."
+  },
+  {
+   "id": "STTI-18",
+   "severity": "low",
+   "path": "runner/templates/index.html:3464",
+   "evidence": "The Copy handler captures owner before awaiting clipboard.writeText. If alias migration moves that pending list while clipboard permission or writing is pending, the completion calls _sttRemovePending with the old local owner. That helper does not canonicalize it, so the copied row remains under the UUID and reappears despite Copy-and-dismiss succeeding.",
+   "fix": "Resolve the canonical owner when pending removal executes, then remove only the selected sid from the current canonical list."
+  }
+ ],
+ "coverage": [
+  "Verified the plan SHA256, all thirteen manifest file hashes and tracked diff SHA256 against base 301d437b9e53d673f3ac683f4beb89c7b6d93092.",
+  "Read the supplied diff and inspected every manifest file; companion dispatch and dsh documents were treated as context, not separately approved.",
+  "Reviewed STT transcription, polish, deadline handling, glossary validation, capabilities, recorder fallbacks, recognition callbacks and resource cleanup.",
+  "Traced modal reuse, draft reads/writes/deletions, attachment writers, creation, retry, card dispatch, state-save dispatch and pending-hint actions.",
+  "Traced alias persistence, endpoint reads, local-first replacement, polling/cache publication and LocalTracker shared-state writers beyond the changed file list.",
+  "Inspected both added test files and relevant installed OpenAI/HTTPcore/AnyIO cleanup code; checked hint rendering uses textContent."
+ ],
+ "limitations": [
+  "Static review only: no edits, tests, compilation, browser checks, provider calls, service restarts or delegation.",
+  "Host-reported test passes, smoke checks and live latency were not independently reproduced.",
+  "Real microphone behavior, browser compatibility and runtime cancellation deadlines remain unverified.",
+  "Spec fidelity was assessed against the supplied STT plan; this was not a repository-wide specification or security audit."
+ ]
+}
+```
+
+### Host dispositions + fixes
+Fix round 2 for inspection i2 (host = builder = Claude). All 7 accepted.
+- STTI-12: added `_sttDispose(s)`. It stops recognition and the recorder, releases tracks, aborts the fetch, clears `_sttCapture`, resets the UI and unregisters the session. Alias reconciliation and cancel both use it for sessions covered by the merged watermark.
+- STTI-13: `_sttWrite` refuses when `s.seq < _sttLatestSeq[owner]`. A superseded session still collects final text for its own refinement but never writes into the field.
+- STTI-14: `saveLinearIssue` with an In Progress state cancels both fields of the issue. `setIssueAgent` (card dispatch) cancels both fields before PATCHing.
+- STTI-15: draft keys are canonical at the source. `_sttIssueId()` is used in `_currentLinearDraftKey`, `_currentReplyDraftKey`, `_clearReplyDraftForIssue` and `_clearLinearDraft`. `_detailLinearIssueId` is canonicalized wherever a card or run record sets it. `_sttAliases` is a `var`, so these earlier helpers can read it safely.
+- STTI-16: `_sttCancel(owner, cutoff)` now cancels only sessions and pending rows with `seq <= cutoff`. Retry and new-issue creation take the cutoff when they send the request, so recordings started while it is in flight survive.
+- STTI-17: alias migration removes a source key only after the destination key reads back.
+- STTI-18: `_sttAddPending` and `_sttRemovePending` canonicalize the owner when they run.
+Proof:
+- py/JS syntax ok; pytest 65 passed; node --test 5 passed.
+- Headless Chrome smoke: 32/32 on two consecutive runs. New checks cover STTI-12, 13, 15, 16 and 18.
+- Dashboard restarted.
+
+## Inspection 3 — Codex (2026-10-14)
+- Result: `<session-scratchpad>/claudex-stt/i3/result.json` · fresh session 01a13c00… · base 301d437 · assurance cross_provider
+- Verdict: **REVISE** (3 medium)
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "The plan, manifest file hashes and tracked diff match. Three concrete defects remain in alias migration and preservation of recordings made during submission.",
+ "findings": [
+  {
+   "id": "STTI-19",
+   "severity": "medium",
+   "path": "runner/templates/index.html:3614",
+   "evidence": "Migration checks whether the destination exists, rather than whether the intended write succeeded. If the UUID pending list already exists and quota prevents saving the merged list, _storageSet silently fails but line 3614 deletes the local list anyway. Its undismissed results are lost. The same problem affects newer drafts and cancellation watermarks; collision hints can also fail to persist before their source draft is removed.",
+   "fix": "Report persistence success and verify the intended destination value, including any collision hint, before removing source keys. Preserve source data for reconciliation when any required write fails."
+  },
+  {
+   "id": "STTI-20",
+   "severity": "medium",
+   "path": "runner/templates/index.html:2172",
+   "evidence": "triggerLinearIssueWithAgent still creates its cancellation watermark after awaiting the PATCH response. Click an issue's Start button, reopen that issue and begin a new recording while the response is delayed: the successful response cancels this newer, unsubmitted recording and deletes its pending results. The submission-cutoff fix applied to retry and creation does not cover this reachable card dispatch path.",
+   "fix": "Capture a cutoff before sending the PATCH and pass it to _sttCancelIssue on success. Preserve drafts and results created after that cutoff."
+  },
+  {
+   "id": "STTI-21",
+   "severity": "medium",
+   "path": "runner/templates/index.html:4057",
+   "evidence": "Creation preserves newer sessions through sttCutoff, but unconditionally clears their drafts. In browser-only mode, submit a task, then start another recording while the POST response is delayed. Its live text is saved by _saveNewIssueDraft. When success arrives, _clearNewIssueDraft deletes that unsent text and closeNewIssueModal detaches the recording. Browser-only sessions produce no pending refinement, so reopening the modal restores an empty description.",
+   "fix": "Clear only the submitted draft version. Preserve post-submission field changes and completed voice writes; if closing the modal, keep their draft or explicitly retain their text in a recoverable pending record."
+  }
+ ],
+ "coverage": [
+  "Verified the supplied plan SHA256, all thirteen manifest file hashes and tracked diff SHA256 against base 301d437b9e53d673f3ac683f4beb89c7b6d93092.",
+  "Reviewed the supplied changes, STT plan and inspection dispositions, backend, glossary, frontend controls and both added test files.",
+  "Traced capture startup, recognition draining, recorder fallbacks, resource disposal, guarded writes, pending hints, ordering and cancellation.",
+  "Traced draft persistence, modal reuse, attachment writers, creation, retry and card/state dispatch callers.",
+  "Inspected alias persistence and serving, local-first replacement, Linear polling/cache publication and LocalTracker shared-state writers beyond the changed files.",
+  "Companion dispatch and dsh documents were treated as manifest context, without granting standalone approval."
+ ],
+ "limitations": [
+  "Static review only: no edits, tests, compilation, browser checks, provider calls, service restarts or delegation.",
+  "Reported test passes, smoke checks and live latency were not independently reproduced.",
+  "Real microphone behavior, browser compatibility and runtime cancellation deadlines remain unverified.",
+  "Spec fidelity was assessed against the supplied STT plan. Vendor model/deprecation claims and separate browser-security work were not independently validated."
+ ]
+}
+```
+
+### Host dispositions + fixes
+Fix round 3 for inspection i3 (host = builder = Claude). All 3 accepted.
+- STTI-19: alias migration writes and then reads back each intended value (put = set + verify). That covers merged pending, cancel max, the moved draft and any collision hint. The source key is removed only when every required write has persisted; otherwise the source is kept and the next load or reconnect retries.
+- STTI-20: triggerLinearIssueWithAgent takes the cutoff before the PATCH and passes it to _sttCancelIssue.
+- STTI-21: on successful creation, any description text changed after Submit (typed or dictated) is written back as the next new-issue draft instead of being cleared.
+Proof:
+- JS syntax ok; pytest 65 passed; node 5 passed.
+- Headless smoke 34/34 on two runs. New checks: a simulated quota failure keeps the source and a later retry migrates it; text added during a held POST survives as the draft. The POST is intercepted, so no real issue was created.
+- Dashboard restarted.
+
+## Inspection 4 — Codex (2026-10-14)
+- Result: `<session-scratchpad>/claudex-stt/i4/result.json` · fresh session 01a13c06… · base 301d437 · assurance cross_provider
+- Verdict: **REVISE** (3 medium)
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "The supplied plan, file hashes and tracked diff match. Three material persistence defects remain.",
+ "findings": [
+  {
+   "id": "STTI-22",
+   "severity": "medium",
+   "path": "runner/templates/index.html:2172",
+   "evidence": "triggerLinearIssueWithAgent preserves recordings started after sttCutoff, but still unconditionally clears the description draft. Start an issue, reopen it and complete a browser-only recording while the PATCH response is delayed. Its input events save the new draft; the successful response then deletes it. Closing and reopening loses that unsubmitted utterance because closeDetailModal does not save the field and browser-only sessions produce no pending refinement.",
+   "fix": "Clear only the submitted draft version. Preserve description drafts changed after dispatch began, including completed voice writes, using a captured draft version or value comparison."
+  },
+  {
+   "id": "STTI-23",
+   "severity": "medium",
+   "path": "runner/templates/index.html:3567",
+   "evidence": "Alias reconciliation installs the canonical mapping before storage migration succeeds. If quota prevents writing the canonical cancellation key, the source watermark is retained but ignored: _sttCancelSeq reads only the canonical key. For example, a local-owner cancellation at seq 20 must suppress a real-owner pending result or refining session at seq 10. After the cancellation-key migration fails, canonical lookups return zero, so the cancelled result can reappear or write into the field. Retaining the source key alone does not preserve cancellation enforcement.",
+   "fix": "Enforce the merged cancellation maximum in memory independently of persistence, and consult retained source watermarks during incomplete migration. Dispose covered sessions and filter hints using that effective maximum."
+  },
+  {
+   "id": "STTI-24",
+   "severity": "medium",
+   "path": "runner/templates/index.html:3408",
+   "evidence": "_sttAddPending uses _storageSet, which silently swallows quota and storage errors. _sttDeliver then marks the session done and unregisters it regardless of persistence success. When a detached result cannot be appended, its refined and raw text have no retained copy and disappear permanently. For an attached edited field, the UI even reports that refined text was kept below although no hint exists.",
+   "fix": "Make pending insertion report verified persistence success. On failure, retain the result in a recoverable in-memory pending store, expose Copy and an explicit persistence warning, and support retrying storage."
+  }
+ ],
+ "coverage": [
+  "Verified the plan SHA256, all thirteen manifest file hashes and tracked diff SHA256 against base 301d437b9e53d673f3ac683f4beb89c7b6d93092.",
+  "Inspected the manifest changes, STT plan and inspection dispositions, backend, glossary, frontend controls and both added test files.",
+  "Traced capture lifecycle, recognition draining, recorder fallbacks, resource disposal, guarded writes, pending hints, ordering and cancellation.",
+  "Traced draft persistence, modal reuse, attachment writers, creation, retry and card/state dispatch callers.",
+  "Inspected alias persistence and serving, local-first replacement, board projection and LocalTracker shared-state writers beyond the changed files.",
+  "Treated companion dispatch and dsh documents as manifest context without granting standalone approval."
+ ],
+ "limitations": [
+  "Static review only: no edits, tests, compilation, browser checks, provider calls, service restarts or delegation.",
+  "Host-reported test passes, smoke checks and live latency were not independently reproduced.",
+  "Real microphone behavior, browser compatibility and runtime cancellation deadlines remain unverified.",
+  "Spec fidelity was assessed against the supplied STT plan; vendor claims and separate browser-security work were not independently validated."
+ ]
+}
+```
+
+### Host dispositions
+- STTI-22 accepted + fixed: triggerLinearIssueWithAgent clears the description draft only if it still equals the version captured before the PATCH. Regression: smoke 34/34, pytest 65.
+- STTI-23, STTI-24 (localStorage quota-failure paths): pending a user decision (fix vs. accept as a documented limitation).
+
+## Open Issues (accepted by user 2026-10-14)
+- STTI-23: if localStorage quota blocks writing a canonical cancel watermark during alias migration, the retained source watermark is not consulted, so a cancelled result could reappear. Trigger needs ~5 MB localStorage full; STT data is a few KB.
+- STTI-24: if localStorage quota blocks appending a pending result, the detached result is lost (no in-memory fallback). Same trigger condition.
+
+## Inspection 5 — Codex FAILED (provider_unavailable) 2026-10-14
+- Result: `<session-scratchpad>/claudex-stt/i5/result.json`; Codex usage limit ("try again at 7:30 PM"); fallback_eligible=true.
+- Automatic fallback: fresh same-provider (Claude CLI) inspection → assurance=degraded_same_provider.
+- Fallback Claude inspection (`<session-scratchpad>/claudex-stt/i5f/result.json`) also FAILED: provider_unavailable (Claude usage limit).
+- STATUS: build complete, fixes for i1–i4 applied, final inspection NOT done. Unreviewed edits: STTI-22 fix (triggerLinearIssueWithAgent sent-draft check) and fix round 3 (STTI-19/20/21) are covered only by host tests (pytest 65, node 5, smoke 34/34). Next: rerun Codex inspect after quota reset (7:30 PM), base 301d437, feedback inspect-notes-5.md.
+- Fallback retry from i5 refused by runner: another session's dsh plan files changed after i5, so i5's snapshot no longer matches. Re-running inspection in an isolated worktree (base 301d437 + only the STT changes).
+
+## Inspection 6 — isolated worktree (base 301d437 + STT changes only), 2026-10-14
+- Codex primary (`<session-scratchpad>/claudex-stt/i6/result.json`): failed in 4 s, provider_unavailable (usage limit).
+- Claude fallback (`<session-scratchpad>/claudex-stt/i6f/result.json`), fresh session 6108d5c5…, observed model claude-opus-5-5[1m], **assurance=degraded_same_provider**
+- Verdict: **REVISE** (1 medium, 4 low)
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "The STTI-22 fix does preserve dictation made while the PATCH is in flight. However, it compares the raw stored draft JSON, and that JSON is rewritten by things other than user edits: the saved_at field changes on every save, and setDetailIssueAgent saves the draft programmatically whenever the issue loads. As a result, simply opening the issue during the PATCH keeps a stale draft that still holds the pre-dispatch state, and that state comes back whenever the issue is reopened. Fix rounds 1–4 also introduced several low-severity edge cases: new-issue submit can re-save already-submitted text as the next draft, retry cancels unsent description results, an alias arriving mid-load can leave the Linear editor stuck on \"Loading…\", and a reattached session can write into the blank field during a load. I found no backend defects. This review is degraded same-provider (Claude reviewing Claude's build), not an independent cross-provider review. I did not re-raise STTI-23/24, which the user accepted.",
+ "findings": [
+  {
+   "id": "STTI-25",
+   "severity": "medium",
+   "path": "runner/templates/index.html:2163-2176",
+   "evidence": "triggerLinearIssueWithAgent keeps the draft unless `_storageGet(draftKey) === sentDraft`, comparing the raw JSON. `_saveLinearDraft` (1658-1670) stamps `saved_at: Date.now()` and is called without any user edit by setDetailIssueAgent (2817), which runs on every issue load via `_restoreLinearDraft` (1688) and at 2886. Scenario: click ▶ Start on a Todo card, then click the card while the dispatch PATCH (which triggers backend dispatch) is still running. The loader rewrites the draft with the fetched `state` (often still 'Todo') and a new saved_at. When the PATCH succeeds the strings differ, so the draft is kept. Linear drafts are never cleared anywhere else; the only other `_clearLinearDraft` call is at 2957. Every later reopen therefore runs `stateEl.value = draft.state` (2889) and shows Todo for an In Progress issue, and the next 'Save to Linear' sends `state_name: 'Todo'`, pulling the running issue back to Todo. Before this fix the draft was always cleared on success.",
+   "fix": "Decide whether to keep the draft by its content, not the raw JSON: keep it only when the stored description or title differs from what was sent in `body`. When keeping it, rewrite its `state` to the dispatched state ('In Progress') and `preferred_agent` to `agentVal`, or store only the description text, so a stale state can never be restored."
+  },
+  {
+   "id": "STTI-26",
+   "severity": "low",
+   "path": "runner/templates/index.html:4053-4068",
+   "evidence": "submitNewIssue neither stops nor fences the live capture when Submit is clicked. The cancel watermark is only set after the POST returns, so a recognition result that arrives during the POST still passes `_sttWrite`. A typical case is Chrome finalizing an interim phrase, which adds punctuation via `_normalizeSpeechSegment`. The field then differs from the sent `desc`, so `descNow.trim() !== desc` is true and the entire already-submitted description plus that final phrase is saved as the next new-issue draft. The next 'New task' opens prefilled with text that was already submitted, which invites a duplicate task. The same pre-cutoff-writer pattern also defeats the STTI-22 equality check.",
+   "fix": "Fence the pre-cutoff session at submit time: stop its capture and refuse its further field writes, for example with an in-memory submitting watermark that `_sttWrite` checks. Then, after success, keep only text the user added after `desc`, such as the suffix when `descNow` starts with the sent text, instead of the whole field."
+  },
+  {
+   "id": "STTI-27",
+   "severity": "low",
+   "path": "runner/templates/index.html:2666-2668",
+   "evidence": "retryRun sends only `reply`, yet `_sttCancelIssue(boardItem?.linear_issue_id, sttCutoff)` also cancels `agenticos.draft.linear.<id>`. Virtual In Review issues show the description mic (2462). A description dictation that is still refining, or whose refined result sits as a pending hint (for example because the field was edited), is disposed or deleted by `_sttCancel` when the user retries with a reply. That description text was never submitted, while the plan only cancels on send/dispatch/create of the owning text.",
+   "fix": "On retry, cancel only the reply owners (`replyOwner`, `reply.run.<run_id>` and `reply.linear.<id>`), not the description owner."
+  },
+  {
+   "id": "STTI-28",
+   "severity": "low",
+   "path": "runner/templates/index.html:2838-2859",
+   "evidence": "`_sttApplyAliases` (STTI-06) retargets `_detailLinearIssueId` from the local id to the real id. If the `linear_issues_updated` id_map arrives while `_loadLinearIssueIntoModal` is still fetching, the loader captured `linear_issue_id` as the local id, so its staleness check `_detailLinearIssueId !== linear_issue_id` (2859) fails and it returns. Title and description stay blank, the inputs stay disabled (2847-2853) and the status stays 'Loading…'. If instead the fetch of the swapped-away local id 404s, the fields are re-enabled but left blank. This is reachable by opening a just-created local task, a step the plan's own manual check performs.",
+   "fix": "In the loader, compare canonical ids, for example `_sttIssueId(_detailLinearIssueId) !== _sttIssueId(linear_issue_id)`. Alternatively, have `_sttApplyAliases` re-invoke the loader for the open issue after retargeting."
+  },
+  {
+   "id": "STTI-29",
+   "severity": "low",
+   "path": "runner/templates/index.html:3554-3563",
+   "evidence": "`_sttTick` treats the desc kind as visible as soon as `linear-edit-section` is shown, but `_loadLinearIssueIntoModal` blanks and disables the fields while fetching (2846-2853). Take a detached session that never wrote into the field (final-only mode with no SpeechRecognition, or recognition failing from the start) on an issue with an empty description, so `expected === ''`. If it reattaches and completes inside that loading window, `_sttWrite` writes into the disabled field. Its input event then saves a draft with title '', state '' and `preferred_agent: 'claude'`, because `_detailPreferredAgent` was reset at 2850. `_restoreLinearDraft` then merges that draft over the issue, so the issue's real preferred agent is silently replaced by 'claude'.",
+   "fix": "Do not reattach or write while the target field is disabled or the loader is pending: treat the kind as not visible until loading finishes."
+  }
+ ],
+ "coverage": [
+  "Read the plan, the full tracked diff, and the current files: runner/modules/stt/__init__.py, runner/modules/stt/glossary.txt, tests/modules/test_stt.py and tests/stt_seq.test.mjs.",
+  "Read runner/templates/index.html around the draft helpers (1460-1720), drag dispatch, setIssueAgent, triggerLinearIssueWithAgent (STTI-22), openDetailModal, closeDetailModal, dispatchFromDetail, retryRun, approveRun, the linear loader, saveLinearIssue, the STT block (capture, recorder, refine, deliver, end, detach, dispose, cancel), the new-issue modal, attachment writers and submitNewIssue.",
+  "Traced every caller of triggerLinearIssueWithAgent, setIssueAgent, retryRun, _moveLinearIssueToColumn, openDetailModal and _loadLinearIssueIntoModal, plus all writers and clearers of agenticos.draft.linear.* keys.",
+  "Checked the backend deadline handling (Python 3.12, so `except TimeoutError` catches asyncio timeouts), glossary validation, response shape, and the record_id_alias ordering and emit placement in runner/modules/linear/__init__.py.",
+  "Verified that the STTI-22 fix covers its intended scenario: dictation during the PATCH changes the stored draft, so the draft is preserved."
+ ],
+ "limitations": [
+  "This is a degraded same-provider fallback: the builder and the reviewer are both Claude, so it is not independent cross-provider assurance.",
+  "Static review only. I did not edit files, run tests, compile, run browser checks, call providers or restart services. I did not verify the hashes of the plan, manifest or diff. The host-reported results (pytest 65, node 5, smoke 34/34) were not reproduced.",
+  "Real-microphone behaviour, browser compatibility and runtime timing windows were not exercised, so the severity of STTI-26, STTI-28 and STTI-29 depends on timing.",
+  "Pre-existing issue outside this diff: triggerLinearIssueWithAgent (2158-2162) builds its PATCH body from the shared detail-modal title and description fields even when started from a card, and closeDetailModal does not clear them. That can send another issue's title and description. I did not assess it further, but it should be checked separately.",
+  "STTI-23 and STTI-24 (localStorage quota exhaustion) were not re-raised, per the user's acceptance. The companion dispatch and dsh plan documents were out of scope.",
+  "DEGRADED_SAME_PROVIDER: preferred reviewer codex was unavailable; claude reviewed in a fresh fallback session without cross-provider independence."
+ ]
+}
+```
+
+### Host dispositions
+- STTI-25 (regression from the STTI-22 fix) was accepted and fixed. The draft is now compared by description/title content against the PATCH body, not by raw JSON. A kept draft is re-stamped with state 'In Progress' and the dispatched agent, so a stale Todo state can't come back.
+- STTI-27 was accepted and fixed: retry now cancels only the reply owners and leaves description dictation alone.
+- STTI-26, STTI-28 and STTI-29 are low-severity, timing-dependent edge cases. Per the user's decision to commit now, they are open and unfixed (see Open Issues).
+- Regression after fixes: pytest 65 passed, node 5 passed, headless smoke 34/34, dashboard restarted.
+- The STTI-25/27 fixes were made after inspection 6 and have not been independently inspected.
+
+## Open Issues (added 2026-10-14)
+- STTI-26: a recognition result that lands during the new-issue POST can re-save the already-submitted description as the next draft.
+- STTI-28: an alias arriving while the Linear loader is fetching can leave the editor showing 'Loading…'. Reopening the issue recovers.
+- STTI-29: a detached session reattaching while the Linear loader has the field disabled can write into it.
+- Pre-existing, outside this diff: triggerLinearIssueWithAgent builds its PATCH from the shared modal title/description fields even when started from a card.
+
+## Commit — 2026-10-14
+- The user chose to commit the current version ("目前这个版本我觉得还可以，那就直接 commit"). The final cross-provider inspection was not completed because Codex quota was exhausted. Recommended: one Codex inspection after the quota resets.

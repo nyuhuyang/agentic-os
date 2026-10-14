@@ -116,7 +116,7 @@ This also moves off OpenAI models that are being retired (source: developers.ope
 
 ## Open Questions (resolve before build)
 - [x] Polish model = `gpt-6-luna` with `reasoning_effort` none, overridable via `OPENAI_STT_POLISH_MODEL`. User confirmed 2026-10-14. Price is $0.10 / $0.50 per 1M tokens (developers.openai.com/api/docs/models).
-- [ ] Should the polish step also run for Browser-only mode without audio, for example when OpenAI transcription fails? Default: no. Polish only runs on the OpenAI transcript.
+- [x] Should the polish step also run for Browser-only mode without audio, for example when OpenAI transcription fails? Default: no. Polish only runs on the OpenAI transcript. — kept default: no (2026-10-14)
 - [ ] Glossary contents beyond the generic list (private extras go in `STT_GLOSSARY_EXTRA`).
 
 ## Non-goals
@@ -131,14 +131,14 @@ This also moves off OpenAI models that are being retired (source: developers.ope
 ## Progress Checklist
 **Phase 0 — confirm**
 - [x] User picked `gpt-6-luna`. `models.list()` with the `.env` key lists `gpt-6-luna`, `gpt-transcribe` and `gpt-live-transcribe` (2026-10-14).
-- [ ] Record documented limits for `keywords` (chars/length/count) and `prompt` length from the official speech-to-text guide
-- [ ] Verify the exact request shape with one 5 s sample: `extra_body={"keywords","languages":["zh"]}` + `prompt` + `response_format="json"` → `.text`
+- [x] Documented limits (official speech-to-text guide, 2026-10-14). `keywords` must not contain `<`, `>`, CR or LF, or the whole request is rejected; no max length or count is documented, so we self-cap at 64 chars and 100 entries. `prompt` has no stated limit for `gpt-transcribe`, so we self-cap `browser_text` at 1000 chars. `languages` takes ISO 639-1 codes (`zh`) and replaces `language`. Audio formats are mp3/mp4/mpeg/mpga/m4a/wav/webm, up to 25 MB.
+- [x] Live sample (macOS `say` → m4a, 2026-10-14). The request shape `extra_body={keywords, languages:["zh"]}` + `prompt` + `response_format="json"` returned `.text` with OpenAI/Codex/Linear spelled correctly, plus `languages:[{code:"zh"}]`, in 2.7 s. The Luna polish (Responses API, `reasoning={"effort":"none"}`) took 2.6 s.
 
 **Phase 1 — backend**
-- [ ] `/api/stt`: step A (`gpt-transcribe`, keywords, browser_text prompt, JSON parse) + step B (polish, 8 s timeout) + fallbacks; env `OPENAI_STT_MODEL` (default `gpt-transcribe`), `OPENAI_STT_POLISH_MODEL`, `STT_GLOSSARY_EXTRA`
-- [ ] `runner/modules/stt/glossary.txt` (generic terms only)
-- [ ] Delete realtime worker + Socket.IO handlers + beta/retired model constants
-- [ ] `tests/modules/test_stt.py` with a fake OpenAI client:
+- [x] `/api/stt`: step A (`gpt-transcribe`, keywords, browser_text prompt, JSON parse) + step B (polish, 8 s timeout) + fallbacks; env `OPENAI_STT_MODEL` (default `gpt-transcribe`), `OPENAI_STT_POLISH_MODEL`, `STT_GLOSSARY_EXTRA` — done 2026-10-14; live `/api/stt` through the launchd runner: 4.0 s, polished, OpenAI/Codex/Linear correct
+- [x] `runner/modules/stt/glossary.txt` (generic terms only) — done
+- [x] Delete realtime worker + Socket.IO handlers + beta/retired model constants — done; module 390 → ~190 lines
+- [x] `tests/modules/test_stt.py` with a fake OpenAI client: — 11 tests pass. Deviation: the DNS case is simulated by blocking executor work (`run_in_executor(time.sleep)`), which is the same uncancellable-executor-thread mechanism, rather than by patching `getaddrinfo`
   - Happy path returns polished + raw.
   - The outbound call has `extra_body` keywords + `languages`, no `language`, a trimmed `prompt`, and `response_format="json"`.
   - A fake async polish call that awaits `asyncio.sleep(20)` ⇒ the response arrives in <9 s with the raw transcript and `polished: false`, and the fake records `CancelledError`, so the call really was cancelled.
@@ -150,10 +150,10 @@ This also moves off OpenAI models that are being retired (source: developers.ope
   - Glossary: an invalid entry is dropped; a missing, unreadable or invalid extras file ⇒ warning only, generic glossary kept.
 
 **Phase 2 — frontend**
-- [ ] One flow in `toggleMicFor` with the session object (Approach 4): Web Speech + MediaRecorder on one stream; stop ⇒ upload with `browser_text`; "refining…" status
-- [ ] Recorder MIME negotiation + failure fallbacks + stream cleanup (4c)
-- [ ] Unique IDs for the new-issue mic/status/hint (4a); bind new-issue draft listeners on modal creation (4b)
-- [ ] Session registry keyed by draft key with `_capture` / `_sttSessions`, a global persisted `seq`, and persisted cancel watermarks:
+- [x] One flow in `toggleMicFor` with the session object (Approach 4): Web Speech + MediaRecorder on one stream; stop ⇒ upload with `browser_text`; "refining…" status — done; headless Chrome smoke (fake mic, `/api/stt` intercepted) passes
+- [x] Recorder MIME negotiation + failure fallbacks + stream cleanup (4c) — done. Deviation: `audio/ogg` dropped because `/v1/audio/transcriptions` does not accept ogg; the candidates are webm(opus), webm and mp4→m4a
+- [x] Unique IDs for the new-issue mic/status/hint (4a); bind new-issue draft listeners on modal creation (4b) — done; draft binding moved to `DOMContentLoaded`; smoke confirms the new-issue draft saves on input
+- [x] Session registry keyed by draft key with `_capture` / `_sttSessions`, a global persisted `seq`, and persisted cancel watermarks: — done. Deviation: the helper is `_sttClassify(seq, cancelSeq, latestSeq)`, not `_classifyResult(...)`; `tests/stt_seq.test.mjs` has 5 passing node tests. Smoke covers close→reopen hint, cancel drop, and reverse order
   - Close or switch stops the capture and detaches the session.
   - A detached result goes only to `agenticos.stt.pending.<owner>`.
   - Reopening from any column reattaches.
@@ -164,27 +164,27 @@ This also moves off OpenAI models that are being retired (source: developers.ope
     - a new recording after a reload ranks above the persisted pending rows.
   - Cancel on send, dispatch or create.
   - A late `getUserMedia` for a cancelled or detached session stops its tracks.
-- [ ] Backend:
+- [x] Backend: — done; emit moved before the slow Linear comment call
   - add `id_map` to the post-swap `linear_issues_updated` emit;
   - persist the alias in `outputs/id_aliases.json` (locked atomic write);
   - add `GET /api/linear/id-aliases`.
-- [ ] Frontend:
+- [x] Frontend: — done; `_sttCanon()` plays the role of `_canonOwner()`; smoke covers pending/draft/cancel migration
   - load aliases on page load and on reconnect, plus the live `id_map`;
   - idempotent, collision-safe migration;
   - `_canonOwner()` in callbacks;
   - test (Python, Flask test client): the alias is persisted and returned by the endpoint.
-- [ ] Guard-before-every-write + expected-then-dispatch-input persistence + "Use refined text" hint + "show raw" toggle
-- [ ] Remove `.stt-source` selectors (3 places) and their JS/localStorage; browser-only when capabilities lack `openai`
+- [x] Guard-before-every-write + expected-then-dispatch-input persistence + "Use refined text" hint + "show raw" toggle — done; the hint offers Copy/Dismiss/show raw and never writes the field; smoke: an edit during refine is preserved and a hint is shown
+- [x] Remove `.stt-source` selectors (3 places) and their JS/localStorage; browser-only when capabilities lack `openai` — done; button title reflects whether openai is available
 
 **Verification**
-- [ ] `.venv/bin/python3 -m py_compile runner/*.py runner/modules/stt/__init__.py` and `.venv/bin/python -m pytest tests/` pass
+- [x] `.venv/bin/python3 -m py_compile runner/*.py runner/modules/stt/__init__.py` and `.venv/bin/python -m pytest tests/` pass — compile ok; 65 passed (2026-10-14)
 - [ ] Manual in Chrome on the launchd dashboard: speak a sentence containing "OpenAI", "Codex", "Linear". Live text appears and is then replaced by the refined text. Typing during "refining…" shows the hint instead of overwriting. Clicking **Copy** in the hint puts the refined text on the clipboard and leaves the field untouched. If you start recording, close the modal while the permission prompt is pending, then grant permission, the mic indicator goes off immediately. The same holds for typing **during** live recognition, and for adding an attachment mid-recording, in all three targets: reply, Linear description and new-issue description. If you start recording in issue A, close it and open issue B, nothing from A is inserted into B. Close A mid-recording ⇒ the mic goes off at once. Reopening A from another column (for example In Review instead of Todo), and after a board refresh, shows A's pending Copy hint.
 Close A, record in B, then reopen A: A's result is present, so the B capture did not discard it.
 Send A's reply while A is still refining: no hint appears later.
 Record in a just-created local task, then wait for Linear sync and reopen: the result is found. The same holds if you reload the page during sync.
 Record twice in A without dismissing and let them finish in reverse order: both results are in the hint, newest first. Clicking Copy on one leaves the other. Reopening A while it is still refining shows "refining…" and then the result in place. Spoken text in the new-issue modal survives a close and reopen. The status and hint always show in the modal of the owning issue. With the OpenAI key temporarily unset in a dev run, the browser-only text stays.
-- [ ] `grep -n "beta.realtime\|gpt-4o-.*transcribe\|whisper-1" runner/` returns nothing
-- [ ] Update `docs/context-maintenance.md`; `graphify update .`
+- [x] `grep -n "beta.realtime\|gpt-4o-.*transcribe\|whisper-1" runner/` returns nothing — returns nothing
+- [x] Update `docs/context-maintenance.md`; `graphify update .` — done 2026-10-14
 
 ## Test
 `.venv/bin/python -m pytest tests/modules/test_stt.py tests/ -q`; restart dashboard (`launchctl kickstart -k gui/$(id -u)/com.agenticos.runner`); the manual Chrome check above.

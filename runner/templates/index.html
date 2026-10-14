@@ -346,6 +346,11 @@
     0%, 100% { opacity: 1; }
     50%       { opacity: 0.45; }
   }
+  .stt-hint { margin-top: 4px; }
+  .stt-hint-row { border: 1px dashed var(--accent); border-radius: 4px; padding: 4px 6px; margin-top: 4px; }
+  .stt-hint-bar { display: flex; gap: 8px; align-items: center; font-size: calc(10px * var(--fs)); color: var(--text-dim); }
+  .stt-hint-text { font-size: calc(12px * var(--fs)); color: var(--text); white-space: pre-wrap; margin-top: 3px; user-select: text; }
+  .stt-link { background: none; border: none; padding: 0; color: var(--accent); font-family: inherit; font-size: calc(10px * var(--fs)); cursor: pointer; text-decoration: underline; }
 
   /* Skill cards */
   .skill-card.agent-disabled { opacity: 0.28; pointer-events: none; }
@@ -794,14 +799,11 @@
         <div style="display:flex;justify-content:space-between;align-items:center">
           <div class="linear-edit-label" style="margin-bottom:0">Description</div>
           <div style="display:flex;align-items:center;gap:4px;display:none" id="desc-stt-group">
-            <select id="stt-source-desc" class="stt-source" onchange="onSttSourceChange(this)" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:calc(11px * var(--fs));padding:1px 4px;border-radius:3px;cursor:pointer;font-family:inherit">
-              <option value="browser">Browser STT</option>
-              <option value="openai:gpt-4o-mini-transcribe">OpenAI 4o mini</option>
-            </select>
-            <button id="mic-btn-desc" onclick="toggleMicFor('linear-edit-desc','mic-btn-desc','mic-status-desc')" title="Voice input" style="background:none;border:1px solid var(--accent);font-size:calc(14px * var(--fs));padding:2px 8px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
+            <button id="mic-btn-desc" onclick="toggleMicFor('desc')" title="Voice input" style="background:none;border:1px solid var(--accent);font-size:calc(14px * var(--fs));padding:2px 8px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
           </div>
         </div>
         <div id="mic-status-desc" style="font-size:calc(10px * var(--fs));color:var(--text-dim);margin-top:2px;display:none"></div>
+        <div id="stt-hint-desc" class="stt-hint" style="display:none"></div>
         <textarea class="linear-edit-input" id="linear-edit-desc" rows="4" placeholder="Issue description"></textarea>
         <div class="attach-bar">
           <label class="attach-btn" for="desc-files">📎 Attach file</label>
@@ -855,10 +857,6 @@
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
         <div class="detail-section-label" style="margin-bottom:0">Comment / Feedback</div>
         <div style="display:flex;align-items:center;gap:4px">
-          <select id="stt-source" class="stt-source" onchange="onSttSourceChange(this)" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:calc(11px * var(--fs));padding:1px 4px;border-radius:3px;cursor:pointer;font-family:inherit">
-            <option value="browser">Browser STT</option>
-            <option value="openai:gpt-4o-mini-transcribe">OpenAI 4o mini</option>
-          </select>
           <button id="mic-btn" onclick="toggleMic()" title="Voice input" style="background:none;border:1px solid var(--accent);font-size:calc(14px * var(--fs));padding:2px 8px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
         </div>
       </div>
@@ -871,6 +869,7 @@
       <div class="detail-reply-status" id="detail-reply-status"></div>
       <div id="mic-status" style="font-size:calc(10px * var(--fs));color:var(--text-dim);margin-top:3px;display:none"></div>
     </div>
+    <div id="stt-hint" class="stt-hint" style="display:none"></div>
     <div class="detail-footer">
       <button class="job-btn" id="detail-approve-btn" onclick="approveRun()" style="display:none;background:var(--green);border-color:var(--green);color:#111">✓ Approve → Done</button>
       <div class="job-btn-group" id="detail-dispatch-group" style="display:none;margin-top:0">
@@ -1278,7 +1277,7 @@ async function _fetchCapabilities() {
     const sttModule = caps.modules && caps.modules.stt;
     if (sttModule && sttModule.backends && sttModule.backends.length > 0) {
       _sttBackends = sttModule.backends;
-      _updateSttSelector();
+      _sttUpdateTitles();
     }
     return caps;
   } catch (_) { return null; }
@@ -1286,47 +1285,8 @@ async function _fetchCapabilities() {
 
 let _sttBackends = ['browser'];
 
-function _updateSttSelector() {
-  const selectors = Array.from(document.querySelectorAll('.stt-source'));
-  if (!selectors.length) return;
-  const saved = window.localStorage.getItem('agenticos.stt.source');
-  const current = saved || selectors.find(sel => sel.value)?.value || 'browser';
-  const options = [
-    ['browser', 'Browser STT'],
-    ['openai:gpt-4o-mini-transcribe', 'OpenAI 4o mini'],
-  ];
-  const selected = options.some(([value]) => value === current)
-    ? current
-    : 'browser';
-
-  for (const sel of selectors) {
-    sel.innerHTML = '';
-    for (const [value, label] of options) {
-      const opt = document.createElement('option');
-      opt.value = value;
-      opt.textContent = label;
-      sel.appendChild(opt);
-    }
-    sel.value = selected;
-  }
-  window.localStorage.setItem('agenticos.stt.source', selected);
-  onSttSourceChange(selectors[0]);
-}
-
-function _getSttSource() {
-  return window.localStorage.getItem('agenticos.stt.source')
-    || document.querySelector('.stt-source')?.value
-    || 'browser';
-}
-
 function _getSttLanguage() {
   return 'zh-CN';
-}
-
-function _syncSttSourceControls(value) {
-  for (const sel of document.querySelectorAll('.stt-source')) {
-    if (sel.value !== value) sel.value = value;
-  }
 }
 
 function _updateTrackerLabel() {
@@ -1526,12 +1486,15 @@ function _isModalOpen(id) {
   return !!document.getElementById(id)?.classList.contains('open');
 }
 
+// local-* ids are replaced by Linear ids after background sync; drafts always use the canonical id.
+function _sttIssueId(id) { return (_sttAliases && _sttAliases[id]) || id; }
+
 function _currentLinearDraftKey() {
-  return _detailLinearIssueId ? `agenticos.draft.linear.${_detailLinearIssueId}` : '';
+  return _detailLinearIssueId ? `agenticos.draft.linear.${_sttIssueId(_detailLinearIssueId)}` : '';
 }
 
 function _currentReplyDraftKey() {
-  if (_detailLinearIssueId) return `agenticos.draft.reply.linear.${_detailLinearIssueId}`;
+  if (_detailLinearIssueId) return `agenticos.draft.reply.linear.${_sttIssueId(_detailLinearIssueId)}`;
   if (_detailRunId) return `agenticos.draft.reply.run.${_detailRunId}`;
   return '';
 }
@@ -1587,6 +1550,7 @@ function _readBoardDragPayload(e) {
 
 async function _moveLinearIssueToColumn(issueId, stateName) {
   if (!issueId || !stateName) return;
+  if (_linearStateToBoard(stateName) === 'in_progress') _sttCancelIssue(issueId);  // dragging to In Progress dispatches it
   _holdBoardRefresh();
   _optimisticPatchLinearIssue(issueId, { state_name: stateName });
   if (_detailLinearIssueId === issueId && _isModalOpen('detail-modal')) {
@@ -1682,7 +1646,7 @@ function _clearReplyDraft() {
 
 function _clearReplyDraftForIssue(issueId) {
   if (!issueId) return;
-  _clearDraft(`agenticos.draft.reply.linear.${issueId}`);
+  _clearDraft(`agenticos.draft.reply.linear.${_sttIssueId(issueId)}`);
   if (_detailLinearIssueId === issueId && !_detailReplyDirty()) {
     _setDetailReplyValue('');
     _replyAttachments = [];
@@ -1699,6 +1663,7 @@ function _saveLinearDraft() {
     description: document.getElementById('linear-edit-desc')?.value || '',
     state: document.getElementById('linear-edit-state')?.value || '',
     preferred_agent: _detailPreferredAgent || 'claude',
+    saved_at: Date.now(),
   };
   _saveDraft(key, JSON.stringify(payload));
   _renderDetailReplyStatus(_linearStateToBoard(document.getElementById('linear-edit-state')?.value || '') === 'in_review');
@@ -1726,7 +1691,7 @@ function _restoreLinearDraft(issue) {
 
 function _clearLinearDraft(issueId = _detailLinearIssueId) {
   if (!issueId) return;
-  _clearDraft(`agenticos.draft.linear.${issueId}`);
+  _clearDraft(`agenticos.draft.linear.${_sttIssueId(issueId)}`);
 }
 
 function _detailLinearDirty() {
@@ -2149,6 +2114,7 @@ async function setIssueAgent(issueId, currentAgent) {
   if (!issueId) return;
   const next = currentAgent === 'claude' ? 'codex' : currentAgent === 'codex' ? 'deepseek' : currentAgent === 'deepseek' ? 'deepseek-tui' : 'claude';
   // Set agent and move to In Progress (server skips dispatch if already running)
+  _sttCancelIssue(issueId);
   await fetch(`/api/linear/issues/${issueId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
@@ -2194,6 +2160,8 @@ async function triggerLinearIssueWithAgent(issueId, agent, { refresh = true } = 
   const body = { preferred_agent: agentVal, state_name: 'In Progress' };
   if (titleEl) body.title = titleEl.value;
   if (descEl) body.description = descEl.value;
+  const sttCutoff = _sttNewSeq();  // recordings started while the PATCH is in flight survive
+  const draftKey = `agenticos.draft.linear.${_sttIssueId(issueId)}`;
   try {
     const res = await fetch(`/api/linear/issues/${issueId}`, {
       method: 'PATCH',
@@ -2202,7 +2170,16 @@ async function triggerLinearIssueWithAgent(issueId, agent, { refresh = true } = 
     });
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || 'dispatch failed');
-    _clearLinearDraft(issueId);
+    // Compare content, not the raw draft JSON (loaders re-save it with a new saved_at). Keep only text
+    // edited or dictated while the PATCH was in flight, stamped with the dispatched state and agent.
+    let kept = null;
+    try { kept = JSON.parse(_storageGet(draftKey, '') || 'null'); } catch (_) {}
+    if (kept && ((kept.description ?? '') !== (body.description ?? '') || (kept.title ?? '') !== (body.title ?? ''))) {
+      _storageSet(draftKey, JSON.stringify({ ...kept, state: 'In Progress', preferred_agent: agentVal, saved_at: Date.now() }));
+    } else {
+      _clearLinearDraft(issueId);
+    }
+    _sttCancelIssue(issueId, sttCutoff);
     if (refresh) refreshJobBoard();
   } catch (err) {
     console.error('triggerLinearIssueWithAgent failed:', err);
@@ -2430,6 +2407,8 @@ async function openDetailModal(run_id) {
   if (!run_id) return;
   const requestSeq = ++_detailModalLoadSeq;
   const boardItem = _boardItemsByRunId[run_id] || null;
+  _sttDetachKind('reply');  // the textareas are reused for the next issue
+  _sttDetachKind('desc');
   _stopDetailProgressPoll();
   _detailRunId = run_id;
   _detailLinearIssueId = null;
@@ -2474,7 +2453,7 @@ async function openDetailModal(run_id) {
     }
     const issueId = run_id.slice(7);
     if (requestSeq !== _detailModalLoadSeq || _detailRunId !== run_id || !_isModalOpen('detail-modal')) return;
-    _detailLinearIssueId = issueId;
+    _detailLinearIssueId = _sttIssueId(issueId);
     document.getElementById('detail-meta').textContent = 'Linear issue';
     document.getElementById('detail-prompt-section').style.display = 'none';
     const isInProgressVirtual = (boardItem?._boardStatus || '') === 'in_progress';
@@ -2575,7 +2554,7 @@ async function openDetailModal(run_id) {
     document.getElementById('detail-approve-btn').style.display = isReview ? '' : 'none';
     document.getElementById('detail-reply-section').style.display = r.linear_issue_id ? '' : 'none';
     document.getElementById('desc-stt-group').style.display = 'none';
-    _detailLinearIssueId = r.linear_issue_id || null;
+    _detailLinearIssueId = r.linear_issue_id ? _sttIssueId(r.linear_issue_id) : null;
     if (isReview) {
       _restoreReplyDraft();
     } else if (_detailLinearIssueId) {
@@ -2657,6 +2636,7 @@ function _updateDetailRetryLock(preferredAgent, sessionLocked = false) {
 async function dispatchFromDetail(agent) {
   if (!_detailLinearIssueId) return;
   const linearIssueId = _detailLinearIssueId;
+  _sttCancelIssue(linearIssueId);
   // Local state + close modal immediately
   fetch(`/api/linear/issues/local/${linearIssueId}`, {
     method: 'PATCH',
@@ -2677,6 +2657,8 @@ async function retryRun(run_id, agent = 'claude', reply = '', attachments = []) 
   if (!run_id) return;
   const boardItem = _boardItemsByRunId[run_id] || null;
   const targetRunId = boardItem?.latest_run_id || run_id;
+  const replyOwner = _isModalOpen('detail-modal') ? _currentReplyDraftKey() : '';
+  const sttCutoff = _sttNewSeq();  // recordings started after this survive the retry
   if (targetRunId.startsWith('linear-')) { alert('No previous run to continue yet. Move the issue to In Progress first.'); return; }
   try {
     const body = JSON.stringify({ agent, reply, attachments });
@@ -2687,6 +2669,10 @@ async function retryRun(run_id, agent = 'claude', reply = '', attachments = []) 
     });
     const data = await res.json();
     if (!data.ok) { alert('Retry failed: ' + (data.error || 'unknown')); return; }
+    if (replyOwner) _sttCancel(replyOwner, sttCutoff);
+    _sttCancel(`agenticos.draft.reply.run.${run_id}`, sttCutoff);
+    // Retry sends only the reply: leave description dictation alone.
+    if (boardItem?.linear_issue_id) _sttCancel(`agenticos.draft.reply.linear.${boardItem.linear_issue_id}`, sttCutoff);
     closeDetailModal();
     refreshJobBoard();
   } catch (err) {
@@ -2856,6 +2842,8 @@ async function _loadLinearIssueIntoModal(linear_issue_id, boardItem = null) {
     state: document.getElementById('linear-edit-state')?.value || '',
     preferred_agent: _detailPreferredAgent || 'claude',
   } : null;
+  linear_issue_id = _sttIssueId(linear_issue_id);
+  if (_detailLinearIssueId !== linear_issue_id) { _sttDetachKind('reply'); _sttDetachKind('desc'); }
   _detailLinearIssueId = linear_issue_id;
   const section = document.getElementById('linear-edit-section');
   if (!section) return;
@@ -2974,6 +2962,8 @@ async function saveLinearIssue() {
     body: JSON.stringify({ title, description: desc, state_name: nextState, preferred_agent: _detailPreferredAgent }),
   }).catch(() => {});
   _clearLinearDraft();
+  if (_linearStateToBoard(nextState) === 'in_progress') _sttCancelIssue(issueId);  // saving as In Progress dispatches
+  else _sttCancel(_currentLinearDraftKey());
   _detailLinearInitial = { title, description: desc, state: nextState, preferred_agent: _detailPreferredAgent };
   if (stateChanged) {
     closeDetailModal({ flush: false });
@@ -3088,20 +3078,45 @@ function _linearStateToBoard(linearState) {
   return map[key] || 'todo';
 }
 
-// ── Voice input (Web Speech API) ────────────────────────────────────────────
-let _micRecognition = null;
-let _micTargetId = null;
-let _micBtnId = null;
-let _micStatusId = null;
-let _micTranscriptBase = '';
-let _micFinalTranscript = '';
-let _micInterimTranscript = '';
-let _micLastRenderedValue = '';
+// ── Voice input: Browser STT live preview + OpenAI two-pass refinement ─────
+// Plan: docs/exec-plans/active/2026-10-14-stt-two-pass.md. A recording is owned by its target
+// field's draft key (issue/task + field), whichever column the issue was opened from.
+const _STT_TARGETS = {
+  reply: { fieldId: 'detail-reply-input', btnId: 'mic-btn', statusId: 'mic-status', hintId: 'stt-hint' },
+  desc:  { fieldId: 'linear-edit-desc', btnId: 'mic-btn-desc', statusId: 'mic-status-desc', hintId: 'stt-hint-desc' },
+  new:   { fieldId: 'new-issue-desc', btnId: 'mic-btn-new', statusId: 'mic-status-new', hintId: 'stt-hint-new' },
+};
+// Only formats /v1/audio/transcriptions accepts (webm, mp4/m4a, …); ogg is not one of them.
+const _STT_MIME_TYPES = [['audio/webm;codecs=opus', 'webm'], ['audio/webm', 'webm'], ['audio/mp4', 'm4a']];
+const _STT_FETCH_TIMEOUT_MS = 45000;
+let _sttCapture = null;          // the single live mic capture
+const _sttSessions = new Map();  // canonical owner -> Set of sessions still capturing or refining
+const _sttLatestSeq = new Map(); // canonical owner -> highest seq started
+var _sttAliases = {};            // local-* id -> Linear id (var: read by draft helpers defined earlier)
 
-// OpenAI STT (file-upload mode)
-let _openAiMediaRecorder = null;
-let _openAiAudioChunks = [];
-let _openAiUploading = false;
+// stt-pure:start
+function _sttNextSeq(lastSeq, nowMs) {
+  return Math.max(nowMs * 1000, (lastSeq || 0) + 1);
+}
+function _sttClassify(seq, cancelSeq, latestSeq) {
+  if (seq <= (cancelSeq || 0)) return 'cancelled';
+  return seq >= (latestSeq || 0) ? 'current' : 'superseded';
+}
+function _sttMergePending(a, b) {
+  const bySid = new Map();
+  for (const row of [...(a || []), ...(b || [])]) {
+    if (row && row.sid && !bySid.has(row.sid)) bySid.set(row.sid, row);
+  }
+  return [...bySid.values()].sort((x, y) => y.seq - x.seq);
+}
+function _sttCanonKey(key, aliases) {
+  // Owner keys and every per-owner storage key end with the issue id.
+  for (const [localId, realId] of Object.entries(aliases || {})) {
+    if (key.endsWith('.' + localId)) return key.slice(0, -localId.length) + realId;
+  }
+  return key;
+}
+// stt-pure:end
 
 function _normalizeSpeechSegment(text, { final = false } = {}) {
   const raw = String(text || '').trim();
@@ -3120,323 +3135,515 @@ function _appendSpeechSegment(baseText, segment, { final = false } = {}) {
   return `${baseText || ''}${chunk}`;
 }
 
-function _renderMicTranscript(targetId) {
-  const ta = document.getElementById(targetId);
-  if (!ta) return;
-  const value = `${_micTranscriptBase || ''}${_micFinalTranscript || ''}${_micInterimTranscript || ''}`;
-  ta.value = value;
-  _micLastRenderedValue = value;
+function _sttCanon(owner) { return _sttCanonKey(owner || '', _sttAliases); }
+function _sttPendingKey(owner) { return 'agenticos.stt.pending.' + owner; }
+function _sttCancelKey(owner) { return 'agenticos.stt.cancel.' + owner; }
+function _sttCancelSeq(owner) { return Number(_storageGet(_sttCancelKey(owner), '0')) || 0; }
+function _sttGetJson(key, fallback) {
+  try { return JSON.parse(_storageGet(key, '')) ?? fallback; } catch (_) { return fallback; }
+}
+function _sttNewSeq() {
+  const seq = _sttNextSeq(Number(_storageGet('agenticos.stt.lastSeq', '0')) || 0, Date.now());
+  _storageSet('agenticos.stt.lastSeq', String(seq));
+  return seq;
 }
 
-function toggleMic() {
-  toggleMicFor('detail-reply-input', 'mic-btn', 'mic-status');
+function _sttOwnerFor(kind) {
+  if (kind === 'reply') return _currentReplyDraftKey();
+  if (kind === 'desc') return _currentLinearDraftKey();
+  return 'agenticos.draft.new_issue.description';
 }
 
-function toggleMicFor(targetId, btnId, statusId) {
-  const source = _getSttSource();
-  const language = _getSttLanguage();
-
-  if (source.startsWith('openai:')) {
-    const model = source.split(':', 2)[1] || 'gpt-4o-mini-transcribe';
-    if (_openAiMediaRecorder && _openAiMediaRecorder.state !== 'inactive') {
-      _stopOpenAiMic();
-      return;
-    }
-    // Stop any active Web Speech recognition first
-    if (_micRecognition) {
-      try { _micRecognition.stop(); } catch (_) {}
-      _micRecognition = null;
-    }
-    _startOpenAiMic(targetId, btnId, statusId, model, language);
-    return;
-  }
-
-  // Web Speech API mode
-  if (_micRecognition) {
-    const activeBtnId = _micBtnId;
-    _stopMic();
-    if (activeBtnId === btnId) return;
-  }
-  _startMic(targetId, btnId, statusId, language);
+function _sttKindVisible(kind) {
+  if (kind === 'new') return _isModalOpen('new-issue-modal');
+  if (!_isModalOpen('detail-modal')) return false;
+  const el = document.getElementById(_STT_TARGETS[kind].fieldId);
+  return !!el && el.offsetParent !== null;
 }
 
-function onSttSourceChange(sourceEl = null) {
-  const el = sourceEl || document.querySelector('.stt-source');
-  if (el) {
-    window.localStorage.setItem('agenticos.stt.source', el.value);
-    _syncSttSourceControls(el.value);
-  }
-  for (const btn of [document.getElementById('mic-btn'), document.getElementById('mic-btn-desc')]) {
-    if (!btn || !el) continue;
-    btn.title = el.value.startsWith('openai:')
-      ? 'Voice input (' + (el.options[el.selectedIndex]?.textContent || 'OpenAI STT') + ')'
-      : 'Voice input (Web Speech API)';
-  }
-  // If recording, switch mode by stopping current capture
-  if (_micRecognition) {
-    try { _micRecognition.stop(); } catch (_) {}
-    _micRecognition = null;
-  }
-  if (_openAiMediaRecorder && _openAiMediaRecorder.state !== 'inactive') {
-    _stopOpenAiMic();
-  } else {
-    _stopMic();
+function _sttSetStatus(kind, text, color = 'var(--text-dim)', raw = '') {
+  const st = document.getElementById(_STT_TARGETS[kind].statusId);
+  if (!st) return;
+  st.style.display = text ? '' : 'none';
+  st.style.color = color;
+  st.textContent = text || '';
+  if (raw) {
+    const btn = document.createElement('button');
+    btn.className = 'stt-link';
+    btn.textContent = 'show raw';
+    btn.onclick = () => { st.textContent = 'Raw: ' + raw; };
+    st.append(' · ', btn);
   }
 }
 
-function onSttLanguageChange() {
-  // no-op — language is always auto
+function _sttSetButton(kind, recording) {
+  const btn = document.getElementById(_STT_TARGETS[kind].btnId);
+  if (!btn) return;
+  btn.style.color = recording ? 'var(--red)' : '';
+  btn.style.borderColor = recording ? 'var(--red)' : 'var(--accent)';
+  btn.style.animation = recording ? 'mic-pulse 1.2s ease-in-out infinite' : '';
+  btn.textContent = recording ? '⏹' : '🎙';
 }
 
-function _downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
-  if (outputSampleRate === inputSampleRate) {
-    return buffer;
-  }
-  if (outputSampleRate > inputSampleRate) {
-    throw new Error('Output sample rate must be lower than input sample rate');
-  }
-
-  const sampleRateRatio = inputSampleRate / outputSampleRate;
-  const newLength = Math.round(buffer.length / sampleRateRatio);
-  const result = new Float32Array(newLength);
-  let offsetResult = 0;
-  let offsetBuffer = 0;
-
-  while (offsetResult < result.length) {
-    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
-    let accum = 0;
-    let count = 0;
-    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
-      accum += buffer[i];
-      count += 1;
-    }
-    result[offsetResult] = count > 0 ? (accum / count) : 0;
-    offsetResult += 1;
-    offsetBuffer = nextOffsetBuffer;
-  }
-  return result;
-}
-
-function _float32ToPcm16(buffer) {
-  const pcm16 = new Int16Array(buffer.length);
-  for (let i = 0; i < buffer.length; i++) {
-    const sample = Math.max(-1, Math.min(1, buffer[i]));
-    pcm16[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-  }
-  return pcm16;
-}
-
-function _arrayBufferToBase64(arrayBuffer) {
-  const bytes = new Uint8Array(arrayBuffer);
-  let binary = '';
-  const chunkSize = 0x2000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
-}
-
-function _cleanupOpenAiMic({ keepTranscript = false } = {}) {
-  if (_openAiMediaRecorder && _openAiMediaRecorder.state !== 'inactive') {
-    try { _openAiMediaRecorder.stop(); } catch (_) {}
-  }
-  _openAiMediaRecorder = null;
-  _openAiAudioChunks = [];
-  _openAiUploading = false;
-  if (!keepTranscript) {
-    _micTargetId = _micBtnId = _micStatusId = null;
-    _micTranscriptBase = '';
-    _micFinalTranscript = '';
-    _micInterimTranscript = '';
-    _micLastRenderedValue = '';
+function _sttUpdateTitles() {
+  const title = _sttBackends.includes('openai') ? 'Voice input (live + OpenAI refine)' : 'Voice input (browser only)';
+  for (const t of Object.values(_STT_TARGETS)) {
+    const btn = document.getElementById(t.btnId);
+    if (btn) btn.title = title;
   }
 }
 
-function _startOpenAiMic(targetId, btnId, statusId, model = 'gpt-4o-mini-transcribe', language = 'auto') {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    const stEl = document.getElementById(statusId);
-    if (stEl) { stEl.style.display = ''; stEl.textContent = 'Microphone capture not supported'; }
-    return;
+function toggleMic() { toggleMicFor('reply'); }
+
+function toggleMicFor(kind) {
+  if (_sttCapture) {
+    const same = _sttCapture.kind === kind && _sttCapture.attached;
+    _sttStopCapture(_sttCapture);
+    if (same) return;
   }
-
-  _micTargetId = targetId;
-  _micBtnId = btnId;
-  _micStatusId = statusId;
-  _micTranscriptBase = (document.getElementById(targetId) || {}).value || '';
-  _micFinalTranscript = '';
-  _micInterimTranscript = '';
-  _micLastRenderedValue = _micTranscriptBase;
-  _openAiAudioChunks = [];
-  _openAiUploading = false;
-
-  const stEl = document.getElementById(statusId);
-  const btn = document.getElementById(btnId);
-
-  if (stEl) { stEl.style.display = ''; stEl.textContent = 'Requesting mic…'; stEl.style.color = 'var(--accent)'; }
-
-  navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-    _openAiMediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-    _openAiAudioChunks = [];
-
-    _openAiMediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) _openAiAudioChunks.push(e.data);
-    };
-
-    _openAiMediaRecorder.onstop = () => {
-      stream.getTracks().forEach(t => t.stop());
-      _uploadOpenAiAudio(targetId, btnId, statusId, model, language);
-    };
-
-    _openAiMediaRecorder.start();
-
-    if (btn) { btn.style.color = 'var(--red)'; btn.style.borderColor = 'var(--red)'; btn.style.animation = 'mic-pulse 1.2s ease-in-out infinite'; btn.textContent = '⏹'; }
-    if (stEl) { stEl.style.display = ''; stEl.textContent = '● Recording…'; stEl.style.color = 'var(--red)'; }
-  }).catch(err => {
-    _cleanupOpenAiMic();
-    if (stEl) { stEl.style.display = ''; stEl.textContent = `Mic access denied: ${err.message}`; stEl.style.color = 'var(--red)'; }
-  });
+  _sttStart(kind);
 }
 
-function _stopOpenAiMic() {
-  if (!_openAiMediaRecorder || _openAiMediaRecorder.state === 'inactive') return;
-  const btn = document.getElementById(_micBtnId);
-  const stEl = document.getElementById(_micStatusId);
-  if (btn) { btn.style.color = ''; btn.style.borderColor = 'var(--accent)'; btn.style.animation = ''; btn.textContent = '🎙'; }
-  if (stEl) { stEl.style.display = ''; stEl.textContent = '⏳ Uploading…'; stEl.style.color = 'var(--accent)'; }
-  _openAiMediaRecorder.stop();
-  _openAiMediaRecorder = null;
-}
-
-function _uploadOpenAiAudio(targetId, btnId, statusId, model, language = 'auto') {
-  if (_openAiAudioChunks.length === 0) {
-    _cleanupOpenAiMic();
-    return;
-  }
-  _openAiUploading = true;
-  const blob = new Blob(_openAiAudioChunks, { type: 'audio/webm' });
-
-  const stEl = document.getElementById(statusId);
-  const btn = document.getElementById(btnId);
-  if (stEl) { stEl.textContent = '⏳ Transcribing…'; stEl.style.color = 'var(--accent)'; }
-
-  const formData = new FormData();
-  formData.append('audio', blob, 'recording.webm');
-  formData.append('model', model);
-  if (language && language !== 'auto') formData.append('language', language);
-
-  fetch('/api/stt', {
-    method: 'POST',
-    body: formData,
-  })
-  .then(res => res.json())
-  .then(data => {
-    if (data.error) {
-      if (stEl) { stEl.style.display = ''; stEl.textContent = `STT error: ${data.error}`; stEl.style.color = 'var(--red)'; }
-      setTimeout(() => { if (stEl) stEl.style.display = 'none'; }, 5000);
-    } else if (data.text) {
-      const el = document.getElementById(targetId);
-      if (el) {
-        const base = _micTranscriptBase || '';
-        const separator = base && !base.endsWith('\n') ? '\n' : '';
-        el.value = base + separator + data.text;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-      if (stEl) { stEl.style.display = 'none'; }
-    }
-    if (btn) { btn.style.color = ''; btn.style.borderColor = 'var(--accent)'; btn.style.animation = ''; btn.textContent = '🎙'; }
-    _cleanupOpenAiMic();
-    _openAiUploading = false;
-  })
-  .catch(err => {
-    if (stEl) { stEl.style.display = ''; stEl.textContent = `Upload error: ${err.message}`; stEl.style.color = 'var(--red)'; }
-    if (btn) { btn.style.color = ''; btn.style.borderColor = 'var(--accent)'; btn.style.animation = ''; btn.textContent = '🎙'; }
-    _cleanupOpenAiMic();
-    _openAiUploading = false;
-  });
-}
-
-function _startMic(targetId, btnId, statusId, language = 'auto') {
+function _sttStart(kind) {
+  const el = document.getElementById(_STT_TARGETS[kind].fieldId);
+  const owner = _sttCanon(_sttOwnerFor(kind));
+  if (!el || !owner) return;
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const stEl = document.getElementById(statusId);
-  if (!SR) {
-    if (stEl) { stEl.style.display = ''; stEl.textContent = 'Speech API not supported'; }
-    return;
+  const canRefine = _sttBackends.includes('openai') && !!navigator.mediaDevices?.getUserMedia
+    && typeof MediaRecorder !== 'undefined';
+  if (!SR && !canRefine) { _sttSetStatus(kind, 'Voice input not supported in this browser', 'var(--red)'); return; }
+  const seq = _sttNewSeq();
+  const s = {
+    sid: String(seq), seq, kind, owner, el, attached: true, base: el.value, expected: el.value,
+    finalText: '', interim: '', capturing: true, draining: false, recActive: false, done: false,
+    noRefine: !canRefine, SR, rec: null, recorder: null, stream: null, chunks: [], mime: '', ext: 'webm', abort: null,
+  };
+  _sttLatestSeq.set(owner, seq);
+  if (!_sttSessions.has(owner)) _sttSessions.set(owner, new Set());
+  _sttSessions.get(owner).add(s);
+  _sttCapture = s;
+  _sttSetButton(kind, true);
+  if (canRefine) {
+    _sttSetStatus(kind, '● Starting mic…', 'var(--accent)');
+    _sttStartRecorder(s);  // recognition starts only once recording runs, so the audio covers all live text
+  } else {
+    _sttStartRecognition(s);
   }
-  _micTargetId = targetId;
-  _micBtnId = btnId;
-  _micStatusId = statusId;
-  const rec = new SR();
+}
+
+// Guarded write: only into the field of the owning issue, never after a cancel, and never over
+// a field that changed since our last write (typing, attachments).
+function _sttWrite(s, value) {
+  if (!s.attached || !s.el || s.el.value !== s.expected) return false;
+  const owner = _sttCanon(s.owner);
+  if (_sttCanon(_sttOwnerFor(s.kind)) !== owner || s.seq <= _sttCancelSeq(owner)) return false;
+  if (s.seq < (_sttLatestSeq.get(owner) || 0)) return false;  // superseded: may still feed its own refinement
+  s.el.value = value;
+  s.expected = value;  // set before dispatching so draft persistence sees our own write
+  s.el.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+}
+
+function _sttStartRecognition(s) {
+  if (!s.SR || !s.capturing) return;
+  const rec = new s.SR();
   rec.continuous = true;
   rec.interimResults = true;
-  rec.lang = language === 'auto' ? (navigator.language || 'zh-CN') : language;
-  _micRecognition = rec;
-  const currentValue = (document.getElementById(targetId) || {}).value || '';
-  _micTranscriptBase = currentValue;
-  _micFinalTranscript = '';
-  _micInterimTranscript = '';
-  _micLastRenderedValue = currentValue;
-
-  rec.onstart = () => {
-    const btn = document.getElementById(btnId);
-    if (btn) { btn.style.color = 'var(--red)'; btn.style.borderColor = 'var(--red)'; btn.style.animation = 'mic-pulse 1.2s ease-in-out infinite'; btn.textContent = '⏹'; }
-    if (stEl) { stEl.style.display = ''; stEl.textContent = '● Listening…'; stEl.style.color = 'var(--red)'; }
-  };
-
+  rec.lang = _getSttLanguage();
+  s.rec = rec;
   rec.onresult = (e) => {
-    if (!_micRecognition || _micTargetId !== targetId) return;
+    // Accept results until recognition has drained after stop(), not just while the mic is live.
+    if (s.done || !(s.capturing || s.draining) || !s.attached) return;
     let interim = '';
-    let finalChunk = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
-      if (e.results[i].isFinal) {
-        finalChunk = _appendSpeechSegment(finalChunk, e.results[i][0].transcript, { final: true });
-      } else {
-        interim = _appendSpeechSegment(interim, e.results[i][0].transcript);
-      }
+      if (e.results[i].isFinal) s.finalText = _appendSpeechSegment(s.finalText, e.results[i][0].transcript, { final: true });
+      else interim = _appendSpeechSegment(interim, e.results[i][0].transcript);
     }
-    if (finalChunk) _micFinalTranscript += finalChunk;
-    _micInterimTranscript = interim;
-    _renderMicTranscript(targetId);
-    if (stEl) stEl.textContent = interim ? `● ${interim}` : '● Listening…';
+    s.interim = interim;
+    if (!_sttWrite(s, s.base + s.finalText + s.interim)) {
+      if (s.capturing) _sttStopCapture(s);  // field changed or superseded: stop; the recording still uploads
+      return;
+    }
+    if (s.capturing) _sttSetStatus(s.kind, interim ? `● ${interim}` : '● Listening…', 'var(--red)');
   };
-
   rec.onerror = (e) => {
-    if (stEl) { stEl.textContent = `Mic error: ${e.error}`; stEl.style.color = 'var(--red)'; }
-    _stopMic();
+    if (!['no-speech', 'aborted'].includes(e.error)) console.warn('[stt] recognition error:', e.error);
+  };  // onend always follows
+  rec.onend = () => {
+    s.recActive = false;
+    s.draining = false;
+    if (s.done) return;
+    if (s.capturing && s.recorder) {
+      // Live recognition stopped (silence, network, unsupported language): keep recording for the final pass.
+      if (s.attached) _sttSetStatus(s.kind, '● Recording… (live text paused)', 'var(--red)');
+    } else if (s.capturing) {
+      _sttStopCapture(s);  // browser-only: recognition ending ends the capture
+    } else if (!s.recorder) {
+      _sttEndSession(s, '');  // browser-only session finished draining
+    }
   };
-
-  rec.onend = () => { _stopMic(); };
-  rec.start();
+  try {
+    rec.start();
+    s.recActive = true;
+    if (s.attached) _sttSetStatus(s.kind, '● Listening…', 'var(--red)');
+  } catch (_) {
+    s.rec = null;
+    if (!s.recorder) _sttAbortCapture(s, 'Speech recognition failed to start');
+  }
 }
 
+// Terminal failure before anything useful was captured: clear ownership and controls, show why.
+function _sttAbortCapture(s, message) {
+  s.capturing = false;
+  if (_sttCapture === s) _sttCapture = null;
+  _sttReleaseStream(s);
+  _sttSetButton(s.kind, false);
+  _sttEndSession(s, message, 'var(--red)');
+}
 
+function _sttStartRecorder(s) {
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    if (!s.capturing || s.done) {  // stale: release the mic, finish the session if nothing else will
+      stream.getTracks().forEach(t => t.stop());
+      if (!s.done && !s.recActive) _sttEndSession(s, '');
+      return;
+    }
+    s.stream = stream;
+    const pick = _STT_MIME_TYPES.find(([m]) => MediaRecorder.isTypeSupported?.(m));
+    if (pick) {
+      try {
+        const recorder = new MediaRecorder(stream, { mimeType: pick[0] });
+        [s.mime, s.ext] = pick;
+        recorder.ondataavailable = (e) => { if (e.data.size > 0) s.chunks.push(e.data); };
+        recorder.onstop = () => _sttRefine(s);
+        recorder.onerror = () => _sttRefineUnavailable(s);
+        recorder.start();
+        s.recorder = recorder;
+      } catch (_) {
+        s.recorder = null;
+      }
+    }
+    if (!s.recorder) { _sttRefineUnavailable(s); return; }
+    if (s.SR) _sttStartRecognition(s);
+    else if (s.attached) _sttSetStatus(s.kind, '● Recording… (text appears after you stop)', 'var(--red)');
+  }).catch(err => {
+    if (s.done) return;
+    s.noRefine = true;
+    if (!s.capturing) { _sttEndSession(s, ''); return; }
+    if (s.SR) _sttStartRecognition(s);  // browser-only fallback
+    else _sttAbortCapture(s, `Mic access denied: ${err.message}`);
+  });
+}
 
-function _stopMic() {
-  if (_micRecognition) { try { _micRecognition.stop(); } catch (_) {} _micRecognition = null; }
-  const btn = document.getElementById(_micBtnId);
-  if (btn) { btn.style.color = ''; btn.style.borderColor = 'var(--accent)'; btn.style.animation = ''; btn.textContent = '🎙'; }
-  const st = document.getElementById(_micStatusId);
-  if (st) { st.style.display = 'none'; st.style.color = ''; }
-  _micTargetId = _micBtnId = _micStatusId = null;
-  _micTranscriptBase = '';
-  _micFinalTranscript = '';
-  _micInterimTranscript = '';
-  _micLastRenderedValue = '';
+function _sttReleaseStream(s) {
+  if (s.stream) { s.stream.getTracks().forEach(t => t.stop()); s.stream = null; }
+}
+
+function _sttRefineUnavailable(s) {
+  s.noRefine = true;
+  if (s.recorder) { s.recorder.onstop = null; try { s.recorder.stop(); } catch (_) {} s.recorder = null; }
+  _sttReleaseStream(s);
+  if (s.done) return;
+  if (s.capturing && s.SR) {  // continue as browser-only
+    if (s.recActive) {
+      if (s.attached) _sttSetStatus(s.kind, '● Listening… (refine unavailable)', 'var(--red)');
+    } else {
+      _sttStartRecognition(s);
+    }
+    return;
+  }
+  if (s.capturing) { _sttAbortCapture(s, 'Recording unavailable in this browser'); return; }
+  if (!s.recActive) _sttEndSession(s, 'Refine unavailable — kept browser text', 'var(--red)');
+}
+
+function _sttStopCapture(s) {
+  if (!s.capturing) return;
+  s.capturing = false;
+  if (_sttCapture === s) _sttCapture = null;
+  _sttSetButton(s.kind, false);
+  if (s.rec && s.recActive) {
+    s.draining = true;  // stop() may still deliver a final result; onend finishes draining
+    try { s.rec.stop(); } catch (_) { s.draining = false; }
+  }
+  if (s.recorder && s.recorder.state !== 'inactive') {
+    if (s.attached) _sttSetStatus(s.kind, '⏳ Refining…', 'var(--accent)');
+    try { s.recorder.stop(); } catch (_) { _sttRefine(s); }  // onstop → _sttRefine
+  } else if (!s.recorder) {
+    _sttReleaseStream(s);
+    // getUserMedia still pending ⇒ its callback finishes the session; browser-only ⇒ end once recognition drains.
+    const micPending = !s.noRefine;
+    if (!micPending && !s.draining) _sttEndSession(s, '');
+  }
+}
+
+function _sttRefine(s, waited = 0) {
+  _sttReleaseStream(s);
+  if (s.done) return;
+  if (s.draining && waited < 1500) { setTimeout(() => _sttRefine(s, waited + 100), 100); return; }  // let the last phrase land
+  const blob = new Blob(s.chunks, { type: s.mime || 'audio/webm' });
+  s.chunks = [];
+  if (!blob.size) { _sttEndSession(s, ''); return; }
+  const form = new FormData();
+  form.append('audio', blob, `recording.${s.ext}`);
+  form.append('browser_text', (s.finalText + s.interim).trim());
+  form.append('language', _getSttLanguage());
+  s.abort = new AbortController();
+  const timer = setTimeout(() => s.abort.abort(), _STT_FETCH_TIMEOUT_MS);
+  fetch('/api/stt', { method: 'POST', body: form, signal: s.abort.signal })
+    .then(res => res.json())
+    .then(data => {
+      if (data.error) throw new Error(data.error);
+      _sttDeliver(s, data);
+    })
+    .catch(err => {
+      if (s.done) return;  // cancelled
+      const why = err.name === 'AbortError' ? 'timed out' : err.message;
+      _sttEndSession(s, `Refine failed (${why}) — kept browser text`, 'var(--red)');
+    })
+    .finally(() => clearTimeout(timer));
+}
+
+function _sttDeliver(s, data) {
+  if (s.done) return;
+  const owner = _sttCanon(s.owner);
+  const verdict = _sttClassify(s.seq, _sttCancelSeq(owner), _sttLatestSeq.get(owner));
+  const text = String(data.text || '').trim();
+  if (verdict === 'cancelled' || !text) { _sttEndSession(s, ''); return; }
+  const raw = String(data.raw || text).trim();
+  const owned = s.attached && _sttCanon(_sttOwnerFor(s.kind)) === owner;
+  if (verdict === 'current' && owned && _sttWrite(s, s.base + text)) {
+    _sttEndSession(s, data.polished ? '✓ Refined' : '✓ Transcribed (not polished)', 'var(--green)', raw !== text ? raw : '');
+    return;
+  }
+  _sttAddPending(owner, { sid: s.sid, seq: s.seq, text, raw, polished: !!data.polished, created_at: Date.now() });
+  _sttEndSession(s, s.attached ? 'Field changed — refined text kept below' : '', 'var(--accent)');
+}
+
+function _sttEndSession(s, message, color, raw = '') {
+  s.done = true;
+  s.abort = null;
+  const set = _sttSessions.get(_sttCanon(s.owner));
+  if (set) { set.delete(s); if (!set.size) _sttSessions.delete(_sttCanon(s.owner)); }
+  if (s.attached && _sttCapture?.kind !== s.kind) {
+    _sttSetStatus(s.kind, message, color, raw);
+    if (message) setTimeout(() => {
+      const st = document.getElementById(_STT_TARGETS[s.kind].statusId);
+      if (st && st.textContent.startsWith(message.slice(0, 8)) && _sttCapture?.kind !== s.kind) _sttSetStatus(s.kind, '');
+    }, 8000);
+  }
+  _sttRenderHints();
+}
+
+// Modal closed / issue switched: stop the mic now, keep refining for the same owner.
+function _sttDetachKind(kind) {
+  for (const set of _sttSessions.values()) {
+    for (const s of [...set]) {
+      if (s.kind !== kind || !s.attached) continue;
+      if (s.capturing) _sttStopCapture(s);
+      s.attached = false;
+      s.el = null;
+    }
+  }
+  _sttSetButton(kind, false);
+  _sttSetStatus(kind, '');
+}
+
+// Stop everything a session owns: recognition, recorder, mic tracks, upload. Never touches other sessions.
+function _sttDispose(s) {
+  s.done = true;
+  s.capturing = s.draining = false;
+  if (_sttCapture === s) _sttCapture = null;
+  if (s.rec) { s.rec.onend = s.rec.onresult = null; try { s.rec.abort(); } catch (_) {} }
+  if (s.recorder) { s.recorder.onstop = null; try { s.recorder.stop(); } catch (_) {} }
+  if (s.abort) s.abort.abort();
+  _sttReleaseStream(s);
+  if (s.attached) { _sttSetButton(s.kind, false); _sttSetStatus(s.kind, ''); }
+  const set = _sttSessions.get(_sttCanon(s.owner));
+  if (set) { set.delete(s); if (!set.size) _sttSessions.delete(_sttCanon(s.owner)); }
+}
+
+// Text already submitted for this owner: drop sessions and pending rows started before `cutoff`
+// (taken when the request was sent), keeping recordings started while the request was in flight.
+function _sttCancel(owner, cutoff = _sttNewSeq()) {
+  owner = _sttCanon(owner);
+  if (!owner) return;
+  _storageSet(_sttCancelKey(owner), String(Math.max(cutoff, _sttCancelSeq(owner))));
+  const key = _sttPendingKey(owner);
+  const rows = _sttGetJson(key, []).filter(r => r.seq > cutoff);
+  if (rows.length) _storageSet(key, JSON.stringify(rows)); else _storageRemove(key);
+  for (const s of [...(_sttSessions.get(owner) || [])]) if (s.seq <= cutoff) _sttDispose(s);
+  _sttRenderHints();
+}
+
+function _sttCancelIssue(issueId, cutoff) {
+  if (!issueId) return;
+  _sttCancel(`agenticos.draft.reply.linear.${issueId}`, cutoff);
+  _sttCancel(`agenticos.draft.linear.${issueId}`, cutoff);
+}
+
+function _sttAddPending(owner, row) {
+  const key = _sttPendingKey(_sttCanon(owner));
+  _storageSet(key, JSON.stringify(_sttMergePending(_sttGetJson(key, []), [row])));
+  _sttRenderHints();
+}
+
+function _sttRemovePending(owner, sid) {
+  const key = _sttPendingKey(_sttCanon(owner));
+  const rows = _sttGetJson(key, []).filter(r => r.sid !== sid);
+  if (rows.length) _storageSet(key, JSON.stringify(rows)); else _storageRemove(key);
+  _sttRenderHints();
+}
+
+// Read-only hints: Copy/Dismiss never write into the field.
+function _sttRenderHints() {
+  for (const kind of Object.keys(_STT_TARGETS)) {
+    const box = document.getElementById(_STT_TARGETS[kind].hintId);
+    if (!box) continue;
+    // Reply results stay reachable from any column, even where reply editing is hidden.
+    const visible = kind === 'reply' ? _isModalOpen('detail-modal') : _sttKindVisible(kind);
+    const owner = visible ? _sttCanon(_sttOwnerFor(kind)) : '';
+    const cancelSeq = owner ? _sttCancelSeq(owner) : 0;
+    const rows = owner ? _sttGetJson(_sttPendingKey(owner), []).filter(r => r.seq > cancelSeq) : [];
+    const sig = owner + '|' + rows.map(r => r.sid).join(',');
+    if (box.dataset.sig === sig) continue;
+    box.dataset.sig = sig;
+    box.replaceChildren();
+    box.style.display = rows.length ? '' : 'none';
+    for (const row of rows) {
+      const text = document.createElement('div');
+      text.className = 'stt-hint-text';
+      text.textContent = row.text;
+      const label = document.createElement('span');
+      label.textContent = `🎙 Voice result${row.polished ? ' · polished' : ''}`;
+      const copy = document.createElement('button');
+      copy.className = 'stt-link';
+      copy.textContent = 'Copy';
+      copy.onclick = () => navigator.clipboard.writeText(text.textContent)
+        .then(() => _sttRemovePending(owner, row.sid))
+        .catch(() => { copy.textContent = 'Copy failed'; });
+      const dismiss = document.createElement('button');
+      dismiss.className = 'stt-link';
+      dismiss.textContent = 'Dismiss';
+      dismiss.onclick = () => _sttRemovePending(owner, row.sid);
+      const bar = document.createElement('div');
+      bar.className = 'stt-hint-bar';
+      bar.append(label, copy);
+      if (row.raw && row.raw !== row.text) {
+        const toggle = document.createElement('button');
+        toggle.className = 'stt-link';
+        toggle.textContent = 'show raw';
+        toggle.onclick = () => {
+          const showingRaw = text.textContent === row.raw;
+          text.textContent = showingRaw ? row.text : row.raw;
+          toggle.textContent = showingRaw ? 'show raw' : 'show polished';
+        };
+        bar.append(toggle);
+      }
+      bar.append(dismiss);
+      const div = document.createElement('div');
+      div.className = 'stt-hint-row';
+      div.append(bar, text);
+      box.append(div);
+    }
+  }
+}
+
+// Every second: reattach refining sessions to a reopened owner, detach on owner change, refresh hints.
+function _sttTick() {
+  for (const set of _sttSessions.values()) {
+    for (const s of set) {
+      if (s.attached && (!_sttKindVisible(s.kind) || _sttCanon(_sttOwnerFor(s.kind)) !== _sttCanon(s.owner))) {
+        if (s.capturing) _sttStopCapture(s);
+        s.attached = false;
+        s.el = null;
+      }
+    }
+  }
+  for (const kind of Object.keys(_STT_TARGETS)) {
+    if (!_sttKindVisible(kind)) continue;
+    const owner = _sttCanon(_sttOwnerFor(kind));
+    for (const s of _sttSessions.get(owner) || []) {
+      if (s.attached || s.done || s.kind !== kind) continue;
+      s.el = document.getElementById(_STT_TARGETS[kind].fieldId);
+      s.attached = true;  // the write guard still compares el.value with s.expected
+      _sttSetStatus(kind, '⏳ Refining…', 'var(--accent)');
+    }
+  }
+  _sttRenderHints();
+}
+
+// local-* ids become Linear ids after background sync: move owner-keyed state with them.
+function _sttApplyAliases(map) {
+  Object.assign(_sttAliases, Object.fromEntries(Object.entries(map || {}).filter(([l, r]) => l && r)));
+  const aliases = _sttAliases;  // re-run every time: writes may have recreated local-id keys since last time
+  if (!Object.keys(aliases).length) return;
+  if (aliases[_detailLinearIssueId]) _detailLinearIssueId = aliases[_detailLinearIssueId];  // retarget the open issue
+  for (const [owner, set] of [..._sttSessions]) {
+    const target = _sttCanonKey(owner, aliases);
+    if (target === owner) continue;
+    _sttSessions.delete(owner);
+    if (!_sttSessions.has(target)) _sttSessions.set(target, new Set());
+    for (const s of set) { s.owner = target; _sttSessions.get(target).add(s); }
+  }
+  for (const [owner, seq] of [..._sttLatestSeq]) {
+    const target = _sttCanonKey(owner, aliases);
+    if (target === owner) continue;
+    _sttLatestSeq.delete(owner);
+    _sttLatestSeq.set(target, Math.max(seq, _sttLatestSeq.get(target) || 0));
+  }
+  const store = _safeLocalStorage();
+  if (!store) return;
+  const keys = [];
+  for (let i = 0; i < store.length; i++) keys.push(store.key(i));
+  // Write, then read back: localStorage can fail silently (quota). The source is removed only when every
+  // write this migration needs has persisted.
+  const put = (k, v) => { _storageSet(k, v); return _storageGet(k, null) === v; };
+  for (const key of keys) {
+    if (!key || !key.startsWith('agenticos.')) continue;
+    const target = _sttCanonKey(key, aliases);
+    if (target === key) continue;
+    const value = _storageGet(key, '');
+    let ok;
+    if (key.startsWith('agenticos.stt.pending.')) {
+      ok = put(target, JSON.stringify(_sttMergePending(_sttGetJson(target, []), _sttGetJson(key, []))));
+    } else if (key.startsWith('agenticos.stt.cancel.')) {
+      ok = put(target, String(Math.max(Number(value) || 0, Number(_storageGet(target, '0')) || 0)));
+    } else if (key.startsWith('agenticos.draft.')) {
+      const existing = _storageGet(target, '');
+      if (!existing) {
+        ok = put(target, value);
+      } else {  // both aliases have a draft: keep the newer one, surface the other as a hint
+        const parse = (v) => { try { return JSON.parse(v); } catch (_) { return { value: v }; } };
+        const [mine, theirs] = [parse(value), parse(existing)];
+        const loser = (Number(mine.saved_at) || 0) > (Number(theirs.saved_at) || 0) ? theirs : mine;
+        const text = String(loser.value ?? loser.description ?? '').trim();
+        const pendingKey = _sttPendingKey(target);
+        ok = !text || put(pendingKey, JSON.stringify(_sttMergePending(_sttGetJson(pendingKey, []), [{
+          sid: 'draft:' + key, seq: _sttNewSeq(), text, raw: text, polished: false, created_at: Date.now() }])));
+        if (ok && loser === theirs) ok = put(target, value);
+      }
+    } else {
+      continue;
+    }
+    if (ok) _storageRemove(key);  // otherwise keep the source; the next load or reconnect retries
+  }
+  // Results covered by a (merged) cancellation never come back.
+  for (const [owner, set] of [..._sttSessions]) {
+    const cancelSeq = _sttCancelSeq(owner);
+    for (const sess of [...set]) if (sess.seq <= cancelSeq) _sttDispose(sess);
+  }
+  _sttRenderHints();
+}
+
+function _sttLoadAliases() {
+  fetch('/api/linear/id-aliases')
+    .then(res => (res.ok ? res.json() : {}))
+    .then(_sttApplyAliases)
+    .catch(() => {});
 }
 
 function _handleReplyInput() {
   _saveReplyDraft();
-  if (_micRecognition && _micTargetId === 'detail-reply-input') {
-    const current = _getDetailReplyValue();
-    if (current !== _micLastRenderedValue) {
-      _stopMic();
-    }
-  }
-  if (_openAiMediaRecorder && _openAiMediaRecorder.state !== 'inactive' && _micTargetId === 'detail-reply-input') {
-    const current = _getDetailReplyValue();
-    if (current !== _micLastRenderedValue) {
-      _stopOpenAiMic();
-    }
-  }
 }
 
 function _bindDraftPersistence() {
@@ -3448,15 +3655,12 @@ function _bindDraftPersistence() {
   document.getElementById('linear-edit-state')?.addEventListener('change', _saveLinearDraft);
 }
 
-// Stop mic when modals close
+// Stop the mic when the detail modal closes; refinement continues for that issue.
 const _origClose = closeDetailModal;
-closeDetailModal = function() {
-  if (_micRecognition) {
-    _stopMic();
-  } else if (_openAiMediaRecorder && _openAiMediaRecorder.state !== 'inactive') {
-    _stopOpenAiMic();
-  }
-  _origClose();
+closeDetailModal = function(...args) {
+  _sttDetachKind('reply');
+  _sttDetachKind('desc');
+  return _origClose(...args);
 };
 
 // Initial load + polling
@@ -3466,7 +3670,10 @@ _initBackends().then(cfg => {
 refreshJobBoard();
 updateWindows();
 initPaceMarkers();
-_bindDraftPersistence();
+// New-issue markup is parsed after this script, so bind once the whole document exists.
+document.addEventListener('DOMContentLoaded', _bindDraftPersistence);
+_sttLoadAliases();
+setInterval(_sttTick, 1000);
 setInterval(refreshJobBoard, 15000);
 setInterval(_flushPendingBoardRefresh, 1000);
 setInterval(() => updateWindows(), 60000);
@@ -3517,6 +3724,7 @@ applyTerminalHeight(loadTerminalHeight());
 const socket = io();
 
 socket.on('connect', () => {
+  _sttLoadAliases();
   fitAddon.fit();
   const { cols, rows } = term;
   socket.emit('pty_start', { cols, rows });
@@ -3558,7 +3766,10 @@ socket.on('run_state_change', (data) => {
   }
 });
 
-socket.on('linear_issues_updated', () => { if (_linearConfigured) _requestBoardRefresh(); });
+socket.on('linear_issues_updated', (data) => {
+  if (data && data.id_map) _sttApplyAliases(data.id_map);
+  if (_linearConfigured) _requestBoardRefresh();
+});
 
 socket.on('run_progress', (data) => {
   if (!data.run_id) return;
@@ -3683,14 +3894,11 @@ terminalEl.addEventListener('drop', async (e) => {
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
         <div class="new-issue-label" style="margin-bottom:0">Description (optional)</div>
         <div style="display:flex;align-items:center;gap:4px">
-          <select id="stt-source-desc" class="stt-source" onchange="onSttSourceChange(this)" style="background:none;border:1px solid var(--border);color:var(--text-dim);font-size:calc(11px * var(--fs));padding:1px 4px;border-radius:3px;cursor:pointer;font-family:inherit">
-            <option value="browser">Browser STT</option>
-            <option value="openai:gpt-4o-mini-transcribe">OpenAI 4o mini</option>
-          </select>
-          <button id="mic-btn-desc" onclick="toggleMicFor('new-issue-desc','mic-btn-desc','mic-status-desc')" title="Voice input" style="background:none;border:1px solid var(--accent);font-size:calc(13px * var(--fs));padding:1px 7px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
+          <button id="mic-btn-new" onclick="toggleMicFor('new')" title="Voice input" style="background:none;border:1px solid var(--accent);font-size:calc(13px * var(--fs));padding:1px 7px;border-radius:4px;cursor:pointer;font-family:inherit;transition:all .15s">🎙</button>
         </div>
       </div>
-      <div id="mic-status-desc" style="font-size:calc(10px * var(--fs));color:var(--text-dim);margin-top:2px;display:none"></div>
+      <div id="mic-status-new" style="font-size:calc(10px * var(--fs));color:var(--text-dim);margin-top:2px;display:none"></div>
+      <div id="stt-hint-new" class="stt-hint" style="display:none"></div>
       <textarea class="new-issue-input" id="new-issue-desc" placeholder="Details…"></textarea>
       <div class="attach-bar">
         <label class="attach-btn" for="new-task-files">📎 Attach file</label>
@@ -3745,7 +3953,7 @@ function closeNewIssueModal() {
   if (_newIssueClosing) return;
   _newIssueClosing = true;
   try {
-    if (typeof _stopMic === 'function') _stopMic();
+    _sttDetachKind('new');
     if (_newIssueFocusTimer) {
       clearTimeout(_newIssueFocusTimer);
       _newIssueFocusTimer = null;
@@ -3849,6 +4057,7 @@ async function submitNewIssue() {
   const desc  = document.getElementById('new-issue-desc').value.trim();
   const btn   = document.getElementById('new-issue-submit');
   const status = document.getElementById('new-issue-status');
+  const sttCutoff = _sttNewSeq();
   btn.disabled = true;
   status.textContent = 'Saving local Todo…';
   try {
@@ -3859,7 +4068,11 @@ async function submitNewIssue() {
     });
     const data = await res.json();
     if (data.ok) {
+      const descNow = document.getElementById('new-issue-desc').value;
       _clearNewIssueDraft();
+      // Text typed or dictated after Submit was not sent: keep it as the next draft.
+      if (descNow.trim() !== desc) _storageSet('agenticos.draft.new_issue.description', descNow);
+      _sttCancel('agenticos.draft.new_issue.description', sttCutoff);
       _newTaskAttachments = [];
       _renderAttachList('new-task-attach-list', _newTaskAttachments);
       closeNewIssueModal();
