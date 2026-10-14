@@ -37,7 +37,7 @@ Full containment of a hostile agent is a non-goal: no containers and no separate
    - **Process-tree ownership.** Project agent and verify processes start with `start_new_session=True`. On **every** exit path (success, error, cancel, timeout), `os.killpg` sends the group SIGTERM, then SIGKILL after 5 s. That stops background servers and watchers an agent left behind. The group is reaped before verify, cleanup or lock release. The same rule applies to the verify process group before results are recorded.
 2. **Verify runs only in an owned worktree.** `projects.py verify` requires `--worktree` (a baseline check uses `projects.py worktree <key> CHECK` first). `{root}` in `verify` expands to the main-checkout path, for tools that live only there, such as `{root}/.venv/bin/python`; `{base}` expands to the persisted `base_sha`. `env.PATH` is prepended to the inherited PATH and never replaces it. Verify has a timeout (default 600 s, `verify_timeout_s` overrides). The raw verify output tail is kept locally only.
 3. **Tracker routing = Linear label `project:<key>`.** The poller already filters on one `project_slug` (`runner/linear_client.py:263`) and already fetches labels, so a label needs no poller change. Unlabelled tickets keep today's behaviour, running at the runner root. Project-bound tickets skip the LLM skill-routing call.
-3a. **One dispatch path for all launches of a project ticket.** Today `cwd=ROOT` is hardcoded at `runner/modules/linear/__init__.py:607,638` (auto-dispatch + routing), `runner/app.py:3069` (retry/rework) and `runner/app.py:2449,2551,2670` (`/run`, `/stream`). All project-bound launches go through one helper that resolves the binding → worktree → `cwd` + `env`. Project tickets always launch the agent CLI via `_ai_command` — never `run_skill.py` executable entrypoints (which resolve against the runner root). Allowed backends for project tickets: `claude`, `codex`, `deepseek-tui`; the direct-API `deepseek` backend (`runner/deepseek_agent.py`, process-global env, `workspace=ROOT`) is rejected for project tickets with a clear error.
+3a. **One dispatch path for all launches of a project ticket.** Today `cwd=ROOT` is hardcoded at `runner/modules/linear/__init__.py:607,638` (auto-dispatch + routing), `runner/app.py:3069` (retry/rework) and `runner/app.py:2449,2551,2670` (`/run`, `/stream`). All project-bound launches go through one helper that resolves the binding → worktree → `cwd` + `env`. Project tickets always launch the agent CLI via `_ai_command` — never `run_skill.py` executable entrypoints (which resolve against the runner root). Allowed backends for project tickets: `claude`, `codex`, `deepseek-tui`; the direct-API `deepseek` backend (`runner/deepseek_agent.py`, process-global env, `workspace=ROOT`) is rejected for project tickets with a clear error. **Superseded once `2026-10-14-dsh-backend-swap.md` lands (planned before Phase 2):** the allowed backends become `claude`, `codex` and `dsh`. Both DeepSeek legacy ids then alias to `dsh`, and the direct-API special case disappears.
 4. **Confidential redaction is enforced in code, at one gate.** Every automatic tracker comment (run result, error, timeout, retry "Human Feedback" at `runner/app.py:2995`, attachments) goes through one `tracker_comment(binding, kind, **fields)` gate. For `confidential: true` the body is a fixed template from trusted structured fields only: run status, `verify: pass|fail (exit N, D s)`, `git diff --shortstat` counts vs `base_sha`. No prompt echo, agent output, verify output, error text, feedback text, attachment names, file names or diff; an error reads "see local run <run_id>". Human-feedback comments for confidential tickets are not posted at all (feedback stays in the local run record). The current `_linear_comment_body` (`runner/modules/linear/__init__.py:208`) is never called for confidential bindings.
 4a. **Local run records for confidential projects stay runner-owned.** `RUN_LOG` defaults to the knowledge-base checkout (`runner/app.py:122`), which is itself a registered (git) project. For confidential bindings `_write_run_log` stores prompt/output/error in `outputs/project_runs/<run_id>.json` under the agentic-os checkout (gitignored `outputs/`) and writes only a redacted record (`"[local]"` placeholders + binding fields) to `RUN_LOG`; one shared `load_run_payload(run_id)` helper rehydrates prompt/output/error from the side file for run detail, retry/rework prompt building (`runner/app.py:2915`) and run history (`api_run_history`), while keeping the lifecycle metadata of the latest log record. A missing side file for a redacted record ⇒ detail shows "local payload missing" and retry is refused.
 4b. **Shared-state writes are serialized.** Parallel completions make `_write_run_log`'s unlocked read-modify-write of `task_state.json` / `job_state.json` racy (`runner/app.py:1838-1929`). `run_skill.py` `_update_state` (`runner/run_skill.py:96`) also rewrites `outputs/job_state.json` from another process. Every read-modify-write of `job_state.json` / `task_state.json`, in both `app.py` and `run_skill.py`, holds a cross-process `fcntl.flock` on a sibling `<file>.lock`. Each write goes to a unique temp file in the same dir (`tempfile.mkstemp`) and then `os.replace`. `projects.py` never writes these files.
@@ -61,12 +61,38 @@ Full containment of a hostile agent is a non-goal: no containers and no separate
      - If spike check (f) fails, non-confidential Codex runs go back to today's bypass flags. That keeps current behaviour, so it is not a regression. Record the fallback in the plan.
    - **Codex (flags verified in `codex-cli 0.162.0 --help`).** Replace `--dangerously-bypass-approvals-and-sandbox` with `--sandbox workspace-write`. Writable roots are the worktree (cwd) and `/tmp`. Add `--add-dir <git common dir>` (`git -C <wt> rev-parse --git-common-dir`), because commits on `agent/<id>` write objects and refs into the main repo's `.git`. Pin `-c 'approval_policy="never"'`. `codex exec` rejects `-a`, so the setting goes through a `-c` config override. With this setting the agent never asks: a blocked action fails and the error goes back to the model. Spike check (a) confirms the override is honoured. Shell network stays at its default (off).
    - **Claude (unverified).** Pass a per-run `--settings <file>` that enables Claude Code's sandbox. Bash writes are limited to the worktree plus the git common dir, Bash network is off, and Bash commands are auto-allowed only when sandboxed. Replace `bypassPermissions` with a mode that auto-accepts edits inside the working directory and refuses them elsewhere, such as `acceptEdits` plus `--add-dir` for the git common dir. Add `permissions.deny` read rules for `**/.env*` and `~/.ssh/**`. The spike settles the exact keys and whether this combination keeps non-interactive `-p` runs from stalling.
-   - **deepseek-tui** has no verified sandbox, so it is rejected for confidential projects with a clear error, as is the direct-API `deepseek` backend.
+   - **deepseek-tui** has no verified sandbox, so it is rejected for confidential projects with a clear error, as is the direct-API `deepseek` backend. After the dsh swap, `dsh` replaces both. It runs under its own `DSH_PERMISSION_MODE=workspace-write` sandbox for confidential projects only if the dsh spike passes, and is rejected otherwise (see that plan's Decision 3).
    - **Fail closed.** If a backend's sandbox flags fail the spike, that backend is rejected for confidential projects. It never falls back to bypass mode.
    - **What this does not cover.**
      - Reads stay broad: Codex `workspace-write` can still read the whole disk, so an agent can still read other repos and secrets. The deny rules above narrow this only for Claude.
      - What the model reads still goes to its provider.
      - Verify runs outside the sandbox, as today.
+
+10. **Terminal tabs: several live terminals in the dashboard, one per session** (added 2026-10-14 at the user's request; not yet reviewed). The terminal is the user's preferred view, because feedback and logs show directly. With several projects running, the user wants one tab per session, the ability to click any of them open, and to hide them without stopping them. Today there is one PTY per browser socket (`runner/modules/pty/__init__.py:131-149`). It always starts at `ROOT`, and on disconnect its fd is dropped but the shell is never killed (`:177-181`), so reloading the page loses the session and leaks the process.
+   - **Server-owned terminals, not socket-owned.**
+     - A registry `term_id -> {pid, fd, kind, project_key, cwd, created_at, scrollback}` lives in the PTY module.
+     - `scrollback` is an in-memory ring buffer of about 256 KB per terminal.
+     - Socket events carry `term_id`: `term_open {kind, project_key|run_id, cols, rows} → term_id`, `term_attach {term_id}` (replays scrollback, then joins room `term:<id>`), `term_input`, `term_resize`, `term_close`.
+     - A browser disconnect only detaches. The process keeps running and the user can reattach after a reload.
+     - `term_close` and server shutdown send SIGHUP and then SIGTERM to the process group, followed by SIGKILL after 5 s. The handler then calls `waitpid` and closes the fd. `pty.fork()` already makes the child a session leader.
+     - There is a cap of 8 live terminals (`AGENTIC_OS_MAX_TERMINALS`). Opening another fails with a clear message.
+   - **Two tab kinds.**
+     - **`shell`: an interactive login shell in a project.** It opens in the project's main path by default, or in a bound ticket's worktree when opened from a card. It gets the registry `env.PATH` prepended, as verify does, so `R`, `claude` and `codex` resolve the same way as in the IDE.
+       - This is the user's own terminal, like a VS Code terminal, so the "agents never touch the main checkout" rule does not apply to it.
+       - It does interact with the main-checkout fingerprint (Decision 1). If a `shell` tab is open on a project's main path while a dispatched run for that project is in flight, the run record notes `interactive_tab_open: true`. A "main checkout changed" badge then reads "main checkout changed (interactive tab open)", so the user can tell their own edits from an agent's.
+     - **`run`: a read-only live view of a dispatched run.** Dispatched runs stay headless (`claude -p --output-format stream-json`, `codex exec --json`), because verify, the run log and completion detection depend on structured output. The runner already parses that stream (`_stream_claude_run`, `run_progress` events at `runner/app.py:2312,2321`). The `run` tab renders the same events as plain lines in xterm: assistant text, `[tool] <name> <short arg>` and `[result] ok|error`. It accepts no input. When the run ends, the tab shows the final status and verify badge and offers **Resume in tab**, which opens a `shell` tab in the run's cwd running `claude --resume <session_id>` / `codex resume <id>` for interactive follow-up. A running session is never resumed concurrently.
+   - **Session list integration (Phase 1 view).** Each session row gets **Resume in tab** next to the existing copy-command button. Each project header gets **Open terminal**.
+   - **UI.**
+     - A tab strip sits above the existing bottom terminal panel. Each tab is labelled `<project key> · shell|run · <short id>`, with a status dot (running, exited, run review/fail).
+     - Clicking a tab switches between xterm instances (one `Terminal` object per tab, created lazily and disposed on close).
+     - The panel collapse button hides the panel only; nothing is killed. Closing a tab (×) kills its process after a confirm, unless the process has already exited.
+     - The panel keeps today's resize handle and its saved height.
+   - **Confidential handling.** Terminal output exists only in server memory and the browser. It is never written to `RUN_LOG`, side files, Linear or disk, and the scrollback is discarded on close. `run` tabs for confidential bindings render the same local stream the runner already holds; nothing new leaves the machine.
+   - **Security fix that comes with this (pre-existing hole).** `SocketIO(app, cors_allowed_origins="*")` (`runner/app.py:149`) lets any web page open in the user's browser connect to `127.0.0.1:8510` and emit `pty_start` / `pty_input`. That is a shell on the user's machine via cross-site WebSocket. Multi-terminal makes this worse.
+     - Restrict origins to `http://127.0.0.1:<port>` and `http://localhost:<port>`.
+     - Reject terminal events from any other origin.
+     - Keep the default bind at `127.0.0.1` (already the default at `:3466`).
+   - The existing skill-handoff PTY features (`skill_selected`, `_record_pending_handoff`) are keyed by `term_id` instead of socket sid. This is a behaviour-preserving port.
 
 ## Progress Checklist
 **Phase 0 — registry + verify**
@@ -118,6 +144,21 @@ Full containment of a hostile agent is a non-goal: no containers and no separate
   - The main-checkout fingerprint catches: edit of an already-dirty file, a commit, and a new ignored file.
 - [ ] Dogfood: one real ticket per registered project end-to-end (dispatch → verify → manual merge or cleanup); record outcome here by key only
 
+**Phase 3 — terminal tabs (Decision 10)**
+- [ ] Origin fix first: `cors_allowed_origins` restricted to the dashboard's own origins; test: Socket.IO connect with `Origin: https://evil.example` is refused; same-origin connect works
+- [ ] PTY module: server-owned terminal registry (term_id, kind, project_key, cwd, ring-buffer scrollback, cap 8), `term_open/attach/input/resize/close` events, detach-on-disconnect, process-group kill + `waitpid` + fd close on close/shutdown; port skill-handoff to `term_id`
+- [ ] `shell` tabs: open in a project main path or a bound worktree, with registry `env.PATH` prepended; `interactive_tab_open` flag recorded on in-flight runs of the same project; badge text variant
+- [ ] `run` tabs: read-only render of an in-flight run's existing progress events; at the end, show status + verify badge + **Resume in tab** (never while the run is live)
+- [ ] UI: tab strip, per-tab xterm instance, hide panel without killing, × kills after confirm, **Open terminal** on project headers, **Resume in tab** on session rows
+- [ ] Tests:
+  - Two terminals in different projects have independent cwd and output, and input to one never reaches the other.
+  - A disconnect followed by reattach replays the scrollback, and the process is still alive.
+  - Close leaves no child process behind (pgid gone) and no open fd.
+  - The 9th open is refused.
+  - A confidential run tab's output is absent from `RUN_LOG` and from disk.
+  - The `interactive_tab_open` flag is set only when a `shell` tab is on that project's main path during the run.
+- [ ] Manual check: three projects running at once, each with its own tab; hide the panel, reload the page, reattach all three; close one and confirm its process is gone (`ps`)
+
 **Wrap-up**
 - [ ] Update `AGENTS.md` repository map + `docs/context-maintenance.md`; `graphify update .`
 - [ ] Definition of Done: `.venv/bin/python3 -m py_compile runner/*.py runner/projects.py` and `.venv/bin/python -m pytest tests/` pass
@@ -127,12 +168,13 @@ Full containment of a hostile agent is a non-goal: no containers and no separate
 - [ ] Dashboard lists every registered project; each shows Claude + Codex sessions matching `claude --resume` / `codex resume` pickers in that directory (spot-check ≥3 ids per project)
 - [ ] A ticket labelled `project:<key>` runs in a worktree of that project on branch `agent/<id>`, the main checkout's `git status` is unchanged by the run, and its review card shows the verify result
 - [ ] For a confidential project, every Linear comment for a run (result, error, retry) contains only the fixed template fields, and `RUN_LOG` holds only the redacted record
+- [ ] Several terminal tabs (shell + run, different projects) run at once. Hiding the panel or reloading the page keeps them alive and reattachable. Closing a tab leaves no process behind. A cross-origin Socket.IO client cannot open or drive a terminal.
 - [ ] `projects.yaml` is not tracked (`git check-ignore projects.yaml` succeeds); `python -m pytest tests/` passes (baseline 2026-10-13: 54 passed)
 
 ## Constraints
 - No project names, paths, client names or data in tracked files (code, docs, tests, fixtures, this plan, its review log) — they live only in `projects.yaml`
 - `~/.claude` and `~/.codex` are read-only: no writes, no copying transcripts into agentic-os state
-- No new UI beyond the project/session view: no transcript viewer, no editing
+- No new UI beyond the project/session view and the terminal tabs (Decision 10): no transcript viewer, no editing, no terminal persistence across server restarts
 - Agents never touch a project's main checkout; AgenticOS writes only to worktrees it created
 - Seeded data copies live only under `~/.agentic-os/worktrees/` and are removed with the worktree
 
@@ -142,6 +184,7 @@ Full containment of a hostile agent is a non-goal: no containers and no separate
 - Knowledge-base dir is TCC-protected from some processes (the Claude Code shell got "Operation not permitted" on 2026-10-13); verify must be proven from the launchd runner context. Whether KB skills need gitignored paths (`seed:`) is unverified.
 - KB slash-command prompts work only with the Claude backend; other agents receive them as plain text.
 - Built-in CLI sandboxes (Decision 9) are vendor features whose flags and settings keys change between releases. A CLI upgrade can silently break confidential dispatch, or make it hang. The runner should check the CLI version, the spike's commands should be rerun after upgrades, and a sandbox failure must surface as a launch error, never as a bypass.
+- Terminal tabs are processes owned by the Flask server. If the server restarts (launchd `KeepAlive`), every interactive shell is killed and its scrollback is lost. This is accepted: the tabs are not a tmux replacement. Use tmux inside a tab if a session must survive restarts.
 - `ai-title`/`entrypoint`/`source` are undocumented on-disk formats of Claude Code / Codex and may change; readers must degrade to "untitled", not crash.
 
 ## Test
