@@ -1,3 +1,11 @@
+---
+status: deferred
+created: 2026-05-20
+deferred: 2026-10-13
+reason: research not started
+resume_from: 待调研问题 section
+---
+
 # P23 — Shared agent context injection
 
 **状态:** Deferred — 待调研  

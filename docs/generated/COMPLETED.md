@@ -64,3 +64,23 @@ Initial UI skeleton with Preact, dnd-kit, basic kanban columns, SSE listener.
 **Status:** completed
 
 All 7 phases complete. Preact → React 18, @hello-pangea/dnd, TanStack Query, Radix UI, Lexical, SSE real-time, Linear columns, AgentKanbanCard, STT, Token/History panels.
+
+## Gemini (Antigravity) weekly quota row
+**Status:** completed
+
+a47c9e2
+
+## Modular Architecture — 可插拔模块系统
+**Status:** completed
+
+Completed 2026-05-12; some items moved to long-term plans
+
+## Structured Operational Memory + Architecture Index
+**Status:** completed
+
+Completed 2026-10-13; roadmap/events/generated docs verified
+
+## DeepSeek Shell Execution via MCP
+**Status:** completed
+
+Completed — superseded by direct API integration

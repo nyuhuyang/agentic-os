@@ -1,3 +1,11 @@
+---
+status: deferred
+created: 2026-05-20
+deferred: 2026-10-13
+reason: focus on multi-project dispatch
+resume_from: 3 unchecked upstream-sync items in acceptance list
+---
+
 # P15 — DeepSeek TUI exec agent integration
 
 **状态:** Phase 1+2 完成 (2026-05-21)  

@@ -1,3 +1,10 @@
+---
+status: completed
+created: 2026-09-23
+completed: 2026-10-13
+note: shipped in a47c9e2; archived during 2026-10-13 plan triage
+---
+
 # Plan: Gemini (Antigravity) weekly quota row in dashboard windows panel
 _Locked via claudex-loop — by Claude + Yang Hu, 2026-09-23_
 

@@ -1,3 +1,11 @@
+---
+status: deferred
+created: 2026-05-15
+deferred: 2026-10-13
+reason: focus on multi-project dispatch; sibling ../symphony-ts no longer present
+resume_from: first unchecked item (1-H)
+---
+
 # P20 — Dashboard Fixes & Token Panel Redesign
 
 ## Status: Active
