@@ -1,6 +1,7 @@
 ---
-status: in-progress
+status: completed
 created: 2026-10-14
+completed: 2026-10-14
 ---
 
 # Task: Two-pass voice input — Browser STT live, OpenAI transcribe + LLM polish as final
@@ -117,7 +118,7 @@ This also moves off OpenAI models that are being retired (source: developers.ope
 ## Open Questions (resolve before build)
 - [x] Polish model = `gpt-6-luna` with `reasoning_effort` none, overridable via `OPENAI_STT_POLISH_MODEL`. User confirmed 2026-10-14. Price is $0.10 / $0.50 per 1M tokens (developers.openai.com/api/docs/models).
 - [x] Should the polish step also run for Browser-only mode without audio, for example when OpenAI transcription fails? Default: no. Polish only runs on the OpenAI transcript. — kept default: no (2026-10-14)
-- [ ] Glossary contents beyond the generic list (private extras go in `STT_GLOSSARY_EXTRA`).
+- [x] Glossary contents beyond the generic list (private extras go in `STT_GLOSSARY_EXTRA`). — N/A: the user decided not to add private terms for now (2026-10-14); the env hook stays available
 
 ## Non-goals
 - Live streaming through `gpt-live-transcribe` / the GA Realtime API. Browser STT already covers the live preview.
@@ -178,7 +179,7 @@ This also moves off OpenAI models that are being retired (source: developers.ope
 
 **Verification**
 - [x] `.venv/bin/python3 -m py_compile runner/*.py runner/modules/stt/__init__.py` and `.venv/bin/python -m pytest tests/` pass — compile ok; 65 passed (2026-10-14)
-- [ ] Manual in Chrome on the launchd dashboard: speak a sentence containing "OpenAI", "Codex", "Linear". Live text appears and is then replaced by the refined text. Typing during "refining…" shows the hint instead of overwriting. Clicking **Copy** in the hint puts the refined text on the clipboard and leaves the field untouched. If you start recording, close the modal while the permission prompt is pending, then grant permission, the mic indicator goes off immediately. The same holds for typing **during** live recognition, and for adding an attachment mid-recording, in all three targets: reply, Linear description and new-issue description. If you start recording in issue A, close it and open issue B, nothing from A is inserted into B. Close A mid-recording ⇒ the mic goes off at once. Reopening A from another column (for example In Review instead of Todo), and after a board refresh, shows A's pending Copy hint.
+- [x] Manual in Chrome on the launchd dashboard: speak a sentence containing "OpenAI", "Codex", "Linear". Live text appears and is then replaced by the refined text. Typing during "refining…" shows the hint instead of overwriting. Clicking **Copy** in the hint puts the refined text on the clipboard and leaves the field untouched. If you start recording, close the modal while the permission prompt is pending, then grant permission, the mic indicator goes off immediately. The same holds for typing **during** live recognition, and for adding an attachment mid-recording, in all three targets: reply, Linear description and new-issue description. If you start recording in issue A, close it and open issue B, nothing from A is inserted into B. Close A mid-recording ⇒ the mic goes off at once. Reopening A from another column (for example In Review instead of Todo), and after a board refresh, shows A's pending Copy hint. — user tested with a real microphone and accepted the version (2026-10-14)
 Close A, record in B, then reopen A: A's result is present, so the B capture did not discard it.
 Send A's reply while A is still refining: no hint appears later.
 Record in a just-created local task, then wait for Linear sync and reopen: the result is found. The same holds if you reload the page during sync.
