@@ -379,16 +379,19 @@ def _write_registry(path: Path, doc: dict, expected_hash: str) -> None:
     if _registry_hash(_read_registry_bytes(path)) != expected_hash:
         raise RegistryConflict("projects.yaml changed while saving; reload and try again")
     text = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, default_flow_style=False)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = None
     try:
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
         os.chmod(tmp, path.stat().st_mode & 0o777 if path.exists() else 0o600)
         os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp)
-        raise
+    except OSError as exc:
+        raise ProjectError(f"cannot write {path}: {exc}") from None
+    finally:
+        if tmp:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(tmp)
 
 
 def _clean_entry(entry: object) -> dict:
@@ -445,12 +448,15 @@ def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = Fa
             project = _validate_for_save(key, entry, old, create)
             projects[key] = entry
             _write_registry(path, doc, expected_hash)
-        except ProjectError as exc:
-            if created:
-                exc.args = (f"{exc} — the new repo {created} was created and kept; save again without "
-                            "'create new folder'",)
-                exc.initialized = str(created)
-            raise
+        except Exception as exc:
+            if not created:
+                raise
+            if not isinstance(exc, ProjectError):  # e.g. an OSError: still a structured answer (B007)
+                exc = ProjectError(f"save failed: {exc}")
+            exc.args = (f"{exc} — the new repo {created} was created and kept; save again without "
+                        "'create new folder'",)
+            exc.initialized = str(created)
+            raise exc from None
     return {"key": key, "confidential": project.confidential}
 
 

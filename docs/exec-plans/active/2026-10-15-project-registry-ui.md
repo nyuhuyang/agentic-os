@@ -132,4 +132,6 @@ The user adds, edits and removes AgenticOS projects from the dashboard's Project
 - [x] Test: symlink-alias path edit and alias re-add refused; init with stale hash / duplicate creates no folder; env values round-trip verbatim; registry temp patterns ignored
 - [x] Fix: after `init`, a failed save keeps the new folder and reports `initialized`; the form retries without init (REGUI-B006)
 - [x] Test: invalid entry and mid-validation hand edit both keep the initialized folder; API returns `initialized`; retry without init registers it
-- [ ] Fresh cross-provider (Codex) build inspection returns no unresolved material findings — inspection 1 REVISE (5, fixed); inspection 2 REVISE (1, fixed); inspection 3 pending
+- [x] Fix: registry write errors become `ProjectError`; after `init` every failure carries `initialized` (REGUI-B007)
+- [x] Test: a registry write failure after init keeps and reports the folder; retry without init registers it
+- [ ] Fresh cross-provider (Codex) build inspection returns no unresolved material findings — inspection 1 REVISE (5, fixed); inspection 2 REVISE (1, fixed); inspection 3 REVISE (1, fixed); inspection 4 pending

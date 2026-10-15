@@ -405,3 +405,16 @@ def test_session_dirs(reg, tmp_path, monkeypatch):
     monkeypatch.setattr(pj, "CODEX_DB", db)
     out = pj.session_dirs([a, b])
     assert out[0]["agents"] == ["claude", "codex"] and out[0]["sessions"] == 2
+
+
+def test_registry_write_failure_after_init_keeps_and_reports_the_folder(reg, tmp_path, monkeypatch):
+    path, a, b = reg
+    fresh = tmp_path / "fresh"
+    real = pj.tempfile.mkstemp
+    monkeypatch.setattr(pj.tempfile, "mkstemp", lambda **kw: (_ for _ in ()).throw(PermissionError("read-only dir")))
+    with pytest.raises(pj.ProjectError, match="cannot write.*created and kept") as exc:
+        pj.save_project("gamma", entry(fresh, verify="true"), h(path), create=True, init=True)
+    assert exc.value.initialized == str(fresh) and (fresh / ".git").exists()
+    monkeypatch.setattr(pj.tempfile, "mkstemp", real)
+    pj.save_project("gamma", entry(fresh, verify="true"), h(path), create=True)
+    assert "gamma" in pj.load_registry()

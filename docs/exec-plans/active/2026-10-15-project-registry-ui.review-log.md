@@ -333,3 +333,37 @@
 
 ### Host disposition (build inspection 2, accepted)
 - REGUI-B006: no automatic rollback. After `init`, any later `ProjectError` keeps the folder. The error text names it, and the exception carries `initialized`. The API returns `initialized` with the original status (409 for conflict/busy, else 400), and the form unchecks "create new folder" so a retry registers the existing repo. Tests: an invalid entry keeps the folder and a retry without init succeeds; a hand edit during validation → RegistryConflict with the folder kept; API 400 carries `initialized`. pytest 344 passed.
+
+## Build inspection 3 (2026-10-15)
+- Fresh Codex session 01a14086-2c64-7a12-b6d0-a713352bb822, base ec74297, cross-provider, 75 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/reg/i3/claudex-70l0guho/result.json`.
+- Verdict: **REVISE**, 1 finding (B006 rollback removal confirmed).
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "REGUI-B006's destructive rollback is removed, but post-initialization filesystem failures bypass the new recovery response.",
+ "findings": [
+  {
+   "id": "REGUI-B007",
+   "severity": "medium",
+   "path": "runner/projects.py:448",
+   "evidence": "Only ProjectError receives initialized metadata. After successful initialization, _write_registry can raise OSError from mkstemp, write, chmod or os.replace—for example, when the registry directory is unwritable while the project directory remains writable. This escapes both save_project and api_project_create's ProjectError handlers, producing HTTP 500 without initialized. The folder survives, but the form retains its checked initialization option; retrying then fails with 'already exists'. The added tests cover validation errors and RegistryConflict, but not operational write failures.",
+   "fix": "Convert ordinary post-initialization operational exceptions into a handled error carrying initialized, preserving the repository and returning structured JSON. Cover a registry write failure and verify that retrying without initialization registers the retained repository."
+  }
+ ],
+ "coverage": [
+  "Verified all seven manifested file hashes, the plan hash and tracked diff hash against the supplied values.",
+  "Reviewed every manifested change and the registry regression-test source.",
+  "Traced initialization, validation, registry replacement, API exception handling and form retry behavior.",
+  "Inspected related lifecycle-lock callers, worktree sidecar readers/writers, durable issue-binding persistence, CLI, PTY and state_io."
+ ],
+ "limitations": [
+  "Static review only; no files edited, tests or browser checks run, or work delegated. Builder-reported results were not independently verified.",
+  "Reinspection focused on REGUI-B006 and its interactions, not a fresh audit of the entire feature.",
+  "Live registry contents, personal session stores and browser artifacts were not inspected. Spec fidelity was assessed against the supplied plan and inspected code contracts."
+ ]
+}
+```
+
+### Host disposition (build inspection 3, accepted)
+- REGUI-B007: `_write_registry` turns any OSError (mkstemp, write, chmod, replace) into `ProjectError("cannot write …")`, and its temp file is removed in `finally`. After `init`, any exception becomes a ProjectError carrying `initialized`, so the API answers with structured JSON rather than a 500. Test: a registry write failure after init keeps the folder and reports `initialized`; a retry without init registers it. pytest 345 passed.
