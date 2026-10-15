@@ -10,6 +10,7 @@ Two dashboard changes requested on 2026-10-15, kept in one plan (user: "these ar
 - B. Pick a project when creating a task (default `agentic-os`)
 - C. Live terminal view of a card's session from any board column
 - D. Rename the project panel's "Baseline" button to "Run tests"
+- E. Browse a project's files (tree + preview) from the Projects panel
 
 Each part has its own goal, criteria and checklist; one Codex plan review and one build inspection cover all parts.
 
@@ -196,6 +197,47 @@ A headless run that ends by asking the user something lands in In review. The us
 ### Progress Checklist
 - [ ] Implement the label, tooltip and result wording in `index.html`
 - [ ] Manual check: the button and result on a project with `verify`, absent on one without
+
+## E. Browse a project's files from the Projects panel
+
+### Goal
+Opening a project in the Projects panel should let the user look at its folder the way they would in an editor: a tree they can expand, and a quick look at a file. Today an opened project shows only its sessions. User request, 2026-10-15.
+
+### Acceptance criteria
+- [ ] An opened project shows two tabs: "Sessions" (today's list) and "Files"; the choice is remembered per project in the browser
+- [ ] "Files" shows the project's main checkout as a tree: folders first, then files, alphabetical; folders expand on click and load lazily (one level per request)
+- [ ] What is listed follows git: tracked files and untracked-but-not-ignored files; gitignored folders (e.g. `data/`, `results/`) appear once, greyed and marked "ignored", and are not expanded; `.git/` never appears
+- [ ] A worktree switcher lists the main checkout and each agent worktree of the project (`agent/<id>`), so the user can browse what an agent changed; changed/untracked files are marked (git status letter)
+- [ ] Clicking a file opens a read-only preview: text files up to 200 KB with line numbers; larger or binary files show size and type only; images are not rendered
+- [ ] "Reveal in Finder" opens the folder or file in Finder (macOS `open -R`)
+- [ ] Nothing is written; every path is checked to resolve inside the chosen checkout (no `..`, no symlink that escapes); a refused path returns 400
+
+### Decisions
+- Listing comes from git, not a raw directory walk: `git ls-files --cached --others --exclude-standard -z` for the folder plus `git status --porcelain -z` for marks, through the hardened, bounded `projects._git` (confined for confidential projects). Ignored folders come from `git check-ignore` on the folder's direct children.
+- Confidential projects are browsable here too: the dashboard is local-only and nothing leaves the machine; previews never go to logs, run records or Linear.
+- Read-only by design: no edit, rename or delete in this view (the agent or the user's editor does that).
+
+### Approach
+- [ ] `projects.list_dir(project, worktree, rel)`: one level of entries `{name, kind: dir|file, size, status, ignored}` with the git sources above; refuses paths outside the checkout
+- [ ] `projects.read_file(project, worktree, rel, limit=200_000)`: `{text | null, size, binary, truncated}`
+- [ ] Routes: `GET /api/projects/<key>/tree?wt=<id|main>&path=<rel>`, `GET /api/projects/<key>/file?wt=…&path=…`, `POST /api/projects/<key>/reveal` (gated like every mutating request; runs `open -R` on the resolved path)
+- [ ] UI: Sessions/Files tabs in the opened project, lazy tree, worktree switcher, preview pane, "Reveal in Finder"
+
+### Non-goals
+- Editing, creating or deleting files; full-text search; image or PDF rendering; diff view (a later step can add a per-worktree diff against its base)
+
+### Risks
+- Very large repos: one level per request and a 2,000-entry cap per folder (rest summarised as "… N more")
+- macOS privacy: the runner (launchd) already reads these folders; `open -R` runs as the user
+
+### Progress Checklist
+- [ ] Test: `list_dir` lists tracked + untracked, marks ignored folders without listing them, hides `.git`, sorts folders first, caps at 2,000
+- [ ] Test: status marks for a modified and an untracked file in an agent worktree
+- [ ] Test: `..`, an absolute path and an escaping symlink are refused; a symlink inside the checkout is listed but not followed out
+- [ ] Test: `read_file` returns text with truncation at the limit, and only size/type for a binary file
+- [ ] Test: routes need the token; `reveal` is gated by maintenance
+- [ ] Implement helpers, routes and the Files tab
+- [ ] Manual check: browse a project's main checkout and an agent worktree, preview a file, reveal in Finder
 
 ## Shared checklist
 - [ ] Codex plan review returns APPROVED
