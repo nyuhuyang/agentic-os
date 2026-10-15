@@ -8,8 +8,9 @@ created: 2026-10-15
 Two dashboard changes requested on 2026-10-15, kept in one plan (user: "these are all UI changes"):
 - A. Rename and remove sessions from the Projects panel
 - B. Pick a project when creating a task (default `agentic-os`)
+- C. Live terminal view of a card's session from any board column
 
-Each part has its own goal, criteria and checklist; one Codex plan review and one build inspection cover both.
+Each part has its own goal, criteria and checklist; one Codex plan review and one build inspection cover all three.
 
 ## A. Rename and remove sessions
 
@@ -112,6 +113,48 @@ The new-task form (job board "+" / Todo) gets a Project selector listing the reg
 - [ ] Test: `ensure_label` reuses an existing label and creates a missing one; `create_issue` sends `labelIds`
 - [ ] Implement tracker labels, route, Linear client, UI selector and card badge
 - [ ] Manual check of the three creation cases, including the Linear label
+
+## C. Live terminal view from any board card
+
+### Goal
+The terminal panel at the bottom stays as it is. Any card in Backlog, Todo, In progress, In review or Done that has a session gets a "Terminal" action that opens a tab in that panel showing the session live — what the agent is doing as it happens, not the after-the-fact Output / Log / Error panes. User request, 2026-10-15.
+
+### Acceptance criteria
+- [ ] Every card with a running job or a recorded session shows a "Terminal" action on the card and in its detail view, in all five columns; cards with neither show nothing
+- [ ] Running job (any path: dashboard `/run`, Linear dispatch, retry/rework, project dispatch): the tab streams the agent's events in real time — assistant text, each tool call with its arguments, tool results (truncated), errors — as terminal lines, starting with what was already emitted
+- [ ] Finished job with a resumable session: the tab first replays the last run's events (from the stream log on disk, so it works after a runner restart), then offers "Resume here", which opens the interactive `claude --resume` / `codex resume` in the run's own folder (worktree or runner root), using the existing resume-tab rules (ticket lock, confidential policy)
+- [ ] A card with several attempts lets the user pick the attempt; the latest is the default
+- [ ] Opening the same card twice focuses the existing tab
+- [ ] Confidential runs show their live view only in the dashboard (never sent to Linear), same as the run tab today
+
+### Decisions
+- Agents run headless (`-p` / `exec --json`), so there is no TTY to mirror while they run; "live terminal" means rendering their event stream as it arrives. Interactive control is the resume tab once the run has ended.
+- One event source for all runs: the existing `project_runs.RUN_EVENTS` ring and `run_event` socket event, now fed by every stream reader (`_stream_claude_run`, `_stream_text_run`, `_stream_dsh_run`, project `run_agent`), not only project dispatch.
+- Replay after the run reads the run's stream log (`outputs/logs/<run>_stream.jsonl` or the text stream) through the same renderer, so live and replay look identical.
+
+### Approach
+- [ ] `render_event(agent, raw) -> list[str]`: one renderer from Claude stream-json / Codex JSON / dsh / plain text to terminal lines (ANSI-dim tool results, colored errors), shared by live and replay
+- [ ] Every stream reader pushes rendered lines into `RUN_EVENTS[run_id]` and emits `run_event`
+- [ ] `GET /api/runs/<id>/events` replays from the stream log when the ring is empty (finished or after restart) and reports `resume_eligible` for every path, not only project runs
+- [ ] Board card + detail view: "Terminal" action (attempt picker when there are several); opens `openRunTab`, which on finish shows "Resume here"
+- [ ] The existing project-only "▤ run tab" badge becomes this action
+
+### Non-goals
+- Typing into a running headless agent (not possible; resume after it ends)
+- Changing the terminal panel layout
+
+### Risks
+- Very chatty runs: the ring stays bounded (existing `EventRing` limit); replay reads the tail of the log, not the whole file
+
+### Verification
+- Manual: a running dashboard `/run`, a running Linear dispatch and a finished project ticket each open a live/replay tab from their card; "Resume here" opens an interactive session in the right folder
+
+### Progress Checklist
+- [ ] Test: renderer turns sample Claude, Codex, dsh and text events into the expected lines
+- [ ] Test: each stream reader feeds the ring and emits `run_event` (non-project and project paths)
+- [ ] Test: events endpoint replays from the stream log after the ring is gone, and flags resume for a non-project run
+- [ ] Implement renderer, reader hooks, replay, card/detail action and attempt picker
+- [ ] Manual check: live view for a running job, replay + "Resume here" for a finished one, from cards in different columns
 
 ## Shared checklist
 - [ ] Codex plan review returns APPROVED
