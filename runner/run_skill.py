@@ -87,6 +87,22 @@ def _acquire_lock(skill: str) -> "IO | None":
         return None
 
 
+def _maintenance_shared() -> "IO | None":
+    """Shared hold on outputs/locks/maintenance.lock for the whole run, so a checkout move
+    (scripts/relocate_checkout.sh holds it exclusively) never happens under a running skill
+    and no skill starts during one (REL-002). None when maintenance holds it."""
+    if not _HAVE_FCNTL:
+        return None
+    LOCKS_DIR.mkdir(parents=True, exist_ok=True)
+    fh: IO = (LOCKS_DIR / "maintenance.lock").open("a", encoding="utf-8")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        return fh
+    except OSError:
+        fh.close()
+        return None
+
+
 def _append_log(record: dict) -> None:
     OUTPUTS_DIR.mkdir(exist_ok=True)
     with RUN_LOG.open("a", encoding="utf-8") as f:
@@ -211,9 +227,14 @@ def cmd_run(skill: str, skill_args: list[str], retry: int, dry_run: bool, yes: b
         print(f"[dry-run] would run: {_python()} {entrypoint} {' '.join(skill_args)}")
         return 0
 
+    maint_fh = _maintenance_shared()
+    if _HAVE_FCNTL and maint_fh is None:
+        print("[runner] BLOCKED: the checkout is being moved (maintenance lock held). Aborting.", file=sys.stderr)
+        return 1
     # Per-skill exclusive lock: prevents two runners from launching the same skill concurrently.
     lock_fh = _acquire_lock(skill)
     if _HAVE_FCNTL and lock_fh is None:
+        maint_fh.close()
         print(f"[runner] BLOCKED: `{skill}` is already running (lock held). Aborting.", file=sys.stderr)
         return 1
 
@@ -247,6 +268,8 @@ def cmd_run(skill: str, skill_args: list[str], retry: int, dry_run: bool, yes: b
     finally:
         if lock_fh is not None:
             lock_fh.close()  # releases fcntl lock automatically
+        if maint_fh is not None:
+            maint_fh.close()  # after the record is written
 
 
 def cmd_list(registry: dict) -> int:

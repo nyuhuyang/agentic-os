@@ -104,3 +104,64 @@
 - REL-008: phase-aware HUP/INT/TERM traps: a signal before the move restarts OLD, after the move it rolls back. Test sends TERM during the NEW bootstrap.
 - REL-009: `core.hooksPath` naming OLD is rewritten inside `repoint` (and so restored on rollback), and the local git config is part of `verified`. Tests cover both directions.
 - pytest 373 passed (relocate suite 5 tests, 7.7 s).
+
+## Plan review round 2 (2026-10-15)
+- Same Codex session (resumed), cross-provider, 117 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/move/r2/claudex-3xwc220e/result.json`.
+- Verdict: **REVISE**, 4 findings.
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "Several prior defects are addressed, but writer detection, rollback completeness, verification errors, and signal handling still have concrete failure paths.",
+ "findings": [
+  {
+   "id": "REL-002",
+   "severity": "high",
+   "path": "scripts/relocate_checkout.sh:35",
+   "evidence": "The new process scan searches only command lines containing the absolute OLD path. The documented invocation, `.venv/bin/python3 runner/run_skill.py <skill>` (runner/run_skill.py:8), need not contain that path. An independently launched CLI run therefore remains invisible to both this scan and the dashboard's running-jobs endpoint. After the move, its completion writes still target OLD/outputs (run_skill.py:90–100), potentially losing the completion record. No shared maintenance lock prevents a new CLI invocation after the final scan either.",
+   "fix": "Coordinate relocation with CLI execution through a shared maintenance lock held through completion writes. Detect existing users through held locks and cwd/open-file inspection rather than command-line substrings alone. Add coverage for the documented relative CLI invocation."
+  },
+  {
+   "id": "REL-004",
+   "severity": "high",
+   "path": "scripts/relocate_checkout.sh:85",
+   "evidence": "Reverse repointing and verification failures are still reduced to warnings. For example, if reverse shebang rewriting fails after a successful forward repair, rollback skips later worktree repairs, restarts OLD, and can print 'rolled back; runner up' with exit 1 while entrypoints or worktrees still reference NEW. The runner's interpreter can start independently of those broken entrypoints. This contradicts the revised plan's checked rollback and exit-2 contract.",
+   "fix": "Track reverse repair and verification failures as incomplete recovery. Restore the verified plist and attempt service recovery where safe, but exit 2 and identify remaining damage unless all rollback invariants pass. Add a case where reverse repair fails while OLD can still answer HTTP."
+  },
+  {
+   "id": "REL-006",
+   "severity": "medium",
+   "path": "scripts/relocate_checkout.sh:68",
+   "evidence": "The new verification still treats inspection failures as success. A failed `git worktree list` at line 72 supplies no rows, leaving the final while loop successful without validating any worktrees. Similarly, grep read errors at lines 69–70 and a failed Git configuration read at line 71 can look like 'no old path found'. These paths can reach DONE despite incomplete verification.",
+   "fix": "Check inspection commands separately before consuming their output. Distinguish grep's no-match status from execution/read failures, require successful Git enumeration, and fail verification on any unreadable required evidence. Add fault-injection coverage for these commands."
+  },
+  {
+   "id": "REL-008",
+   "severity": "high",
+   "path": "scripts/relocate_checkout.sh:104",
+   "evidence": "PHASE remains 'stopped' while mv executes and changes to 'moved' only afterward. If TERM arrives after the rename succeeds but before that assignment, the shell can run the pending trap with PHASE=stopped. The handler then tries to restart OLD, whose directory is already gone, instead of rolling back NEW. The added interruption test signals during bootstrap, so it misses this boundary.",
+   "fix": "Introduce a moving phase that reconciles the actual directory locations, or defer signal recovery until the move result and phase transition are recorded. Add interruption coverage immediately after a successful rename and before the next shell statement."
+  }
+ ],
+ "coverage": [
+  "Verified the revised plan SHA256 and inspected commit c6569cc, the complete relocation script, relocation tests, and added path-resolution tests.",
+  "Confirmed source fixes for REL-001, REL-003, REL-005, REL-007, and REL-009; forward worktree repair failures now propagate.",
+  "Traced CLI locks and completion writes, dashboard completion bookkeeping and shutdown, project-process shutdown, shared-state locking, and both progress readers.",
+  "Inspected the live LaunchAgent plist, local Git configuration, and registered nested worktree paths.",
+  "Rechecked relevant specification requirements for in-memory running-job visibility, append-only journals, and state integrity."
+ ],
+ "limitations": [
+  "No files were edited, tests run, services changed, or work delegated.",
+  "The host-reported 373 passing tests were not independently verified.",
+  "Signal timing, process detection, and launchd recovery were assessed statically.",
+  "This follow-up focused on the revision and related callers and writers; it did not repeat an exhaustive external-path audit."
+ ]
+}
+```
+
+### Host dispositions (round 2, all accepted)
+- REL-002: a shared maintenance lock. `run_skill.py` holds `outputs/locks/maintenance.lock` with LOCK_SH for its whole run, through its record write, and refuses to start while it is held exclusively. The script takes it exclusively through a `/usr/bin/python3` helper that holds it until the script exits; the helper also exits when its parent dies. A skill already running, whatever its argv (relative CLI invocation), makes the script abort before anything changes; a skill started during the move is refused. Tests: a lock holder whose argv lacks OLD blocks the move, and `_maintenance_shared()` returns None while the lock is held exclusively.
+- REL-004: failures in the reverse repoint or its verification are recorded. The runner is still restarted on OLD, but the script exits 2 ("recovery is incomplete: …"). Test: reverse sed fails while OLD answers → exit 2, runner up on OLD.
+- REL-006: `verified` tells grep's no-match (1) apart from errors (≥2), and requires `git config --list` and `git worktree list` to succeed. Each worktree must be its own toplevel (a subdirectory that falls back to the main repo no longer passes) and `git status` must work. Tests: a failed worktree listing and a failed repair each roll back. An already broken worktree is refused before anything changes.
+- REL-008: a new `moving` phase. A signal during `mv` checks where the checkout actually is, then rolls back or restarts. Test: TERM delivered right after the rename, before the next statement, rolls back.
+- pytest 379 passed (relocate suite 11 tests).

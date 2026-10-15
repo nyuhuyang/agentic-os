@@ -35,6 +35,15 @@ case "$pat" in
      exit 1 ;;
 esac''',
     "plutil": "exit 0",
+    # fault injection around the real tools (REAL_* filled in by the fixture)
+    "git": '''if [ -n "${SHIM_GIT_FAIL_ONCE:-}" ] && [ ! -e "$SHIM_LOG.gitfail" ] && echo "$*" | grep -q "${SHIM_GIT_FAIL_ON:-worktree list}"; then
+  touch "$SHIM_LOG.gitfail"; exit 128
+fi
+exec "$REAL_GIT" "$@"''',
+    "sed": '''if [ -n "${SHIM_SED_FAIL:-}" ] && echo "$*" | grep -qF "$SHIM_SED_FAIL"; then exit 1; fi
+exec "$REAL_SED" "$@"''',
+    "mv": '''"$REAL_MV" "$@" || exit $?
+if [ -n "${SHIM_KILL_AFTER_MV:-}" ] && [ ! -e "$SHIM_LOG.mvkill" ]; then touch "$SHIM_LOG.mvkill"; kill -TERM $PPID; fi''',
 }
 
 
@@ -60,7 +69,9 @@ def env(tmp_path):
     plist.write_text(f"<string>{old}/.venv/bin/python3</string>\n<string>{old}/runner/app.py</string>\n")
     up = tmp_path / "up"
     up.write_text(str(old))
-    e = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}", "AOS_PLIST": str(plist), "AOS_WAIT": "3",
+    import shutil
+    real = {f"REAL_{t.upper()}": shutil.which(t) for t in ("git", "sed", "mv")}
+    e = {**os.environ, **real, "PATH": f"{bin_}:{os.environ['PATH']}", "AOS_PLIST": str(plist), "AOS_WAIT": "3",
          "SHIM_LOG": str(tmp_path / "calls"), "SHIM_UP": str(up)}
     return old, new, plist, up, e
 
@@ -123,10 +134,72 @@ def test_rolls_back_when_interrupted_after_the_move(env):
     assert_back_on_old(old, new, plist, up, before, r)
 
 
-def test_rolls_back_when_a_worktree_cannot_be_repaired(env):
+def test_an_already_broken_worktree_is_refused_up_front(env):
     old, new, plist, up, e = env
-    (old / ".claude" / "worktrees" / "w1" / ".git").unlink()  # unrepairable
+    (old / ".claude" / "worktrees" / "w1" / ".git").unlink()
     before = plist.read_text()
     r = run(old, new, e)
-    assert r.returncode == 1 and "rolled back" in r.stdout and old.exists() and not new.exists()
-    assert plist.read_text() == before and up.read_text().strip() == str(old)
+    assert r.returncode == 1 and "worktree already broken" in r.stdout
+    assert old.exists() and not new.exists() and plist.read_text() == before
+    assert "bootout" not in (Path(e["SHIM_LOG"]).read_text() if Path(e["SHIM_LOG"]).exists() else "")
+
+
+def test_rolls_back_when_a_worktree_repair_fails(env):
+    old, new, plist, up, e = env
+    before = plist.read_text()
+    r = run(old, new, {**e, "SHIM_GIT_FAIL_ONCE": "1", "SHIM_GIT_FAIL_ON": "worktree repair"})
+    assert "repoint failed" in r.stdout
+    assert_back_on_old(old, new, plist, up, before, r)
+
+
+def test_a_running_skill_blocks_the_move(env):
+    old, new, plist, up, e = env
+    lock = old / "outputs" / "locks" / "maintenance.lock"
+    holder = subprocess.Popen(["/usr/bin/python3", "-c", (
+        "import fcntl, os, sys, time; os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True); "
+        "f = open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_SH); print('x', flush=True); time.sleep(30)"), str(lock)],
+        stdout=subprocess.PIPE, cwd=str(old))  # like `.venv/bin/python3 runner/run_skill.py`: no OLD in argv
+    holder.stdout.readline()
+    try:
+        r = run(old, new, e)
+        assert r.returncode == 1 and "a skill run holds the maintenance lock" in r.stdout
+        assert old.exists() and up.read_text().strip() == str(old)
+    finally:
+        holder.kill()
+
+
+def test_run_skill_refuses_while_maintenance_holds_the_lock(tmp_path, monkeypatch):
+    import fcntl
+    import sys
+    sys.path.insert(0, str(SCRIPT.parents[1] / "runner"))
+    import run_skill
+    monkeypatch.setattr(run_skill, "LOCKS_DIR", tmp_path)
+    with open(tmp_path / "maintenance.lock", "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        assert run_skill._maintenance_shared() is None
+    fh = run_skill._maintenance_shared()
+    assert fh is not None
+    fh.close()
+
+
+def test_incomplete_reverse_repair_needs_a_human(env):
+    old, new, plist, up, e = env
+    r = run(old, new, {**e, "SHIM_FAIL_AT": str(new), "SHIM_SED_FAIL": f"s|{new}|{old}|g"})
+    assert r.returncode == 2 and "recovery is incomplete" in r.stdout, r.stdout + r.stderr
+    assert old.exists() and up.read_text().strip() == str(old)  # the runner was still restarted
+
+
+def test_failed_inspection_is_not_success(env):
+    old, new, plist, up, e = env
+    before = plist.read_text()
+    r = run(old, new, {**e, "SHIM_GIT_FAIL_ONCE": "1"})
+    assert "cannot list worktrees" in r.stdout
+    assert_back_on_old(old, new, plist, up, before, r)
+
+
+def test_interrupt_right_after_the_rename_rolls_back(env):
+    old, new, plist, up, e = env
+    before = plist.read_text()
+    r = run(old, new, {**e, "SHIM_KILL_AFTER_MV": "1"})
+    assert "interrupted during the move" in r.stdout
+    assert_back_on_old(old, new, plist, up, before, r)

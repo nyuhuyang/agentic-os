@@ -35,6 +35,36 @@ jobs=$(http -H "X-AgenticOS-Token: $token" "$URL/api/runs?state=running")
 others() { pgrep -fl "$1/" | grep -v -e "$1/runner/app.py" -e relocate_checkout.sh; }  # CLI runs, scripts, ...
 busy=$(others "$OLD") && die "processes still use $OLD: $busy"
 
+wt_ok() {  # $1 is a working worktree root of its own (a bare subdir of the main repo is not)
+  top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) && [ "$(cd "$top" && pwd -P)" = "$(cd "$1" && pwd -P)" ] \
+    && git -C "$1" status --porcelain >/dev/null 2>&1
+}
+for wt in "$OLD"/.claude/worktrees/*; do  # a worktree broken before we start cannot be carried over
+  [ -d "$wt" ] || continue
+  wt_ok "$wt" || die "worktree already broken, fix or remove it first: $wt"
+done
+
+# Exclusive maintenance lock, held by a helper until this script ends: run_skill.py holds it
+# shared for its whole run, so no skill is mid-run now and none can start until we finish (REL-002).
+LOCKER_PY='import fcntl, os, sys, time
+path, parent = sys.argv[1], int(sys.argv[2])
+os.makedirs(os.path.dirname(path), exist_ok=True)
+f = open(path, "a")
+try:
+    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    print("busy", flush=True); sys.exit(1)
+print("held", flush=True)
+while os.getppid() == parent:
+    time.sleep(0.5)'
+LOCK_STATUS=$(mktemp -t agenticos-lock) || die "cannot create a temp file"
+/usr/bin/python3 -c "$LOCKER_PY" "$OLD/outputs/locks/maintenance.lock" $$ > "$LOCK_STATUS" &
+LOCKER=$!
+trap 'kill $LOCKER 2>/dev/null; rm -f "$LOCK_STATUS"' EXIT
+i=0; until [ -s "$LOCK_STATUS" ]; do i=$((i + 1)); [ $i -gt 20 ] && die "maintenance lock helper did not answer"; sleep 0.5; done
+[ "$(cat "$LOCK_STATUS")" = held ] || die "a skill run holds the maintenance lock"
+say "maintenance lock held"
+
 BACKUP=$(mktemp -t agenticos-plist) || die "cannot create a plist backup"
 cp "$PLIST" "$BACKUP" && cmp -s "$PLIST" "$BACKUP" || die "plist backup did not verify"
 say "plist backup: $BACKUP"
@@ -65,14 +95,26 @@ repoint() {  # rewrite $1 -> $2 for the checkout now at $2
   done
   sed -i '' "s|$1|$2|g" "$PLIST" && plutil -lint "$PLIST" >/dev/null
 }
-verified() {  # nothing operational in checkout $2 still names $1, and every worktree works
-  [ -z "$(grep -rlI "$1" "$2/.venv" 2>/dev/null)" ] || { say "old path left in .venv"; return 1; }
-  ! grep -q "$1" "$PLIST" || { say "old path left in the plist"; return 1; }
-  ! git -C "$2" config --list --local | grep -q "$1" || { say "old path left in git config"; return 1; }
-  git -C "$2" worktree list --porcelain | sed -n 's/^worktree //p' | while read -r wt; do
-    case "$wt/" in "$1"/*) say "worktree still at $wt"; exit 1 ;; esac
-    git -C "$wt" status --porcelain >/dev/null 2>&1 || { say "worktree broken: $wt"; exit 1; }
+verified() {  # nothing operational in checkout $2 still names $1, and every worktree works;
+              # an inspection that cannot run fails the check (REL-006)
+  out=$(grep -rlI "$1" "$2/.venv"); rc=$?
+  [ $rc -le 1 ] || { say "cannot read $2/.venv"; return 1; }
+  [ -z "$out" ] || { say "old path left in: $out"; return 1; }
+  grep -q "$1" "$PLIST"; rc=$?
+  [ $rc -eq 1 ] || { say "plist still names the old path, or cannot be read"; return 1; }
+  cfg=$(git -C "$2" config --list --local) || { say "cannot read git config"; return 1; }
+  case "$cfg" in *"$1"*) say "old path left in git config"; return 1 ;; esac
+  wts=$(git -C "$2" worktree list --porcelain) || { say "cannot list worktrees"; return 1; }
+  old_ifs=$IFS; IFS='
+'
+  set -f  # worktree paths are data, never globs
+  for line in $wts; do
+    case "$line" in worktree\ *) ;; *) continue ;; esac
+    wt=${line#worktree }
+    case "$wt/" in "$1"/*) IFS=$old_ifs; set +f; say "worktree still at $wt"; return 1 ;; esac
+    wt_ok "$wt" || { IFS=$old_ifs; set +f; say "worktree broken: $wt"; return 1; }
   done
+  IFS=$old_ifs; set +f
 }
 rollback() {
   PHASE=rollback
@@ -82,14 +124,19 @@ rollback() {
   wait_down "$NEW" || manual "a runner from $NEW is still alive; checkout left at $NEW"
   busy=$(others "$NEW") && manual "processes still use $NEW ($busy); checkout left there"
   mv "$NEW" "$OLD" || manual "could not move $NEW back to $OLD"
-  repoint "$NEW" "$OLD" || say "WARNING: repointing back reported an error"
-  verified "$NEW" "$OLD" || say "WARNING: the old checkout still names $NEW somewhere"
+  damage=""
+  repoint "$NEW" "$OLD" || damage="repointing back failed"
+  verified "$NEW" "$OLD" || damage="${damage:+$damage; }the old checkout still names $NEW somewhere"
   restart_old
+  [ -z "$damage" ] || manual "runner restarted on $OLD, but recovery is incomplete: $damage"
   say "rolled back; runner up on $OLD"
   exit 1
 }
 on_signal() {
   case "$PHASE" in
+    moving)  # the rename may or may not have happened: look, then recover (REL-008)
+      if [ -e "$NEW" ] && [ ! -e "$OLD" ]; then rollback "interrupted during the move"; fi
+      say "interrupted before the move"; restart_old; exit 1 ;;
     stopped) say "interrupted before the move"; restart_old; exit 1 ;;
     moved) rollback "interrupted" ;;
     *) exit 1 ;;
@@ -101,7 +148,8 @@ PHASE=stopped
 launchctl bootout "$DOMAIN/$LABEL" || { PHASE=check; die "could not stop $LABEL"; }
 wait_down "$OLD" || { restart_old; die "runner did not stop"; }
 busy=$(others "$OLD") && { restart_old; die "processes still use $OLD: $busy"; }
-mv "$OLD" "$NEW" || { restart_old; die "mv failed; nothing changed"; }
+PHASE=moving
+mv "$OLD" "$NEW" || { PHASE=stopped; restart_old; die "mv failed; nothing changed"; }
 PHASE=moved
 say "moved to $NEW"
 repoint "$OLD" "$NEW" || rollback "repoint failed"
