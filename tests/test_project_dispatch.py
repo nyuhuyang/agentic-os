@@ -1055,3 +1055,21 @@ def test_create_without_key_uses_the_folder_name(helper):
     fresh = pj.REGISTRY_PATH.parent / "Fresh Folder"
     r = c.post("/api/projects", json={"registry_hash": snap, "entry": {"path": str(fresh), "confidential": False, "no_push": True}})
     assert r.status_code == 200 and r.get_json()["key"] == "Fresh-Folder" and (fresh / ".git").exists()
+
+
+def test_workspace_root_found_from_either_checkout_location(tmp_path):
+    import app as app_mod
+    ws = tmp_path / "AI_Workspace"
+    (ws / "obsidian").mkdir(parents=True)
+    assert app_mod._workspace_root(ws / "prototypes" / "agentic-os") == ws
+    assert app_mod._workspace_root(ws / "agentic-os") == ws
+    assert app_mod._workspace_root(tmp_path / "x" / "agentic-os") == tmp_path / "x"
+
+
+def test_saved_stream_paths_follow_the_moved_checkout(tmp_path, monkeypatch):
+    import app as app_mod
+    monkeypatch.setattr(app_mod, "OUTPUTS_DIR", tmp_path / "outputs")
+    (tmp_path / "outputs" / "logs").mkdir(parents=True)
+    (tmp_path / "outputs" / "logs" / "r.stream").write_text("x")
+    assert app_mod._checkout_path("/old/prototypes/agentic-os/outputs/logs/r.stream") == tmp_path / "outputs" / "logs" / "r.stream"
+    assert app_mod._checkout_path("/elsewhere/file.log") == Path("/elsewhere/file.log")

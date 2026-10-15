@@ -48,7 +48,13 @@ import project_runs
 
 _HERE = Path(__file__).resolve().parent              # runner/
 _PROTO = _HERE.parent                                # agentic-os root
-WORKSPACE_ROOT = _PROTO.parent.parent
+# The workspace is the nearest ancestor holding obsidian/ (the checkout moved from
+# prototypes/ to the root once, REL-001); its parent when none is visible.
+def _workspace_root(checkout: Path) -> Path:
+    return next((p for p in checkout.parents if (p / "obsidian").is_dir()), checkout.parent)
+
+
+WORKSPACE_ROOT = _workspace_root(_PROTO)
 KNOWLEDGE_BASE_ROOT = WORKSPACE_ROOT / "obsidian" / "knowledge_base"
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 CODEX_CONFIG = CODEX_HOME / "config.toml"
@@ -891,7 +897,7 @@ def _build_progress_payload(run_id: str, *, issue_id: str | None = None) -> dict
                 pass
         saved_stream = existing_progress.get("stream_log")
         if saved_stream:
-            session_path = Path(saved_stream)
+            session_path = _checkout_path(saved_stream)
     events = _tail_codex_session(session_path) if session_path else []
     if not events:
         prog_path = _run_progress_path(run_id)
@@ -899,7 +905,7 @@ def _build_progress_payload(run_id: str, *, issue_id: str | None = None) -> dict
             try:
                 sl = json.loads(prog_path.read_text(encoding="utf-8")).get("stream_log")
                 if sl:
-                    events = _tail_text_stream(Path(sl))
+                    events = _tail_text_stream(_checkout_path(sl))
                     if events and status == "unknown":
                         status = "running"
             except Exception:
@@ -2231,6 +2237,16 @@ def _extract_codex_thread_id(stdout_s: str) -> str | None:
         except Exception:
             pass
     return None
+
+
+def _checkout_path(saved: str) -> Path:
+    """A path a record saved under this checkout's outputs/, followed to wherever the checkout
+    lives now (it moved once, REL-007). Anything else is returned unchanged."""
+    p = Path(saved)
+    if p.exists() or "/outputs/" not in saved:
+        return p
+    moved = OUTPUTS_DIR / saved.rsplit("/outputs/", 1)[1]
+    return moved if moved.exists() else p
 
 
 def _claude_stream_log_path(run_id: str) -> Path:

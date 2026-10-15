@@ -31,7 +31,7 @@ except ImportError as exc:
     raise SystemExit("rich is required. Run with .venv/bin/python3") from exc
 
 ROOT = Path.cwd()
-WORKSPACE_ROOT = ROOT.parent.parent
+WORKSPACE_ROOT = next((p for p in ROOT.parents if (p / "obsidian").is_dir()), ROOT.parent)  # same rule as app.py
 REGISTRY_JSON = WORKSPACE_ROOT / ".codex" / "registry.json"
 OUTPUTS_DIR = ROOT / "outputs"
 RUN_LOG = OUTPUTS_DIR / "run_log.jsonl"

@@ -14,19 +14,25 @@ Move this repository from `~/Documents/AI_Workspace/prototypes/agentic-os` to `~
 - [ ] `.venv` works from the new path: no file under `.venv` mentions the old path; `.venv/bin/python -m pytest tests/` passes from the new path
 - [ ] Every nested worktree under `.claude/worktrees/` resolves (`git worktree list` shows new paths; `git status` works in each)
 - [ ] The dashboard lists the registered projects with their sessions after the move
+- [ ] The runner resolves the workspace root to `~/Documents/AI_Workspace` from the new path (knowledge base and registry lookups unchanged; nothing written under `~/Documents/.claude`) — `WORKSPACE_ROOT` is the nearest ancestor holding `obsidian/` (REL-001)
+- [ ] Saved progress records that name the old checkout's `outputs/` still show their stream events (reader follows the moved checkout, REL-007)
+- [ ] `.git/config` `core.hooksPath` points into the new checkout (REL-009)
 - [ ] If the runner does not come back on the new path, the script restores the old path, the venv, the worktrees and the plist, and restarts the runner there
 - [ ] The workspace map names `agentic-os/` at the root (repo `CLAUDE.md`, and the workspace-level `CLAUDE.md` if it is a separate file)
 - [ ] The user has the exact commands for what lives outside the repo and stays read-only to the agent: two hooks in `~/.claude/settings.json`, the trust entry in `~/.codex/config.toml`, and copying the Claude project folder (auto memory + session history) to the new path's slug
 
 ## Approach
 `scripts/relocate_checkout.sh OLD NEW` (committed, reusable):
-1. Refuse unless OLD is an AgenticOS checkout, NEW does not exist and its parent does, NEW is not inside OLD, the plist exists, the runner answers, and `/api/runs?state=running` is empty.
-2. Back up the plist; `launchctl bootout`; wait until no `OLD/runner/app.py` process remains.
-3. `mv OLD NEW` (on failure: restart the runner on OLD, nothing changed).
-4. Repoint: rewrite OLD → NEW in `.venv/bin` text files (`grep -rlI --null | xargs -0 sed`) and `.venv/pyvenv.cfg`; `git worktree repair` each `.claude/worktrees/*`; rewrite the plist and `plutil -lint` it.
-5. Check that no `.venv` file or the plist still names OLD; `launchctl bootstrap`; wait for HTTP 200 and for a `NEW/runner/app.py` process.
-6. Any failure after the move → rollback: bootout, `mv NEW OLD`, repoint back, restore the plist backup, bootstrap, wait for 200.
-7. Report the files outside the checkout that still name OLD.
+1. Refuse unless OLD is an AgenticOS checkout, NEW does not exist and its parent does, NEW is not inside OLD, the plist exists, the runner answers, `/api/runs?state=running` is empty, and no process other than the runner has OLD in its command line (CLI `run_skill.py`, scripts; REL-002). Every curl call has a 2 s connect / 5 s total timeout and readiness waits are bounded (REL-003).
+2. Back up the plist to a `mktemp` file and verify it with `cmp`; abort before touching anything if that fails (REL-005).
+3. Install HUP/INT/TERM traps by phase: before the move a signal restarts the runner on OLD; after it, a full rollback (REL-008).
+4. `launchctl bootout`; wait until no `OLD/runner/app.py` remains; re-check that no other process uses OLD; `mv OLD NEW` (on any failure here: restart on OLD, nothing changed).
+5. Repoint, each step checked: `.venv/bin` text files and `.venv/pyvenv.cfg`; `core.hooksPath` when it names OLD (REL-009); `git worktree repair` per `.claude/worktrees/*`; the plist (`plutil -lint`).
+6. Verify: no OLD in `.venv`, the plist or the local git config; every registered worktree is outside OLD and `git status` works in it (REL-006). Then `launchctl bootstrap` and wait for HTTP 200 from a `NEW/runner/app.py` process.
+7. Rollback on any failure after the move (REL-004): bootout and confirm no NEW runner or NEW-using process remains, else stop and report (exit 2, checkout left at NEW); `mv NEW OLD`; repoint back and verify; restore the verified plist backup; bootstrap; require HTTP 200 from an `OLD/runner/app.py` process, else exit 2.
+8. Report the files outside the checkout that still name OLD.
+
+Runner code: `WORKSPACE_ROOT` = nearest ancestor holding `obsidian/` (fallback: the checkout's parent), in `app.py` and `dashboard.py` (REL-001). Progress readers map a saved `…/outputs/…` path that no longer exists onto this checkout's `outputs/` (REL-007); the records themselves are left as written.
 
 The Claude Code shell here cannot read the workspace root (macOS privacy), so the script is started from a dashboard terminal (runner context, which has Documents access), detached with `start_new_session=True` because its first act stops the runner. Its output goes to a log in the session scratchpad.
 
@@ -47,7 +53,12 @@ The Claude Code shell here cannot read the workspace root (macOS privacy), so th
 ## Progress Checklist
 - [ ] Test: relocate succeeds (moved, venv + plist + nested worktree repointed, runner up from NEW)
 - [ ] Test: refuses running jobs, an existing target, a non-checkout source, with nothing changed
-- [ ] Test: rolls back fully when the runner does not come up on NEW
+- [ ] Test: rolls back fully when only the NEW checkout fails to start, and the restored runner is OLD's
+- [ ] Test: an interrupt after the move rolls back
+- [ ] Test: an unrepairable worktree rolls back
+- [ ] Test: another process using OLD is refused before anything changes
+- [ ] Test: `core.hooksPath` repointed on success and restored on rollback
+- [ ] Test: workspace root found from both checkout locations; saved stream paths follow the moved checkout
 - [ ] Codex plan review of this plan and the script returns APPROVED
 - [ ] Run the script against the real checkout from a dashboard terminal; log captured
 - [ ] Verify each acceptance criterion from the new path
