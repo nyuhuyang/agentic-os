@@ -763,15 +763,6 @@
         <div class="skill-panel-subtitle">Registered projects and their Claude / Codex sessions, newest first</div>
       </div>
 
-      <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid var(--border);">
-        <div class="agent-toggle">
-          <button class="agent-btn active" id="agent-claude" onclick="setAgent('claude')">Claude</button>
-          <button class="agent-btn" id="agent-codex" onclick="setAgent('codex')">Codex</button>
-          <button class="agent-btn" id="agent-dsh" onclick="setAgent('dsh')">DeepSeek</button>
-          <button class="agent-btn" id="ds-refresh" onclick="refreshDeepSeek()" style="display:none; font-size:calc(10px * var(--fs)); letter-spacing:.3px; opacity:.7;">↻ Refresh</button>
-        </div>
-        <span style="font-size:calc(11px * var(--fs));color:var(--text-dim)">Active agent for dispatch</span>
-      </div>
 
       <!-- Projects (plan Decision 6: project sections replace the skill-stack sections) -->
       <div id="project-panel-content"><div class="job-board-empty">Loading projects…</div></div>
@@ -1413,8 +1404,8 @@ async function updateWindows(agent) {
 async function setAgent(agent) {
   agent = canonAgent(agent) || 'claude';
   selectedAgent = agent;
-  document.getElementById('agent-claude').classList.toggle('active', agent === 'claude');
-  document.getElementById('agent-codex').classList.toggle('active', agent === 'codex');
+  document.getElementById('agent-claude')?.classList.toggle('active', agent === 'claude');
+  document.getElementById('agent-codex')?.classList.toggle('active', agent === 'codex');
   document.getElementById('agent-dsh')?.classList.toggle('active', agent === 'dsh');
   const dsr = document.getElementById('ds-refresh');
   if (dsr) dsr.style.display = agent === 'dsh' ? '' : 'none';
