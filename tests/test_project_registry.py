@@ -181,9 +181,56 @@ def test_path_edit_refused_while_a_worktree_of_the_old_repo_exists(reg, tmp_path
     worktree("alpha", "T-1")
     other = make_repo(tmp_path / "other")
     before = path.read_bytes()
-    with pytest.raises(pj.ProjectError, match="another repository"):
+    with pytest.raises(pj.ProjectError, match="cannot change while worktrees exist"):
         pj.save_project("alpha", entry(other, seed=["data"]), h(path))
+    alias = tmp_path / "alias"
+    os.symlink(a, alias)  # same repo, different spelling: sidecars record the old path literally (B002)
+    with pytest.raises(pj.ProjectError, match="cannot change while worktrees exist"):
+        pj.save_project("alpha", entry(alias, seed=["data"]), h(path))
     assert path.read_bytes() == before
+
+
+def test_readding_with_leftover_worktrees_needs_the_exact_recorded_path(reg, tmp_path):
+    path, a, b = reg
+    worktree("alpha", "T-1")
+    doc = yaml.safe_load(path.read_text())
+    del doc["projects"]["alpha"]  # removed by hand, worktree left behind
+    path.write_text(yaml.safe_dump(doc, sort_keys=False))
+    alias = tmp_path / "alias"
+    os.symlink(a, alias)
+    with pytest.raises(pj.ProjectError, match="belong to another path"):
+        pj.save_project("alpha", entry(alias, seed=["data"]), h(path), create=True)
+    pj.save_project("alpha", entry(a, seed=["data"]), h(path), create=True)
+    assert "alpha" in pj.load_registry()
+
+
+def test_init_runs_after_the_checks_and_is_rolled_back_on_failure(reg, tmp_path):
+    path, a, b = reg
+    fresh = tmp_path / "fresh"
+    with pytest.raises(pj.RegistryConflict):
+        pj.save_project("gamma", entry(fresh, verify="true"), "stale", create=True, init=True)
+    assert not fresh.exists()  # a stale hash creates nothing
+    with pytest.raises(pj.ProjectError, match="already exists"):
+        pj.save_project("alpha", entry(fresh, verify="true"), h(path), create=True, init=True)
+    assert not fresh.exists()
+    with pytest.raises(pj.ProjectError, match="'env' must map"):
+        pj.save_project("gamma", entry(fresh, verify="true", env={"A": 1}), h(path), create=True, init=True)
+    assert not fresh.exists()  # created by this call, removed when the save failed
+    pj.save_project("gamma", entry(fresh, verify="true"), h(path), create=True, init=True)
+    assert (fresh / ".git").exists() and "gamma" in pj.load_registry()
+
+
+def test_env_values_round_trip_verbatim(reg):
+    path, a, b = reg
+    env = {"MULTI": "line one\nline two", "PADDED": "  spaced  "}
+    pj.save_project("beta", entry(b, env=env), h(path))
+    assert pj.raw_entries(path.read_bytes())["beta"]["env"] == env
+
+
+def test_registry_temp_files_are_gitignored():
+    root = Path(__file__).resolve().parents[1]
+    for name in ("projects.yaml", "projects.yaml.lock", ".projects.yaml.abc123.tmp"):
+        assert subprocess.run(["git", "-C", str(root), "check-ignore", "-q", name]).returncode == 0, name
 
 
 def test_seed_edit_runs_its_check_under_its_own_exclusive_lock(reg):

@@ -412,10 +412,12 @@ def _lifecycle_changed(old: dict, new: dict) -> bool:
             or (old.get("seed") or []) != (new.get("seed") or []))
 
 
-def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = False,
+def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = False, init: bool = False,
                  path: Path | None = None) -> dict:
     """Create or edit one registry entry from the dashboard, validated like dispatch.
-    The key is immutable: worktrees, sidecars and bindings are keyed by it."""
+    The key is immutable: worktrees, sidecars and bindings are keyed by it. `init` (create
+    only) makes the folder a new repo after the key/hash/duplicate checks, and removes it
+    again if the save then fails (REGUI-B005)."""
     path = Path(path or REGISTRY_PATH)
     _check_key(key)
     entry = _clean_entry(entry)
@@ -435,27 +437,50 @@ def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = Fa
             raise ProjectError(f"project {key!r} already exists")
         if not create and key not in projects:
             raise ProjectError(f"unknown project {key!r}")
-        project = _parse_project(key, entry)
-        if project.path.resolve().is_relative_to(WORKTREE_ROOT.resolve()):
-            raise ProjectError(f"{key}: path must not be inside {WORKTREE_ROOT}")
-        new_repo = create or entry.get("path") != old.get("path")
-        if new_repo:  # REGUI-007: every leftover worktree must belong to the new repo
-            foreign = [n for n in _worktree_dirs(key) if not _is_worktree_of(project, WORKTREE_ROOT / key / n)]
-            if foreign:
-                raise ProjectError(f"{key}: worktrees of another repository remain under "
-                                   f"{WORKTREE_ROOT / key}: {foreign}; clean them up first")
-        if new_repo or entry.get("seed") != old.get("seed"):
-            # The exact dispatch checks (verify targets, seed copy, collision, committed-ignore
-            # rule) in a throwaway worktree, under this call's exclusive lock (REGUI-002/009).
-            ident = f"REGCHECK-{int(time.time() * 1000)}"
-            with ticket_lock(key, ident):
-                if create_worktree(project, ident)["reused"]:
-                    raise ProjectError(f"{key}/{ident} already existed; left untouched")
-                remove_worktree(project, ident)
-            drop_ticket_lock(key, ident)
-        projects[key] = entry
-        _write_registry(path, doc, expected_hash)
+        if init and not create:
+            raise ProjectError("a new folder can only be created when adding a project")
+        created = init_repo(str(entry.get("path") or "")) if init else None
+        try:
+            project = _validate_for_save(key, entry, old, create)
+            projects[key] = entry
+            _write_registry(path, doc, expected_hash)
+        except BaseException:
+            if created:  # made by this call and never registered: nothing else refers to it
+                shutil.rmtree(created, ignore_errors=True)
+            raise
     return {"key": key, "confidential": project.confidential}
+
+
+def _validate_for_save(key: str, entry: dict, old: dict, create: bool) -> Project:
+    """Caller holds the registry lock and, for create/lifecycle changes, the exclusive project lock."""
+    project = _parse_project(key, entry)
+    if project.path.resolve().is_relative_to(WORKTREE_ROOT.resolve()):
+        raise ProjectError(f"{key}: path must not be inside {WORKTREE_ROOT}")
+    new_repo = create or entry.get("path") != old.get("path")
+    trees = _worktree_dirs(key)
+    if trees and not create and new_repo:  # sidecars record the old path literally (REGUI-007, B002)
+        raise ProjectError(f"{key}: the path cannot change while worktrees exist ({', '.join(trees)}); "
+                           "remove the project with clean-up, or clean them up first")
+    if trees and create:  # re-adding: every leftover must bind to exactly this path
+        bad = []
+        for ident in trees:
+            try:
+                load_binding(project, _check_ident(ident))
+            except ProjectError:
+                bad.append(ident)
+        if bad:
+            raise ProjectError(f"{key}: leftover worktrees under {WORKTREE_ROOT / key} belong to another "
+                               f"path or are damaged: {bad}; clean them up first")
+    if new_repo or entry.get("seed") != old.get("seed"):
+        # The exact dispatch checks (verify targets, seed copy, collision, committed-ignore
+        # rule) in a throwaway worktree, under the caller's exclusive lock (REGUI-002/009).
+        ident = f"REGCHECK-{int(time.time() * 1000)}"
+        with ticket_lock(key, ident):
+            if create_worktree(project, ident)["reused"]:
+                raise ProjectError(f"{key}/{ident} already existed; left untouched")
+            remove_worktree(project, ident)
+        drop_ticket_lock(key, ident)
+    return project
 
 
 def _cleanup_descriptor(key: str, raw: object) -> Project:

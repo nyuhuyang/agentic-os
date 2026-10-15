@@ -3023,9 +3023,8 @@ def api_project_create():
     body = request.get_json(silent=True) or {}
     entry = body.get("entry") or {}
     try:
-        if body.get("init"):
-            _projects.init_repo(str(entry.get("path") or ""))
-        result = _projects.save_project(body.get("key"), entry, str(body.get("registry_hash") or ""), create=True)
+        result = _projects.save_project(body.get("key"), entry, str(body.get("registry_hash") or ""), create=True,
+                                        init=bool(body.get("init")))
     except _projects.ProjectError as exc:
         return _project_error(exc)
     return jsonify({"ok": True, **result, "warning": _records_unsafe() if result["confidential"] else None})

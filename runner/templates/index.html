@@ -785,7 +785,7 @@
           <label>Kind<input type="text" name="kind" placeholder="python | r-shiny | wiki"></label>
           <label>Verify command (runs in the ticket's worktree; exit 0 = pass)<input type="text" name="verify" required placeholder="{root}/.venv/bin/python -m pytest -q"></label>
           <label>Verify timeout (s)<input type="number" name="verify_timeout_s" min="1" placeholder="600"></label>
-          <label>Env (one KEY=VALUE per line; PATH is prepended)<textarea name="env" rows="2"></textarea></label>
+          <label>Env (JSON object of strings, e.g. {"LANG": "en_US.UTF-8"}; PATH is prepended)<textarea name="env" rows="2" spellcheck="false"></textarea></label>
           <label>Seed (gitignored paths copied into each worktree, one per line)<textarea name="seed" rows="2"></textarea></label>
           <label class="check"><input type="checkbox" name="confidential" checked> Confidential (sandboxed; only template comments reach Linear)</label>
           <label class="check"><input type="checkbox" name="no_push" checked> No push / deploy</label>
@@ -1122,11 +1122,12 @@ function _projectFormOpen(p) {
   f.reset();
   const e = (p && p.entry) || {};
   f.dataset.mode = p ? 'edit' : 'add';
+  f.dataset.hash = _projectData.registry_hash || '';  // the version these fields came from (REGUI-B001)
   document.getElementById('project-form-title').textContent = p ? `Edit ${p.key}` : 'Add project';
   f.key.value = p ? p.key : ''; f.key.readOnly = !!p;
   f.path.value = e.path || ''; f.kind.value = e.kind || ''; f.verify.value = e.verify || '';
   f.verify_timeout_s.value = e.verify_timeout_s || '';
-  f.env.value = Object.entries(e.env || {}).map(([k, v]) => `${k}=${v}`).join('\n');
+  f.env.value = e.env && Object.keys(e.env).length ? JSON.stringify(e.env, null, 1) : '';
   f.seed.value = (e.seed || []).join('\n');
   f.confidential.checked = p ? !!e.confidential : true;
   f.no_push.checked = p ? !!e.no_push : true;
@@ -1139,16 +1140,16 @@ function _projectFormOpen(p) {
 }
 
 function _projectFormEntry(f) {
-  const env = {};
-  for (const line of f.env.value.split('\n')) {
-    const i = line.indexOf('=');
-    if (line.trim() && i > 0) env[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  let env = {};
+  if (f.env.value.trim()) {
+    try { env = JSON.parse(f.env.value); } catch (_) { throw new Error('Env must be a JSON object, e.g. {"LANG": "en_US.UTF-8"}'); }
+    if (!env || typeof env !== 'object' || Array.isArray(env)) throw new Error('Env must be a JSON object');
   }
   const timeout = parseInt(f.verify_timeout_s.value, 10);
   return {
     path: f.path.value.trim(), kind: f.kind.value.trim(), verify: f.verify.value.trim(),
     verify_timeout_s: Number.isFinite(timeout) ? timeout : null, env,
-    seed: f.seed.value.split('\n').map(x => x.trim()).filter(Boolean),
+    seed: f.seed.value.split('\n').filter(x => x !== ''),  // kept verbatim: no trimming
     confidential: f.confidential.checked, no_push: f.no_push.checked, note: f.note.value.trim(),
   };
 }
@@ -1157,13 +1158,21 @@ document.getElementById('project-form')?.addEventListener('submit', async (event
   event.preventDefault();
   const f = event.target, errEl = document.getElementById('project-form-error');
   const save = document.getElementById('project-form-save');
-  const key = f.key.value.trim(), hash = _projectData.registry_hash || '';
+  const key = f.key.value.trim(), hash = f.dataset.hash || '';
+  let entry;
+  try { entry = _projectFormEntry(f); } catch (err) { errEl.textContent = err.message; return; }
   save.disabled = true; errEl.textContent = 'Saving… (validates in a throwaway worktree)';
   const r = f.dataset.mode === 'edit'
-    ? await _projectApi('PUT', `/api/projects/${encodeURIComponent(key)}`, { entry: _projectFormEntry(f), registry_hash: hash })
-    : await _projectApi('POST', '/api/projects', { key, entry: _projectFormEntry(f), registry_hash: hash, init: f.init.checked });
+    ? await _projectApi('PUT', `/api/projects/${encodeURIComponent(key)}`, { entry, registry_hash: hash })
+    : await _projectApi('POST', '/api/projects', { key, entry, registry_hash: hash, init: f.init.checked });
   save.disabled = false;
-  if (!r.ok) { errEl.textContent = r.data.error || `HTTP ${r.status}`; if (r.status === 409) loadProjects(); return; }
+  if (!r.ok) {
+    // A conflict keeps the stale hash: saving again keeps failing until the form is reopened
+    // from the current registry, so a hand edit is never overwritten (REGUI-B001).
+    errEl.textContent = (r.data.error || `HTTP ${r.status}`) + (r.status === 409 ? ' — Cancel and reopen the form to load the current values.' : '');
+    if (r.status === 409) loadProjects();
+    return;
+  }
   errEl.textContent = '';
   document.getElementById('project-dialog').close();
   if (r.data.warning) alert(`Saved. Warning: ${r.data.warning}`);
