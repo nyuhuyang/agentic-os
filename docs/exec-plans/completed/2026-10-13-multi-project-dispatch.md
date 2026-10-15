@@ -1,5 +1,6 @@
 ---
-status: in-progress
+status: completed
+completed: 2026-10-15
 created: 2026-10-13
 ---
 
@@ -414,7 +415,7 @@ Added 2026-10-14 and widened after Round 5 (MPD-21/22) to cover HTTP as well as 
 
 ## Acceptance Criteria
 - [x] For every registered project, `projects.py verify <key> --worktree <fresh seeded worktree>` exits 0 from a non-interactive shell with no manual PATH setup — all registered projects pass (see Phase 0, 2026-10-15)
-- [ ] Dashboard lists every registered project; each shows Claude + Codex sessions matching `claude --resume` / `codex resume` pickers in that directory (spot-check ≥3 ids per project) — OPEN: lists all projects (live); the ≥3-id spot check against the `claude --resume` / `codex resume` pickers needs the user
+- [x] Dashboard lists every registered project; each shows Claude + Codex sessions matching `claude --resume` / `codex resume` pickers in that directory (spot-check ≥3 ids per project) — 2026-10-15: the real pickers were run in each project's folder from dashboard terminals and their screens compared with the panel's newest sessions: private project A Claude 3/3 + Codex 1/1, private project B 2/2 + 3/3, knowledge-base 4/4 + 8/8, agentic-os 7/7 + 7/7 (titles matched whitespace-insensitively; wide CJK glyphs are drawn with cursor moves; Codex's one-time update prompt was skipped, not changed)
 - [x] A ticket labelled `project:<key>` runs in a worktree of that project on branch `agent/<id>`, the main checkout's `git status` is unchanged by the run, and its review card shows the verify result — dogfood 2026-10-15 (see Phase 4): `git status --porcelain` of each main checkout identical before/after; `/api/runs` carries `verify_badge` (pass) that the board card renders
 - [x] For a confidential project, every Linear comment for a run (result, error, retry) contains only the fixed template fields
 - [x] With a confidential project registered, run records can only live under this checkout's gitignored `state/`/`outputs/`; any other location stops the runner at startup

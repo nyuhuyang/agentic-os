@@ -1813,3 +1813,4 @@ Round 3 dispositions (host = Claude). Both accepted:
 }
 ```
 - Inspections used: 13 of 20. Still unverified by any inspection: the session-picker spot-check (needs the user).
+- 2026-10-15: last acceptance box closed by a real picker comparison (see plan); every box [x]; archived.
