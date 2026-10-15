@@ -164,20 +164,22 @@ A headless run that ends by asking the user something lands in In review. The us
 - [ ] The card detail view gains a fourth tab, "Terminal", next to Output / Log / Error; it opens by default when the card is In review or has a running job
 - [ ] The Terminal tab shows the C view (live or replayed events) with the run's last assistant message pinned at the top
 - [ ] "Quick reply": a text box under the view; sending it continues the same session headless through the existing reply/retry path (`/api/runs/<id>/retry` with `reply`), so the card goes back to In progress and the attempt is logged
-- [ ] "Open interactive": starts the interactive `claude --resume` / `codex resume` inside the Terminal tab, in the run's folder (worktree or runner root), as a regular terminal that also appears in the bottom panel's tab strip
+- [ ] "Open interactive": starts the interactive `claude --resume` / `codex resume` inside the Terminal tab, in the run's folder (worktree or runner root). The bottom terminal panel does not open, expand or switch to it, and it is not added to the panel's tab strip; the session keeps running in the background when the detail view closes, and appears in the bottom panel only when the user asks ("Show in panel" in the detail tab, or picking it from the panel's list of running terminals)
 - [ ] While the interactive terminal is open it holds the ticket lock (existing worktree-tab rule), so quick reply, retry and auto-dispatch for that card are refused with a clear message
 - [ ] Closing the interactive terminal asks what next — Mark done / Send back to Todo / Leave in review — and records a run-log entry `interactive session ended` with the session id, so the card history shows it
 - [ ] In review cards whose last assistant message is a question show a "Waiting for you" badge with the first line of that message
 
 #### Decisions
 - Quick reply stays headless and reuses retry-with-feedback, so pipelines like `/claudex-loop` keep their recorded attempts; the interactive terminal is for longer back-and-forth or hands-on work.
-- The embedded terminal is the same PTY terminal object as the bottom panel's (attach a second xterm to the same `term_id`, existing replay-on-attach), not a second process.
+- The embedded terminal is the same PTY terminal object the bottom panel uses (one process per session; the bottom panel can attach a second xterm to the same `term_id` with the existing replay-on-attach). Attaching is on demand only: nothing in the bottom panel opens automatically (user, 2026-10-15).
+- The C live/replay run tab follows the same rule: opened from a card it shows in the card's Terminal tab, not in the bottom panel, unless the user asks.
 - "Waiting for you" uses the last assistant text: it ends with a question mark (ASCII or full-width) or matches an approval phrasing list kept in one place (ponytail: a heuristic; a structured "needs-input" marker from the agent can replace it).
 
 #### Progress Checklist
 - [ ] Test: Terminal tab defaults (In review / running), pinned last message, "Waiting for you" detection on sample messages (EN/ZH, question vs statement)
 - [ ] Test: quick reply calls the retry path with the reply and the same session; refused while an interactive tab holds the ticket lock
 - [ ] Test: closing the interactive terminal records `interactive session ended` and applies the chosen next state
+- [ ] Test: opening a card's terminal (live view or interactive) adds nothing to the bottom panel's tab strip and does not expand it; "Show in panel" attaches the same `term_id` there; closing the detail view leaves the session running
 - [ ] Implement the Terminal tab, pinned message, quick reply, embedded interactive terminal, close prompt and badge
 - [ ] Manual check: a `/claudex-loop` run stopped for sign-off is answered once by quick reply and once interactively
 
