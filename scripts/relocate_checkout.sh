@@ -32,7 +32,19 @@ token=$(http "$URL/" | sed -n 's/.*name="agentic-os-token" content="\([^"]*\)".*
 [ -n "$token" ] || die "runner not reachable; start it first so running jobs can be checked"
 jobs=$(http -H "X-AgenticOS-Token: $token" "$URL/api/runs?state=running")
 [ "$jobs" = "[]" ] || die "jobs are running (or the check failed): $jobs"
-others() { pgrep -fl "$1/" | grep -v -e "$1/runner/app.py" -e relocate_checkout.sh; }  # CLI runs, scripts, ...
+LOCKER=none
+# Processes naming the checkout, minus the runner, this script and its own lock helper (REL-010).
+# Succeeds (busy) and prints them when any remain; matched by PID, so multi-line argv is fine.
+others() {
+  busy_pids=""
+  for p in $(pgrep -f "$1/"); do
+    [ "$p" = "$LOCKER" ] || [ "$p" = "$$" ] && continue
+    cmd=$(ps -o command= -p "$p" 2>/dev/null) || continue
+    case "$cmd" in *"$1/runner/app.py"*|*relocate_checkout.sh*) continue ;; esac
+    busy_pids="$busy_pids $p"
+  done
+  [ -n "$busy_pids" ] && echo "pids:$busy_pids"
+}
 busy=$(others "$OLD") && die "processes still use $OLD: $busy"
 
 wt_ok() {  # $1 is a working worktree root of its own (a bare subdir of the main repo is not)
@@ -123,6 +135,7 @@ rollback() {
   launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null
   wait_down "$NEW" || manual "a runner from $NEW is still alive; checkout left at $NEW"
   busy=$(others "$NEW") && manual "processes still use $NEW ($busy); checkout left there"
+  [ -e "$OLD" ] && manual "$OLD was recreated meanwhile (a stale process?); checkout left at $NEW"
   mv "$NEW" "$OLD" || manual "could not move $NEW back to $OLD"
   damage=""
   repoint "$NEW" "$OLD" || damage="repointing back failed"

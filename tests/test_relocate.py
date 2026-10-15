@@ -20,6 +20,7 @@ case "$1" in
     if [ -n "${SHIM_KILL_AT:-}" ] && [ "$at" = "$SHIM_KILL_AT" ] && [ ! -e "$SHIM_LOG.killed" ]; then
       touch "$SHIM_LOG.killed"; kill -TERM $PPID; exit 0
     fi
+    [ -n "${SHIM_RECREATE:-}" ] && [ "$at" = "${SHIM_FAIL_AT:-}" ] && mkdir -p "$SHIM_RECREATE"
     [ "$at" = "${SHIM_FAIL_AT:-}" ] || echo "$at" > "$SHIM_UP" ;;
 esac''',
     "curl": '''case "$*" in
@@ -31,8 +32,7 @@ esac''',
 case "$pat" in
   */runner/app.py) [ -s "$SHIM_UP" ] && [ "$pat" = "$(cat "$SHIM_UP")/runner/app.py" ] || exit 1
                    [ "$1" = -fl ] && echo "1 python $pat"; exit 0 ;;
-  *) [ -n "${SHIM_OTHER_AT:-}" ] && [ "$pat" = "$SHIM_OTHER_AT/" ] && { echo "99 python $pat/runner/run_skill.py"; exit 0; }
-     exit 1 ;;
+  *) exec "$REAL_PGREP" "$@" ;;  # the real process table for everything but the runner (REL-010)
 esac''',
     "plutil": "exit 0",
     # fault injection around the real tools (REAL_* filled in by the fixture)
@@ -70,7 +70,7 @@ def env(tmp_path):
     up = tmp_path / "up"
     up.write_text(str(old))
     import shutil
-    real = {f"REAL_{t.upper()}": shutil.which(t) for t in ("git", "sed", "mv")}
+    real = {f"REAL_{t.upper()}": shutil.which(t) for t in ("git", "sed", "mv", "pgrep")}
     e = {**os.environ, **real, "PATH": f"{bin_}:{os.environ['PATH']}", "AOS_PLIST": str(plist), "AOS_WAIT": "3",
          "SHIM_LOG": str(tmp_path / "calls"), "SHIM_UP": str(up)}
     return old, new, plist, up, e
@@ -97,7 +97,7 @@ def assert_back_on_old(old, new, plist, up, before, r):
 
 def test_moves_repoints_and_restarts(env):
     old, new, plist, up, e = env
-    r = run(old, new, e)
+    r = run(old, new, e)  # real pgrep: its own lock helper must not count as busy
     assert r.returncode == 0, r.stdout + r.stderr
     assert not old.exists() and (new / "runner" / "app.py").exists()
     assert str(old) not in plist.read_text() and str(new) in plist.read_text()
@@ -112,7 +112,11 @@ def test_refusals_change_nothing(env, tmp_path):
     old, new, plist, up, e = env
     before = plist.read_text()
     assert "jobs are running" in run(old, new, {**e, "SHIM_JOBS": '[{"run_id":"x"}]'}).stdout
-    assert "processes still use" in run(old, new, {**e, "SHIM_OTHER_AT": str(old)}).stdout
+    other = subprocess.Popen(["/usr/bin/python3", "-c", "import time; time.sleep(30)", f"{old}/runner/run_skill.py"])
+    try:
+        assert "processes still use" in run(old, new, e).stdout
+    finally:
+        other.kill()
     new.mkdir()
     assert "already exists" in run(old, new, e).stdout
     new.rmdir()
@@ -157,7 +161,8 @@ def test_a_running_skill_blocks_the_move(env):
     lock = old / "outputs" / "locks" / "maintenance.lock"
     holder = subprocess.Popen(["/usr/bin/python3", "-c", (
         "import fcntl, os, sys, time; os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True); "
-        "f = open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_SH); print('x', flush=True); time.sleep(30)"), str(lock)],
+        "f = open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_SH); print('x', flush=True); time.sleep(30)"),
+        "outputs/locks/maintenance.lock"],
         stdout=subprocess.PIPE, cwd=str(old))  # like `.venv/bin/python3 runner/run_skill.py`: no OLD in argv
     holder.stdout.readline()
     try:
@@ -203,3 +208,39 @@ def test_interrupt_right_after_the_rename_rolls_back(env):
     r = run(old, new, {**e, "SHIM_KILL_AFTER_MV": "1"})
     assert "interrupted during the move" in r.stdout
     assert_back_on_old(old, new, plist, up, before, r)
+
+
+def test_rollback_stops_when_old_was_recreated(env):
+    old, new, plist, up, e = env
+    r = run(old, new, {**e, "SHIM_FAIL_AT": str(new), "SHIM_RECREATE": str(old)})
+    assert r.returncode == 2 and "was recreated meanwhile" in r.stdout
+    assert (new / "runner" / "app.py").exists() and not (old / "agentic-os").exists()  # never nested
+
+
+def test_run_skill_takes_the_lock_before_prompting_and_never_recreates_a_moved_checkout(tmp_path, monkeypatch):
+    import builtins
+    import fcntl
+    import sys
+    sys.path.insert(0, str(SCRIPT.parents[1] / "runner"))
+    import run_skill
+    monkeypatch.setattr(run_skill, "OUTPUTS_DIR", tmp_path / "outputs")
+    monkeypatch.setattr(run_skill, "LOCKS_DIR", tmp_path / "outputs" / "locks")
+    monkeypatch.setattr(run_skill, "_load_registry", lambda: {"s": {"entrypoint": "x.py", "security": {"confirmation_required": True}}})
+    held = []
+
+    def prompt(_):
+        with open(tmp_path / "outputs" / "locks" / "maintenance.lock", "a") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held.append(False)
+            except BlockingIOError:
+                held.append(True)
+        return "n"
+    monkeypatch.setattr(builtins, "input", prompt)
+    run_skill.cmd_run("s", [], 0, False, False, False)
+    assert held == [True]  # a prompting CLI already blocks a move
+    gone = tmp_path / "moved-away"
+    monkeypatch.setattr(run_skill, "_SELF", gone / "runner" / "run_skill.py")
+    monkeypatch.setattr(run_skill, "OUTPUTS_DIR", gone / "outputs")
+    monkeypatch.setattr(run_skill, "LOCKS_DIR", gone / "outputs" / "locks")
+    assert run_skill._maintenance_shared() is None and not gone.exists()

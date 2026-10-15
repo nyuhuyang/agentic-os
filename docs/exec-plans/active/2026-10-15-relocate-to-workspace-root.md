@@ -24,13 +24,13 @@ Move this repository from `~/Documents/AI_Workspace/prototypes/agentic-os` to `~
 ## Approach
 `scripts/relocate_checkout.sh OLD NEW` (committed, reusable):
 1. Refuse unless OLD is an AgenticOS checkout, NEW does not exist and its parent does, NEW is not inside OLD, the plist exists, the runner answers, `/api/runs?state=running` is empty, and no process other than the runner has OLD in its command line (CLI `run_skill.py`, scripts; REL-002). Every curl call has a 2 s connect / 5 s total timeout and readiness waits are bounded (REL-003).
-2. Refuse if any `.claude/worktrees/*` is already broken (its own toplevel + `git status`). Take the maintenance lock exclusively through a helper that lives until the script ends: `run_skill.py` holds `outputs/locks/maintenance.lock` shared for its whole run and refuses to start while it is held exclusively, so no CLI skill is mid-run and none can start during the move, whatever its command line (REL-002 round 2).
+2. Refuse if any `.claude/worktrees/*` is already broken (its own toplevel + `git status`). Take the maintenance lock exclusively through a helper that lives until the script ends (excluded from the busy scan by PID): `run_skill.py` takes `outputs/locks/maintenance.lock` shared first thing (before the registry and any prompt), refuses if held exclusively or if its own checkout has moved (never recreating it), and checks the lock file is still the one at its path, so no CLI skill is mid-run and none can start during the move, whatever its command line (REL-002 round 2).
 2a. Back up the plist to a `mktemp` file and verify it with `cmp`; abort before touching anything if that fails (REL-005).
 3. Install HUP/INT/TERM traps by phase: before the move a signal restarts the runner on OLD; during `mv` (phase `moving`) the handler looks where the checkout actually is and rolls back or restarts accordingly; after it, a full rollback (REL-008).
 4. `launchctl bootout`; wait until no `OLD/runner/app.py` remains; re-check that no other process uses OLD; `mv OLD NEW` (on any failure here: restart on OLD, nothing changed).
 5. Repoint, each step checked: `.venv/bin` text files and `.venv/pyvenv.cfg`; `core.hooksPath` when it names OLD (REL-009); `git worktree repair` per `.claude/worktrees/*`; the plist (`plutil -lint`).
 6. Verify: no OLD in `.venv`, the plist or the local git config; every registered worktree is outside OLD, is its own toplevel and `git status` works in it. An inspection that cannot run (grep read error, git failure) fails the check (REL-006). Then `launchctl bootstrap` and wait for HTTP 200 from a `NEW/runner/app.py` process.
-7. Rollback on any failure after the move (REL-004): bootout and confirm no NEW runner or NEW-using process remains, else stop and report (exit 2, checkout left at NEW); `mv NEW OLD`; repoint back and verify; restore the verified plist backup; bootstrap; require HTTP 200 from an `OLD/runner/app.py` process, else exit 2. If the reverse repoint or its verification failed, the runner is still restarted but the script exits 2 naming the damage.
+7. Rollback on any failure after the move (REL-004): stop (exit 2) if OLD was recreated meanwhile; bootout and confirm no NEW runner or NEW-using process remains, else stop and report (exit 2, checkout left at NEW); `mv NEW OLD`; repoint back and verify; restore the verified plist backup; bootstrap; require HTTP 200 from an `OLD/runner/app.py` process, else exit 2. If the reverse repoint or its verification failed, the runner is still restarted but the script exits 2 naming the damage.
 8. Report the files outside the checkout that still name OLD.
 
 Runner code: `WORKSPACE_ROOT` = nearest ancestor holding `obsidian/` (fallback: the checkout's parent), in `app.py` and `dashboard.py` (REL-001). Progress readers map a saved `…/outputs/…` path that no longer exists onto this checkout's `outputs/` (REL-007); the records themselves are left as written.
@@ -63,6 +63,9 @@ The Claude Code shell here cannot read the workspace root (macOS privacy), so th
 - [ ] Test: a failed worktree listing and a failed worktree repair each roll back
 - [ ] Test: an interrupt right after the rename rolls back
 - [ ] Test: an already broken worktree is refused before anything changes
+- [ ] Test: with the real process table, the script's own lock helper is not counted as busy; a real process naming OLD is (REL-010)
+- [ ] Test: `run_skill` holds the maintenance lock before its confirmation prompt, and a stale `run_skill` whose checkout moved never recreates it (REL-002 round 3)
+- [ ] Test: rollback stops (exit 2) when OLD was recreated meanwhile, never nesting the checkout
 - [ ] Test: `core.hooksPath` repointed on success and restored on rollback
 - [ ] Test: workspace root found from both checkout locations; saved stream paths follow the moved checkout
 - [ ] Codex plan review of this plan and the script returns APPROVED

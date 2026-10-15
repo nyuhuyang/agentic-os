@@ -87,16 +87,24 @@ def _acquire_lock(skill: str) -> "IO | None":
         return None
 
 
+_SELF = Path(__file__)
+
+
 def _maintenance_shared() -> "IO | None":
-    """Shared hold on outputs/locks/maintenance.lock for the whole run, so a checkout move
-    (scripts/relocate_checkout.sh holds it exclusively) never happens under a running skill
-    and no skill starts during one (REL-002). None when maintenance holds it."""
-    if not _HAVE_FCNTL:
+    """Shared hold on outputs/locks/maintenance.lock for the whole run, taken before anything
+    else, so a checkout move (scripts/relocate_checkout.sh holds it exclusively) never happens
+    under a running or prompting skill and no skill starts during one (REL-002). None when
+    maintenance holds it, or when this process's checkout has moved away (it must not recreate
+    the old folder)."""
+    if not _HAVE_FCNTL or not _SELF.exists():
         return None
-    LOCKS_DIR.mkdir(parents=True, exist_ok=True)
-    fh: IO = (LOCKS_DIR / "maintenance.lock").open("a", encoding="utf-8")
+    LOCKS_DIR.mkdir(parents=True, exist_ok=True)  # safe: the checkout was just seen in place
+    path = LOCKS_DIR / "maintenance.lock"
+    fh: IO = path.open("a", encoding="utf-8")
     try:
         fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        if os.fstat(fh.fileno()).st_ino != path.stat().st_ino:  # the file moved under us
+            raise OSError("maintenance lock moved")
         return fh
     except OSError:
         fh.close()
@@ -177,6 +185,21 @@ def run_once(skill: str, entrypoint: str, skill_args: list[str]) -> dict:
 
 
 def cmd_run(skill: str, skill_args: list[str], retry: int, dry_run: bool, yes: bool, headless: bool) -> int:
+    if dry_run:
+        return _cmd_run(skill, skill_args, retry, dry_run, yes, headless)
+    maint_fh = _maintenance_shared()  # first, before the registry or any prompt (REL-002)
+    if _HAVE_FCNTL and maint_fh is None:
+        print("[runner] BLOCKED: the checkout is being moved or has moved (maintenance lock). Aborting.",
+              file=sys.stderr)
+        return 1
+    try:
+        return _cmd_run(skill, skill_args, retry, dry_run, yes, headless)
+    finally:
+        if maint_fh is not None:
+            maint_fh.close()  # after the record is written
+
+
+def _cmd_run(skill: str, skill_args: list[str], retry: int, dry_run: bool, yes: bool, headless: bool) -> int:
     registry = _load_registry()
 
     if skill not in registry:
@@ -227,14 +250,9 @@ def cmd_run(skill: str, skill_args: list[str], retry: int, dry_run: bool, yes: b
         print(f"[dry-run] would run: {_python()} {entrypoint} {' '.join(skill_args)}")
         return 0
 
-    maint_fh = _maintenance_shared()
-    if _HAVE_FCNTL and maint_fh is None:
-        print("[runner] BLOCKED: the checkout is being moved (maintenance lock held). Aborting.", file=sys.stderr)
-        return 1
     # Per-skill exclusive lock: prevents two runners from launching the same skill concurrently.
     lock_fh = _acquire_lock(skill)
     if _HAVE_FCNTL and lock_fh is None:
-        maint_fh.close()
         print(f"[runner] BLOCKED: `{skill}` is already running (lock held). Aborting.", file=sys.stderr)
         return 1
 
@@ -268,8 +286,6 @@ def cmd_run(skill: str, skill_args: list[str], retry: int, dry_run: bool, yes: b
     finally:
         if lock_fh is not None:
             lock_fh.close()  # releases fcntl lock automatically
-        if maint_fh is not None:
-            maint_fh.close()  # after the record is written
 
 
 def cmd_list(registry: dict) -> int:

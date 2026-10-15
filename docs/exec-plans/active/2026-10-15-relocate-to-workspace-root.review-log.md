@@ -165,3 +165,47 @@
 - REL-006: `verified` tells grep's no-match (1) apart from errors (≥2), and requires `git config --list` and `git worktree list` to succeed. Each worktree must be its own toplevel (a subdirectory that falls back to the main repo no longer passes) and `git status` must work. Tests: a failed worktree listing and a failed repair each roll back. An already broken worktree is refused before anything changes.
 - REL-008: a new `moving` phase. A signal during `mv` checks where the checkout actually is, then rolls back or restarts. Test: TERM delivered right after the rename, before the next statement, rolls back.
 - pytest 379 passed (relocate suite 11 tests).
+
+## Plan review round 3 (2026-10-15)
+- Same Codex session (resumed), cross-provider, 84 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/move/r3/claudex-m36qba__/result.json`.
+- Verdict: **REVISE**, 2 findings.
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "The prior rollback, verification, and move-phase fixes are present. The new maintenance implementation introduces a deterministic refusal and still permits stale CLI processes to recreate OLD.",
+ "findings": [
+  {
+   "id": "REL-010",
+   "severity": "high",
+   "path": "scripts/relocate_checkout.sh:150",
+   "evidence": "The maintenance helper started at line 61 has OLD/outputs/locks/maintenance.lock in its command line. The post-bootout others(OLD) scan therefore finds this helper: its command matches neither exclusion at line 35. A real invocation stops the runner, detects its own helper as busy, restarts OLD, and aborts before moving. The pgrep shim suppresses real process discovery, hiding this from the success test.",
+   "fix": "Exclude the maintenance helper by its recorded PID, alongside precisely identified script and runner processes. Add coverage that supplies the helper's actual command line to the process scan."
+  },
+  {
+   "id": "REL-002",
+   "severity": "high",
+   "path": "runner/run_skill.py:96",
+   "evidence": "The shared lock is acquired after registry loading and interactive confirmation (lines 180–230). A relative CLI invocation can wait at the confirmation prompt without holding it. Once relocation proceeds after REL-010 is fixed, answering that prompt causes mkdir(parents=True) to recreate OLD/outputs/locks and open a new maintenance.lock inode, bypassing the exclusive lock now inside NEW. The CLI then writes records under OLD. If relocation subsequently rolls back, mv NEW OLD can nest the checkout inside the recreated directory instead of restoring its original location.",
+   "fix": "Acquire maintenance protection before confirmation and other checkout-dependent work. Reject a stale or missing checkout before creating lock directories, and ensure lock identity remains stable across relocation. Add a case with a relative CLI paused at confirmation, resumed after the rename."
+  }
+ ],
+ "coverage": [
+  "Verified the supplied plan SHA256 and inspected commit ab3475d, the complete relocation script, run_skill.py changes, and all relocation tests.",
+  "Confirmed the revised reverse-repair error handling, checked verification commands, worktree-root validation, and moving-phase signal recovery.",
+  "Traced maintenance helper lifetime, process filtering, CLI confirmation and locking order, completion writes, dashboard shutdown, and shared-state helpers.",
+  "Rechecked relevant specification requirements for running-job visibility and state integrity."
+ ],
+ "limitations": [
+  "No files were edited, tests run, services changed, or work delegated.",
+  "The host-reported 379 passing tests were not independently verified.",
+  "Process discovery and relocation timing were assessed statically; current tests replace process discovery with a shim.",
+  "Earlier resolved path-resolution fixes were not subjected to another exhaustive external-path audit."
+ ]
+}
+```
+
+### Host dispositions (round 3, both accepted)
+- REL-010: `others()` now takes PIDs from `pgrep -f`, skips the lock helper (`$LOCKER`), the script (`$$`) and the runner/script by `ps -o command=`, and reports the remaining PIDs. Matching by PID also fixes multi-line argv: the real pgrep printed the helper's multi-line `-c` code as extra lines. The shim now delegates every non-runner pattern to the real `pgrep`. The success test therefore runs against the real process table with the helper alive. The refusal test uses a real process whose argv names OLD.
+- REL-002: `cmd_run` takes the maintenance lock before the registry load and any prompt (the body moved to `_cmd_run`). `_maintenance_shared` refuses when this process's own file no longer exists, so a stale CLI never recreates OLD, and checks that the locked file is still the one at its path. Rollback stops with exit 2 when OLD was recreated, so the checkout is never nested. Tests: the lock is held during the confirmation prompt; a moved checkout is not recreated; the rollback guard works.
+- pytest 381 passed (relocate suite 13 tests).
