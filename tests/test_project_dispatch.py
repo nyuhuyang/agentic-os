@@ -899,3 +899,98 @@ def test_unbound_labelled_issue_with_cli_confidential_worktree(helper):
     mod.issues_cache["iss-7"] = {"id": "iss-7", "labels": [{"name": "project:demo"}]}
     assert mod._is_confidential_issue("iss-5") and mod._is_confidential_issue("iss-7")
     assert not mod._is_confidential_issue("iss-6")
+
+
+# ── dashboard registry: lifecycle lock across the launch helper, API, baseline ──
+
+def test_dispatch_behind_a_remove_fails_and_creates_no_worktree(helper):
+    app_mod, run, records, *_ = helper
+    out = []
+    with pj.project_lock("demo", exclusive=True, blocking=False):
+        t = threading.Thread(target=lambda: out.append(run()))
+        t.start()
+        time.sleep(0.5)
+        assert t.is_alive() and not out  # waiting for the lock, before any registry read
+        reg = pj.REGISTRY_PATH
+        reg.write_text("projects: {}\n")  # the remove lands while the launch waits
+    t.join(timeout=30)
+    assert out and out[0]["status"] == "error" and "unknown project" in out[0]["error"]
+    assert not (pj.WORKTREE_ROOT / "demo" / "T-1").exists()
+
+
+def test_confidentiality_edit_waits_until_the_comment_is_posted(helper, monkeypatch):
+    app_mod, run, records, state, events, comments, pushes, repo, _ = helper
+    attempts = []
+
+    def comment(issue, body):
+        snap = pj.registry_snapshot()[1]
+        entry = pj.raw_entries(pj.REGISTRY_PATH.read_bytes())["demo"]
+        try:
+            pj.save_project("demo", {**entry, "confidential": True}, snap)
+            attempts.append("saved")
+        except pj.ProjectBusy:
+            attempts.append("busy")
+        comments.append(body)
+    monkeypatch.setattr(app_mod, "_post_linear_comment", comment)
+    run()
+    assert attempts == ["busy"] and not app_mod._running_jobs
+    entry = pj.raw_entries(pj.REGISTRY_PATH.read_bytes())["demo"]
+    pj.save_project("demo", {**entry, "confidential": True, "seed": entry["seed"]}, pj.registry_snapshot()[1])
+    assert pj.load_registry()["demo"].confidential
+
+
+def test_project_api_token_validation_and_conflicts(helper):
+    app_mod, run, *_ = helper
+    anon = app_mod.app.test_client()
+    assert anon.post("/api/projects", json={}).status_code == 403
+    assert anon.delete("/api/projects/demo", json={}).status_code == 403
+    c = api(app_mod)
+    listing = c.get("/api/projects").get_json()
+    snap = listing["registry_hash"]
+    assert snap and listing["projects"][0]["entry"]["verify"] == "sh tests/check.sh"
+    r = c.post("/api/projects", json={"key": "bad key", "entry": {}, "registry_hash": snap})
+    assert r.status_code == 400 and "must match" in r.get_json()["error"]
+    r = c.put("/api/projects/demo", json={"entry": {"path": "x"}, "registry_hash": "stale"})
+    assert r.status_code == 409
+    run()  # leaves worktree T-1
+    r = c.delete("/api/projects/demo", json={"registry_hash": c.get("/api/projects").get_json()["registry_hash"]})
+    assert r.status_code == 409 and r.get_json()["worktrees"] == ["T-1"]
+
+
+def test_baseline_reports_fail_with_tail_and_removes_only_its_worktree(helper, monkeypatch):
+    app_mod, run, *_ = helper
+    monkeypatch.setattr(app_mod, "_BASELINES", {})
+    app_mod._run_baseline("demo")
+    b = app_mod._BASELINES["demo"]
+    assert b["status"] == "fail" and b["exit"] != 0 and "duration_s" in b
+    assert pj._worktree_dirs("demo") == []
+
+
+def test_baseline_never_touches_an_existing_worktree(helper, monkeypatch):
+    app_mod, *_ = helper
+    monkeypatch.setattr(app_mod, "_BASELINES", {})
+    monkeypatch.setattr(app_mod.time, "time", lambda: 1234.5)
+    p = pj.get_project("demo")
+    with pj.ticket_lock("demo", "BASELINE-1234500"):
+        wt = Path(pj.create_worktree(p, "BASELINE-1234500")["worktree"])
+    (wt / "precious.txt").write_text("work")
+    app_mod._run_baseline("demo")
+    assert "already existed" in app_mod._BASELINES["demo"]["error"]
+    assert (wt / "precious.txt").read_text() == "work"
+
+
+def test_baseline_runs_once_per_key(helper, monkeypatch):
+    app_mod, *_ = helper
+    monkeypatch.setattr(app_mod, "_BASELINES", {"demo": {"state": "running"}})
+    r = api(app_mod).post("/api/projects/demo/baseline")
+    assert r.status_code == 409
+
+
+def test_project_added_through_save_dispatches_into_its_worktree(helper):
+    app_mod, run, records, state, events, comments, pushes, repo, _ = helper
+    snap = pj.registry_snapshot()[1]
+    pj.save_project("demo2", {"path": str(repo), "verify": "sh tests/check.sh", "seed": ["data"],
+                              "confidential": False, "note": "added from the dashboard"}, snap, create=True)
+    out = app_mod._run_project_ticket(project_key="demo2", ident="N-1", agent="claude", prompt="p", title="t",
+                                      run_id="run-n1", linear_issue_id="iss-n1", task_id="task-n1", launch_gen=0)
+    assert out["status"] == "review" and out["worktree"].endswith("demo2/N-1") and out["branch"] == "agent/N-1"

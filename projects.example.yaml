@@ -14,6 +14,10 @@
 #                     links dereferenced; each must be ignored by a committed .gitignore
 #   confidential      true => agents run sandboxed and only template comments reach Linear
 #   no_push           true => the dispatch prompt forbids push/deploy
+#   note              free text shown in the dashboard (the dashboard rewrites this file and
+#                     drops # comments, so keep remarks here)
+#
+# The dashboard's Projects panel can add, edit and remove entries (it validates them first).
 projects:
   example-r-app:
     path: ~/code/example-r-app
@@ -26,6 +30,7 @@ projects:
       - data/fixtures
     confidential: true
     no_push: true
+    note: laptop only; tests need the miniforge R
   example-py-tool:
     path: ~/code/example-py-tool
     kind: python

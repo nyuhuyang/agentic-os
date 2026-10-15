@@ -28,3 +28,4 @@ state/
 
 # Project registry (names private/client projects; repo is public)
 projects.yaml
+projects.yaml.lock

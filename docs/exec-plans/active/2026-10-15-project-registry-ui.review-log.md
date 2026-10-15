@@ -227,3 +227,4 @@
 }
 ```
 - Plan review: 4 of 20 rounds; findings 8 → 5 → 1 → 0.
+- Build (Claude, 2026-10-15): base 18a104f. 339 tests pass; headless-browser check of add/edit/baseline/remove passed. User request mid-build: also fix the stray `_playStartSound` after `</html>` (done).

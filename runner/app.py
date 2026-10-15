@@ -2601,11 +2601,21 @@ def _signal_project_run(run_id: str, why: str) -> str | None:
     return "ok"
 
 
-def _run_project_ticket(*, project_key: str, ident: str, agent: str, prompt: str, title: str,
-                        run_id: str, linear_issue_id: str | None, task_id: str, launch_gen: int,
-                        attempt: int = 0, parent_run_id: str | None = None,
-                        resume_session: str | None = None, reuse_only: bool = False,
-                        skill: str = "_prompt", confidential: bool | None = None) -> dict:
+def _run_project_ticket(**kw) -> dict:
+    """Holds the project's shared lifecycle lock for the whole launch, through its comment and
+    running-job removal, so remove and lifecycle edits wait for it (REGUI-004, REGUI-006). An
+    invalid key takes no lock; the helper's registry lookup then records the error."""
+    with contextlib.ExitStack() as stack:
+        with contextlib.suppress(_projects.ProjectError):
+            stack.enter_context(_projects.project_lock(kw["project_key"]))
+        return _run_project_ticket_locked(**kw)
+
+
+def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prompt: str, title: str,
+                               run_id: str, linear_issue_id: str | None, task_id: str, launch_gen: int,
+                               attempt: int = 0, parent_run_id: str | None = None,
+                               resume_session: str | None = None, reuse_only: bool = False,
+                               skill: str = "_prompt", confidential: bool | None = None) -> dict:
     """The one launch helper for every project-bound launch (dispatch and retry/rework).
 
     Holds the ticket lock across worktree -> agent -> runner commit -> verify -> seed check
@@ -2973,22 +2983,115 @@ def api_run_events(run_id: str):
 
 @app.route("/api/projects")
 def api_projects():
-    """Registered projects with their Claude + Codex sessions (read-only, plan Phase 1)."""
-    import projects as _projects
+    """Registered projects with their sessions, raw entries (for the edit form) and the
+    registry hash, all from one read of projects.yaml (REGUI-008)."""
+    data, registry_hash = _projects.registry_snapshot()
+    raw = _projects.raw_entries(data)
     errors: dict[str, str] = {}
     try:
-        reg = _projects.load_registry(errors=errors)
+        reg = _projects.load_registry(errors=errors, data=data)
     except _projects.ProjectError as exc:
-        return jsonify({"projects": [], "error": str(exc)})
+        return jsonify({"projects": [], "error": str(exc), "registry_hash": registry_hash})
     out = []
     for key, p in reg.items():
         try:  # one project's reader failure never hides the others
             out.append({"key": key, "kind": p.kind, "confidential": p.confidential, "no_push": p.no_push,
+                        "note": p.note, "entry": raw.get(key), "baseline": _BASELINES.get(key),
                         "sessions": _projects.project_sessions(p), "memory": _projects.claude_memory_names(p)})
         except Exception as exc:
-            out.append({"key": key, "error": f"session readers failed: {exc}"})
-    out += [{"key": key, "error": msg} for key, msg in errors.items()]
-    return jsonify({"projects": out})
+            out.append({"key": key, "error": f"session readers failed: {exc}", "entry": raw.get(key)})
+    out += [{"key": key, "error": msg, "entry": raw.get(key)} for key, msg in errors.items()]
+    return jsonify({"projects": out, "registry_hash": registry_hash})
+
+
+def _project_error(exc: Exception):
+    if isinstance(exc, _projects.WorktreesRemain):
+        return jsonify({"error": str(exc), "worktrees": exc.worktrees}), 409
+    if isinstance(exc, (_projects.RegistryConflict, _projects.ProjectBusy, _projects.TicketLocked)):
+        return jsonify({"error": str(exc)}), 409
+    return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/projects/suggestions")
+def api_project_suggestions():
+    registered = [p.path for p in _projects.load_registry(errors={}).values()]
+    return jsonify({"suggestions": _projects.session_dirs(registered)})
+
+
+@app.route("/api/projects", methods=["POST"])
+def api_project_create():
+    body = request.get_json(silent=True) or {}
+    entry = body.get("entry") or {}
+    try:
+        if body.get("init"):
+            _projects.init_repo(str(entry.get("path") or ""))
+        result = _projects.save_project(body.get("key"), entry, str(body.get("registry_hash") or ""), create=True)
+    except _projects.ProjectError as exc:
+        return _project_error(exc)
+    return jsonify({"ok": True, **result, "warning": _records_unsafe() if result["confidential"] else None})
+
+
+@app.route("/api/projects/<key>", methods=["PUT"])
+def api_project_edit(key: str):
+    body = request.get_json(silent=True) or {}
+    try:
+        result = _projects.save_project(key, body.get("entry") or {}, str(body.get("registry_hash") or ""))
+    except _projects.ProjectError as exc:
+        return _project_error(exc)
+    return jsonify({"ok": True, **result, "warning": _records_unsafe() if result["confidential"] else None})
+
+
+@app.route("/api/projects/<key>", methods=["DELETE"])
+def api_project_remove(key: str):
+    body = request.get_json(silent=True) or {}
+    try:
+        result = _projects.remove_project(key, str(body.get("registry_hash") or ""), cleanup=bool(body.get("cleanup")))
+    except _projects.ProjectError as exc:
+        return _project_error(exc)
+    _BASELINES.pop(key, None)
+    return jsonify({"ok": True, **result})
+
+
+_BASELINES: dict[str, dict] = {}  # key -> last baseline (memory only; the tail never leaves this machine)
+_BASELINE_LOCK = threading.Lock()
+
+
+def _run_baseline(key: str) -> None:
+    result: dict = {"state": "done", "finished_at": None}
+    try:
+        with _projects.project_lock(key):  # shared: remove/lifecycle edits wait (REGUI-004)
+            project = _projects.get_project(key, _projects.load_registry(errors={}))
+            ident = f"BASELINE-{int(time.time() * 1000)}"
+            with _projects.ticket_lock(key, ident):
+                info = _projects.create_worktree(project, ident)
+                if info["reused"]:  # never verify or delete a worktree this call did not create (REGUI-003)
+                    raise _projects.ProjectError(f"{key}/{ident} already existed; left untouched")
+                try:
+                    result.update(_projects.run_verify(project, Path(info["worktree"])))
+                finally:
+                    _projects.remove_worktree(project, ident)
+            _projects.drop_ticket_lock(key, ident)
+    except Exception as exc:
+        result.setdefault("status", "error")
+        result["error"] = str(exc)
+    result["finished_at"] = time.time()
+    _BASELINES[key] = result
+    socketio.emit("project_baseline", {"key": key})
+
+
+@app.route("/api/projects/<key>/baseline", methods=["POST"])
+def api_project_baseline(key: str):
+    with _BASELINE_LOCK:
+        if (_BASELINES.get(key) or {}).get("state") == "running":
+            return jsonify({"error": f"a baseline for {key} is already running"}), 409
+        _BASELINES[key] = {"state": "running", "started_at": time.time()}
+    threading.Thread(target=_run_baseline, args=(key,), daemon=True).start()
+    return jsonify({"ok": True, "state": "running"})
+
+
+@app.route("/api/projects/<key>/baseline")
+def api_project_baseline_status(key: str):
+    return jsonify(_BASELINES.get(key) or {"state": "none"})
 
 
 @app.route("/api/registry")

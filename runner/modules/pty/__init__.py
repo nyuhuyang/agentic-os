@@ -286,6 +286,9 @@ def open_terminal(data: dict, socketio) -> dict:
     key = data.get("project_key")
     try:
         if key:
+            # A project tab holds the project's shared lifecycle lock while open, so remove and
+            # path/confidential/seed edits wait until it closes (REGUI-004).
+            t.holds.enter_context(projects.project_lock(key))
             project = projects.get_project(key, projects.load_registry(errors={}))
             t.project_key = key
         ticket = data.get("ticket")

@@ -379,6 +379,21 @@
   .session-copy { background: none; border: 1px solid var(--border); color: var(--text-dim); border-radius: 3px; cursor: pointer; font-family: inherit; font-size: calc(10px * var(--fs)); }
   .session-copy:hover { color: var(--accent); border-color: var(--accent); }
   .session-empty { color: var(--text-dim); font-size: calc(12px * var(--fs)); padding: 4px 0; }
+  .project-toolbar { display: flex; justify-content: flex-end; padding: 6px 4px; }
+  .project-note { padding: 0 4px 6px 20px; color: var(--text-dim); font-size: calc(11px * var(--fs)); white-space: pre-wrap; }
+  .project-baseline { padding: 0 4px 6px 20px; font-size: calc(11px * var(--fs)); }
+  .project-baseline .ok { color: var(--green); } .project-baseline .bad { color: var(--red); }
+  .project-baseline pre { max-height: 240px; overflow: auto; white-space: pre-wrap; background: var(--surface); padding: 6px; }
+  #project-dialog { margin: auto; padding: 16px; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; width: min(560px, 92vw); max-height: 90vh; overflow: auto; }
+  #project-dialog::backdrop { background: rgba(0,0,0,.5); }
+  #project-dialog label { display: block; font-size: calc(11px * var(--fs)); color: var(--text-dim); margin-top: 8px; }
+  #project-dialog input[type=text], #project-dialog input[type=number], #project-dialog textarea, #project-dialog select {
+    width: 100%; box-sizing: border-box; background: var(--surface); color: var(--text); border: 1px solid var(--border);
+    border-radius: 3px; padding: 4px 6px; font-family: inherit; font-size: calc(12px * var(--fs)); }
+  #project-dialog .row { display: flex; gap: 6px; align-items: center; }
+  #project-dialog .check { display: flex; gap: 6px; align-items: center; color: var(--text); }
+  #project-dialog .error { color: var(--red); white-space: pre-wrap; font-size: calc(12px * var(--fs)); margin-top: 8px; }
+  #project-dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
   .skill-panel {
     margin: 18px 0 24px;
     padding: 16px 18px 18px;
@@ -757,6 +772,31 @@
 
       <!-- Projects (plan Decision 6: project sections replace the skill-stack sections) -->
       <div id="project-panel-content"><div class="job-board-empty">Loading projects…</div></div>
+      <dialog id="project-dialog">
+        <form id="project-form" method="dialog">
+          <b id="project-form-title">Add project</b>
+          <label>Key (Linear label <code>project:&lt;key&gt;</code>; cannot change later)<input type="text" name="key" required pattern="[A-Za-z0-9][A-Za-z0-9._\-]*"></label>
+          <label>Path (git repo root)
+            <div class="row"><input type="text" name="path" required placeholder="~/code/my-repo">
+              <button type="button" class="session-copy" id="project-history-btn">From history</button></div>
+          </label>
+          <select id="project-history" style="display:none"></select>
+          <label class="check"><input type="checkbox" name="init"> Create this folder as a new git repo (git init + empty commit)</label>
+          <label>Kind<input type="text" name="kind" placeholder="python | r-shiny | wiki"></label>
+          <label>Verify command (runs in the ticket's worktree; exit 0 = pass)<input type="text" name="verify" required placeholder="{root}/.venv/bin/python -m pytest -q"></label>
+          <label>Verify timeout (s)<input type="number" name="verify_timeout_s" min="1" placeholder="600"></label>
+          <label>Env (one KEY=VALUE per line; PATH is prepended)<textarea name="env" rows="2"></textarea></label>
+          <label>Seed (gitignored paths copied into each worktree, one per line)<textarea name="seed" rows="2"></textarea></label>
+          <label class="check"><input type="checkbox" name="confidential" checked> Confidential (sandboxed; only template comments reach Linear)</label>
+          <label class="check"><input type="checkbox" name="no_push" checked> No push / deploy</label>
+          <label>Note<textarea name="note" rows="3"></textarea></label>
+          <div class="error" id="project-form-error"></div>
+          <div class="actions">
+            <button type="button" class="session-copy" id="project-form-cancel">Cancel</button>
+            <button type="submit" class="session-copy" id="project-form-save">Save</button>
+          </div>
+        </form>
+      </dialog>
     </section>
 
     <!-- Terminal — at bottom -->
@@ -1019,10 +1059,12 @@ function _renderProjects() {
   const el = document.getElementById('project-panel-content');
   if (!el) return;
   const ps = _projectData.projects || [];
-  if (_projectData.error) { el.innerHTML = `<div class="job-board-empty">Registry error: ${_esc(_projectData.error)}</div>`; return; }
-  if (!ps.length) { el.innerHTML = '<div class="job-board-empty">No projects registered — copy projects.example.yaml to projects.yaml.</div>'; return; }
-  el.innerHTML = ps.map(p => {
-    if (p.error) return `<div class="project-section"><div class="project-head project-error">${_esc(p.key)} — ${_esc(p.error)}</div></div>`;
+  const toolbar = '<div class="project-toolbar"><button class="session-copy" data-proj-action="add">+ Project</button></div>';
+  if (_projectData.error) { el.innerHTML = toolbar + `<div class="job-board-empty">Registry error: ${_esc(_projectData.error)}</div>`; return; }
+  if (!ps.length) { el.innerHTML = toolbar + '<div class="job-board-empty">No projects registered yet.</div>'; return; }
+  const removeBtn = p => `<button class="session-copy" data-proj-action="remove" data-key="${_esc(p.key)}">Remove</button>`;
+  el.innerHTML = toolbar + ps.map(p => {
+    if (p.error) return `<div class="project-section"><div class="project-head project-error">${_esc(p.key)} — ${_esc(p.error)} ${removeBtn(p)}</div></div>`;
     const open = _openProjects.has(p.key);
     const badges = (p.confidential ? '<span class="badge risk-destructive">confidential</span>' : '')
       + (p.no_push ? '<span class="badge">no push</span>' : '') + (p.kind ? `<span class="badge">${_esc(p.kind)}</span>` : '');
@@ -1037,7 +1079,12 @@ function _renderProjects() {
     return `<div class="project-section">
       <div class="project-head" data-key="${_esc(p.key)}">${open ? '▾' : '▸'} <b>${_esc(p.key)}</b> ${badges}
         <span class="session-meta">${(p.sessions || []).length} sessions</span>
-        <button class="session-copy" data-open-terminal="${_esc(p.key)}">Open terminal</button></div>
+        <button class="session-copy" data-open-terminal="${_esc(p.key)}">Open terminal</button>
+        <button class="session-copy" data-proj-action="baseline" data-key="${_esc(p.key)}">Baseline</button>
+        <button class="session-copy" data-proj-action="edit" data-key="${_esc(p.key)}">Edit</button>
+        ${removeBtn(p)}</div>
+      ${p.note ? `<div class="project-note">${_esc(p.note)}</div>` : ''}
+      ${_baselineHtml(p.baseline)}
       ${open ? `<div class="session-list">${rows}</div>` : ''}</div>`;
   }).join('');
 }
@@ -1052,7 +1099,125 @@ async function loadProjects() {
   _renderProjects();
 }
 
+function _baselineHtml(b) {
+  if (!b || b.state === 'none') return '';
+  if (b.state === 'running') return '<div class="project-baseline">baseline: running…</div>';
+  const ok = b.status === 'pass';
+  const head = `<span class="${ok ? 'ok' : 'bad'}">baseline: ${_esc(b.status || 'error')}</span>`
+    + (b.exit !== undefined ? ` · exit ${_esc(b.exit)}` : '') + (b.duration_s !== undefined ? ` · ${_esc(b.duration_s)} s` : '')
+    + (b.error ? ` · ${_esc(b.error)}` : '');
+  return `<div class="project-baseline">${head}${b.tail ? `<details><summary>output tail</summary><pre>${_esc(b.tail)}</pre></details>` : ''}</div>`;
+}
+
+async function _projectApi(method, url, body) {
+  const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  let data = {};
+  try { data = await res.json(); } catch (_) {}
+  return { ok: res.ok, status: res.status, data };
+}
+
+function _projectFormOpen(p) {
+  const dlg = document.getElementById('project-dialog');
+  const f = document.getElementById('project-form');
+  f.reset();
+  const e = (p && p.entry) || {};
+  f.dataset.mode = p ? 'edit' : 'add';
+  document.getElementById('project-form-title').textContent = p ? `Edit ${p.key}` : 'Add project';
+  f.key.value = p ? p.key : ''; f.key.readOnly = !!p;
+  f.path.value = e.path || ''; f.kind.value = e.kind || ''; f.verify.value = e.verify || '';
+  f.verify_timeout_s.value = e.verify_timeout_s || '';
+  f.env.value = Object.entries(e.env || {}).map(([k, v]) => `${k}=${v}`).join('\n');
+  f.seed.value = (e.seed || []).join('\n');
+  f.confidential.checked = p ? !!e.confidential : true;
+  f.no_push.checked = p ? !!e.no_push : true;
+  f.note.value = e.note || '';
+  f.init.checked = false; f.init.closest('label').style.display = p ? 'none' : '';
+  document.getElementById('project-history-btn').style.display = p ? 'none' : '';
+  document.getElementById('project-history').style.display = 'none';
+  document.getElementById('project-form-error').textContent = '';
+  dlg.showModal();
+}
+
+function _projectFormEntry(f) {
+  const env = {};
+  for (const line of f.env.value.split('\n')) {
+    const i = line.indexOf('=');
+    if (line.trim() && i > 0) env[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  const timeout = parseInt(f.verify_timeout_s.value, 10);
+  return {
+    path: f.path.value.trim(), kind: f.kind.value.trim(), verify: f.verify.value.trim(),
+    verify_timeout_s: Number.isFinite(timeout) ? timeout : null, env,
+    seed: f.seed.value.split('\n').map(x => x.trim()).filter(Boolean),
+    confidential: f.confidential.checked, no_push: f.no_push.checked, note: f.note.value.trim(),
+  };
+}
+
+document.getElementById('project-form')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const f = event.target, errEl = document.getElementById('project-form-error');
+  const save = document.getElementById('project-form-save');
+  const key = f.key.value.trim(), hash = _projectData.registry_hash || '';
+  save.disabled = true; errEl.textContent = 'Saving… (validates in a throwaway worktree)';
+  const r = f.dataset.mode === 'edit'
+    ? await _projectApi('PUT', `/api/projects/${encodeURIComponent(key)}`, { entry: _projectFormEntry(f), registry_hash: hash })
+    : await _projectApi('POST', '/api/projects', { key, entry: _projectFormEntry(f), registry_hash: hash, init: f.init.checked });
+  save.disabled = false;
+  if (!r.ok) { errEl.textContent = r.data.error || `HTTP ${r.status}`; if (r.status === 409) loadProjects(); return; }
+  errEl.textContent = '';
+  document.getElementById('project-dialog').close();
+  if (r.data.warning) alert(`Saved. Warning: ${r.data.warning}`);
+  loadProjects();
+});
+document.getElementById('project-form-cancel')?.addEventListener('click', () => document.getElementById('project-dialog').close());
+
+document.getElementById('project-history-btn')?.addEventListener('click', async () => {
+  const sel = document.getElementById('project-history');
+  sel.innerHTML = '<option>Loading…</option>'; sel.style.display = '';
+  const r = await _projectApi('GET', '/api/projects/suggestions');
+  const rows = (r.data.suggestions || []);
+  sel.innerHTML = '<option value="">— pick a folder from session history —</option>' + rows.map((s, i) =>
+    `<option value="${i}">${_esc(s.path)} · ${_esc(s.agents.join('+'))} · ${s.sessions} sessions · ${_ago(s.last_used)}</option>`).join('');
+  sel.onchange = () => {
+    const s = rows[parseInt(sel.value, 10)];
+    if (!s) return;
+    const f = document.getElementById('project-form');
+    f.path.value = s.path;
+    if (!f.key.value) f.key.value = s.name.replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[^A-Za-z0-9]+/, '').toLowerCase();
+  };
+});
+
+async function _projectRemove(key) {
+  if (!confirm(`Remove project "${key}" from AgenticOS? Its files are not touched.`)) return;
+  let r = await _projectApi('DELETE', `/api/projects/${encodeURIComponent(key)}`, { registry_hash: _projectData.registry_hash || '' });
+  if (r.status === 409 && r.data.worktrees) {
+    if (!confirm(`${key} still has worktrees: ${r.data.worktrees.join(', ')}.\n\nClean up and remove? Only worktrees with no uncommitted changes and no new commits are deleted; if any holds work, nothing is deleted.`)) return;
+    r = await _projectApi('DELETE', `/api/projects/${encodeURIComponent(key)}`, { registry_hash: _projectData.registry_hash || '', cleanup: true });
+  }
+  if (!r.ok) alert(r.data.error || `HTTP ${r.status}`);
+  loadProjects();
+}
+
+async function _projectBaseline(key) {
+  const r = await _projectApi('POST', `/api/projects/${encodeURIComponent(key)}/baseline`);
+  if (!r.ok) { alert(r.data.error || `HTTP ${r.status}`); return; }
+  loadProjects();
+  const poll = setInterval(async () => {
+    const s = await _projectApi('GET', `/api/projects/${encodeURIComponent(key)}/baseline`);
+    if (s.data.state !== 'running') { clearInterval(poll); loadProjects(); }
+  }, 2000);
+}
+
 document.getElementById('project-panel-content')?.addEventListener('click', (event) => {
+  const act = event.target.closest('[data-proj-action]');
+  if (act) {
+    const key = act.dataset.key, p = (_projectData.projects || []).find(x => x.key === key);
+    if (act.dataset.projAction === 'add') _projectFormOpen(null);
+    else if (act.dataset.projAction === 'edit' && p) _projectFormOpen(p);
+    else if (act.dataset.projAction === 'remove') _projectRemove(key);
+    else if (act.dataset.projAction === 'baseline') _projectBaseline(key);
+    return;
+  }
   const openTerm = event.target.closest('[data-open-terminal]');
   if (openTerm) { openShellTab(openTerm.dataset.openTerminal); return; }
   const resumeBtn = event.target.closest('[data-resume-id]');
@@ -3912,6 +4077,23 @@ function _playChime() {
   } catch (_) { /* audio not available */ }
 }
 
+function _playStartSound() {
+  try {
+    if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = _audioCtx.currentTime;
+    const osc = _audioCtx.createOscillator();
+    const gain = _audioCtx.createGain();
+    osc.frequency.setValueAtTime(392, now);          // G4
+    osc.frequency.setValueAtTime(523.25, now + 0.15); // C5
+    osc.frequency.setValueAtTime(659.25, now + 0.3);  // E5
+    gain.gain.setValueAtTime(0.25, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+    osc.connect(gain).connect(_audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.5);
+  } catch (_) {}
+}
+
 socket.on('run_state_change', (data) => {
   if (data.run_id && data.state && data.state !== 'running') {
     _tabs.forEach(t => { if (t.info.kind === 'run' && t.info.run_id === data.run_id) setTimeout(() => _loadRunEvents(t.info), 500); });
@@ -4229,19 +4411,3 @@ async function submitNewIssue() {
 </script>
 </body>
 </html>
-function _playStartSound() {
-  try {
-    if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const now = _audioCtx.currentTime;
-    const osc = _audioCtx.createOscillator();
-    const gain = _audioCtx.createGain();
-    osc.frequency.setValueAtTime(392, now);          // G4
-    osc.frequency.setValueAtTime(523.25, now + 0.15); // C5
-    osc.frequency.setValueAtTime(659.25, now + 0.3);  // E5
-    gain.gain.setValueAtTime(0.25, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
-    osc.connect(gain).connect(_audioCtx.destination);
-    osc.start(now);
-    osc.stop(now + 0.5);
-  } catch (_) {}
-}

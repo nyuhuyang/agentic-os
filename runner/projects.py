@@ -38,7 +38,7 @@ _PROTO = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = Path(os.environ.get("AGENTIC_OS_PROJECTS", str(_PROTO / "projects.yaml")))
 WORKTREE_ROOT = Path(os.environ.get("AGENTIC_OS_WORKTREES", "~/.agentic-os/worktrees")).expanduser()
 
-_FIELDS = {"path", "kind", "verify", "env", "confidential", "no_push", "seed", "verify_timeout_s"}
+_FIELDS = {"path", "kind", "verify", "env", "confidential", "no_push", "seed", "verify_timeout_s", "note"}
 _IDENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DEFAULT_VERIFY_TIMEOUT_S = 600
 TAIL_CHARS = 4000
@@ -52,6 +52,20 @@ class TicketLocked(ProjectError):
     pass
 
 
+class ProjectBusy(ProjectError):
+    """The project lifecycle lock is held (a run, baseline, CLI command or terminal)."""
+
+
+class RegistryConflict(ProjectError):
+    """projects.yaml changed since the caller read it."""
+
+
+class WorktreesRemain(ProjectError):
+    def __init__(self, msg: str, worktrees: list[str]):
+        super().__init__(msg)
+        self.worktrees = worktrees
+
+
 @dataclass(frozen=True)
 class Project:
     key: str
@@ -63,6 +77,7 @@ class Project:
     no_push: bool = False
     seed: tuple = ()
     verify_timeout_s: int = DEFAULT_VERIFY_TIMEOUT_S
+    note: str = ""
 
 
 # An agent can write the shared git config (e.g. core.fsmonitor -> a script in its
@@ -233,6 +248,9 @@ def _parse_project(key: str, entry: object) -> Project:
     seeds = entry.get("seed") or []
     if not isinstance(seeds, list):
         raise ProjectError(f"{key}: 'seed' must be a list")
+    note = entry.get("note") or ""
+    if not isinstance(note, str):
+        raise ProjectError(f"{key}: 'note' must be a string")
     timeout = entry.get("verify_timeout_s", DEFAULT_VERIFY_TIMEOUT_S)
     if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
         raise ProjectError(f"{key}: 'verify_timeout_s' must be a positive integer")
@@ -240,7 +258,7 @@ def _parse_project(key: str, entry: object) -> Project:
         key=key, path=root, verify=verify.strip(), kind=str(entry.get("kind") or ""),
         env=env, confidential=bool(entry.get("confidential", False)),
         no_push=bool(entry.get("no_push", False)),
-        seed=tuple(_seed_path(root, s, key) for s in seeds), verify_timeout_s=timeout,
+        seed=tuple(_seed_path(root, s, key) for s in seeds), verify_timeout_s=timeout, note=note,
     )
 
 
@@ -260,14 +278,16 @@ def declares_confidential(path: Path | None = None) -> bool:
     return any(not isinstance(e, dict) or e.get("confidential") not in (None, False) for e in entries.values())
 
 
-def load_registry(path: Path | None = None, errors: dict | None = None) -> dict[str, Project]:
+def load_registry(path: Path | None = None, errors: dict | None = None,
+                  data: bytes | None = None) -> dict[str, Project]:
     """Parse the registry. With `errors` given, a bad entry is recorded there and skipped
-    (the dashboard keeps showing the other projects); without it, the first error raises."""
+    (the dashboard keeps showing the other projects); without it, the first error raises.
+    `data` parses bytes already read (one snapshot for entries and hash, REGUI-008)."""
     path = Path(path or REGISTRY_PATH)
-    if not path.exists():
+    if data is None and not path.exists():
         return {}
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data = yaml.safe_load(data if data is not None else path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as exc:
         raise ProjectError(f"{path}: cannot read registry: {exc}") from None
     projects = data.get("projects") if isinstance(data, dict) else None
@@ -285,6 +305,269 @@ def load_registry(path: Path | None = None, errors: dict | None = None) -> dict[
         except Exception as exc:  # ProjectError, or e.g. RuntimeError from '~nouser', ValueError from NUL
             errors[key] = str(exc)
     return loaded
+
+
+def _check_key(key: object) -> str:
+    if not isinstance(key, str) or not _IDENT.match(key):
+        raise ProjectError(f"project key {key!r} must match {_IDENT.pattern}")
+    return key
+
+
+@contextlib.contextmanager
+def project_lock(key: str, exclusive: bool = False, blocking: bool = True):
+    """Lifecycle lock of one project (REGUI-004). Shared (blocking) for everything that uses
+    the project: a launch, CLI worktree/verify/cleanup, a baseline, a project tab. Exclusive
+    (non-blocking) for remove and for edits of path/confidential/seed. Lock order everywhere:
+    project -> registry -> ticket locks; a holder never re-acquires or downgrades it."""
+    lock_dir = WORKTREE_ROOT / ".project-locks"  # outside every key dir; keys never start with "."
+    lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(lock_dir / f"{_check_key(key)}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            raise ProjectBusy(f"project {key} is busy (a run, baseline, CLI command or open terminal is using it)") from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def _registry_hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest() if data else ""
+
+
+def _read_registry_bytes(path: Path) -> bytes:
+    try:
+        return path.read_bytes()
+    except FileNotFoundError:
+        return b""
+
+
+def registry_snapshot(path: Path | None = None) -> tuple[bytes, str]:
+    """One read of projects.yaml: its bytes and their hash ("" when missing)."""
+    data = _read_registry_bytes(Path(path or REGISTRY_PATH))
+    return data, _registry_hash(data)
+
+
+def raw_entries(data: bytes) -> dict:
+    """The entries as written (for the edit form); {} when the file is empty or malformed."""
+    try:
+        doc = yaml.safe_load(data) if data else None
+    except yaml.YAMLError:
+        return {}
+    projects = doc.get("projects") if isinstance(doc, dict) else None
+    return {k: v for k, v in projects.items() if isinstance(k, str)} if isinstance(projects, dict) else {}
+
+
+def _locked_doc(path: Path, expected_hash: str) -> dict:
+    data = _read_registry_bytes(path)
+    if _registry_hash(data) != expected_hash:
+        raise RegistryConflict("projects.yaml changed since it was loaded; reload and try again")
+    try:
+        doc = (yaml.safe_load(data) if data else None) or {"projects": {}}
+    except yaml.YAMLError as exc:
+        raise ProjectError(f"{path}: cannot parse registry: {exc}") from None
+    if not isinstance(doc, dict) or not isinstance(doc.setdefault("projects", {}), dict):
+        raise ProjectError(f"{path}: top level must have a 'projects' mapping")
+    return doc
+
+
+def _write_registry(path: Path, doc: dict, expected_hash: str) -> None:
+    """Re-check the hash immediately before replacing (REGUI-008), then write atomically.
+    ponytail: an editor saving in the instant between this check and os.replace still loses;
+    editors do not take the registry lock."""
+    if _registry_hash(_read_registry_bytes(path)) != expected_hash:
+        raise RegistryConflict("projects.yaml changed while saving; reload and try again")
+    text = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, default_flow_style=False)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.chmod(tmp, path.stat().st_mode & 0o777 if path.exists() else 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
+
+
+def _clean_entry(entry: object) -> dict:
+    """Form values -> a registry entry: empty optional fields are dropped, booleans kept."""
+    if not isinstance(entry, dict):
+        raise ProjectError("entry must be a mapping")
+    return {k: v for k, v in entry.items() if v is not None and v != "" and v != [] and v != {}}
+
+
+def _worktree_dirs(key: str) -> list[str]:
+    """Names under WORKTREE_ROOT/<key> that may be worktrees (dirs or links; .meta and lock files skipped)."""
+    root = WORKTREE_ROOT / key
+    if not root.is_dir():
+        return []
+    return sorted(e.name for e in root.iterdir() if e.name != ".meta" and (e.is_dir() or e.is_symlink()))
+
+
+def _lifecycle_changed(old: dict, new: dict) -> bool:
+    """path, confidential and seed changes need the exclusive project lock."""
+    return (old.get("path") != new.get("path") or bool(old.get("confidential")) != bool(new.get("confidential"))
+            or (old.get("seed") or []) != (new.get("seed") or []))
+
+
+def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = False,
+                 path: Path | None = None) -> dict:
+    """Create or edit one registry entry from the dashboard, validated like dispatch.
+    The key is immutable: worktrees, sidecars and bindings are keyed by it."""
+    path = Path(path or REGISTRY_PATH)
+    _check_key(key)
+    entry = _clean_entry(entry)
+    old = raw_entries(_read_registry_bytes(path)).get(key)
+    lifecycle = create or _lifecycle_changed(old if isinstance(old, dict) else {}, entry)
+    with contextlib.ExitStack() as stack:
+        if lifecycle:
+            stack.enter_context(project_lock(key, exclusive=True, blocking=False))
+        from state_io import file_lock
+        stack.enter_context(file_lock(path))
+        doc = _locked_doc(path, expected_hash)
+        projects = doc["projects"]
+        old = projects.get(key) if isinstance(projects.get(key), dict) else {}
+        if not lifecycle and _lifecycle_changed(old, entry):
+            raise RegistryConflict("projects.yaml changed while saving; reload and try again")
+        if create and key in projects:
+            raise ProjectError(f"project {key!r} already exists")
+        if not create and key not in projects:
+            raise ProjectError(f"unknown project {key!r}")
+        project = _parse_project(key, entry)
+        if project.path.resolve().is_relative_to(WORKTREE_ROOT.resolve()):
+            raise ProjectError(f"{key}: path must not be inside {WORKTREE_ROOT}")
+        new_repo = create or entry.get("path") != old.get("path")
+        if new_repo:  # REGUI-007: every leftover worktree must belong to the new repo
+            foreign = [n for n in _worktree_dirs(key) if not _is_worktree_of(project, WORKTREE_ROOT / key / n)]
+            if foreign:
+                raise ProjectError(f"{key}: worktrees of another repository remain under "
+                                   f"{WORKTREE_ROOT / key}: {foreign}; clean them up first")
+        if new_repo or entry.get("seed") != old.get("seed"):
+            # The exact dispatch checks (verify targets, seed copy, collision, committed-ignore
+            # rule) in a throwaway worktree, under this call's exclusive lock (REGUI-002/009).
+            ident = f"REGCHECK-{int(time.time() * 1000)}"
+            with ticket_lock(key, ident):
+                if create_worktree(project, ident)["reused"]:
+                    raise ProjectError(f"{key}/{ident} already existed; left untouched")
+                remove_worktree(project, ident)
+            drop_ticket_lock(key, ident)
+        projects[key] = entry
+        _write_registry(path, doc, expected_hash)
+    return {"key": key, "confidential": project.confidential}
+
+
+def _cleanup_descriptor(key: str, raw: object) -> Project:
+    """The project to clean worktrees with. A broken entry keeps only its path, is always
+    confidential (every git call confined, REGUI-012), and must still be a git repo."""
+    with contextlib.suppress(Exception):
+        return _parse_project(key, raw)
+    raw_path = raw.get("path") if isinstance(raw, dict) else None
+    root = Path(raw_path).expanduser() if isinstance(raw_path, str) and raw_path.strip() else None
+    if root is None or not root.is_absolute() or not root.is_dir() or \
+            _git(root, "rev-parse", "--git-dir", check=False).returncode != 0:
+        raise ProjectError(f"{key}: path is missing or not a git repository, so worktree ownership "
+                           f"cannot be verified; nothing removed")
+    return Project(key=key, path=root, verify="", confidential=True)
+
+
+def remove_project(key: str, expected_hash: str, *, cleanup: bool = False,
+                   path: Path | None = None) -> dict:
+    """Remove one registry entry (a broken one too). Project files are never touched; with
+    `cleanup`, work-free worktrees are removed first, all or nothing (REGUI-005)."""
+    path = Path(path or REGISTRY_PATH)
+    _check_key(key)
+    from state_io import file_lock
+    removed: list[str] = []
+    with project_lock(key, exclusive=True, blocking=False), file_lock(path):
+        doc = _locked_doc(path, expected_hash)
+        if key not in doc["projects"]:
+            raise ProjectError(f"unknown project {key!r}")
+        trees = _worktree_dirs(key)
+        if trees and not cleanup:
+            raise WorktreesRemain(f"{key}: worktrees remain: {', '.join(trees)}", trees)
+        if trees:
+            removed = _cleanup_worktrees(_cleanup_descriptor(key, doc["projects"][key]), trees)
+        del doc["projects"][key]
+        try:
+            _write_registry(path, doc, expected_hash)
+        except RegistryConflict as exc:
+            raise RegistryConflict(f"{exc} (already removed worktrees: {removed or 'none'})") from None
+        # Nothing else can hold this key's ticket locks while its exclusive project lock is held
+        # (every ticket-lock holder takes the shared project lock first), so lock-only leftovers go.
+        key_dir, meta = WORKTREE_ROOT / key, WORKTREE_ROOT / key / ".meta"
+        if key_dir.is_dir() and not _worktree_dirs(key) and \
+                all(e.is_file() and e.suffix == ".lock" for e in (meta.iterdir() if meta.is_dir() else [])) and \
+                all(e.name == ".meta" for e in key_dir.iterdir()):
+            shutil.rmtree(key_dir)
+    return {"removed": key, "worktrees_removed": removed}
+
+
+def drop_ticket_lock(key: str, ident: str) -> None:
+    """Delete the lock file of a one-off ticket id (REGCHECK-/BASELINE-) after its lock is released."""
+    (WORKTREE_ROOT / key / ".meta" / f"{_check_ident(ident)}.lock").unlink(missing_ok=True)
+
+
+def _cleanup_worktrees(project: Project, trees: list[str]) -> list[str]:
+    """Preflight every worktree under all their ticket locks, then delete; nothing is deleted
+    unless every one is an owned, clean worktree with no commits beyond its base."""
+    failures: list[str] = []
+    with contextlib.ExitStack() as stack:
+        checked: list[tuple[Project, str]] = []
+        for ident in trees:  # sorted: one acquisition order
+            try:
+                _check_ident(ident)
+                stack.enter_context(ticket_lock(project.key, ident))
+                wt = worktree_path(project, ident)
+                if wt.is_symlink() or not _is_worktree_of(project, wt):
+                    raise ProjectError("not a worktree of this project")
+                meta = load_binding(project, ident)
+                eff = effective(project, meta)  # sidecar-confidential stays confined (REGUI-012)
+                dirty = uncommitted(eff, wt)
+                if dirty:
+                    raise ProjectError(f"uncommitted changes: {', '.join(dirty[:5])}")
+                ahead = _git(project.path, "rev-list", "--count", f"{meta['base_sha']}..refs/heads/agent/{ident}",
+                             confine=confine_for(eff)).stdout.strip()
+                if ahead != "0":
+                    raise ProjectError(f"{ahead} commit(s) beyond its base")
+                checked.append((eff, ident))
+            except ProjectError as exc:
+                failures.append(f"{ident}: {exc}")
+        if failures:
+            raise ProjectError("nothing removed; worktrees hold work or cannot be verified — " + "; ".join(failures))
+        done: list[str] = []
+        for eff, ident in checked:
+            try:
+                remove_worktree(eff, ident)
+            except ProjectError as exc:
+                left = [i for _, i in checked if i not in done]
+                raise ProjectError(f"cleanup failed at {ident}: {exc}; removed {done or 'none'}, "
+                                   f"still present {left}; registry entry kept") from None
+            done.append(ident)
+        return done
+
+
+def init_repo(raw_path: str) -> Path:
+    """A brand-new project folder: mkdir + git init + empty initial commit. Refuses an
+    existing path or a missing parent; on failure removes only what it created."""
+    root = Path(raw_path or "").expanduser()
+    if not root.is_absolute():
+        raise ProjectError("path must be absolute or ~-relative")
+    if os.path.lexists(root):
+        raise ProjectError(f"{root} already exists")
+    if not root.parent.is_dir():
+        raise ProjectError(f"parent folder {root.parent} does not exist")
+    if root.parent.resolve().is_relative_to(WORKTREE_ROOT.resolve()):
+        raise ProjectError(f"path must not be inside {WORKTREE_ROOT}")
+    root.mkdir()
+    try:
+        _git(root, "init", "-q")
+        _git(root, "commit", "-q", "--allow-empty", "-m", "Initial commit")
+    except BaseException:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+    return root
 
 
 def get_project(key: str, registry: dict[str, Project] | None = None) -> Project:
@@ -925,6 +1208,91 @@ def codex_sessions(project: Project) -> list[dict]:
     return out
 
 
+def _first_cwd(path: Path) -> str | None:
+    """The cwd of a Claude session: the first line that carries one (ponytail: 200 lines max)."""
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for _, line in zip(range(200), f):
+            if '"cwd"' not in line:
+                continue
+            try:
+                cwd = json.loads(line).get("cwd")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(cwd, str) and cwd:
+                return cwd
+    return None
+
+
+# Throwaway temp repos (spikes, test fixtures) are never suggested as projects.
+_TEMP_ROOTS = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
+_TOPLEVEL: dict[str, str | None] = {}  # ponytail: per-process memo; restart the runner to forget
+
+
+def _repo_root(cwd: str) -> str | None:
+    if cwd not in _TOPLEVEL:
+        top = None
+        if os.path.isdir(cwd):
+            proc = _git(Path(cwd), "rev-parse", "--show-toplevel", check=False, timeout=10)
+            top = proc.stdout.strip() or None if proc.returncode == 0 else None
+        _TOPLEVEL[cwd] = top
+    return _TOPLEVEL[cwd]
+
+
+def session_dirs(registered: list[Path], limit: int = 50) -> list[dict]:
+    """Git repo roots seen in Claude/Codex session history that are not registered yet.
+    Read-only; any reader failure just yields fewer rows."""
+    from usage_reader import _cached_by_stat
+    seen: dict[str, dict] = {}  # cwd -> {last_used, sessions, agents}
+
+    def note(cwd: str, ts: float, agent: str, n: int = 1) -> None:
+        row = seen.setdefault(cwd, {"last_used": 0.0, "sessions": 0, "agents": set()})
+        row["last_used"] = max(row["last_used"], ts)
+        row["sessions"] += n
+        row["agents"].add(agent)
+
+    with contextlib.suppress(OSError):
+        for d in CLAUDE_PROJECTS.iterdir() if CLAUDE_PROJECTS.is_dir() else []:
+            for f in d.glob("*.jsonl") if d.is_dir() else []:
+                with contextlib.suppress(Exception):
+                    st = f.stat()
+                    cwd = _cached_by_stat("session_cwd", f, st, _first_cwd)
+                    if cwd:
+                        note(cwd, st.st_mtime, "claude")
+    if CODEX_DB.exists():
+        import sqlite3
+        with contextlib.suppress(sqlite3.Error):
+            db = sqlite3.connect(f"file:{CODEX_DB}?mode=ro", uri=True)
+            try:
+                for cwd, updated, n in db.execute(
+                        "SELECT cwd, MAX(updated_at), COUNT(*) FROM threads WHERE archived = 0 GROUP BY cwd"):
+                    if isinstance(cwd, str) and cwd:
+                        with contextlib.suppress(TypeError, ValueError):
+                            note(cwd, float(updated or 0), "codex", int(n or 0))
+            finally:
+                db.close()
+    skip = [str(WORKTREE_ROOT.resolve()), *_TEMP_ROOTS]
+    taken = {str(Path(p).resolve()) for p in registered}
+    roots: dict[str, dict] = {}
+    for cwd, row in seen.items():
+        with contextlib.suppress(Exception):
+            top = _repo_root(cwd)
+            if not top:
+                continue
+            real = str(Path(top).resolve())
+            if real in taken or _under(real, skip):
+                continue
+            agg = roots.setdefault(real, {"last_used": 0.0, "sessions": 0, "agents": set()})
+            agg["last_used"] = max(agg["last_used"], row["last_used"])
+            agg["sessions"] += row["sessions"]
+            agg["agents"] |= row["agents"]
+    home = str(Path.home())
+    out = [{"path": "~" + p[len(home):] if p.startswith(home + "/") else p, "name": Path(p).name,
+            "last_used": r["last_used"], "sessions": r["sessions"], "agents": sorted(r["agents"])}
+           for p, r in roots.items()]
+    out.sort(key=lambda r: r["last_used"], reverse=True)
+    return out[:limit]
+
+
 def project_sessions(project: Project) -> list[dict]:
     rows = claude_sessions(project) + codex_sessions(project)
     rows.sort(key=lambda r: r["updated"], reverse=True)
@@ -947,22 +1315,25 @@ def _cmd_list(args) -> dict:
 
 
 def _cmd_worktree(args) -> dict:
-    project = get_project(args.key)
-    with ticket_lock(project.key, args.id):
-        return create_worktree(project, args.id)
+    with project_lock(args.key):
+        project = get_project(args.key)
+        with ticket_lock(project.key, args.id):
+            return create_worktree(project, args.id)
 
 
 def _cmd_verify(args) -> dict:
-    project = get_project(args.key)
-    ident = ticket_from_worktree(project, Path(args.worktree))
-    with ticket_lock(project.key, ident):
-        return run_verify(project, Path(args.worktree), base=args.base)
+    with project_lock(args.key):
+        project = get_project(args.key)
+        ident = ticket_from_worktree(project, Path(args.worktree))
+        with ticket_lock(project.key, ident):
+            return run_verify(project, Path(args.worktree), base=args.base)
 
 
 def _cmd_cleanup(args) -> dict:
-    project = get_project(args.key)
-    with ticket_lock(project.key, args.id):
-        remove_worktree(project, args.id)
+    with project_lock(args.key):
+        project = get_project(args.key)
+        with ticket_lock(project.key, args.id):
+            remove_worktree(project, args.id)
     return {"removed": str(worktree_path(project, args.id))}
 
 

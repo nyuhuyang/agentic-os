@@ -277,3 +277,15 @@ def test_confidential_tab_refused_and_handoff_withheld_when_records_unsafe(env, 
     t.project_key, t.pending_handoff = "beta", {"skill": "s", "run_id": "r"}  # registry says confidential
     tpty._record_pending_handoff(t, f"run {SENTINEL}", app_mod.socketio)
     assert logged and SENTINEL not in logged[0]
+
+
+def test_project_tab_holds_the_project_lifecycle_lock(env):
+    app_mod, tpty, repos, _ = env
+    c = connect(app_mod)
+    a = open_tab(c, kind="shell", project_key="alpha")
+    with pytest.raises(pj.ProjectBusy):  # remove / lifecycle edits wait for the tab
+        with pj.project_lock("alpha", exclusive=True, blocking=False):
+            pass
+    c.emit("term_close", {"term_id": a["term_id"]}, callback=True)
+    with pj.project_lock("alpha", exclusive=True, blocking=False):  # released on close
+        pass
