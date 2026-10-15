@@ -112,9 +112,6 @@ CLAUDE_REGISTRY_MD = WORKSPACE_ROOT / ".claude" / "registry.md"
 CLAUDE_BUDGET_JSON = Path.home() / ".claude" / "budget.json"
 OUTPUTS_DIR = _PROTO / "outputs"          # runner-internal state (job_state, cache, etc.)
 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-KB_OUTPUTS_DIR = KNOWLEDGE_BASE_ROOT / "outputs"   # skill run artifacts → knowledge base
-KB_OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-RUN_LOG = Path(os.environ.get("RUN_LOG_PATH", str(KB_OUTPUTS_DIR / "run_log.jsonl")))
 PROTO_RUN_LOG = OUTPUTS_DIR / "run_log.jsonl"      # runner-local legacy run log
 CLAUDE_RATE_LIMITS_LIVE = _PROTO / ".claude" / "rate-limits-live.json"
 JOB_STATE = OUTPUTS_DIR / "job_state.json"          # runner-internal, stays in proto
@@ -125,6 +122,8 @@ RUN_PROGRESS_DIR = OUTPUTS_DIR / "logs"
 STATE_DIR = _PROTO / "state"
 STATE_DIR.mkdir(parents=True, exist_ok=True)
 STATE_RUN_LOG = STATE_DIR / "runs.jsonl"
+# Never write into the knowledge base; KB is read-only for the runner.
+RUN_LOG = Path(os.environ.get("RUN_LOG_PATH", str(STATE_DIR / "run_log.jsonl")))
 STATE_TASK_STATE = STATE_DIR / "task_state.json"
 WIKI_LOG = KNOWLEDGE_BASE_ROOT / "wiki" / "log.md"
 RUNNER = _HERE / "run_skill.py"

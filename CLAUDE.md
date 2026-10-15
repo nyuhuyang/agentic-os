@@ -27,7 +27,7 @@ This is the top-level contract for `/AI_Workspace`. It governs the workspace as 
 | --- | --- |
 | `obsidian/knowledge_base/` | Primary memory layer — see its own `CLAUDE.md` |
 | `obsidian/knowledge_base/.codex/skills/` | Skill library (Capability layer) |
-| `obsidian/knowledge_base/outputs/` | Persisted run artifacts and todo lists |
+| `obsidian/knowledge_base/outputs/` | Knowledge-base todos only. The runner never writes here: run logs and state stay in `state/` and `outputs/` (both gitignored). Lessons distilled from agentic-os enter the KB only after explicit user approval. |
 | `experiments/` | Throwaway explorations — nothing here is canonical |
 | `prototypes/` | In-progress builds not yet promoted to tools |
 | `tools/` | Promoted, stable utilities |
@@ -63,15 +63,7 @@ Each skill must have a `skill.yaml` manifest. Schema: `purpose`, `trigger`, `inp
 
 ## Build Roadmap
 
-Priority order from Gap Analysis (2026-04-23):
-
-1. Skill registry — machine-readable index of all skills
-2. Job runner — local queue + run logs + state + retry + cron/launchd
-3. `local_only` / `remote_ok` / `hybrid` backfill across all skills
-4. Telemetry — start/end time, success/failure, output path, quality score
-5. Lightweight dashboard — core skills, recent runs, one-click triggers
-6. Security gates — read/write separation, approval for destructive actions
-7. Remote worker — if local runner proves the value first
+Live roadmap: `docs/exec-plans/ROADMAP.md` (rendered from `state/roadmap.json`).
 
 Skill registry: `.codex/registry.json` / `.codex/registry.md` (generated; rebuild with `build_registry.py`)
 
