@@ -95,4 +95,5 @@ Adding a project takes one folder and at most one choice. The user picks a folde
 - [x] Test: YAML alias, history eligibility + symlinked root, history-phase deadline
 - [x] Fix: candidate listing incremental and deadline-aware, bounded session head read, final deadline check (SAP-B002 remainder); stale-drop check before any DOM change (SAP-B005)
 - [x] Test: slow candidate listing stops within budget; bounded head read
-- [ ] Fresh cross-provider (Codex) build inspection returns no unresolved material findings — inspection 1 REVISE (4, fixed); inspection 2 REVISE (2, fixed); inspection 3 pending
+- [x] Fix: the bounded session head splits on physical newlines only (SAP-B006); test with literal U+2028
+- [ ] Fresh cross-provider (Codex) build inspection returns no unresolved material findings — inspection 1 REVISE (4, fixed); inspection 2 REVISE (2, fixed); inspection 3 REVISE (1, fixed); inspection 4 pending

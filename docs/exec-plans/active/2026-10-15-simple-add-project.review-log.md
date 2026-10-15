@@ -237,3 +237,38 @@
 - SAP-B002: `consider()` reads entries one at a time and stops once every wanted name is seen, checking the deadline per entry. An empty drop stops at the first entry. `_first_cwd` reads at most 256 KB, a fixed rule, so caching stays deterministic. `locate_folder` checks the deadline again before returning. Tests cover a slow candidate listing (stops within budget, complete=false) and the bounded head read.
 - SAP-B005: the `current()` check moved to directly after the `readEntries` await, before any DOM change.
 - pytest 365 passed.
+
+## Build inspection 3 (2026-10-15)
+- Fresh Codex session 01a140c7-c541-74e2-9c9b-2f4acb9fd2b1, cross-provider, 90 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/simple/i3/claudex-7o3hj5bg/result.json`.
+- Verdict: **REVISE**, 1 low finding (B002, B005 confirmed fixed).
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "SAP-B002 and SAP-B005 address the reported failures. The bounded history reader introduces one parsing regression.",
+ "findings": [
+  {
+   "id": "SAP-B006",
+   "severity": "low",
+   "path": "runner/projects.py:1435",
+   "evidence": "head.splitlines() treats literal Unicode separators such as U+2028 as record boundaries, although they are valid inside JSON strings. A session whose only cwd-bearing record contains U+2028 in its message or path is split into invalid JSON fragments and returns None. Previously, file iteration preserved that record. Both locate_folder and session_dirs cache this missing cwd through the shared session_cwd cache until the file changes.",
+   "fix": "Keep the bounded read, but split on physical newline boundaries, such as head.split('\\n'), instead of splitlines(). Add coverage for a valid JSONL record containing literal U+2028 inside a string."
+  }
+ ],
+ "coverage": [
+  "Verified all five manifest file hashes, the plan SHA256, and the tracked diff SHA256 against the supplied base.",
+  "Read the plan, review log, changed implementation sections, and added test source.",
+  "Traced locator deadlines, incremental directory matching, history discovery, and completeness reporting.",
+  "Traced both _first_cwd callers, shared cache reads and writes in usage_reader.py, and locate/suggestions routes.",
+  "Checked dialog generation invalidation and asynchronous callbacks across drop, typing, history selection, close, and reopen."
+ ],
+ "limitations": [
+  "Static review only; no files edited, tests or browser checks run, or work delegated. Reported validation results were not independently verified.",
+  "Review focused on the two requested fixes and their interactions, without repeating the full feature audit.",
+  "The graphify snapshot predates these changes and its query was truncated; conclusions rely on current source."
+ ]
+}
+```
+
+### Host disposition (build inspection 3, accepted)
+- SAP-B006: `_first_cwd` keeps the 256 KB bound but now splits on `"\n"` only, so a literal U+2028/U+2029 inside a JSON string no longer breaks the record. A test covers a literal U+2028 in the cwd and U+2029 in the message. pytest 366 passed.

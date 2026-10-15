@@ -570,3 +570,10 @@ def test_first_cwd_reads_a_bounded_head(tmp_path):
     assert pj._first_cwd(f) is None
     f.write_text(json.dumps({"type": "user", "cwd": "/early"}) + "\n" + "x" * 300000)
     assert pj._first_cwd(f) == "/early"
+
+
+def test_first_cwd_keeps_records_with_unicode_line_separators(tmp_path):
+    f = tmp_path / "s.jsonl"
+    f.write_text(json.dumps({"type": "user", "cwd": "/a\u2028b", "message": "x\u2029y"}, ensure_ascii=False) + "\n",
+                 encoding="utf-8")
+    assert pj._first_cwd(f) == "/a\u2028b"

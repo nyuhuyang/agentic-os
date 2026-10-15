@@ -1432,7 +1432,7 @@ def _first_cwd(path: Path) -> str | None:
     256 KB are read (ponytail: a session whose cwd appears later is simply not suggested)."""
     with open(path, encoding="utf-8", errors="replace") as f:
         head = f.read(262144)
-        for line in head.splitlines()[:200]:
+        for line in head.split("\n")[:200]:  # physical lines only: U+2028 is valid inside JSON (SAP-B006)
             if '"cwd"' not in line:
                 continue
             try:
