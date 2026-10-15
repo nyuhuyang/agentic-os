@@ -28,14 +28,19 @@ agentic-os/
 │   ├── agent_ids.py        # Canonical agent ids (claude, codex, dsh) + legacy aliases
 │   ├── dsh_cli.py          # DeepSeek Harness (dsh) CLI: binary, version gate, key, NDJSON events
 │   ├── deepseek_monitor.py # DeepSeek balance/spend monitor
+│   ├── projects.py         # Project registry, per-ticket worktrees + seeds, verify harness, session readers (CLI: list|worktree|verify|cleanup)
+│   ├── project_runs.py     # Project-bound dispatch: sandboxed argv, comment gate, run-event ring, post-run checks
+│   ├── reset_gen.py        # Per-issue reset generation + per-issue tracker lock (DSH-30)
+│   ├── state_io.py         # Locked JSON read-modify-write for shared state files
 │   ├── core/               # Registry and feature flags
-│   ├── modules/            # Modular backends and integrations
+│   ├── modules/            # Modular backends and integrations (pty/ = server-owned terminal tabs)
 │   ├── outputs/            # Runner logs and uploads
 │   ├── scripts/            # Runner-internal utilities
 │   └── templates/
 │       └── index.html      # Jinja2 dashboard — all CSS/JS inline, no build step
 ├── outputs/                # Runtime state (created on first run)
 ├── state/                  # Operational JSON/JSONL truth — do not edit manually
+├── projects.yaml           # Real project registry — gitignored (schema: projects.example.yaml)
 ├── scripts/                # Utility scripts (roadmap render, state sync, migration, etc.)
 ├── docs/
 │   ├── generated/          # Auto-generated — do not edit manually
@@ -59,6 +64,7 @@ agentic-os/
 
 - Flask + SocketIO dispatches agents; `usage_reader.py` aggregates budgets; rebuild the dashboard-read-only registry externally
 - Linear polling + dispatch are built in (`runner/modules/linear/`); no Symphony or `symphony-ts` dependency. The dashboard is `runner/templates/index.html` only
+- A ticket labelled `project:<key>` runs in `~/.agentic-os/worktrees/<key>/<id>` on `agent/<id>`; confidential projects run sandboxed and get template-only tracker comments. Every browser request carries the per-process `X-AgenticOS-Token` (plan `2026-10-13-multi-project-dispatch`)
 
 ## Docs Index
 

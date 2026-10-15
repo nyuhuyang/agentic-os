@@ -22,17 +22,16 @@ Task format (matches _normalize_linear_issue output):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
-import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_SAVE_LOCK = threading.Lock()
 
 # Board status → tracker state mapping (matches _BOARD_TO_LINEAR in app.py)
 BOARD_TO_STATE: dict[str, str] = {
@@ -68,16 +67,19 @@ def _load_state(state_dir: Path) -> dict:
 
 
 def _save_state(state_dir: Path, tasks: dict) -> None:
-    """Atomically write tasks to state/tasks.json."""
-    state_dir.mkdir(parents=True, exist_ok=True)
-    path = state_dir / "tasks.json"
-    with _SAVE_LOCK:
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(tasks, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        tmp.replace(path)
+    """Atomically write tasks to state/tasks.json (caller holds _tasks_lock)."""
+    from state_io import write_json_atomic
+    write_json_atomic(state_dir / "tasks.json", tasks, indent=2, ensure_ascii=False)
+
+
+@contextlib.contextmanager
+def _tasks_txn(state_dir: Path):
+    """Whole load -> change -> save of tasks.json under one cross-process lock (plan 4b)."""
+    from state_io import file_lock
+    with file_lock(state_dir / "tasks.json"):
+        tasks = _load_state(state_dir)
+        yield tasks
+        _save_state(state_dir, tasks)
 
 
 def _next_identifier(tasks: dict) -> str:
@@ -138,7 +140,14 @@ class LocalTracker:
         team_name: str = "",
     ) -> dict:
         """Create a new task, return normalized issue dict."""
-        tasks = _load_state(self._state_dir)
+        with _tasks_txn(self._state_dir) as tasks:
+            issue = self._new_issue(tasks, title, description, state_name, preferred_agent,
+                                    team_id, team_key, team_name)
+        logger.info("Local task created: %s — %s", issue["identifier"], title)
+        return dict(issue)
+
+    @staticmethod
+    def _new_issue(tasks, title, description, state_name, preferred_agent, team_id, team_key, team_name) -> dict:
         issue_id = f"local-{uuid.uuid4().hex[:12]}"
         now = _now_iso()
         issue = {
@@ -156,20 +165,17 @@ class LocalTracker:
             "updated_at": now,
         }
         tasks[issue_id] = issue
-        _save_state(self._state_dir, tasks)
-        logger.info("Local task created: %s — %s", issue["identifier"], title)
-        return dict(issue)
+        return issue
 
     def update_issue_state(self, issue_id: str, state_name: str) -> bool:
         """Update task state, return True on success."""
-        tasks = _load_state(self._state_dir)
-        issue = tasks.get(issue_id)
-        if not issue:
-            logger.warning("Local task not found: %s", issue_id)
-            return False
-        issue["state"] = state_name
-        issue["updated_at"] = _now_iso()
-        _save_state(self._state_dir, tasks)
+        with _tasks_txn(self._state_dir) as tasks:
+            issue = tasks.get(issue_id)
+            if not issue:
+                logger.warning("Local task not found: %s", issue_id)
+                return False
+            issue["state"] = state_name
+            issue["updated_at"] = _now_iso()
         logger.info("Local task %s → %s", issue_id, state_name)
         return True
 
@@ -182,30 +188,28 @@ class LocalTracker:
         preferred_agent: str | None = None,
     ) -> dict | None:
         """Update task fields, return updated issue or None."""
-        tasks = _load_state(self._state_dir)
-        issue = tasks.get(issue_id)
-        if not issue:
-            return None
-        if title is not None:
-            issue["title"] = title
-        if description is not None:
-            issue["description"] = description
-        if state_name is not None:
-            issue["state"] = state_name
-        if preferred_agent is not None:
-            issue["preferred_agent"] = preferred_agent
-        issue["updated_at"] = _now_iso()
-        _save_state(self._state_dir, tasks)
-        return dict(issue)
+        with _tasks_txn(self._state_dir) as tasks:
+            issue = tasks.get(issue_id)
+            if not issue:
+                return None
+            if title is not None:
+                issue["title"] = title
+            if description is not None:
+                issue["description"] = description
+            if state_name is not None:
+                issue["state"] = state_name
+            if preferred_agent is not None:
+                issue["preferred_agent"] = preferred_agent
+            issue["updated_at"] = _now_iso()
+            return dict(issue)
 
     def delete_issue(self, issue_id: str) -> bool:
         """Delete a task, return True on success."""
-        tasks = _load_state(self._state_dir)
-        if issue_id not in tasks:
-            return False
-        del tasks[issue_id]
-        _save_state(self._state_dir, tasks)
-        return True
+        with _tasks_txn(self._state_dir) as tasks:
+            if issue_id not in tasks:
+                return False
+            del tasks[issue_id]
+            return True
 
     # ── AgenticOS-specific helpers ───────────────────────────────────────
 
@@ -221,19 +225,13 @@ class LocalTracker:
 
     def post_comment(self, issue_id: str, body: str) -> bool:
         """Post a comment to the task (stored as log entry)."""
-        tasks = _load_state(self._state_dir)
-        issue = tasks.get(issue_id)
-        if not issue:
-            return False
-        if "comment_log" not in issue:
-            issue["comment_log"] = []
-        issue["comment_log"].append({
-            "body": body,
-            "created_at": _now_iso(),
-        })
-        issue["updated_at"] = _now_iso()
-        _save_state(self._state_dir, tasks)
-        return True
+        with _tasks_txn(self._state_dir) as tasks:
+            issue = tasks.get(issue_id)
+            if not issue:
+                return False
+            issue.setdefault("comment_log", []).append({"body": body, "created_at": _now_iso()})
+            issue["updated_at"] = _now_iso()
+            return True
 
     def get_in_progress_ids(self) -> set[str]:
         """Return set of issue IDs that are in 'In Progress' state."""
@@ -245,17 +243,10 @@ class LocalTracker:
 
     # ── Raw access for sync_cache_to_local ──────────────────────────────
 
-    def _load_raw(self) -> dict:
-        """Load the raw tasks dict directly (bypassing the class abstraction).
-
-        Used by LinearModule._sync_cache_to_local to write issues keyed by
-        their Linear UUID instead of a generated local-* id.
-        """
-        return _load_state(self._state_dir)
-
-    def _save_raw(self, tasks: dict) -> None:
-        """Atomically write the raw tasks dict."""
-        _save_state(self._state_dir, tasks)
+    def raw_transaction(self):
+        """`with tracker.raw_transaction() as tasks:` — locked raw access for the Linear
+        cache sync, which writes issues keyed by their Linear UUID."""
+        return _tasks_txn(self._state_dir)
 
     @property
     def is_available(self) -> bool:

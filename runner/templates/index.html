@@ -4,6 +4,23 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AgenticOS</title>
+<meta name="agentic-os-token" content="{{ request_token }}">
+<script>
+// Every request to the runner must carry the per-process token (plan: Security
+// Precondition). Patch fetch once, before any other script runs.
+(() => {
+  const token = document.querySelector('meta[name="agentic-os-token"]').content;
+  window.AGENTIC_OS_TOKEN = token;
+  const origFetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+    const url = new URL(input instanceof Request ? input.url : input, location.href);
+    if (url.origin !== location.origin) return origFetch(input, init);
+    const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+    headers.set('X-AgenticOS-Token', token);
+    return origFetch(input, { ...init, headers });
+  };
+})();
+</script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
@@ -188,6 +205,9 @@
   .job-btn.retry-codex.selected { background: rgba(111,181,212,.10); border-color: #6fb5d4; }
   .job-btn.retry-dsh.selected { background: rgba(126,200,160,.10); border-color: #7ec8a0; }
   .job-btn-group { display: inline-flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
+  .verify-badge { font-size: calc(10px * var(--fs)); padding: 1px 5px; border-radius: 3px; border: 1px solid var(--border); }
+  .verify-badge.ok { color: var(--green); border-color: var(--green); }
+  .verify-badge.bad { color: var(--red); border-color: var(--red); }
   .job-card-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
   .model-badge {
     font-size: calc(8px * var(--fs));
@@ -346,7 +366,19 @@
   .stt-link { background: none; border: none; padding: 0; color: var(--accent); font-family: inherit; font-size: calc(10px * var(--fs)); cursor: pointer; text-decoration: underline; }
 
   /* Skill cards */
-  .skill-card.agent-disabled { opacity: 0.28; pointer-events: none; }
+  .project-section { border-bottom: 1px solid var(--border); }
+  .project-head { padding: 8px 4px; cursor: pointer; display: flex; gap: 8px; align-items: center; font-size: calc(13px * var(--fs)); }
+  .project-head:hover { background: var(--surface); }
+  .project-error { color: var(--red); cursor: default; }
+  .session-list { padding: 0 4px 8px 20px; }
+  .session-row { display: flex; gap: 10px; align-items: center; padding: 3px 0; font-size: calc(12px * var(--fs)); }
+  .session-agent { font-size: calc(10px * var(--fs)); padding: 1px 4px; border-radius: 3px; border: 1px solid var(--border); }
+  .session-agent.codex { color: var(--green); } .session-agent.claude { color: var(--accent); }
+  .session-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .session-meta { color: var(--text-dim); font-size: calc(11px * var(--fs)); margin-left: auto; white-space: nowrap; }
+  .session-copy { background: none; border: 1px solid var(--border); color: var(--text-dim); border-radius: 3px; cursor: pointer; font-family: inherit; font-size: calc(10px * var(--fs)); }
+  .session-copy:hover { color: var(--accent); border-color: var(--accent); }
+  .session-empty { color: var(--text-dim); font-size: calc(12px * var(--fs)); padding: 4px 0; }
   .skill-panel {
     margin: 18px 0 24px;
     padding: 16px 18px 18px;
@@ -373,16 +405,6 @@
     font-size: calc(11px * var(--fs));
     color: var(--text-dim);
   }
-  .stack-section { margin-bottom: 20px; }
-  .stack-label { font-size: calc(12px * var(--fs)); color: var(--accent); letter-spacing: 2px; text-transform: uppercase; margin-bottom: 10px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
-  .skill-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
-  .skill-card { background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 10px 12px; cursor: pointer; transition: border-color .15s; }
-  .skill-card:hover { border-color: var(--accent-dim); }
-  .skill-card.active { border-color: var(--accent); }
-  .skill-card.schedulable { border-left: 2px solid var(--accent-dim); }
-  .skill-name { font-size: calc(13px * var(--fs)); font-weight: 700; color: var(--text); letter-spacing: .5px; text-transform: uppercase; margin-bottom: 4px; }
-  .skill-desc { font-size: calc(12px * var(--fs)); color: var(--text-dim); line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-  .skill-meta { margin-top: 6px; display: flex; gap: 6px; align-items: center; }
   .badge { font-size: calc(11px * var(--fs)); padding: 1px 5px; border-radius: 3px; background: var(--surface); color: var(--text-dim); border: 1px solid var(--border); }
   .badge.remote { color: var(--yellow); border-color: var(--yellow); }
   .badge.sched { color: var(--accent); border-color: var(--accent-dim); }
@@ -420,6 +442,16 @@
   .term-clear-btn { background: transparent; border: 1px solid var(--border); color: var(--text-dim); font-size: calc(11px * var(--fs)); padding: 3px 10px; border-radius: 3px; cursor: pointer; font-family: inherit; letter-spacing: 1px; }
   .term-clear-btn:hover { border-color: var(--text-dim); color: var(--text); }
   .term-shell { position: relative; background: var(--bg); }
+  .term-tabs { display: flex; gap: 4px; flex: 1; overflow-x: auto; }
+  .term-tab { display: flex; align-items: center; gap: 6px; padding: 2px 8px; border: 1px solid var(--border); border-radius: 4px; cursor: pointer; font-size: calc(11px * var(--fs)); color: var(--text-dim); white-space: nowrap; }
+  .term-tab.active { color: var(--text); border-color: var(--accent); }
+  .term-tab .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+  .term-tab.exited .dot { background: var(--text-dim); }
+  .term-tab.failed .dot { background: var(--red); }
+  .term-tab .x { color: var(--text-dim); } .term-tab .x:hover { color: var(--red); }
+  .term-pane { height: 100%; display: none; } .term-pane.active { display: block; }
+  #terminal[data-empty]::before { content: attr(data-empty); display: block; padding: 16px; color: var(--text-dim); font-size: calc(12px * var(--fs)); }
+  .term-resume { margin-left: 4px; font-size: calc(10px * var(--fs)); }
   #terminal { padding: 6px 4px; background: var(--bg); height: 300px; min-height: 200px; max-height: 75vh; }
   .term-resize-handle {
     height: 12px; background: var(--surface); border-top: 1px solid var(--border);
@@ -709,8 +741,8 @@
     <!-- Skill panel -->
     <section class="skill-panel" id="skill-panel">
       <div class="skill-panel-header">
-        <div class="skill-panel-title">Skill Panel</div>
-        <div class="skill-panel-subtitle">Active agent controls skill dispatch and terminal injection</div>
+        <div class="skill-panel-title">Projects</div>
+        <div class="skill-panel-subtitle">Registered projects and their Claude / Codex sessions, newest first</div>
       </div>
 
       <div style="display:flex; align-items:center; gap:12px; margin-bottom:16px; padding-bottom:12px; border-bottom:1px solid var(--border);">
@@ -720,50 +752,23 @@
           <button class="agent-btn" id="agent-dsh" onclick="setAgent('dsh')">DeepSeek</button>
           <button class="agent-btn" id="ds-refresh" onclick="refreshDeepSeek()" style="display:none; font-size:calc(10px * var(--fs)); letter-spacing:.3px; opacity:.7;">↻ Refresh</button>
         </div>
-        <span style="font-size:calc(11px * var(--fs));color:var(--text-dim)">Active agent for skill cards &amp; terminal injection</span>
+        <span style="font-size:calc(11px * var(--fs));color:var(--text-dim)">Active agent for dispatch</span>
       </div>
 
-      <!-- Skill stacks -->
-      <div id="skill-panel-content">
-        {% for stack, skills in stacks.items() %}
-        <div class="stack-section">
-          <div class="stack-label">{{ stack }}</div>
-          <div class="skill-grid">
-            {% for skill in skills %}
-            <div class="skill-card {% if skill.schedule_eligible %}schedulable{% endif %}"
-                 id="card-{{ skill.name }}"
-                 data-agents="{{ skill.agents | join(',') }}"
-                 data-skill-name="{{ skill.name }}"
-                 data-skill-trigger="{{ (skill.trigger_phrases[0] if skill.trigger_phrases else skill.name) }}"
-                 title="Click: inject skill command · Alt/Shift-click: trigger phrase"
-                 >
-              <div class="skill-name">{{ skill.name.replace('llm-wiki-', '').replace('-', ' ').upper() }}</div>
-              <div class="skill-desc">{{ skill.purpose[:80] }}</div>
-              <div class="skill-meta">
-                {% set risk = skill.security.risk_level if skill.security else 'write' %}
-                <span class="badge risk-{{ risk }}">{{ risk }}</span>
-                {% if skill.security and skill.security.confirmation_required %}
-                <span class="badge risk-destructive" title="{{ skill.security.reason }}">confirm</span>
-                {% endif %}
-                {% if skill.schedule_eligible and skill.entrypoint %}
-                <span class="badge sched">schedulable</span>
-                {% endif %}
-              </div>
-            </div>
-            {% endfor %}
-          </div>
-        </div>
-        {% endfor %}
-      </div>
+      <!-- Projects (plan Decision 6: project sections replace the skill-stack sections) -->
+      <div id="project-panel-content"><div class="job-board-empty">Loading projects…</div></div>
     </section>
 
     <!-- Terminal — at bottom -->
     <div class="term-container">
       <div class="term-topbar">
         <span class="term-title">◈ Terminal</span>
+        <div class="term-tabs" id="term-tabs"></div>
+        <button class="term-clear-btn" onclick="openShellTab()" title="New shell at the runner root">+ SHELL</button>
         <button class="term-clear-btn" onclick="clearTerm()">CLEAR</button>
+        <button class="term-clear-btn" id="term-collapse" onclick="toggleTermPanel()" title="Hide the panel; terminals keep running">HIDE</button>
       </div>
-      <div class="term-shell">
+      <div class="term-shell" id="term-shell">
         <div id="terminal"></div>
         <div class="term-resize-handle" id="term-resize-handle" title="Drag to resize"></div>
       </div>
@@ -999,70 +1004,84 @@ function initPaceMarkers() {
   });
 }
 
-function _renderSkillPanel(reg) {
-  const container = document.getElementById('skill-panel-content');
-  if (!container) return;
-  const grouped = new Map();
-  Object.entries(reg || {}).forEach(([name, entry]) => {
-    const stack = entry.stack || 'uncategorized';
-    if (!grouped.has(stack)) grouped.set(stack, []);
-    grouped.get(stack).push([name, entry]);
-  });
-  if (!grouped.size) {
-    container.innerHTML = '<div class="job-board-empty">No skills in this registry.</div>';
+// ── Projects (Phase 1: read-only session view) ─────────────────────────────
+const _openProjects = new Set();
+let _projectData = { projects: [] };
+
+function _ago(ts) {
+  const s = Math.max(0, Date.now() / 1000 - (ts || 0));
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+}
+
+function _renderProjects() {
+  const el = document.getElementById('project-panel-content');
+  if (!el) return;
+  const ps = _projectData.projects || [];
+  if (_projectData.error) { el.innerHTML = `<div class="job-board-empty">Registry error: ${_esc(_projectData.error)}</div>`; return; }
+  if (!ps.length) { el.innerHTML = '<div class="job-board-empty">No projects registered — copy projects.example.yaml to projects.yaml.</div>'; return; }
+  el.innerHTML = ps.map(p => {
+    if (p.error) return `<div class="project-section"><div class="project-head project-error">${_esc(p.key)} — ${_esc(p.error)}</div></div>`;
+    const open = _openProjects.has(p.key);
+    const badges = (p.confidential ? '<span class="badge risk-destructive">confidential</span>' : '')
+      + (p.no_push ? '<span class="badge">no push</span>' : '') + (p.kind ? `<span class="badge">${_esc(p.kind)}</span>` : '');
+    const rows = (p.sessions || []).map(s => `
+      <div class="session-row">
+        <span class="session-agent ${s.agent}">${s.agent === 'codex' ? 'CX' : 'CC'}</span>
+        <span class="session-title" title="${_esc(s.cwd)}">${_esc(s.title)}</span>
+        <span class="session-meta">${_esc(s.branch || '')} · ${_ago(s.updated)}</span>
+        <button class="session-copy" data-cmd="${_esc(s.resume)}" title="${_esc(s.resume)}">copy resume</button>
+        <button class="session-copy" data-resume-agent="${_esc(s.agent)}" data-resume-id="${_esc(s.id)}" data-resume-cwd="${_esc(s.cwd)}" data-project="${_esc(p.key)}">Resume in tab</button>
+      </div>`).join('') || '<div class="session-empty">No sessions in this project yet.</div>';
+    return `<div class="project-section">
+      <div class="project-head" data-key="${_esc(p.key)}">${open ? '▾' : '▸'} <b>${_esc(p.key)}</b> ${badges}
+        <span class="session-meta">${(p.sessions || []).length} sessions</span>
+        <button class="session-copy" data-open-terminal="${_esc(p.key)}">Open terminal</button></div>
+      ${open ? `<div class="session-list">${rows}</div>` : ''}</div>`;
+  }).join('');
+}
+
+async function loadProjects() {
+  try {
+    const res = await fetch('/api/projects');
+    _projectData = res.ok ? await res.json() : { projects: [], error: `HTTP ${res.status}` };
+  } catch (err) {
+    _projectData = { projects: [], error: String(err) };
+  }
+  _renderProjects();
+}
+
+document.getElementById('project-panel-content')?.addEventListener('click', (event) => {
+  const openTerm = event.target.closest('[data-open-terminal]');
+  if (openTerm) { openShellTab(openTerm.dataset.openTerminal); return; }
+  const resumeBtn = event.target.closest('[data-resume-id]');
+  if (resumeBtn) {
+    openResumeTab(resumeBtn.dataset.resumeAgent, resumeBtn.dataset.resumeId, resumeBtn.dataset.project, resumeBtn.dataset.resumeCwd);
     return;
   }
-  let html = '';
-  for (const [stack, skills] of grouped.entries()) {
-    html += `<div class="stack-section"><div class="stack-label">${_esc(stack)}</div><div class="skill-grid">`;
-    for (const [name, entry] of skills) {
-      const trigger = (entry.trigger_phrases && entry.trigger_phrases.length) ? entry.trigger_phrases[0] : name;
-      const risk = entry.security?.risk_level || 'write';
-      const sched = entry.schedule_eligible && entry.entrypoint
-        ? '<span class="badge sched">schedulable</span>'
-        : '';
-      const confirm = entry.security?.confirmation_required
-        ? `<span class="badge risk-destructive" title="${_esc(entry.security?.reason || '')}">confirm</span>`
-        : '';
-      const agents = (entry.agents || ['claude']).join(',');
-      html += `
-        <div class="skill-card ${entry.schedule_eligible ? 'schedulable' : ''}"
-             id="card-${_esc(name)}"
-             data-agents="${_esc(agents)}"
-             data-skill-name="${_esc(name)}"
-             data-skill-trigger="${_esc(trigger)}"
-             title="Click: inject skill command · Alt/Shift-click: trigger phrase"
-             >
-          <div class="skill-name">${_esc(String(name).replace('llm-wiki-', '').replace(/-/g, ' ').toUpperCase())}</div>
-          <div class="skill-desc">${_esc((entry.purpose || '').slice(0, 80))}</div>
-          <div class="skill-meta">
-            <span class="badge risk-${_esc(risk)}">${_esc(risk)}</span>
-            ${confirm}
-            ${sched}
-          </div>
-        </div>`;
-    }
-    html += '</div></div>';
+  const copy = event.target.closest('.session-copy');
+  if (copy) {
+    navigator.clipboard.writeText(copy.dataset.cmd || '');
+    copy.textContent = 'copied';
+    setTimeout(() => { copy.textContent = 'copy resume'; }, 1200);
+    return;
   }
-  container.innerHTML = html;
-  if (selectedSkill) {
-    const active = document.getElementById('card-' + selectedSkill);
-    if (active) active.classList.add('active');
-    else selectedSkill = null;
-  }
-  document.querySelectorAll('.skill-card').forEach(card => {
-    const agents = (card.dataset.agents || 'claude').split(',').map(canonAgent);
-    if (!agents.includes(selectedAgent)) card.classList.add('agent-disabled');
-    else card.classList.remove('agent-disabled');
-  });
-}
+  const head = event.target.closest('.project-head');
+  if (!head || !head.dataset.key) return;
+  const key = head.dataset.key;
+  _openProjects.has(key) ? _openProjects.delete(key) : _openProjects.add(key);
+  _renderProjects();
+});
+
+loadProjects();
+setInterval(loadProjects, 60000);
 
 async function _refreshRegistry(agent) {
   try {
     const res = await fetch('/api/registry?agent=' + encodeURIComponent(agent));
     if (!res.ok) return;
     registry = await res.json();
-    _renderSkillPanel(registry);
   } catch (_) {}
 }
 
@@ -1306,15 +1325,6 @@ async function _updateRuntimeChip() {
       chip.querySelector('span').textContent = s < 3600 ? Math.round(s/60) + 'm' : (s/3600).toFixed(1) + 'h';
     }
   } catch (_) {}
-}
-
-// Skill selection
-let selectedSkill = null;
-
-function setSelectedSkill(name) {
-  if (selectedSkill) document.getElementById('card-' + selectedSkill)?.classList.remove('active');
-  selectedSkill = name;
-  document.getElementById('card-' + name)?.classList.add('active');
 }
 
 // Confirmation modal
@@ -2020,7 +2030,13 @@ function _buildColCard(run) {
   const issueTitle = run.title || prompt || '';
   const metaAgentHtml = run._is_linear_issue ? agentBadge : '';
   const metaModelHtml = isRunning ? '' : modelBadge;
-  const metaHtml = metaModelHtml || metaAgentHtml ? `<div class="job-card-meta">${metaModelHtml}${metaAgentHtml}</div>` : '';
+  // Decision 8: project runs end in review with a verify badge (pass / fail / timeout / seed committed / main checkout changed)
+  const verifyHtml = (run.verify_badge
+    ? `<span class="verify-badge ${run.verify_badge === 'pass' ? 'ok' : 'bad'}" title="project ${_esc(run.project_key || '')}">verify: ${_esc(run.verify_badge)}</span>`
+    : '') + (run.project_key && run.latest_run_id
+    ? `<span class="verify-badge" title="Open the run's live view in a terminal tab" onclick="event.stopPropagation();openRunTab('${_esc(run.latest_run_id)}','${_esc(run.project_key)}')">▤ run tab</span>`
+    : '');
+  const metaHtml = metaModelHtml || metaAgentHtml || verifyHtml ? `<div class="job-card-meta">${metaModelHtml}${metaAgentHtml}${verifyHtml}</div>` : '';
   const footerControlsHtml = run._is_linear_issue && state === 'todo' ? todoAgentToggle : '';
 
   card.innerHTML = `
@@ -2262,12 +2278,18 @@ async function refreshJobBoard(force = false) {
         preferred_agent: issue.preferred_agent || '',
         input_tokens: latest?.input_tokens || 0,
         output_tokens: latest?.output_tokens || 0,
+        verify_badge: latest?.verify_badge || '',
+        project_key: latest?.project_key || '',
         _is_linear_issue: true,
       };
     });
 
     _renderBoardItems(all);
   } catch (_) {}
+}
+
+function _verifyRank(run) {
+  return run.verify_badge && run.verify_badge !== 'pass' ? 0 : 1;
 }
 
 function _renderBoardItems(all) {
@@ -2285,6 +2307,8 @@ function _renderBoardItems(all) {
     const col = ALL_COLS.find(c => c.states.includes(state));
     if (col) byCol[col.key].push(r);
   });
+  // Failing project runs sort first in In Review (Decision 8); the sort is stable otherwise.
+  (byCol['in_review'] || []).sort((a, b) => _verifyRank(a) - _verifyRank(b));
   _cancelledItems = _boardItems.filter(r => (r._boardStatus || r.status || r.state || 'unknown') === 'cancelled');
 
   const container = document.getElementById('job-board-cols');
@@ -3694,45 +3718,177 @@ setInterval(() => {
 </script>
 
 <script>
-// ── xterm.js + PTY via Socket.IO ────────────────────────────────────────────
-const term = new Terminal({
-  theme: {
-    background: '#0d0d0d', foreground: '#d4d4d4',
-    cursor: '#e8723a', selectionBackground: 'rgba(232,114,58,0.25)',
-  },
+// ── Terminal tabs: server-owned terminals, one xterm per tab (plan Decision 10) ──
+const TERM_OPTS = {
+  theme: { background: '#0d0d0d', foreground: '#d4d4d4', cursor: '#e8723a', selectionBackground: 'rgba(232,114,58,0.25)' },
   fontFamily: "'SF Mono', 'Fira Code', 'Fira Mono', 'Cascadia Code', monospace",
   fontSize: Math.round(13 * parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--fs"))), lineHeight: 1.0,
-  cursorBlink: true, cursorStyle: 'block',
-  scrollback: 2000,
-});
-const fitAddon = new FitAddon.FitAddon();
-term.loadAddon(fitAddon);
+  cursorBlink: true, cursorStyle: 'block', scrollback: 2000,
+};
 const terminalEl = document.getElementById('terminal');
 const terminalResizeHandle = document.getElementById('term-resize-handle');
 const DEFAULT_TERM_HEIGHT = 300;
 const MIN_TERM_HEIGHT = 200;
 const MAX_TERM_HEIGHT = Math.floor(window.innerHeight * 0.75);
+const _tabs = new Map();   // term_id -> { info, term, fit, el, status }
+let _activeTab = null;
 
 function clampTerminalHeight(h) { return Math.max(MIN_TERM_HEIGHT, Math.min(MAX_TERM_HEIGHT, h)); }
-function applyTerminalHeight(h) { terminalEl.style.height = `${clampTerminalHeight(h)}px`; fitAddon.fit(); }
+function _fitActive() { const t = _tabs.get(_activeTab); if (t) t.fit.fit(); }
+function applyTerminalHeight(h) { terminalEl.style.height = `${clampTerminalHeight(h)}px`; _fitActive(); }
 function loadTerminalHeight() {
-  const saved = Number(window.localStorage.getItem('agenticos.terminal.height'));
+  let saved = NaN;
+  try { saved = Number(window.localStorage.getItem('agenticos.terminal.height')); } catch (_) {}
   return Number.isFinite(saved) && saved > 0 ? saved : DEFAULT_TERM_HEIGHT;
 }
-
-term.open(terminalEl);
 applyTerminalHeight(loadTerminalHeight());
 
-const socket = io();
+const socket = io({ auth: { token: window.AGENTIC_OS_TOKEN } });
+
+function _addTab(info) {
+  if (_tabs.has(info.term_id)) return _tabs.get(info.term_id);
+  const el = document.createElement('div');
+  el.className = 'term-pane';
+  terminalEl.appendChild(el);
+  const term = new Terminal({ ...TERM_OPTS, disableStdin: info.kind === 'run' });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(el);
+  const tid = info.term_id;
+  if (info.kind !== 'run') {
+    term.onData(data => socket.emit('term_input', { term_id: tid, data }));
+    term.onResize(({ cols, rows }) => socket.emit('term_resize', { term_id: tid, cols, rows }));
+  }
+  const tab = { info, term, fit, el, status: info.alive === false ? 'exited' : (info.cleanup_failed ? 'failed' : 'live') };
+  _tabs.set(tid, tab);
+  delete terminalEl.dataset.empty;
+  _renderTabStrip();
+  return tab;
+}
+
+function _renderTabStrip() {
+  const strip = document.getElementById('term-tabs');
+  if (!strip) return;
+  strip.innerHTML = [..._tabs.values()].map(t => {
+    const resume = t.resume ? `<button class="term-clear-btn term-resume" data-resume="${_esc(t.info.term_id)}">Resume in tab</button>` : '';
+    return `<span class="term-tab ${t.info.term_id === _activeTab ? 'active' : ''} ${t.status}" data-tid="${_esc(t.info.term_id)}">
+      <span class="dot"></span>${_esc(t.info.label || t.info.kind)}${resume}<span class="x" data-close="${_esc(t.info.term_id)}">×</span></span>`;
+  }).join('');
+}
+
+function activateTab(tid) {
+  _activeTab = tid;
+  _tabs.forEach((t, id) => t.el.classList.toggle('active', id === tid));
+  _renderTabStrip();
+  const t = _tabs.get(tid);
+  if (t) { t.fit.fit(); t.term.focus(); }
+}
+
+function _attachTab(info, activate) {
+  _addTab(info);
+  if (info.kind === 'run') _loadRunEvents(info);
+  else socket.emit('term_attach', { term_id: info.term_id });
+  if (activate || !_activeTab) activateTab(info.term_id);
+}
+
+function _openTab(payload) {
+  const first = _tabs.values().next().value;
+  const size = first ? { cols: first.term.cols, rows: first.term.rows } : { cols: 120, rows: 24 };
+  socket.emit('term_open', { ...size, ...payload }, info => {
+    if (!info || info.error) { alert(`Terminal: ${info ? info.error : 'no response'}`); return; }
+    _attachTab(info, true);
+  });
+}
+function openShellTab(projectKey, ticket) { _openTab({ kind: 'shell', project_key: projectKey || null, ticket: ticket || null }); }
+function openResumeTab(agent, sessionId, projectKey, cwd, ticket) {
+  _openTab({ kind: 'resume', agent, session_id: sessionId, project_key: projectKey || null, cwd: cwd || null, ticket: ticket || null });
+}
+function openRunTab(runId, projectKey) {
+  const existing = [..._tabs.values()].find(t => t.info.kind === 'run' && t.info.run_id === runId);
+  if (existing) { activateTab(existing.info.term_id); return; }
+  _openTab({ kind: 'run', run_id: runId, project_key: projectKey || null });
+}
+
+function closeTab(tid) {
+  const t = _tabs.get(tid);
+  if (!t) return;
+  if (t.status === 'live' && t.info.kind !== 'run' && !confirm('Close this terminal and kill its processes?')) return;
+  socket.emit('term_close', { term_id: tid }, res => {
+    if (res && res.error && !/unknown/.test(res.error)) { t.status = 'failed'; _renderTabStrip(); alert(res.error); return; }
+    t.term.dispose(); t.el.remove(); _tabs.delete(tid);
+    if (_activeTab === tid) { _activeTab = null; const next = _tabs.keys().next().value; if (next) activateTab(next); }
+    _renderTabStrip();
+  });
+}
+
+function toggleTermPanel() {
+  const shell = document.getElementById('term-shell');
+  const hidden = shell.style.display === 'none';
+  shell.style.display = hidden ? '' : 'none';  // hiding kills nothing
+  document.getElementById('term-collapse').textContent = hidden ? 'HIDE' : 'SHOW';
+  if (hidden) _fitActive();
+}
+
+document.getElementById('term-tabs')?.addEventListener('click', (e) => {
+  const close = e.target.closest('[data-close]');
+  if (close) { e.stopPropagation(); closeTab(close.dataset.close); return; }
+  const resume = e.target.closest('[data-resume]');
+  if (resume) { e.stopPropagation(); _resumeFromRunTab(resume.dataset.resume); return; }
+  const tab = e.target.closest('[data-tid]');
+  if (tab) activateTab(tab.dataset.tid);
+});
+
+// Run tabs: read-only view of a dispatched run's normalized events.
+async function _loadRunEvents(info) {
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(info.run_id)}/events`);
+    const data = res.ok ? await res.json() : { lines: [] };
+    const t = _tabs.get(info.term_id);
+    if (!t) return;
+    t.term.reset();
+    (data.lines || []).forEach(l => t.term.writeln(l.replace(/\n/g, '\r\n')));
+    if (data.finished) _markRunFinished(t, data);
+  } catch (_) {}
+}
+function _markRunFinished(t, data) {
+  if (t.finished) return;
+  t.finished = true;
+  t.status = 'exited';
+  t.term.writeln(`\r\n[run ${data.status || 'finished'}${data.verify_badge ? ' · verify: ' + data.verify_badge : ''}]`);
+  if (data.resume_eligible) t.resume = data;
+  _renderTabStrip();
+}
+async function _resumeFromRunTab(tid) {
+  const t = _tabs.get(tid);
+  if (!t || !t.resume) return;
+  const r = t.resume;
+  openResumeTab(r.agent, r.agent_session_id, r.project_key, null, r.issue_identifier);
+}
+socket.on('run_event', (d) => {
+  _tabs.forEach(t => { if (t.info.kind === 'run' && t.info.run_id === d.run_id) t.term.writeln(String(d.line).replace(/\n/g, '\r\n')); });
+});
 
 socket.on('connect', () => {
   _sttLoadAliases();
-  fitAddon.fit();
-  const { cols, rows } = term;
-  socket.emit('pty_start', { cols, rows });
+  // A reload reattaches to the server's terminals; nothing new is opened automatically.
+  socket.emit('term_list', {}, (list) => {
+    (list || []).forEach(info => _attachTab(info, false));
+    if (!list || !list.length) {
+      terminalEl.dataset.empty = 'No terminals open. + SHELL opens one; project headers and sessions open more.';
+    }
+  });
 });
 
-socket.on('pty_output', (data) => { term.write(data.data); });
+socket.on('term_output', (d) => {
+  const t = _tabs.get(d.term_id);
+  if (!t) return;
+  if (d.replay) t.term.reset();  // the replay is the full scrollback
+  t.term.write(d.data);
+});
+socket.on('term_exit', (d) => {
+  const t = _tabs.get(d.term_id);
+  if (t) { t.status = 'exited'; t.term.writeln(`\r\n[process exited${d.exit_code != null ? ' ' + d.exit_code : ''}]`); _renderTabStrip(); }
+});
 
 socket.on('run_logged', () => { refreshJobBoard(); });
 
@@ -3757,6 +3913,9 @@ function _playChime() {
 }
 
 socket.on('run_state_change', (data) => {
+  if (data.run_id && data.state && data.state !== 'running') {
+    _tabs.forEach(t => { if (t.info.kind === 'run' && t.info.run_id === data.run_id) setTimeout(() => _loadRunEvents(t.info), 500); });
+  }
   if (data.run_id && data.state) {
     if (data.state === 'running') {
       _playStartSound();
@@ -3793,18 +3952,16 @@ socket.on('run_progress', (data) => {
   }
 });
 
-term.onData((data) => { socket.emit('pty_input', { data }); });
-term.onResize(({ cols, rows }) => { socket.emit('pty_resize', { cols, rows }); });
 window.addEventListener('resize', () => {
   const h = terminalEl.getBoundingClientRect().height;
   terminalEl.style.height = `${clampTerminalHeight(h)}px`;
-  fitAddon.fit();
+  _fitActive();
 });
 
 let terminalResizeState = null;
 function stopTerminalResize() {
   if (!terminalResizeState) return;
-  window.localStorage.setItem('agenticos.terminal.height', String(Math.round(terminalEl.getBoundingClientRect().height)));
+  try { window.localStorage.setItem('agenticos.terminal.height', String(Math.round(terminalEl.getBoundingClientRect().height))); } catch (_) {}
   terminalResizeState = null;
   document.body.style.userSelect = '';
 }
@@ -3820,34 +3977,16 @@ terminalResizeHandle.addEventListener('mousedown', (e) => {
 window.addEventListener('mousemove', (e) => resizeTerminalFromPointer(e.clientY));
 window.addEventListener('mouseup', () => stopTerminalResize());
 
-function injectCommand(phrase) {
-  socket.emit('pty_input', { data: phrase });
-  term.focus();
+function _activeInput(data) {
+  const t = _tabs.get(_activeTab);
+  if (!t || t.info.kind === 'run') return null;
+  socket.emit('term_input', { term_id: _activeTab, data });
+  t.term.focus();
+  return t;
 }
-function clearTerm() {
-  socket.emit('pty_input', { data: 'clear\n' });
-  term.focus();
-}
-function commandForSkill(name) {
-  return selectedAgent === 'codex' ? `$${name} ` : `/${name} `;
-}
-function selectSkill(event, name, phrase) {
-  setSelectedSkill(name);
-  const command = (event && (event.altKey || event.shiftKey)) ? phrase : commandForSkill(name);
-  socket.emit('skill_selected', { skill: name, phrase: command });
-  injectCommand(command);
-}
+function injectCommand(phrase) { _activeInput(phrase); }
+function clearTerm() { _activeInput('clear\n'); }
 function clearPrompt() { clearTerm(); }
-
-const skillPanelContent = document.getElementById('skill-panel-content');
-skillPanelContent?.addEventListener('click', (event) => {
-  const card = event.target.closest('.skill-card');
-  if (!card || !skillPanelContent.contains(card)) return;
-  const name = card.dataset.skillName || '';
-  if (!name) return;
-  const phrase = card.dataset.skillTrigger || name;
-  selectSkill(event, name, phrase);
-});
 
 // Drag-and-drop file → inject server path into PTY
 terminalEl.addEventListener('dragover', (e) => {
@@ -3865,9 +4004,9 @@ terminalEl.addEventListener('drop', async (e) => {
     try {
       const res = await fetch('/upload', { method: 'POST', body: fd });
       const data = await res.json();
-      if (data.path) { socket.emit('pty_input', { data: data.path }); term.focus(); }
-      else { term.write(`\r\n[upload error: ${data.error}]\r\n`); }
-    } catch (err) { term.write(`\r\n[upload error: ${err}]\r\n`); }
+      if (data.path) { _activeInput(data.path); }
+      else { _tabs.get(_activeTab)?.term.write(`\r\n[upload error: ${data.error}]\r\n`); }
+    } catch (err) { _tabs.get(_activeTab)?.term.write(`\r\n[upload error: ${err}]\r\n`); }
   }
 });
 </script>

@@ -94,13 +94,13 @@ def _append_log(record: dict) -> None:
 
 
 def _update_state(skill: str, record: dict) -> None:
+    from state_io import json_transaction  # same cross-process lock as the dashboard (plan 4b)
     OUTPUTS_DIR.mkdir(exist_ok=True)
-    state: dict = {}
-    if JOB_STATE.exists():
-        try:
-            state = json.loads(JOB_STATE.read_text(encoding="utf-8"))
-        except Exception:
-            state = {}
+    with json_transaction(JOB_STATE, indent=2, ensure_ascii=False) as state:
+        _set_job_state(state, skill, record)
+
+
+def _set_job_state(state: dict, skill: str, record: dict) -> None:
     state[skill] = {
         "last_run": record["started_at"],
         "status": record["status"],
@@ -108,10 +108,6 @@ def _update_state(skill: str, record: dict) -> None:
         "duration_s": record.get("duration_s"),
         "error": record.get("error"),
     }
-    # Atomic write: temp file then rename prevents partial-write corruption under concurrency.
-    tmp = JOB_STATE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    os.replace(tmp, JOB_STATE)
 
 
 def run_once(skill: str, entrypoint: str, skill_args: list[str]) -> dict:

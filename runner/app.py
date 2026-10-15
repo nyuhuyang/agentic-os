@@ -10,12 +10,17 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import contextlib
 import hashlib
+import hmac
 import json
+import secrets
 import logging
 import re
 import select
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -33,8 +38,13 @@ import os
 import termios
 import threading
 
-from flask import Flask, Response, jsonify, render_template, request, stream_with_context
+from flask import Flask, jsonify, render_template, request
 from flask_socketio import SocketIO, emit
+
+from state_io import file_lock, json_transaction, read_json, write_json_atomic
+import reset_gen
+import projects as _projects
+import project_runs
 
 _HERE = Path(__file__).resolve().parent              # runner/
 _PROTO = _HERE.parent                                # agentic-os root
@@ -140,7 +150,67 @@ STALL_TIMEOUT_S = 300
 AI_RUN_TIMEOUT_S = int(os.environ.get("AI_RUN_TIMEOUT_S", "1800"))  # 30 min default
 
 app = Flask(__name__, template_folder="templates")
-socketio = SocketIO(app, cors_allowed_origins="*")
+
+
+# ── Browser request checks (plan: Security Precondition) ─────────────────────
+# A local page in any browser tab can reach 127.0.0.1, so every request must
+# prove it came from the dashboard page itself.
+REQUEST_TOKEN = secrets.token_urlsafe(32)
+_TOKEN_HEADER = "X-AgenticOS-Token"
+
+
+def _allowed_hosts(host: str) -> list[str]:
+    return list(dict.fromkeys(["127.0.0.1", "localhost", host]))
+
+
+def _allowed_origins(host: str, port: int) -> list[str]:
+    return [f"http://{h}:{port}" for h in _allowed_hosts(host)]
+
+
+def _token_ok(token: object) -> bool:
+    return isinstance(token, str) and hmac.compare_digest(token, REQUEST_TOKEN)
+
+
+def _token_exempt(path: str, method: str) -> bool:
+    # Page load, favicon and attachment links cannot carry a header. Attachments are
+    # read-only and served with CORP same-origin + sandbox (runner/modules/pty).
+    return method in ("GET", "HEAD") and (
+        path in ("/", "/favicon.ico")
+        or path.startswith("/static/")
+        or path.startswith("/api/board/uploads/")
+    )
+
+
+@app.before_request
+def _require_request_token():
+    if _token_exempt(request.path, request.method):
+        return None
+    if not _token_ok(request.headers.get(_TOKEN_HEADER)):
+        return jsonify({"ok": False, "error": "missing or invalid request token"}), 403
+    return None
+
+
+@app.after_request
+def _forbid_framing(resp):
+    resp.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    return resp
+
+
+app.config["TRUSTED_HOSTS"] = _allowed_hosts("127.0.0.1")
+socketio = SocketIO(app, cors_allowed_origins=_allowed_origins("127.0.0.1", 8510))
+
+
+def _configure_request_security(host: str, port: int) -> None:
+    """Rebuild the Host and Origin allow-lists from the actual --host/--port."""
+    app.config["TRUSTED_HOSTS"] = _allowed_hosts(host)
+    socketio.server.eio.cors_allowed_origins = _allowed_origins(host, port)
+
+
+@socketio.on("connect")
+def _socket_connect(auth=None):
+    if not _token_ok((auth or {}).get("token")):
+        return False  # refuses the Socket.IO connection
+    return None
 
 # Initialize registry_loader paths
 _set_registry_paths(_PROTO, VENV_PYTHON, MASTER_REGISTRY_JSON,
@@ -441,11 +511,12 @@ _BOARD_TO_LINEAR: dict[str, str] = {
 }
 
 
-def _push_linear_state_async(issue_id: str, board_status: str) -> None:
-    """Bridge to LinearModule.push_state."""
+def _push_linear_state_async(issue_id: str, board_status: str, gen: int | None = None) -> None:
+    """Bridge to LinearModule.push_state. `gen` = the reset generation the caller launched
+    under; a push from an older generation is dropped (Decision 11)."""
     linear_mod = _module_registry.get("linear")
     if linear_mod and linear_mod._capability.get("available"):
-        linear_mod.push_state(issue_id, board_status)
+        linear_mod.push_state(issue_id, board_status, gen=gen)
     else:
         logger.debug("No tracker available, state %s for %s not pushed", board_status, issue_id)
 
@@ -504,7 +575,7 @@ def _load_task_state() -> dict:
                     "duration_s": entry.get("duration_s", 0.0),
                 }
             # Write back migrated format
-            STATE_TASK_STATE.write_text(json.dumps(new_data, indent=2), encoding="utf-8")
+            write_json_atomic(STATE_TASK_STATE, new_data, indent=2)
             return new_data
         return data
     except Exception:
@@ -1840,7 +1911,9 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
                    task_id: str | None = None,
                    quality_score: float | None = None,
                    token_cost_usd: float | None = None,
-                   agent_session_id: str | None = None) -> str:
+                   agent_session_id: str | None = None,
+                   reset_generation: int | None = None,
+                   extra: dict | None = None) -> str:
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if run_id is None:
@@ -1878,6 +1951,10 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
         record["token_cost_usd"] = token_cost_usd
     if agent_session_id:
         record["agent_session_id"] = agent_session_id
+    if reset_generation is not None:
+        record["reset_gen"] = reset_generation  # the generation this run launched under (Decision 11)
+    if extra:
+        record.update({k: v for k, v in extra.items() if k not in record})  # additive fields only
     progress_path = _run_progress_path(run_id)
     if progress_path.exists():
         record["log_path"] = str(progress_path)
@@ -1889,7 +1966,22 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
         f.write(json.dumps(record) + "\n")
     _runs_cache.clear()  # invalidate so next board refresh sees the new record
 
-    # Update task state in state/task_state.json (operational truth)
+    # Update task state in state/task_state.json (operational truth), one locked
+    # read-modify-write so parallel completions never drop each other's record (4b).
+    with file_lock(STATE_TASK_STATE):
+        _update_task_state(skill, status, started_at, record, run_id, agent, model, input_tokens,
+                           output_tokens, selected_skill, attempt, parent_run_id, linear_issue_id,
+                           error, output, prompt, progress_path)
+
+    with json_transaction(JOB_STATE, indent=2) as legacy_state:  # legacy job_state.json
+        legacy_state[skill] = {"status": status, "last_run": started_at, "duration_s": record["duration_s"]}
+    return run_id
+
+
+def _update_task_state(skill, status, started_at, record, run_id, agent, model, input_tokens,
+                       output_tokens, selected_skill, attempt, parent_run_id, linear_issue_id,
+                       error, output, prompt, progress_path) -> None:
+    """Append one run to task_state.json. Caller holds file_lock(STATE_TASK_STATE)."""
     state = _load_task_state()
     if skill not in state:
         state[skill] = {"runs": [], "status": "", "last_run": "", "duration_s": 0.0}
@@ -1918,13 +2010,7 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
     state[skill]["status"] = status
     state[skill]["last_run"] = started_at
     state[skill]["duration_s"] = record["duration_s"]
-    STATE_TASK_STATE.write_text(json.dumps(state, indent=2), encoding="utf-8")
-
-    # Also update legacy job_state.json for backward compat
-    legacy_state = _load_legacy_job_state()
-    legacy_state[skill] = {"status": status, "last_run": started_at, "duration_s": record["duration_s"]}
-    JOB_STATE.write_text(json.dumps(legacy_state, indent=2), encoding="utf-8")
-    return run_id
+    write_json_atomic(STATE_TASK_STATE, state, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -1948,11 +2034,6 @@ def index():
         for i in seen_linear.values() if i.get("created_at")
     ]
     all_runs_with_linear = all_runs + linear_for_stats
-
-    # Group skills by stack
-    stacks: dict[str, list] = defaultdict(list)
-    for name, entry in sorted(registry.items()):
-        stacks[entry.get("stack", "other")].append(entry)
 
     # Stats
     error_runs = [
@@ -1999,16 +2080,8 @@ def index():
     windows_deepseek = load_windows("deepseek")
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    # Stack order
-    stack_order = ["knowledge", "research", "admin", "trading", "publishing", "automation"]
-    ordered_stacks = {k: stacks[k] for k in stack_order if k in stacks}
-    for k in stacks:
-        if k not in ordered_stacks:
-            ordered_stacks[k] = stacks[k]
-
     return render_template(
         "index.html",
-        stacks=ordered_stacks,
         stats=stats,
         recent_runs=recent_runs,
         chart_data=chart_data,
@@ -2022,6 +2095,7 @@ def index():
         windows_deepseek=windows_deepseek,
         registry=registry,
         now=now,
+        request_token=REQUEST_TOKEN,
     )
 
 
@@ -2308,14 +2382,22 @@ def _get_task_agent_lock(task_id: str) -> dict | None:
     """
     if not RUN_LOG.exists():
         return None
-    latest: dict | None = None
-    agent_session_id: str | None = None
+    records: list[dict] = []
     for line in reversed(RUN_LOG.read_text(encoding="utf-8").strip().splitlines()):
         try:
             r = json.loads(line)
         except Exception:
             continue
-        if not isinstance(r, dict) or r.get("task_id") != task_id:
+        if isinstance(r, dict) and r.get("task_id") == task_id:
+            records.append(r)  # newest first
+    # Decision 11: only records of the issue's current reset generation may lock or resume.
+    # A completion or restore from before a tracker reset is history, nothing more.
+    gen_key = _reset_key(records, task_id)
+    gen = reset_gen.current(gen_key)
+    latest: dict | None = None
+    agent_session_id: str | None = None
+    for r in records:
+        if (r.get("reset_gen") or 0) != gen:
             continue
         if latest is None:
             latest = r  # most recent record for this task
@@ -2336,6 +2418,335 @@ def _get_task_agent_lock(task_id: str) -> dict | None:
         # A legacy Rust CLI session id is never passed to dsh: lock to dsh, fresh session.
         agent_session_id = None
     return {"agent": agent, "agent_session_id": agent_session_id}
+
+
+# ── Project-bound dispatch (plan Phase 2, Decision 3a) ───────────────────────
+
+def _claude_bin() -> str:
+    claude_bin = _PROTO / ".venv" / "bin" / "claude"
+    return str(claude_bin) if claude_bin.exists() else "claude"
+
+
+def _project_cmd(agent: str, project, prompt: str, resume_session: str | None) -> list[str]:
+    cli = project_runs.agent_cli(agent, project, _claude_bin(), dsh_cli.cli_prefix)
+    if agent == "claude":
+        resume = ["--resume", resume_session] if resume_session else []
+        return cli + resume + [prompt, "--output-format", "stream-json"]
+    if agent == "codex":
+        return cli + (["resume", resume_session] if resume_session else []) + [prompt]
+    return cli + ["--json"] + (["--session-id", resume_session] if resume_session else []) + ["--", prompt]
+
+
+def _parse_project_output(agent: str, lines: list[str], stderr: str, returncode: int | None):
+    """(output, input_tokens, output_tokens, model, session_id, ok, error) from a finished run."""
+    if agent == "claude":
+        result, sid = {}, None
+        for line in lines:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(ev, dict):
+                sid = sid or ev.get("session_id")
+                if ev.get("type") == "result":
+                    result = ev
+        usage = result.get("usage") or {}
+        ok = returncode == 0 and not result.get("is_error")
+        return (result.get("result") or "", usage.get("input_tokens"), usage.get("output_tokens"),
+                result.get("model"), sid, ok, "" if ok else stderr)
+    if agent == "codex":
+        text = "\n".join(lines)
+        output, it, ot, model = _parse_agent_output("codex", text)
+        ok = returncode == 0
+        return output, it, ot, model, _extract_codex_thread_id(text), ok, "" if ok else stderr
+    events = dsh_cli.DshRun()
+    for line in lines:
+        events.feed_line(line)
+    ok, err = events.outcome(returncode, stderr)
+    it, ot = events.tokens()
+    return events.final or "", it, ot, None, events.session_id, bool(ok and events.final is not None), err
+
+
+def _project_exec_env(agent: str, project) -> dict:
+    env = _registry_exec_env(agent, _load_registry(agent))
+    for k, v in project.env.items():
+        env[k] = f"{v}{os.pathsep}{env.get('PATH', '')}" if k == "PATH" else v
+    return env
+
+
+def _main_path_tab_open(project_key: str) -> bool:
+    try:
+        from runner.modules.pty import main_path_tab_open
+        return main_path_tab_open(project_key)
+    except Exception:
+        return False
+
+
+def _sticky(*flags) -> bool | None:
+    """Confidentiality never weakens: any True wins, then unknown (None), then False."""
+    return True if True in flags else (None if None in flags else False)
+
+
+def _binding_keys(linear_issue_id=None, task_id=None, project_key=None, ident=None) -> list[str]:
+    return [k for k in (linear_issue_id and f"issue:{linear_issue_id}", task_id and f"task:{task_id}",
+                        project_key and ident and f"ticket:{project_key}/{ident}") if k]
+
+
+def _persist_binding(keys: list[str], fields: dict) -> None:
+    """Record an issue's binding before anything runs (I6-01). The first binding wins;
+    later calls only fill missing fields, and confidentiality is merged sticky."""
+    with json_transaction(STATE_DIR / "issue_bindings.json", indent=2) as store:
+        for k in keys:
+            cur = store.get(k) or {}
+            merged = {**fields, **{f: v for f, v in cur.items() if v is not None}}
+            flags = [d["confidential"] for d in (cur, fields) if "confidential" in d]
+            if flags:
+                merged["confidential"] = _sticky(*flags)
+            store[k] = merged
+
+
+def _durable_binding(linear_issue_id: str | None = None, task_id: str | None = None,
+                     project_key: str | None = None, ident: str | None = None) -> dict | None:
+    """The persisted project binding of a tracker issue, task or ticket (Decision 1), written
+    by the launch helper before the agent starts. Labels only matter when this is None."""
+    store = read_json(STATE_DIR / "issue_bindings.json")
+    for k in _binding_keys(linear_issue_id, task_id, project_key, ident):
+        if isinstance(store.get(k), dict):
+            return dict(store[k])
+    return None
+
+
+def _ticket_confidential(project_key: str, ident: str | None, linear_issue_id: str | None = None,
+                         task_id: str | None = None, *known) -> bool | None:
+    """The one confidentiality policy for a ticket (I6-02, I8-01, I9-01/02): the current
+    registry, the worktree sidecar (CLI promotions) and the durable binding, plus any `known`
+    flags, merged sticky. Needs no lock and no git, so every reader calls it before anything
+    can fail or leave the machine. A failed registry lookup counts as unknown (None)."""
+    try:
+        flags = [_projects.get_project(project_key, _projects.load_registry(errors={})).confidential]
+    except _projects.ProjectError:
+        flags = [None]
+    if ident:
+        flags.append(_projects.sidecar_confidential(project_key, ident))
+    bound = _durable_binding(linear_issue_id, task_id, project_key, ident)
+    if bound and "confidential" in bound:
+        flags.append(bound["confidential"])
+    return _sticky(*flags, *known)
+
+
+def _effective_project(project, ident: str):
+    """The project as this ticket's policy sees it (confidential if anything says so)."""
+    if _ticket_confidential(project.key, ident) is not False:
+        return dataclasses.replace(project, confidential=True)
+    return project
+
+
+def _records_unsafe() -> str | None:
+    """Why run records may not hold confidential text right now (None = they may). A check
+    that cannot run (e.g. git refused during shutdown) counts as unsafe (I7-03)."""
+    try:
+        return _projects.record_location_problem([RUN_LOG, STATE_DIR, OUTPUTS_DIR], _PROTO)
+    except Exception as exc:
+        return f"record location check unavailable ({type(exc).__name__})"
+
+
+_SHUTTING_DOWN = threading.Event()
+
+
+def _stop_project_runs() -> None:
+    """Shutdown (SIGTERM/atexit): refuse new project processes, kill and reap every live one
+    (git, agent, verify), then give the workers a moment to write their records (I5-12, I6-08)."""
+    _SHUTTING_DOWN.set()
+    with _JOB_LOCK:
+        for job in list(_running_jobs.values()):
+            if job.get("project_key") and job.get("phase") != "finalizing":
+                job.setdefault("cancelled", "cancelled")
+    _projects.stop_all()
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and any(j.get("project_key") for j in list(_running_jobs.values())):
+        time.sleep(0.1)
+
+
+def _terminate_group(proc) -> None:
+    """SIGTERM the group now, SIGKILL after 5 s while the leader is unreaped (I6-07)."""
+    def _kill():
+        if proc.poll() is None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGKILL)
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(proc.pid, signal.SIGTERM)
+    timer = threading.Timer(5, _kill)
+    timer.daemon = True
+    timer.start()
+
+
+_JOB_LOCK = threading.Lock()  # orders cancel/stall/shutdown against a run entering finalization
+
+
+def _signal_project_run(run_id: str, why: str) -> str | None:
+    """Cancel or stall a project run: flag it and stop its current phase's process group.
+    The launch helper reaps the group and writes the record with the full binding (I5-01/09).
+    Returns None (not a project run), "finishing" (too late: the outcome is decided, I8-06)
+    or "ok"."""
+    job = _running_jobs.get(run_id)
+    if not job or not job.get("project_key"):
+        return None
+    with _JOB_LOCK:
+        if job.get("phase") == "finalizing":
+            return "finishing"
+        job.setdefault("cancelled", why)
+    proc = _running_procs.get(run_id)
+    if proc is not None:
+        _terminate_group(proc)
+    return "ok"
+
+
+def _run_project_ticket(*, project_key: str, ident: str, agent: str, prompt: str, title: str,
+                        run_id: str, linear_issue_id: str | None, task_id: str, launch_gen: int,
+                        attempt: int = 0, parent_run_id: str | None = None,
+                        resume_session: str | None = None, reuse_only: bool = False,
+                        skill: str = "_prompt", confidential: bool | None = None) -> dict:
+    """The one launch helper for every project-bound launch (dispatch and retry/rework).
+
+    Holds the ticket lock across worktree -> agent -> runner commit -> verify -> seed check
+    -> closing fingerprint. Fails closed: a refused backend, a missing binding or a missing
+    worktree ends as an error record, never as a launch at the runner root. `confidential` is
+    the persisted flag (None = unknown); it never weakens, and unknown is treated as
+    confidential for tracker comments (I5-02). Cancel, stall and shutdown only flag the job;
+    this helper writes every record, so each carries the binding (I5-01)."""
+    started_at = datetime.now(timezone.utc).isoformat()
+    t0 = time.monotonic()
+    gen_key = linear_issue_id or task_id
+    stored = _durable_binding(linear_issue_id, task_id, project_key, ident) or {}
+    confidential = _ticket_confidential(project_key, ident, linear_issue_id, task_id,
+                                        *([confidential] if confidential is not None else []))
+    binding: dict = {"project_key": project_key, "issue_identifier": ident, "confidential": confidential}
+    record_kw = dict(run_id=run_id, linear_issue_id=linear_issue_id, agent=agent, task_id=task_id,
+                     attempt=attempt, parent_run_id=parent_run_id, reset_generation=launch_gen,
+                     model=_agent_model(agent))
+    job = _running_jobs[run_id] = {
+        "run_id": run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running",
+        "last_progress_at": time.monotonic(), "linear_issue_id": linear_issue_id, "agent": agent,
+        "project_key": project_key, "phase": "agent"}
+    socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill})
+    status, output, error, result, sid, it, ot, model = "error", "", "", {}, None, None, None, None
+
+    def _track(proc):
+        _running_procs[run_id] = proc
+        if job.get("cancelled"):  # cancelled between phases: stop this one too
+            _terminate_group(proc)
+
+    def _emit(event, payload):
+        job["last_progress_at"] = time.monotonic()  # streaming agent = progress (I5-07)
+        socketio.emit(event, payload)
+
+    try:
+        if _SHUTTING_DOWN.is_set():
+            raise project_runs.ProjectRunError("runner is shutting down")
+        errors: dict = {}
+        project = _projects.get_project(project_key, _projects.load_registry(errors=errors))
+        # Resolved above. Unknown (an unreadable sidecar) stays None: treated as confidential
+        # here and in every outbound path, never collapsed to False (I10-01).
+        if binding["confidential"] is not False:
+            # One effective policy: a ticket once confidential stays sandboxed even if the
+            # registry flag was dropped since (I6-02).
+            project = dataclasses.replace(project, confidential=True)
+            problem = _records_unsafe()  # registry may have changed since startup (I5-04)
+            if problem:
+                raise _projects.ProjectError(problem)
+        keys = _binding_keys(linear_issue_id, task_id, project.key, ident)
+        _persist_binding(keys, {"project_key": project.key, "issue_identifier": ident,
+                                "confidential": binding["confidential"]})
+        with _projects.ticket_lock(project.key, ident):
+            if reuse_only and not _projects.worktree_path(project, ident).exists():
+                raise _projects.ProjectError(
+                    f"{project.key}/{ident}: bound worktree is missing; refusing to fall back "
+                    "(remove its entries from state/issue_bindings.json to start over)")
+            wt_info = _projects.create_worktree(project, ident)
+            for field_ in ("worktree", "branch", "base_sha"):  # the whole binding, not just the base (I7-06)
+                if stored.get(field_) and stored[field_] != wt_info[field_]:
+                    raise _projects.ProjectError(f"{project.key}/{ident}: {field_} differs from the first run's binding; "
+                                                 "refusing to continue (recover explicitly)")
+            if binding["confidential"] is not False:
+                _projects.mark_confidential(project, ident)
+            binding.update(project_runs.binding_fields(project, ident, wt_info))
+            _persist_binding(keys, {k: binding[k] for k in ("worktree", "branch", "base_sha")})
+            exclude = project_runs.bookkeeping_paths(project, [STATE_DIR, OUTPUTS_DIR])
+            before = _projects.fingerprint(project, exclude=exclude)
+            tab_open = _main_path_tab_open(project.key)
+            cmd = _project_cmd(agent, project, project_runs.project_prompt(prompt, project, binding, agent),
+                               resume_session)
+            lines, stderr_s, code, timed_out = project_runs.run_agent(
+                cmd, binding["worktree"], _project_exec_env(agent, project), run_id, agent,
+                AI_RUN_TIMEOUT_S, _emit, on_start=_track)
+            _running_procs.pop(run_id, None)
+            output, it, ot, model, sid, ok, error = _parse_project_output(agent, lines, stderr_s, code)
+            if timed_out:
+                status, error = "timeout", f"Timed out after {AI_RUN_TIMEOUT_S}s"
+            else:
+                status = "review" if ok else "error"
+            if job.get("cancelled"):  # skip the work, keep the safety check (I6-13, I7-07)
+                result = project_runs.closing_check(project, exclude, before)
+                if result["main_checkout_changed"] is None:
+                    result["verify_badge"] = "main checkout unchecked"
+                elif result["main_checkout_changed"]:
+                    result["verify_badge"] = "main checkout changed"
+            else:
+                job["phase"] = "post_run"  # bounded by git/verify timeouts; not a stall candidate
+                result = project_runs.post_run(project, binding, agent, title, before, exclude,
+                                               on_start=_track, stopped=lambda: bool(job.get("cancelled")))
+                if result.get("post_run_error"):
+                    status, error = "error", result["post_run_error"]
+                tab_open = tab_open or _main_path_tab_open(project.key)
+                result["interactive_tab_open"] = tab_open
+                if tab_open and result.get("verify_badge") == "main checkout changed":
+                    result["verify_badge"] = "main checkout changed (interactive tab open)"
+    except (_projects.ProjectError, project_runs.ProjectRunError) as exc:
+        status, error = "error", str(exc)
+    except Exception as exc:
+        logger.exception("project run %s failed", run_id)
+        status, error = "error", str(exc)
+    finally:
+        _running_procs.pop(run_id, None)
+        with _JOB_LOCK:  # from here a cancel is refused, so the outcome below is final (I8-06)
+            job["phase"] = "finalizing"
+            cancelled = job.get("cancelled")
+    try:  # the job stays registered until its record is written: shutdown waits for it (I7-03)
+        if cancelled:  # authoritative through final logging: no review push, no run comment (I5-09)
+            status, error = cancelled, "Cancelled by user" if cancelled == "cancelled" else "stalled"
+        verify = result.get("verify")
+        extra = {**binding, **{k: v for k, v in result.items() if k != "verify_tail"}}
+        if verify:
+            extra["verify"] = verify
+        withhold = binding["confidential"] is not False and _records_unsafe()
+        if withhold:  # never write confidential text where records may leak (I5-04, I6-05)
+            prompt_rec, output_rec = "[withheld: run-record location not allowed for confidential runs]", ""
+            error = f"withheld ({status}): run records are outside this checkout's ignored state/ or outputs/"
+        else:
+            prompt_rec = prompt
+            output_rec = (output or "") + (f"\n\n[verify tail]\n{result['verify_tail']}" if result.get("verify_tail") else "")
+        _write_run_log(skill, status, started_at, time.monotonic() - t0, prompt=prompt_rec, output=output_rec,
+                       error=error, input_tokens=it, output_tokens=ot, agent_session_id=sid,
+                       extra=extra, **{**record_kw, "model": model or record_kw["model"]})
+        if linear_issue_id:
+            if not cancelled:
+                body = project_runs.tracker_comment(
+                    binding, "Run", run_id=run_id, status=status, verify=verify, shortstat=result.get("shortstat", ""),
+                    fallback=lambda: _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output, error=error))
+                if body:
+                    _post_linear_comment(linear_issue_id, body)
+            _push_linear_state_async(linear_issue_id, "review", gen=launch_gen)
+        if reset_gen.is_current(gen_key, launch_gen):
+            socketio.emit("run_state_change", {"run_id": run_id, "state": status, "skill": skill})
+        socketio.emit("run_logged", {"skill": skill, "run_id": run_id})
+        return {"status": status, "error": error, **extra}
+    finally:
+        _running_jobs.pop(run_id, None)
+
+
+def _reset_key(records: list[dict], task_id: str) -> str:
+    """Reset generations are kept per tracker issue when there is one, else per task."""
+    return next((r["linear_issue_id"] for r in records if r.get("linear_issue_id")), None) or task_id
 
 
 def _build_resume_cmd(agent: str, session_id: str, prompt: str) -> list[str]:
@@ -2530,95 +2941,60 @@ def api_state():
     })
 
 
+@app.route("/api/runs/<run_id>/events")
+def api_run_events(run_id: str):
+    """A run tab's view: the in-memory event ring, plus resume data once the run is over."""
+    ring = project_runs.RUN_EVENTS.get(run_id)
+    out: dict = {"lines": ring.snapshot() if ring else [], "finished": run_id not in _running_jobs}
+    if out["finished"]:
+        rec = {}
+        if RUN_LOG.exists():  # newest record for this run
+            for line in reversed(RUN_LOG.read_text(encoding="utf-8").splitlines()):
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get("run_id") == run_id:
+                    rec = r
+                    break
+        for k in ("status", "verify_badge", "agent", "agent_session_id", "project_key", "issue_identifier"):
+            out[k] = rec.get(k)
+        project = None
+        if rec.get("project_key"):
+            try:
+                project = _projects.get_project(rec["project_key"], _projects.load_registry(errors={}))
+            except _projects.ProjectError:
+                project = False
+        from runner.modules.pty import interactive_resume_argv
+        out["resume_eligible"] = bool(rec.get("agent_session_id") and project is not False and
+                                      interactive_resume_argv(str(rec.get("agent")), str(rec.get("agent_session_id")), project))
+    return jsonify(out)
+
+
+@app.route("/api/projects")
+def api_projects():
+    """Registered projects with their Claude + Codex sessions (read-only, plan Phase 1)."""
+    import projects as _projects
+    errors: dict[str, str] = {}
+    try:
+        reg = _projects.load_registry(errors=errors)
+    except _projects.ProjectError as exc:
+        return jsonify({"projects": [], "error": str(exc)})
+    out = []
+    for key, p in reg.items():
+        try:  # one project's reader failure never hides the others
+            out.append({"key": key, "kind": p.kind, "confidential": p.confidential, "no_push": p.no_push,
+                        "sessions": _projects.project_sessions(p), "memory": _projects.claude_memory_names(p)})
+        except Exception as exc:
+            out.append({"key": key, "error": f"session readers failed: {exc}"})
+    out += [{"key": key, "error": msg} for key, msg in errors.items()]
+    return jsonify({"projects": out})
+
+
 @app.route("/api/registry")
 def api_registry():
     agent = (request.args.get("agent") or _load_workflow_config().get("agent", {}).get("backend", "claude")).strip().lower()
     return jsonify(_load_registry(canonical_agent(agent) or agent))
-
-
-@app.route("/stream")
-def stream():
-    prompt  = request.args.get("prompt", "").strip()
-    skill   = request.args.get("skill", "_prompt") or "_prompt"
-    agent   = canonical_agent(request.args.get("agent")) or "claude"
-
-    def _sse(obj: dict) -> str:
-        return f"data: {json.dumps(obj)}\n\n"
-
-    def generate():
-        if not prompt:
-            yield _sse({"type": "error", "text": "No prompt."})
-            return
-
-        run_id = str(uuid.uuid4())
-        started_at = datetime.now(timezone.utc).isoformat()
-        t0 = time.monotonic()
-        output_buf: list[str] = []
-
-        _running_jobs[run_id] = {"run_id": run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent)}
-        socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill})
-        yield _sse({"type": "start", "run_id": run_id})
-
-        # Schedule-eligible entrypoint path
-        registry = _load_registry(agent)
-        entry = registry.get(skill, {})
-        if entry.get("schedule_eligible") and entry.get("entrypoint"):
-            cmd = [str(_python_path()), str(RUNNER), skill]
-        else:
-            cmd = _ai_command(agent, prompt, output_format="text",
-                              skill_name=skill, registry=registry)
-
-        chunk_count = 0
-        try:
-            proc = subprocess.Popen(
-                cmd,
-                cwd=str(ROOT),
-                env=_registry_exec_env(agent, registry),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                bufsize=0,
-            )
-            _running_procs[run_id] = proc
-            while True:
-                chunk = proc.stdout.read(64)
-                if not chunk:
-                    break
-                text = chunk.decode("utf-8", errors="replace")
-                output_buf.append(text)
-                chunk_count += 1
-                snippet = text.replace("\n", " ").strip()[-80:]
-                if _running_jobs.get(run_id):
-                    _running_jobs[run_id]["last_progress_at"] = time.monotonic()
-                socketio.emit("run_progress", {"run_id": run_id, "snippet": snippet, "turn": chunk_count})
-                yield _sse({"type": "output", "text": text})
-            proc.wait()
-            dur = time.monotonic() - t0
-            ok = proc.returncode == 0
-            _running_jobs.pop(run_id, None)
-            _running_procs.pop(run_id, None)
-            final_state = "review"
-            _full_output = "".join(output_buf)
-            _footer = _parse_run_footer(_full_output)
-            _write_run_log(skill, final_state, started_at, dur,
-                           prompt=prompt, output=_full_output, run_id=run_id,
-                           output_path=_footer["output_path"],
-                           quality_score=_footer["quality_score"])
-            socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": skill})
-            socketio.emit("run_logged", {"skill": skill, "run_id": run_id})
-            yield _sse({"type": "done", "ok": ok, "run_id": run_id, "duration_s": round(dur, 2)})
-        except Exception as e:
-            dur = time.monotonic() - t0
-            _running_procs.pop(run_id, None)
-            _running_jobs.pop(run_id, None)
-            _write_run_log(skill, "error", started_at, dur, prompt=prompt, error=str(e), run_id=run_id)
-            socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill})
-            yield _sse({"type": "error", "text": str(e)})
-
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
 
 
 @app.route("/api/runs")
@@ -2738,17 +3114,21 @@ def api_run_set_status(run_id: str):
     record = {**original, "status": new_status}
     if new_status == "archived":
         record["prev_status"] = original.get("status", "failed")
-    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-    with RUN_LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
-    with STATE_RUN_LOG.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
-    socketio.emit("run_state_change", {"run_id": run_id, "state": new_status})
-
-    # Push state to Linear if this run is linked to a Linear issue
     linear_issue_id = original.get("linear_issue_id")
-    if linear_issue_id and new_status not in ("archived",):
-        _push_linear_state_async(linear_issue_id, new_status)
+    gen_key = linear_issue_id or original.get("task_id") or run_id
+    with reset_gen.issue_lock(gen_key):
+        if new_status in ("todo", "rework"):
+            record["reset_gen"] = reset_gen.bump(gen_key)  # Decision 11: older runs stop counting
+        OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+        with RUN_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        with STATE_RUN_LOG.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+        socketio.emit("run_state_change", {"run_id": run_id, "state": new_status})
+
+        # Push state to Linear if this run is linked to a Linear issue
+        if linear_issue_id and new_status not in ("archived",):
+            _push_linear_state_async(linear_issue_id, new_status)
 
     return jsonify({"ok": True, "run_id": run_id, "status": new_status})
 
@@ -2788,6 +3168,11 @@ def api_run_restore(run_id: str):
 
 @app.route("/api/runs/<run_id>", methods=["DELETE"])
 def api_run_cancel(run_id: str):
+    signalled = _signal_project_run(run_id, "cancelled")  # the launch helper writes the record (I5-01/09)
+    if signalled == "finishing":
+        return jsonify({"error": "run is already finishing; its result stands"}), 409
+    if signalled:
+        return jsonify({"ok": True, "run_id": run_id})
     proc = _running_procs.get(run_id)
     # DeepSeek/async jobs have no proc entry — still cancel if in _running_jobs
     if proc is None and run_id not in _running_jobs:
@@ -2893,10 +3278,44 @@ def api_run_retry(run_id: str):
 
     registry = _load_registry(agent)
     entry = registry.get(skill, {})
+    _gen_key = linear_issue_id or task_id
+    _launch_gen = reset_gen.current(_gen_key)
+
+    # Bound task: same binding, never re-derived, even from a record that lacks it (I5-01).
+    bound = _durable_binding(linear_issue_id, task_id) or (original if original.get("project_key") else None)
+    if bound:
+        bound = {**bound, "confidential": _ticket_confidential(  # before any comment (I6-03, I9-02)
+            bound["project_key"], bound.get("issue_identifier"), linear_issue_id, task_id,
+            *([bound["confidential"]] if "confidential" in bound else []))}
+        if linear_issue_id:
+            _linear_dispatched[linear_issue_id] = new_run_id
+            _push_linear_state_async(linear_issue_id, "running", gen=_launch_gen)
+            if reply or attachments:
+                body = project_runs.tracker_comment(
+                    bound, "feedback", run_id=new_run_id,
+                    fallback=lambda: _linear_comment_body(title="Human Feedback", feedback=reply, attachments=attachments))
+                if body:
+                    _post_linear_comment(linear_issue_id, body)
+        threading.Thread(target=_run_project_ticket, kwargs=dict(
+            project_key=bound["project_key"], ident=bound.get("issue_identifier") or "",
+            agent=agent, prompt=prompt, title=original.get("prompt", "")[:80], run_id=new_run_id,
+            linear_issue_id=linear_issue_id, task_id=task_id, launch_gen=_launch_gen,
+            attempt=prev_attempt + 1, parent_run_id=run_id, resume_session=_lock_session_id,
+            reuse_only=True, skill=skill, confidential=bound.get("confidential")), daemon=True).start()
+        return jsonify({"ok": True, "run_id": new_run_id, "skill": skill, "attempt": prev_attempt + 1, "agent": agent})
+
+    def _finish(final_state: str) -> None:
+        """Completion side effects, skipped when a reset happened during the run (Decision 11)."""
+        if linear_issue_id:
+            _push_linear_state_async(linear_issue_id, "review", gen=_launch_gen)  # Linear has no error state
+        if reset_gen.is_current(_gen_key, _launch_gen):
+            socketio.emit("run_state_change", {"run_id": new_run_id, "state": final_state, "skill": skill})
+        else:
+            logger.info("[retry] %s finished after a reset of %s; ticket left as is", new_run_id, _gen_key)
 
     if linear_issue_id:
         _linear_dispatched[linear_issue_id] = new_run_id
-        _push_linear_state_async(linear_issue_id, "running")
+        _push_linear_state_async(linear_issue_id, "running", gen=_launch_gen)
         if reply or attachments:
             _post_linear_comment(
                 linear_issue_id,
@@ -2999,11 +3418,11 @@ def api_run_retry(run_id: str):
                                output_path=_footer["output_path"],
                                quality_score=_footer["quality_score"],
                                token_cost_usd=_cost,
-                               agent_session_id=new_sid)
+                               agent_session_id=new_sid,
+                               reset_generation=_launch_gen)
                 if linear_issue_id:
-                    _push_linear_state_async(linear_issue_id, "review")  # Linear has no error state
                     _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry", prompt=prompt, output=output))
-                socketio.emit("run_state_change", {"run_id": new_run_id, "state": final_state, "skill": skill})
+                _finish(final_state)
                 socketio.emit("run_logged", {"skill": skill, "run_id": new_run_id})
             except subprocess.TimeoutExpired:
                 dur = time.monotonic() - t0
@@ -3014,24 +3433,23 @@ def api_run_retry(run_id: str):
                 _write_run_log(skill, "timeout", started_at, dur, prompt=prompt, error=msg,
                                run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
                                linear_issue_id=linear_issue_id, agent=agent,
-                               model=_agent_model(agent, cfg), task_id=task_id)
+                               model=_agent_model(agent, cfg), task_id=task_id, reset_generation=_launch_gen)
                 if linear_issue_id:
-                    _push_linear_state_async(linear_issue_id, "review")
                     _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry Timeout", prompt=prompt))
-                socketio.emit("run_state_change", {"run_id": new_run_id, "state": "review", "skill": skill})
+                _finish("review")
             except Exception as e:
                 _running_procs.pop(new_run_id, None)
                 _running_jobs.pop(new_run_id, None)
                 _write_run_log(skill, "error", started_at, 0.0, prompt=prompt, error=str(e),
                                run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
                                linear_issue_id=linear_issue_id, agent=agent,
-                               model=_agent_model(agent, cfg), task_id=task_id)
+                               model=_agent_model(agent, cfg), task_id=task_id, reset_generation=_launch_gen)
                 if linear_issue_id:
-                    _push_linear_state_async(linear_issue_id, "review")
                     _post_linear_comment(
                         linear_issue_id,
                         _linear_comment_body(title="AgenticOS Retry Error", prompt=prompt),
                     )
+                _finish("review")
 
     threading.Thread(target=_do_retry, daemon=True).start()
     return jsonify({"ok": True, "run_id": new_run_id, "skill": skill, "attempt": prev_attempt + 1, "agent": agent})
@@ -3320,6 +3738,19 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
+    _configure_request_security(args.host, args.port)
+    # Decision 4a: confidential run records may only live in this checkout's ignored dirs.
+    # Any entry declaring confidential counts, valid or not (I6-04).
+    if _projects.declares_confidential() and (problem := _records_unsafe()):
+        sys.exit(f"AgenticOS refuses to start: {problem}")
+
+    # Terminal tabs are server-owned processes: shutting down kills them all (Decision 10).
+    import atexit
+    import signal as _signal
+    from runner.modules.pty import close_all as _close_terminals
+    atexit.register(_close_terminals)
+    atexit.register(_stop_project_runs)  # runs first (LIFO): agents and verifies die with the runner
+    _signal.signal(_signal.SIGTERM, lambda *_: sys.exit(0))  # launchd stop -> atexit runs
 
     print(f"AgenticOS dashboard → http://{args.host}:{args.port}")
     _migrate_legacy_state()

@@ -268,7 +268,8 @@ def _retry(app_mod, monkeypatch, tmp_path, lines, code, stderr=b""):
         def join(self, timeout=None): pass
         def is_alive(self): return False
     monkeypatch.setattr(app_mod.threading, "Thread", SyncThread)
-    resp = app_mod.app.test_client().post("/api/runs/a/retry", json={})
+    resp = app_mod.app.test_client().post(
+        "/api/runs/a/retry", json={}, headers={"X-AgenticOS-Token": app_mod.REQUEST_TOKEN})
     assert resp.status_code == 200
     return cmds, logged
 
@@ -504,7 +505,7 @@ def test_linear_launch_failure_is_cleaned_up(app_mod, monkeypatch):
     reviewed = []
     monkeypatch.setattr(mod, "push_state", lambda *a, **k: None)
     monkeypatch.setattr(mod, "post_comment", lambda *a, **k: None)
-    monkeypatch.setattr(mod, "_mark_issue_review", lambda iid: (reviewed.append(iid), mod.dispatched.pop(iid, None)))
+    monkeypatch.setattr(mod, "_mark_issue_review", lambda iid, gen=None: (reviewed.append(iid), mod.dispatched.pop(iid, None)))
     mod._dispatch_issue({"id": "i3", "identifier": "T-3", "title": "t", "preferred_agent": "dsh"},
                         {}, type("S", (), {"emit": lambda *a, **k: None})())
     (args, kw), = logged

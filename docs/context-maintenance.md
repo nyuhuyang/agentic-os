@@ -3,10 +3,11 @@
 ## Current WIP (WIP = 1)
 <!-- One active task at a time. What is it? -->
 - STT two-pass: done, plan archived in completed/ (2026-10-14); optional follow-ups = one cross-provider Codex inspection, low-severity Open Issues in its review log
-- Multi-Project Dispatch — `docs/exec-plans/active/2026-10-13-multi-project-dispatch.md` (plan approved by Codex review 2026-10-13; build not started)
+- Multi-Project Dispatch — `docs/exec-plans/active/2026-10-13-multi-project-dispatch.md`: Phases 0–3 built on `feat/multi-project-dispatch` (2026-10-14). Open: the cross-provider Codex inspection of the build (Codex quota), spike (d2) for Codex, dogfood tickets, one user decision (`/run` free prompts), one project's committed .gitignore
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- Multi-project dispatch Phases 0–3: 265 pytest pass. Live: browser request checks (token/Host/Origin), project panel, terminal tabs (3 projects, reload, close), and sandboxed verify baselines (one R project 0 fail / 1031 pass; KB from the launchd context) — 2026-10-14
 - STT two-pass (Browser STT live → `gpt-transcribe` + `gpt-6-luna` polish) built per `docs/exec-plans/completed/2026-10-14-stt-two-pass.md`: 65 pytest + 5 node tests pass; live `/api/stt` via launchd 4.0 s; headless Chrome smoke (fake mic) 17/17. A real-mic manual check is still pending — 2026-10-14
 - Claude quota cards now display `remaining_pct` on initial render and live refresh; focused Jinja and Node checks cover live/missing Claude values and unaffected Codex/Gemini display, and `.venv/bin/python3 -m py_compile runner/*.py` passes — 2026-09-24
 - `com.agenticos.runner` is registered and running under launchd on 127.0.0.1:8510. Live `/api/windows/all` and `/` returned HTTP 200; all three served Claude card labels matched the API's `remaining_pct` values (`100% remaining`, `100% remaining`, `no data`) — 2026-09-24
@@ -24,4 +25,4 @@
 
 ## Next Action
 <!-- Concrete first step for the next session -->
-- Start Multi-Project Dispatch Phase 0 (first unchecked item in its plan) once the build is authorized
+- Multi-Project Dispatch: run the cross-provider Codex inspection of the build (base a8ab382) and spike (d2) for Codex, then dogfood one labelled ticket per project

@@ -42,33 +42,43 @@ class StallDetectionModule(AgenticModule):
 
         while True:
             time.sleep(30)
-            now = time.monotonic()
-
-            for run_id, job in list(_app._running_jobs.items()):
-                last = job.get("last_progress_at", now)
-                if now - last > _app.STALL_TIMEOUT_S:
-                    skill = job.get("skill", "unknown")
-                    started_at = job.get("started_at", "")
-                    _app._running_jobs.pop(run_id, None)
-                    proc = _app._running_procs.pop(run_id, None)
-                    if proc:
-                        try:
-                            proc.kill()
-                        except Exception:
-                            pass
-                    _app._write_run_log(
-                        skill, "stalled", started_at, 0.0,
-                        prompt=job.get("prompt", ""), error="stalled",
-                        run_id=run_id,
-                        linear_issue_id=job.get("linear_issue_id"),
-                    )
-                    socketio.emit("run_state_change", {
-                        "run_id": run_id, "state": "stalled", "skill": skill,
-                    })
+            check_once(_app, socketio)
 
             if time.monotonic() - last_cleanup > 3600:
                 last_cleanup = time.monotonic()
                 _app._archive_stale_sent()
+
+
+def check_once(_app, socketio) -> None:
+    """Kill every job without progress for longer than STALL_TIMEOUT_S."""
+    now = time.monotonic()
+    for run_id, job in list(_app._running_jobs.items()):
+        last = job.get("last_progress_at", now)
+        if job.get("project_key"):
+            # Project runs: only a silent agent phase stalls; post-run git/verify have
+            # their own timeouts. The launch helper writes the record (I5-01/07).
+            if job.get("phase") == "agent" and not job.get("cancelled") and now - last > _app.STALL_TIMEOUT_S:
+                _app._signal_project_run(run_id, "stalled")
+            continue
+        if now - last > _app.STALL_TIMEOUT_S:
+            skill = job.get("skill", "unknown")
+            started_at = job.get("started_at", "")
+            _app._running_jobs.pop(run_id, None)
+            proc = _app._running_procs.pop(run_id, None)
+            if proc:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            _app._write_run_log(
+                skill, "stalled", started_at, 0.0,
+                prompt=job.get("prompt", ""), error="stalled",
+                run_id=run_id,
+                linear_issue_id=job.get("linear_issue_id"),
+            )
+            socketio.emit("run_state_change", {
+                "run_id": run_id, "state": "stalled", "skill": skill,
+            })
 
 
 module = StallDetectionModule()

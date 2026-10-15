@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -229,6 +230,22 @@ def _append_attachments_to_text(text: str, attachments: list[dict] | None) -> st
     return f"{base}\n\n{attachment_text}" if base else attachment_text
 
 
+def _tracker_reset_route(fn):
+    """Tracker PATCH routes hold the issue's lock for the whole update, and a move back to
+    Todo bumps its reset generation first (Decision 11, DSH-30)."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(issue_id: str, *args, **kwargs):
+        import reset_gen
+        state_name = (request.get_json(silent=True) or {}).get("state_name")
+        with reset_gen.issue_lock(issue_id):
+            if state_name and _linear_state_to_board(state_name) == "todo":
+                reset_gen.bump(issue_id)
+            return fn(issue_id, *args, **kwargs)
+    return wrapper
+
+
 def _linear_comment_body(*, title: str, prompt: str = "", output: str = "",
                          error: str = "", feedback: str = "",
                          attachments: list[dict] | None = None) -> str:
@@ -362,6 +379,8 @@ class LinearModule(AgenticModule):
                 new_cache: dict[str, dict] = {}
                 new_by_team: dict[str, dict[str, dict]] = {}
                 all_in_progress_ids: set[str] = set()
+                import reset_gen
+                gens_before = reset_gen.snapshot()  # a reset during the fetch wins (I6-11)
 
                 for tid in team_ids_to_poll:
                     team_issues = client.fetch_issues(states, team_id=tid)
@@ -391,12 +410,6 @@ class LinearModule(AgenticModule):
                     if iid not in all_in_progress_ids and not self._issue_is_running(iid):
                         self.dispatched.pop(iid, None)
 
-                # Keep terminal-state issues (Canceled/Done/Duplicate) for trash display
-                terminal_issues = {
-                    k: v for k, v in self.issues_cache.items()
-                    if v.get("state") in ("Canceled", "Done", "Duplicate")
-                }
-
                 # Late-guard: re-check right before commit so a cancel that raced
                 # with the issue-iteration loop still prevents "In Progress" from
                 # overwriting a cache entry already set to "In Review".
@@ -410,21 +423,41 @@ class LinearModule(AgenticModule):
                         _updated["state"] = "In Review"
                         new_cache[_iid2] = _updated
 
-                self.issues_cache.clear()
-                self.issues_cache.update(new_cache)
-                self._issues_by_team.clear()
-                self._issues_by_team.update(new_by_team)
+                with contextlib.ExitStack() as held:
+                    # Publish under the lock of every issue polled or cached; an issue reset
+                    # since the fetch keeps its current (post-reset) entry (I6-11, I7-04).
+                    for iid in sorted(set(new_cache) | set(self.issues_cache)):
+                        held.enter_context(reset_gen.issue_lock(iid))
+                    # Keep terminal-state issues (Canceled/Done/Duplicate) for trash display
+                    terminal_issues = {
+                        k: v for k, v in self.issues_cache.items()
+                        if v.get("state") in ("Canceled", "Done", "Duplicate")
+                    }
+                    gens_now = reset_gen.snapshot()
+                    for iid in set(new_cache) | set(self.issues_cache):
+                        if gens_now.get(iid, 0) != gens_before.get(iid, 0) and iid in self.issues_cache:
+                            terminal_issues.pop(iid, None)
+                            new_cache[iid] = self.issues_cache[iid]
+                            for team_dict in new_by_team.values():
+                                team_dict.pop(iid, None)
+                            tid = new_cache[iid].get("team_id") or ""
+                            if tid:  # also when the fetch did not include it (I8-07)
+                                new_by_team.setdefault(tid, {})[iid] = new_cache[iid]
+                    self.issues_cache.clear()
+                    self.issues_cache.update(new_cache)
+                    self._issues_by_team.clear()
+                    self._issues_by_team.update(new_by_team)
 
-                # Preserve last N terminal issues so the recycle bin stays populated
-                terminal_list = sorted(terminal_issues.items(), key=lambda x: x[1].get("updated_at", ""))
-                self.issues_cache.update(dict(terminal_list[-100:]))
-                # Also add terminal issues back into _issues_by_team so team-filtered
-                # requests (e.g. /api/linear/issues?team_id=xxx) still see them
-                for iid, issue in terminal_list[-100:]:
-                    tid = issue.get("team_id") or ""
-                    if tid:
-                        self._issues_by_team.setdefault(tid, {})[iid] = issue
-                self._sync_cache_to_local()
+                    # Preserve last N terminal issues so the recycle bin stays populated
+                    terminal_list = sorted(terminal_issues.items(), key=lambda x: x[1].get("updated_at", ""))
+                    self.issues_cache.update(dict(terminal_list[-100:]))
+                    # Also add terminal issues back into _issues_by_team so team-filtered
+                    # requests (e.g. /api/linear/issues?team_id=xxx) still see them
+                    for iid, issue in terminal_list[-100:]:
+                        tid = issue.get("team_id") or ""
+                        if tid:
+                            self._issues_by_team.setdefault(tid, {})[iid] = issue
+                    self._sync_cache_to_local()
                 socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
             except Exception as e:
                 logger.error("Linear polling error: %s", e)
@@ -498,24 +531,44 @@ class LinearModule(AgenticModule):
         cached["state"] = state_name
         self.issues_cache[issue_id] = cached
         if self._capability.get("type") == "linear":
+            import reset_gen
             threading.Thread(
                 target=self._linear_sync_patch,
-                args=(issue_id, {"state_name": state_name}, cfg, None),
+                args=(issue_id, {"state_name": state_name}, cfg, None, reset_gen.current(issue_id)),
                 daemon=True,
             ).start()
 
-    def _mark_issue_review(self, issue_id: str) -> None:
-        # Don't override terminal states (Canceled, Done, Duplicate)
-        current_state = (self.issues_cache.get(issue_id) or {}).get("state", "")
-        if _linear_state_key(current_state) in ("canceled", "cancelled", "done", "duplicate"):
-            return
-        cached = dict(self.issues_cache.get(issue_id) or {})
-        cached["state"] = "In Review"
-        self.issues_cache[issue_id] = cached
-        self.dispatched.pop(issue_id, None)
-        if self._socketio:
-            self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
-        self.push_state(issue_id, "review")
+    def _is_confidential_issue(self, issue_id: str) -> bool:
+        import project_runs
+        from app import _durable_binding, _ticket_confidential
+        bound = _durable_binding(linear_issue_id=issue_id)
+        if bound:  # the ticket's one policy, sidecar promotions included (I5-03, I9-02)
+            return _ticket_confidential(bound["project_key"], bound.get("issue_identifier"), issue_id) is not False
+        issue = self.issues_cache.get(issue_id) or {}
+        key = project_runs.project_key_from_labels(issue.get("labels"))
+        if not key:
+            return False
+        if not issue.get("identifier"):
+            return True  # no ticket id to check its worktree with: fail closed
+        # Unbound but labelled: same policy, so a CLI-made confidential worktree counts (I10-02).
+        return _ticket_confidential(key, issue["identifier"], issue_id) is not False
+
+    def _mark_issue_review(self, issue_id: str, gen: int | None = None) -> None:
+        import reset_gen
+        with reset_gen.issue_lock(issue_id):
+            if not reset_gen.is_current(issue_id, gen):
+                return  # the run finished after the ticket was reset: leave the ticket alone
+            # Don't override terminal states (Canceled, Done, Duplicate)
+            current_state = (self.issues_cache.get(issue_id) or {}).get("state", "")
+            if _linear_state_key(current_state) in ("canceled", "cancelled", "done", "duplicate"):
+                return
+            cached = dict(self.issues_cache.get(issue_id) or {})
+            cached["state"] = "In Review"
+            self.issues_cache[issue_id] = cached
+            self.dispatched.pop(issue_id, None)
+            if self._socketio:
+                self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+            self.push_state(issue_id, "review", gen=gen)
 
     def _dispatch_issue(self, issue: dict, cfg: dict, socketio, previous_board_status: str | None = None) -> None:
         import subprocess
@@ -523,10 +576,35 @@ class LinearModule(AgenticModule):
         issue_id = issue["id"]
         if issue_id in self.dispatched:
             return
+        import reset_gen
+        launch_gen = reset_gen.current(issue_id)
 
         agent_cfg = cfg.get("agent", {})
         backend = (canonical_agent(issue.get("preferred_agent"))
                    or canonical_agent(agent_cfg.get("backend")) or "claude")
+
+        import project_runs
+        from app import _durable_binding
+        # An issue bound by an earlier run keeps that binding whatever its labels say now (I5-03).
+        bound = _durable_binding(linear_issue_id=issue_id) or {}
+        project_key = bound.get("project_key") or project_runs.project_key_from_labels(issue.get("labels"))
+        if project_key:  # project ticket: own worktree, no skill routing, one launch helper (3a)
+            from app import _run_project_ticket
+            run_id = str(uuid.uuid4())
+            self.dispatched[issue_id] = run_id
+            self.push_state(issue_id, "running", gen=launch_gen)
+            try:
+                _run_project_ticket(
+                    project_key=project_key, ident=bound.get("issue_identifier") or issue.get("identifier") or issue_id,
+                    agent=backend, confidential=bound.get("confidential"),
+                    reuse_only=bool(bound.get("worktree")),  # a bound worktree is never silently recreated (I6-10)
+                    prompt=f"{issue.get('identifier', '')}: {issue.get('title', '')}\n\n"
+                           f"{_strip_issue_metadata(issue.get('description') or '')}",
+                    title=issue.get("title", ""), run_id=run_id, linear_issue_id=issue_id,
+                    task_id=run_id, launch_gen=launch_gen)
+            finally:
+                self.dispatched.pop(issue_id, None)
+            return
 
         try:
             registry = _load_registry(backend)
@@ -566,7 +644,7 @@ class LinearModule(AgenticModule):
                 "linear_issue_id": issue_id,
                 "agent": backend,
             }
-            self.push_state(issue_id, "running")
+            self.push_state(issue_id, "running", gen=launch_gen)
             socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": selected_skill})
             entry = registry.get(selected_skill, {})
             is_entrypoint = bool(entry.get("schedule_eligible") and entry.get("entrypoint"))
@@ -616,10 +694,12 @@ class LinearModule(AgenticModule):
                     model=pm or _agent_model(backend, cfg),
                     task_id=run_id,
                     agent_session_id=session_id,
+                    reset_generation=launch_gen,
                 )
                 self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output, error=error_s))
-                self._mark_issue_review(issue_id)
-                socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": selected_skill})
+                self._mark_issue_review(issue_id, gen=launch_gen)
+                if reset_gen.is_current(issue_id, launch_gen):
+                    socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": selected_skill})
                 socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
             except subprocess.TimeoutExpired:
                 dur = time.monotonic() - t0
@@ -628,17 +708,19 @@ class LinearModule(AgenticModule):
                     proc.kill()
                 _running_jobs.pop(run_id, None)
                 msg = f"Timed out after {AI_RUN_TIMEOUT_S}s"
-                _write_run_log(selected_skill, "timeout", started_at, dur, prompt=prompt, error=msg, run_id=run_id, linear_issue_id=issue_id, agent=backend)
+                _write_run_log(selected_skill, "timeout", started_at, dur, prompt=prompt, error=msg, run_id=run_id,
+                               linear_issue_id=issue_id, agent=backend, reset_generation=launch_gen)
                 self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Timeout", prompt=prompt, error=msg))
-                self._mark_issue_review(issue_id)
+                self._mark_issue_review(issue_id, gen=launch_gen)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": selected_skill})
                 socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
             except Exception as e:
                 _running_procs.pop(run_id, None)
                 _running_jobs.pop(run_id, None)
-                _write_run_log(selected_skill, "error", started_at, 0.0, prompt=prompt, error=str(e), run_id=run_id, linear_issue_id=issue_id, agent=backend)
+                _write_run_log(selected_skill, "error", started_at, 0.0, prompt=prompt, error=str(e), run_id=run_id,
+                               linear_issue_id=issue_id, agent=backend, reset_generation=launch_gen)
                 self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
-                self._mark_issue_review(issue_id)
+                self._mark_issue_review(issue_id, gen=launch_gen)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": selected_skill})
                 socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
         except Exception as e:
@@ -755,10 +837,13 @@ class LinearModule(AgenticModule):
                     # Persist the alias before the local id disappears, so the dashboard can always recover it.
                     record_id_alias(local_id, real_id)
                     # Swap local placeholder → real Linear ID in local tracker and cache
-                    raw = local._load_raw()
-                    raw.pop(local_id, None)
-                    raw[real_id] = dict(n)
-                    local._save_raw(raw)
+                    with local.raw_transaction() as raw:  # locked: concurrent writers survive (I5-05)
+                        # ponytail: edits made while the create is pending are lost (pre-existing
+                        # local-first gap, out of scope here; needs an acknowledged edit queue).
+                        raw.pop(local_id, None)
+                        raw[real_id] = dict(n)
+                    if local_id in self._local_overrides:
+                        self._local_overrides[real_id] = self._local_overrides.pop(local_id)
                     self.issues_cache.pop(local_id, None)
                     self.issues_cache[real_id] = n
                     if tid:
@@ -796,6 +881,7 @@ class LinearModule(AgenticModule):
             except Exception as e:
                 return jsonify({"error": str(e)}), 500
         @app.route("/api/linear/issues/local/<issue_id>", methods=["PATCH", "POST"])
+        @_tracker_reset_route
         def _issues_local_patch(issue_id: str):
             """Write-only local state update, no Linear API call."""
             data = request.get_json(silent=True) or {}
@@ -829,6 +915,7 @@ class LinearModule(AgenticModule):
 
 
         @app.route("/api/linear/issues/<issue_id>", methods=["PATCH", "POST"])
+        @_tracker_reset_route
         def _issues_patch(issue_id: str):
             data = request.get_json(silent=True) or {}
             cfg = _load_workflow_config()
@@ -881,7 +968,9 @@ class LinearModule(AgenticModule):
                 if not self._issue_is_running(issue_id):
                     self.dispatched.pop(issue_id, None)
                     threading.Thread(target=self._dispatch_issue, args=(cached, cfg, self._socketio, previous_board_status), daemon=True).start()
-                threading.Thread(target=self._linear_sync_patch, args=(issue_id, data, cfg, preferred_agent), daemon=True).start()
+                import reset_gen
+                threading.Thread(target=self._linear_sync_patch, args=(issue_id, data, cfg, preferred_agent,
+                                                                       reset_gen.current(issue_id)), daemon=True).start()
                 return jsonify({"ok": True, "issue": cached})
 
             # ── Synchronous Linear path for non-dispatch updates ──────────
@@ -924,6 +1013,8 @@ class LinearModule(AgenticModule):
             attachments = data.get("attachments") or []
             if not text and not attachments:
                 return jsonify({"error": "feedback or attachment required"}), 400
+            if self._is_confidential_issue(issue_id):  # Decision 4: feedback stays in the local record
+                return jsonify({"ok": False, "error": "confidential project: feedback is not posted to the tracker"}), 403
             body = _linear_comment_body(
                 title=data.get("title") or "AgenticOS Feedback",
                 feedback=text,
@@ -1023,20 +1114,8 @@ class LinearModule(AgenticModule):
                     "created_at": issue.get("created_at", ""),
                     "updated_at": issue.get("updated_at", ""),
                 }
-                tasks_path = STATE_DIR / "tasks.json"
-                tasks = {}
-                if tasks_path.exists():
-                    import json as _json
-                    try:
-                        tasks = _json.loads(tasks_path.read_text(encoding="utf-8"))
-                    except Exception:
-                        tasks = {}
-                tasks[issue["id"]] = data
-                tasks_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = tasks_path.with_suffix(".tmp")
-                import json as _json
-                tmp.write_text(_json.dumps(tasks, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-                tmp.replace(tasks_path)
+                with local.raw_transaction() as tasks:  # locked with every other tasks.json writer
+                    tasks[issue["id"]] = data
         except Exception as e:
             logger.debug("localize_issue failed for %s: %s", issue.get("id", "?"), e)
 
@@ -1050,23 +1129,29 @@ class LinearModule(AgenticModule):
             return
         try:
             local = self.get_local_tracker()
-            tasks = local._load_raw()
-            modified = False
-            for issue in self.issues_cache.values():
-                iid = issue["id"]
-                existing = tasks.get(iid)
-                if existing:
-                    existing.update(issue)
-                else:
-                    tasks[iid] = dict(issue)
-                modified = True
-            if modified:
-                local._save_raw(tasks)
+            with local.raw_transaction() as tasks:  # one locked load -> merge -> save (plan 4b)
+                for issue in list(self.issues_cache.values()):
+                    existing = tasks.get(issue["id"])
+                    if existing:
+                        existing.update(issue)
+                    else:
+                        tasks[issue["id"]] = dict(issue)
         except Exception as e:
             logger.debug("_sync_cache_to_local failed: %s", e)
 
-    def _linear_sync_patch(self, issue_id: str, data: dict, cfg: dict, preferred_agent: str | None) -> None:
-        """Async Linear sync for state/metadata updates (runs in daemon thread)."""
+    def _linear_sync_patch(self, issue_id: str, data: dict, cfg: dict, preferred_agent: str | None,
+                           gen: int | None = None) -> None:
+        """Async Linear sync for state/metadata updates (runs in daemon thread).
+
+        Serialized with other tracker writers under the issue lock. A state change queued
+        before a later reset is dropped; title/description edits still land (I5-06)."""
+        import reset_gen
+        with reset_gen.issue_lock(issue_id):
+            if not reset_gen.is_current(issue_id, gen):
+                data = {k: v for k, v in data.items() if k != "state_name"}
+            self._linear_sync_patch_locked(issue_id, data, cfg, preferred_agent)
+
+    def _linear_sync_patch_locked(self, issue_id: str, data: dict, cfg: dict, preferred_agent: str | None) -> None:
         tc = cfg.get("tracker", {})
         ak = _linear_api_key_from_cfg(tc)
         if not ak:
@@ -1105,25 +1190,36 @@ class LinearModule(AgenticModule):
 
     # ── Bridge methods (called from app.py) ──────────────────────────────
 
-    def push_state(self, issue_id: str, board_status: str) -> None:
-        state_name = _BOARD_TO_LINEAR.get(board_status)
-        if state_name:
-            cached = dict(self.issues_cache.get(issue_id) or {})
-            cached["state"] = state_name
-            self.issues_cache[issue_id] = cached
-            if board_status == "review":
-                self.dispatched.pop(issue_id, None)
-            if self._socketio:
-                self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
-        threading.Thread(target=self._push_sync, args=(issue_id, board_status), daemon=True).start()
+    def push_state(self, issue_id: str, board_status: str, gen: int | None = None) -> None:
+        """`gen` = the reset generation the caller launched under (None: unconditional)."""
+        import reset_gen
+        with reset_gen.issue_lock(issue_id):
+            if not reset_gen.is_current(issue_id, gen):
+                return
+            state_name = _BOARD_TO_LINEAR.get(board_status)
+            if state_name:
+                cached = dict(self.issues_cache.get(issue_id) or {})
+                cached["state"] = state_name
+                self.issues_cache[issue_id] = cached
+                if board_status == "review":
+                    self.dispatched.pop(issue_id, None)
+                if self._socketio:
+                    self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+        threading.Thread(target=self._push_sync, args=(issue_id, board_status, gen), daemon=True).start()
 
-    def _push_sync(self, issue_id: str, board_status: str) -> None:
-        cfg = _load_workflow_config()
-        tc = cfg.get("tracker", {})
-        if tc.get("kind") == "linear" and _has_env_key("LINEAR_API_KEY"):
-            self._push_linear(issue_id, board_status, tc)
-        else:
-            self.get_local_tracker().push_state(issue_id, board_status)
+    def _push_sync(self, issue_id: str, board_status: str, gen: int | None = None) -> None:
+        """Apply a state push. The generation is re-checked inside the issue lock, so a push
+        still in flight when a reset arrives is dropped instead of landing after it (MPD-45)."""
+        import reset_gen
+        with reset_gen.issue_lock(issue_id):
+            if not reset_gen.is_current(issue_id, gen):
+                return
+            cfg = _load_workflow_config()
+            tc = cfg.get("tracker", {})
+            if tc.get("kind") == "linear" and _has_env_key("LINEAR_API_KEY"):
+                self._push_linear(issue_id, board_status, tc)
+            else:
+                self.get_local_tracker().push_state(issue_id, board_status)
 
     def _push_linear(self, issue_id: str, board_status: str, tc: dict) -> None:
         ls = _BOARD_TO_LINEAR.get(board_status)

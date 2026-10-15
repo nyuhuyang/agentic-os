@@ -1,17 +1,34 @@
 # Project registry schema. Copy to projects.yaml (gitignored) and fill in real entries.
 # Override location with AGENTIC_OS_PROJECTS=/path/to/projects.yaml
+#
+# Fields (anything else is an error):
+#   path              absolute or ~-relative git repo root (required)
+#   verify            shell command run in the ticket's worktree; exit 0 = pass (required)
+#                     {root} expands to the main checkout (for tools that live only there,
+#                     e.g. {root}/.venv/bin/python); {base} expands to the run's base commit.
+#                     Any file the command names must be committed at HEAD.
+#   verify_timeout_s  verify timeout in seconds (default 600)
+#   kind              free text: r-shiny | python | wiki | ...
+#   env               extra env for verify and dispatch; PATH is prepended, never replaced
+#   seed              gitignored paths (relative, no '..') copied into each fresh worktree,
+#                     links dereferenced; each must be ignored by a committed .gitignore
+#   confidential      true => agents run sandboxed and only template comments reach Linear
+#   no_push           true => the dispatch prompt forbids push/deploy
 projects:
   example-r-app:
-    path: ~/code/example-r-app          # absolute or ~-relative repo root
-    kind: r-shiny                       # free text: r-shiny | python | wiki | ...
-    verify: Rscript tests/testthat.R    # run from path; exit 0 = pass
+    path: ~/code/example-r-app
+    kind: r-shiny
+    verify: Rscript tests/testthat.R
+    verify_timeout_s: 900
     env:
-      PATH: ~/miniforge3/bin            # prepended to PATH for verify and dispatch
-    confidential: true                  # only the verify summary may leave the machine
-    no_push: true                       # dispatch prompt forbids push/deploy
+      PATH: ~/miniforge3/bin
+    seed:
+      - data/fixtures
+    confidential: true
+    no_push: true
   example-py-tool:
     path: ~/code/example-py-tool
     kind: python
-    verify: .venv/bin/python -m pytest -q
+    verify: "{root}/.venv/bin/python -m pytest -q"
     confidential: false
     no_push: false
