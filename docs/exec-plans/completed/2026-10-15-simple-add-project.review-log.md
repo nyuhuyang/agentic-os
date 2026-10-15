@@ -272,3 +272,8 @@
 
 ### Host disposition (build inspection 3, accepted)
 - SAP-B006: `_first_cwd` keeps the 256 KB bound but now splits on `"\n"` only, so a literal U+2028/U+2029 inside a JSON string no longer breaks the record. A test covers a literal U+2028 in the cwd and U+2029 in the message. pytest 366 passed.
+
+## Build inspection 4 (2026-10-15)
+- Fresh Codex session 01a140cb-5e6b-7c22-9812-315056d1a0e5, cross-provider, 44 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/simple/i4/claudex-5koafr7o/result.json`.
+- Verdict: **APPROVED**, 0 findings.
+- Summary: plan review 3 rounds (7 → 2 → 0); build inspections 4 of 20 (4 → 2 → 1 → 0), all cross-provider. Final proof: pytest 366 passed; browser checks passed.
