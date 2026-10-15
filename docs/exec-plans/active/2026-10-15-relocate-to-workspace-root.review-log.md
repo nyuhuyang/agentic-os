@@ -609,3 +609,4 @@
 - BUILD-014: stream readers (`_stream_text_run`, `_stream_claude_run`, `_stream_dsh_run`, plus the stderr drainer) start through `_start_counted`, which now returns the thread, so each stays counted until it stops writing, even past a timeout. Test checks the reader is started counted.
 - BUILD-015: `_write_run_progress_json` holds a `file_lock` around read-merge-replace. Test: 12 concurrent writers each keep their key.
 - pytest 408 passed.
+- User decision (2026-10-15): one more inspection round, then stop. Any remaining findings go to a separate "runner write-safety hardening" plan and this plan is archived.
