@@ -387,9 +387,15 @@ def _record_pending_handoff(t: Terminal, line: str, socketio) -> None:
     socketio.emit("run_logged", {"skill": pending["skill"], "run_id": run_id}, to=_room(t.term_id))
 
 
-def _forward_input(t: Terminal, text: str, socketio) -> None:
+def _forward_input(t: Terminal, text: str, socketio, refused: str | None = None) -> None:
     completed = _track_input(t, text)
-    if completed is not None:
+    if completed is not None and refused is not None:
+        if t.pending_handoff:  # a handoff under maintenance: neither recorded nor sent
+            t.pending_handoff, t.input_buffer = None, ""
+            socketio.emit("term_output", {"term_id": t.term_id, "data": f"\r\n[{refused}]\r\n"},
+                          to=_room(t.term_id))
+            return
+    elif completed is not None:
         _record_pending_handoff(t, completed, socketio)
     with contextlib.suppress(OSError):
         os.write(t.fd, text.encode())
@@ -432,17 +438,16 @@ class PTYModule(AgenticModule):
             if t is None or t.fd is None or not t.alive:
                 return
             text = data.get("data") or ""
-            if t.pending_handoff and any(c in text for c in "\r\n"):
-                # A skill handoff writes run records: admitted and counted through its write, or
-                # refused under maintenance before anything is recorded or forwarded (BUILD-011).
+            if any(c in text for c in "\r\n"):
+                # Only a completed line can record a handoff, so every newline is admitted first;
+                # refused, it may still be forwarded but never records (BUILD-011, no race with
+                # a concurrent skill_selected).
                 from app import _inflight_work, MaintenanceRefused
                 try:
                     with _inflight_work():
                         _forward_input(t, text, socketio)
                 except MaintenanceRefused as exc:
-                    t.pending_handoff, t.input_buffer = None, ""
-                    socketio.emit("term_output", {"term_id": t.term_id, "data": f"\r\n[{exc}]\r\n"},
-                                  to=_room(t.term_id))
+                    _forward_input(t, text, socketio, refused=str(exc))
                 return
             _forward_input(t, text, socketio)
 

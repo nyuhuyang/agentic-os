@@ -1234,3 +1234,36 @@ def test_progress_cache_write_is_atomic(helper, monkeypatch):
     with pytest.raises(OSError):
         app_mod._write_run_progress_json("r1", {"state": "x"})
     assert path.read_text() == before  # an interrupted write leaves the old file whole
+
+
+def test_progress_updates_from_concurrent_writers_all_survive(helper):
+    app_mod, *_ = helper
+    keys = [f"k{i}" for i in range(12)]
+    ts = [threading.Thread(target=app_mod._write_run_progress_json, args=("r2", {k: True})) for k in keys]
+    for t in ts: t.start()
+    for t in ts: t.join(10)
+    saved = json.loads(app_mod._run_progress_path("r2").read_text())
+    assert all(saved.get(k) for k in keys)  # no stale read-merge-replace overwrote another (BUILD-015)
+
+
+def test_stream_readers_are_counted(helper, monkeypatch):
+    app_mod, *_ = helper
+    started = []
+    real = app_mod._start_counted
+    monkeypatch.setattr(app_mod, "_start_counted", lambda fn, *a, **k: started.append(fn.__name__) or real(fn, *a, **k))
+    proc = subprocess.Popen(["/bin/sh", "-c", "echo hello"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, _ = app_mod._stream_text_run(proc, "r3", timeout=10)
+    assert "hello" in out and started == ["_reader"]  # BUILD-014
+
+
+def test_registry_cache_write_is_atomic(tmp_path, monkeypatch):
+    from runner.core import registry_loader as rl
+    import state_io
+    monkeypatch.setattr(rl, "_CLAUDE_REGISTRY_JSON", tmp_path / "registry.json")
+    monkeypatch.setattr(rl, "_CLAUDE_REGISTRY_MD", tmp_path / "registry.md")
+    monkeypatch.setattr(rl, "filter_registry_for_agent", lambda agent: {"s": {"agents": ["claude"]}})
+    rl.ensure_claude_registry()
+    before = (tmp_path / "registry.json").read_text()
+    monkeypatch.setattr(state_io.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("killed")))
+    rl.ensure_claude_registry()  # best-effort: swallowed, and the old file stays whole (BUILD-013)
+    assert (tmp_path / "registry.json").read_text() == before

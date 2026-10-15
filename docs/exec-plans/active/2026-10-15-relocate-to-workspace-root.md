@@ -86,4 +86,6 @@ The Claude Code shell here cannot read the workspace root (macOS privacy), so th
 - [x] Test: mutating requests 409 under maintenance while reads stay open; counted threads inherit admission and release on failed start; lock helper never recreates a moved checkout
 - [x] Fix: atomic progress-cache writes; counted terminal handoffs; counted stall passes; full writer audit recorded in the review log (BUILD-010, 011, 012)
 - [x] Test: interrupted progress write keeps the old file; handoff refused under maintenance and recorded after; stall pass counted and skipped
-- [ ] Fresh cross-provider (Codex) build inspection of the script and tests returns no unresolved material findings — inspection 1 REVISE (2 fixed, 1 deferred); inspection 2 REVISE (3 fixed, deferral reversed); inspection 3 REVISE (5 fixed); inspection 4 REVISE (4 fixed); inspection 5 REVISE (3 fixed); inspection 6 pending
+- [x] Fix: newline-level admission for terminal handoffs; atomic, locked registry cache; counted stream readers; locked progress read-merge-replace (BUILD-011, 013, 014, 015)
+- [x] Test: concurrent progress writers all survive; stream readers counted; registry cache write atomic
+- [ ] Fresh cross-provider (Codex) build inspection of the script and tests returns no unresolved material findings — inspection 1 REVISE (2 fixed, 1 deferred); inspection 2 REVISE (3 fixed, deferral reversed); inspection 3 REVISE (5 fixed); inspection 4 REVISE (4 fixed); inspection 5 REVISE (3 fixed); inspection 6 REVISE (4 fixed); inspection 7 pending

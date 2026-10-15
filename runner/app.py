@@ -665,18 +665,19 @@ def _run_progress_path(run_id: str) -> Path:
 def _write_run_progress_json(run_id: str, payload: dict) -> str:
     RUN_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
     path = _run_progress_path(run_id)
-    existing: dict = {}
-    if path.exists():
-        try:
-            existing = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            existing = {}
-    existing.update(payload)
-    existing["run_id"] = run_id
-    existing["updated_at"] = datetime.now(timezone.utc).isoformat()
-    # Atomic: GET progress requests refresh this cache outside admission, so an interrupted
-    # write must leave the previous file intact (BUILD-010).
-    write_json_atomic(path, existing, indent=2, ensure_ascii=False)
+    # One lock over read-merge-replace, so a slow GET cannot put back a stale copy (BUILD-015);
+    # atomic replace, so an interrupted write leaves the previous file whole (BUILD-010).
+    with file_lock(path):
+        existing: dict = {}
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                existing = {}
+        existing.update(payload)
+        existing["run_id"] = run_id
+        existing["updated_at"] = datetime.now(timezone.utc).isoformat()
+        write_json_atomic(path, existing, indent=2, ensure_ascii=False)
     return str(path)
 
 
@@ -740,8 +741,7 @@ def _stream_text_run(
                         "last_event_type": "text",
                     })
 
-    t = threading.Thread(target=_reader, daemon=True)
-    t.start()
+    t = _start_counted(_reader)  # counted until it stops writing, even past a timeout (BUILD-014)
     t.join(timeout=timeout)
     if t.is_alive():
         proc.kill()
@@ -2301,8 +2301,7 @@ def _stream_claude_run(
                 except Exception:
                     pass
 
-    t = threading.Thread(target=_reader, daemon=True)
-    t.start()
+    t = _start_counted(_reader)  # counted until it stops writing, even past a timeout (BUILD-014)
     t.join(timeout=timeout)
 
     if t.is_alive():
@@ -2370,9 +2369,7 @@ def _stream_dsh_run(
         stderr_chunks.append(proc.stderr.read() or b"")  # type: ignore[union-attr]
 
     deadline = time.monotonic() + timeout
-    readers = [threading.Thread(target=_reader, daemon=True), threading.Thread(target=_drain_stderr, daemon=True)]
-    for r in readers:
-        r.start()
+    readers = [_start_counted(_reader), _start_counted(_drain_stderr)]  # counted readers (BUILD-014)
     try:
         for r in readers:
             r.join(timeout=max(0.0, deadline - time.monotonic()))
@@ -2623,7 +2620,7 @@ def _inflight_work():
         _release()
 
 
-def _start_counted(target, *args, **kwargs) -> None:
+def _start_counted(target, *args, **kwargs) -> threading.Thread:
     """Every background writer starts here. Spawned from admitted work (a request, a counted
     worker) it takes its own slot even after admission closed, because its parent is still
     counted at that moment; spawned from anywhere else it must be admitted (BUILD-008). The
@@ -2642,11 +2639,13 @@ def _start_counted(target, *args, **kwargs) -> None:
         finally:
             _TL.admitted = False
             _release()
+    t = threading.Thread(target=run, daemon=True)
     try:
-        threading.Thread(target=run, daemon=True).start()
+        t.start()
     except BaseException:
         _release()
         raise
+    return t
 
 
 def _counted(fn):

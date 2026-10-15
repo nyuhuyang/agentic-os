@@ -111,13 +111,15 @@ def ensure_claude_registry() -> dict[str, dict]:
     _ensure_paths()
     registry = filter_registry_for_agent("claude")
     try:
+        from state_io import file_lock, write_text_atomic
         _CLAUDE_REGISTRY_JSON.parent.mkdir(parents=True, exist_ok=True)
-        _CLAUDE_REGISTRY_JSON.write_text(
-            json.dumps({"generated_at": datetime.now(timezone.utc).isoformat(),
-                         "skill_count": len(registry), "skills": registry},
-                        indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8")
-        _CLAUDE_REGISTRY_MD.write_text(registry_md_text(registry), encoding="utf-8")
+        # GET requests regenerate this cache outside admission: serialized and atomic, so an
+        # interrupted or concurrent write never leaves a partial file (BUILD-013).
+        with file_lock(_CLAUDE_REGISTRY_JSON):
+            write_text_atomic(_CLAUDE_REGISTRY_JSON, json.dumps(
+                {"generated_at": datetime.now(timezone.utc).isoformat(),
+                 "skill_count": len(registry), "skills": registry}, indent=2, ensure_ascii=False) + "\n")
+            write_text_atomic(_CLAUDE_REGISTRY_MD, registry_md_text(registry))
     except (PermissionError, OSError):
         pass  # cache write is best-effort
     return registry

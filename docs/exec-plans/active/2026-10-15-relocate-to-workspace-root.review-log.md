@@ -548,3 +548,64 @@
   - startup migration → runs before serving
   - run_skill.py CLI → shared maintenance lock
 - pytest 405 passed.
+
+## Build inspection 6 (2026-10-15)
+- Fresh Codex session 01a14134-51af-7d11-a8a2-b95956a578c2, base 59fca9d, cross-provider, 212 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/move/i6/claudex-kge0g15k/result.json`.
+- Verdict: **REVISE**, 4 findings (BUILD-010 truncation and BUILD-012 confirmed).
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "BUILD-012 is addressed, and BUILD-010's truncation scenario is fixed. BUILD-011 retains a race, and the writer audit misses additional persistence paths.",
+ "findings": [
+  {
+   "id": "BUILD-011",
+   "severity": "medium",
+   "path": "runner/modules/pty/__init__.py:435",
+   "evidence": "Admission depends on an unlocked pending_handoff check. Socket.IO executes handlers concurrently by default. A newline handler can observe no pending handoff, then skill_selected can set one before _forward_input executes. The latter consumes it and writes run journals without admission, even while maintenance reports inflight=0. Shutdown can interrupt these writes. The added test exercises sequential events only.",
+   "fix": "Reserve admission before every newline operation that could record a handoff, or serialize pending-handoff changes and consumption under one lock. Cover concurrent skill_selected and term_input while maintenance is closed."
+  },
+  {
+   "id": "BUILD-013",
+   "severity": "medium",
+   "path": "runner/core/registry_loader.py:115",
+   "evidence": "GET /api/registry?agent=claude calls load_registry → ensure_claude_registry, which overwrites the workspace's .claude/registry.json and registry.md with non-atomic write_text calls. GET / does the same when Claude is selected. Both bypass maintenance admission at app.py:2669. Relocation can therefore observe zero inflight and stop the runner during either overwrite, leaving an empty or partial generated registry. These GET-side writers are missing from the claimed audit.",
+   "fix": "Make registry reads side-effect free, or protect cache generation with admission through completion. If retaining the atomic-cache exception, atomically replace both cache files and serialize competing writers. Add maintenance coverage for registry-loading GETs."
+  },
+  {
+   "id": "BUILD-014",
+   "severity": "medium",
+   "path": "runner/app.py:743",
+   "evidence": "_stream_text_run starts its persistent log writer as an uncounted daemon thread. On timeout it kills only the subprocess and raises without joining the reader. _stream_claude_run:2304 and _stream_dsh_run:2373 have the same lifetime gap. A reader delayed in persistence, or receiving stdout retained by a descendant, can keep writing after its parent records timeout and releases admission. Maintenance can report zero and terminate that writer, interrupting stream persistence.",
+   "fix": "Give each persistent reader its own counted reservation, or retain the parent's reservation until every reader exits. Clean up subprocesses and pipes on timeout, and cover a reader paused during persistence after the parent times out."
+  },
+  {
+   "id": "BUILD-015",
+   "severity": "medium",
+   "path": "runner/app.py:665",
+   "evidence": "Atomic replacement does not protect the read-modify-write sequence. A progress GET can read a cache before stream_log is populated and pause before replacement. The stream worker can then write stream_log and finish; the delayed GET subsequently replaces that document with its stale copy lacking stream_log. Later progress requests have no saved stream reference and return no events for an unlinked run, despite the stream file existing. The new test checks replacement failure, not concurrent updates.",
+   "fix": "Lock the entire cache read-merge-replace operation for every caller, or make progress GETs read-only. Add an interleaving test where a stale GET commits after the worker's final metadata update."
+  }
+ ],
+ "coverage": [
+  "Verified all seven manifested file hashes, the supplied plan SHA256, and the tracked diff SHA256 against the supplied base.",
+  "Read every manifested file and inspected the relocation script, lock helper, and relocation tests.",
+  "Traced HTTP admission, counted workers, run/retry/baseline/project dispatch, Linear polling and persistence, stall cleanup, terminal handoffs, and shutdown.",
+  "Inspected related CLI locks, shared-state helpers, registry caches, stream readers, DeepSeek persistence, and installed Socket.IO concurrency behavior beyond the manifest.",
+  "Checked relevant SPEC.md requirements for registry display, dispatch records, append-only journals, and crash integrity."
+ ],
+ "limitations": [
+  "No files were edited, tests executed, services changed, or work delegated.",
+  "Findings use static source and interleaving analysis; scenarios were not reproduced.",
+  "Reported relocation success and 405 passing tests were not independently verified.",
+  "Live launchd configuration, external settings, and historical runtime records were not independently audited."
+ ]
+}
+```
+
+### Host dispositions (build inspection 6, all accepted)
+- BUILD-011: every newline in `term_input` is admitted first; only a completed line can record a handoff. When refused, `_forward_input(..., refused=…)` never records and drops a pending handoff with a message, so a concurrent `skill_selected` cannot slip a record past the gate.
+- BUILD-013: `ensure_claude_registry` writes both cache files with `write_text_atomic` (new in state_io) under `file_lock`. Test: an interrupted replace leaves the old file whole.
+- BUILD-014: stream readers (`_stream_text_run`, `_stream_claude_run`, `_stream_dsh_run`, plus the stderr drainer) start through `_start_counted`, which now returns the thread, so each stays counted until it stops writing, even past a timeout. Test checks the reader is started counted.
+- BUILD-015: `_write_run_progress_json` holds a `file_lock` around read-merge-replace. Test: 12 concurrent writers each keep their key.
+- pytest 408 passed.
