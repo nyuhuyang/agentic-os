@@ -52,24 +52,24 @@ The Claude Code shell here cannot read the workspace root (macOS privacy), so th
 - After the run, from the new path via the dashboard terminal: `launchctl print gui/$UID/com.agenticos.runner | grep -A3 arguments`, `grep -rlI <old> .venv | wc -l` → 0, `git worktree list`, `git -C <each worktree> status`, full `pytest tests/`, `curl /api/projects` count
 
 ## Progress Checklist
-- [ ] Test: relocate succeeds (moved, venv + plist + nested worktree repointed, runner up from NEW)
-- [ ] Test: refuses running jobs, an existing target, a non-checkout source, with nothing changed
-- [ ] Test: rolls back fully when only the NEW checkout fails to start, and the restored runner is OLD's
-- [ ] Test: an interrupt after the move rolls back
-- [ ] Test: an unrepairable worktree rolls back
-- [ ] Test: another process using OLD is refused before anything changes
-- [ ] Test: a skill holding the maintenance lock (no OLD in its argv) blocks the move; `run_skill` refuses while maintenance holds it
-- [ ] Test: an incomplete reverse repair exits 2 with the runner restarted on OLD
-- [ ] Test: a failed worktree listing and a failed worktree repair each roll back
-- [ ] Test: an interrupt right after the rename rolls back
-- [ ] Test: an already broken worktree is refused before anything changes
-- [ ] Test: with the real process table, the script's own lock helper is not counted as busy; a real process naming OLD is (REL-010)
-- [ ] Test: `run_skill` holds the maintenance lock before its confirmation prompt, and a stale `run_skill` whose checkout moved never recreates it (REL-002 round 3)
-- [ ] Test: rollback stops (exit 2) when OLD was recreated meanwhile, never nesting the checkout
-- [ ] Test: a checkout renamed between run_skill's identity read and its lock-folder creation is not recreated (REL-002 round 4)
-- [ ] Test: `core.hooksPath` repointed on success and restored on rollback
-- [ ] Test: workspace root found from both checkout locations; saved stream paths follow the moved checkout
-- [ ] Codex plan review of this plan and the script returns APPROVED
+- [x] Test: relocate succeeds (moved, venv + plist + nested worktree repointed, runner up from NEW)
+- [x] Test: refuses running jobs, an existing target, a non-checkout source, with nothing changed
+- [x] Test: rolls back fully when only the NEW checkout fails to start, and the restored runner is OLD's
+- [x] Test: an interrupt after the move rolls back
+- [x] Test: an unrepairable worktree rolls back
+- [x] Test: another process using OLD is refused before anything changes
+- [x] Test: a skill holding the maintenance lock (no OLD in its argv) blocks the move; `run_skill` refuses while maintenance holds it
+- [x] Test: an incomplete reverse repair exits 2 with the runner restarted on OLD
+- [x] Test: a failed worktree listing and a failed worktree repair each roll back
+- [x] Test: an interrupt right after the rename rolls back
+- [x] Test: an already broken worktree is refused before anything changes
+- [x] Test: with the real process table, the script's own lock helper is not counted as busy; a real process naming OLD is (REL-010)
+- [x] Test: `run_skill` holds the maintenance lock before its confirmation prompt, and a stale `run_skill` whose checkout moved never recreates it (REL-002 round 3)
+- [x] Test: rollback stops (exit 2) when OLD was recreated meanwhile, never nesting the checkout
+- [x] Test: a checkout renamed between run_skill's identity read and its lock-folder creation is not recreated (REL-002 round 4)
+- [x] Test: `core.hooksPath` repointed on success and restored on rollback
+- [x] Test: workspace root found from both checkout locations; saved stream paths follow the moved checkout
+- [x] Codex plan review of this plan and the script returns APPROVED — round 5, 2026-10-15 (9 → 4 → 2 → 1 → 0)
 - [ ] Run the script against the real checkout from a dashboard terminal; log captured
 - [ ] Verify each acceptance criterion from the new path
 - [ ] Update the workspace map (repo `CLAUDE.md`, and the workspace-level one if separate)
