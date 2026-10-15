@@ -132,3 +132,4 @@
 ## Plan review round 3 (2026-10-15)
 - Same Codex session (resumed), cross-provider, 36 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/simple/r3/claudex-chmk8q18/result.json`.
 - Verdict: **APPROVED**, 0 findings; bound to plan sha256 `891572e4d6a0057b3802c176e6508385ca7de500eedcf24a4b942eeaaba4074d`. Plan review: 3 rounds (7 → 2 → 0).
+- Build (Claude, 2026-10-15): base 52da675. 360 tests pass; headless-browser check passed (see plan). Key derivation lives in `projects.derive_key` (the server also derives it when the POST has no key); the form mirrors it for the preview.

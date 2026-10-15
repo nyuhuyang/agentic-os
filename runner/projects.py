@@ -238,9 +238,9 @@ def _parse_project(key: str, entry: object) -> Project:
         raise ProjectError(f"{key}: 'path' must be absolute or ~-relative")
     if not root.is_dir() or _git(root, "rev-parse", "--git-dir", check=False).returncode != 0:
         raise ProjectError(f"{key}: {root} is not a git repository")
-    verify = entry.get("verify")
-    if not isinstance(verify, str) or not verify.strip():
-        raise ProjectError(f"{key}: 'verify' is required")
+    verify = entry.get("verify")  # optional: without it the agent runs the project's own tests
+    if verify is not None and (not isinstance(verify, str) or not verify.strip()):
+        raise ProjectError(f"{key}: 'verify' must be a non-empty string when given")
     env = entry.get("env") or {}
     if not isinstance(env, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
         raise ProjectError(f"{key}: 'env' must map strings to strings")
@@ -255,7 +255,7 @@ def _parse_project(key: str, entry: object) -> Project:
     if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
         raise ProjectError(f"{key}: 'verify_timeout_s' must be a positive integer")
     return Project(
-        key=key, path=root, verify=verify.strip(), kind=str(entry.get("kind") or ""),
+        key=key, path=root, verify=(verify or "").strip(), kind=str(entry.get("kind") or ""),
         env=env, confidential=bool(entry.get("confidential", False)),
         no_push=bool(entry.get("no_push", False)),
         seed=tuple(_seed_path(root, s, key) for s in seeds), verify_timeout_s=timeout, note=note,
@@ -415,13 +415,13 @@ def _lifecycle_changed(old: dict, new: dict) -> bool:
             or (old.get("seed") or []) != (new.get("seed") or []))
 
 
-def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = False, init: bool = False,
+def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = False,
                  path: Path | None = None) -> dict:
     """Create or edit one registry entry from the dashboard, validated like dispatch.
-    The key is immutable: worktrees, sidecars and bindings are keyed by it. `init` (create
-    only) makes the folder a new repo after the key/hash/duplicate checks (REGUI-B005). If the
-    save then fails the folder is kept, never deleted (it may already be referenced or hold
-    new files, B006), and the error carries `initialized` so the form retries without init."""
+    The key is immutable: worktrees, sidecars and bindings are keyed by it. On create, a
+    missing or empty folder that is not its own repo root is made one after the key/hash/
+    duplicate checks (REGUI-B005); a non-empty one is refused. If the save then fails the
+    folder is kept, never deleted (B006), and the error carries `initialized`."""
     path = Path(path or REGISTRY_PATH)
     _check_key(key)
     entry = _clean_entry(entry)
@@ -441,9 +441,7 @@ def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = Fa
             raise ProjectError(f"project {key!r} already exists")
         if not create and key not in projects:
             raise ProjectError(f"unknown project {key!r}")
-        if init and not create:
-            raise ProjectError("a new folder can only be created when adding a project")
-        created = init_repo(str(entry.get("path") or "")) if init else None
+        created = init_repo(str(entry.get("path") or "")) if create and _needs_init(entry.get("path")) else None
         try:
             project = _validate_for_save(key, entry, old, create)
             projects[key] = entry
@@ -453,8 +451,7 @@ def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = Fa
                 raise
             if not isinstance(exc, ProjectError):  # e.g. an OSError: still a structured answer (B007)
                 exc = ProjectError(f"save failed: {exc}")
-            exc.args = (f"{exc} — the new repo {created} was created and kept; save again without "
-                        "'create new folder'",)
+            exc.args = (f"{exc} — the new repo {created} was created and kept; save again to register it",)
             exc.initialized = str(created)
             raise exc from None
     return {"key": key, "confidential": project.confidential}
@@ -466,6 +463,8 @@ def _validate_for_save(key: str, entry: dict, old: dict, create: bool) -> Projec
     if project.path.resolve().is_relative_to(WORKTREE_ROOT.resolve()):
         raise ProjectError(f"{key}: path must not be inside {WORKTREE_ROOT}")
     new_repo = create or entry.get("path") != old.get("path")
+    if new_repo and not _is_repo_root(project.path):  # a folder inside another repo is not a project (SAP-001)
+        raise ProjectError(f"{key}: {project.path} is not the root of its git repository")
     trees = _worktree_dirs(key)
     if trees and not create and new_repo:  # sidecars record the old path literally (REGUI-007, B002)
         raise ProjectError(f"{key}: the path cannot change while worktrees exist ({', '.join(trees)}); "
@@ -582,26 +581,164 @@ def _cleanup_worktrees(project: Project, trees: list[str]) -> list[str]:
         return done
 
 
+def _is_repo_root(root: Path) -> bool:
+    proc = _git(root, "rev-parse", "--show-toplevel", check=False) if root.is_dir() else None
+    return bool(proc and proc.returncode == 0 and Path(proc.stdout.strip()).resolve() == root.resolve())
+
+
+def _needs_init(raw_path: object) -> bool:
+    """True for a missing folder or an empty one that is not its own repo root; a non-empty
+    non-root folder is refused (its files would otherwise be committed blind)."""
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return False  # _parse_project reports the missing path
+    root = Path(raw_path).expanduser()
+    if not root.is_absolute() or not os.path.lexists(root):
+        return root.is_absolute()
+    if not root.is_dir() or _is_repo_root(root):
+        return False
+    if any(root.iterdir()):
+        raise ProjectError(f"{root} is not a git repository root and is not empty; run git init and commit first")
+    return True
+
+
 def init_repo(raw_path: str) -> Path:
-    """A brand-new project folder: mkdir + git init + empty initial commit. Refuses an
-    existing path or a missing parent; on failure removes only what it created."""
+    """Make a missing or empty folder a repo: git init + empty initial commit. On failure it
+    removes only what it created (the folder it made, else just .git)."""
     root = Path(raw_path or "").expanduser()
     if not root.is_absolute():
         raise ProjectError("path must be absolute or ~-relative")
-    if os.path.lexists(root):
-        raise ProjectError(f"{root} already exists")
-    if not root.parent.is_dir():
+    existed = os.path.lexists(root)
+    if existed and (not root.is_dir() or root.is_symlink() or any(root.iterdir())):
+        raise ProjectError(f"{root} is not an empty folder")
+    if not existed and not root.parent.is_dir():
         raise ProjectError(f"parent folder {root.parent} does not exist")
-    if root.parent.resolve().is_relative_to(WORKTREE_ROOT.resolve()):
+    if (root if existed else root.parent).resolve().is_relative_to(WORKTREE_ROOT.resolve()):
         raise ProjectError(f"path must not be inside {WORKTREE_ROOT}")
-    root.mkdir()
+    if not existed:
+        root.mkdir()
     try:
         _git(root, "init", "-q")
         _git(root, "commit", "-q", "--allow-empty", "-m", "Initial commit")
     except BaseException:
-        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(root / ".git" if existed else root, ignore_errors=True)
         raise
     return root
+
+
+def derive_key(folder_name: str, taken) -> str:
+    """The project key for a folder: its name made valid for _IDENT, `project` when nothing
+    usable is left (SAP-004), then -2, -3, ... on a clash."""
+    base = re.sub(r"[^A-Za-z0-9._-]", "-", folder_name or "")
+    base = re.sub(r"^[^A-Za-z0-9]+", "", base) or "project"
+    key, n = base, 1
+    while key in taken:
+        n += 1
+        key = f"{base}-{n}"
+    return key
+
+
+def set_confidential(key: str, value: bool, expected_hash: str, path: Path | None = None) -> dict:
+    """Change only `confidential` on the stored entry; every other field stays as written
+    (no _clean_entry, SAP-007). A lifecycle change: needs the exclusive project lock."""
+    path = Path(path or REGISTRY_PATH)
+    _check_key(key)
+    if not isinstance(value, bool):
+        raise ProjectError("confidential must be true or false")
+    from state_io import file_lock
+    with project_lock(key, exclusive=True, blocking=False), file_lock(path):
+        doc = _locked_doc(path, expected_hash)
+        entry = doc["projects"].get(key)
+        if not isinstance(entry, dict):
+            raise ProjectError(f"unknown project {key!r}")
+        entry["confidential"] = value
+        project = _parse_project(key, entry)
+        _write_registry(path, doc, expected_hash)
+    return {"key": key, "confidential": project.confidential}
+
+
+_SCAN_ROOTS = ("Documents", "code", "Projects", "Developer", "src", "repos", "work", "")
+_SCAN_SKIP_NAMES = {"Library", "Desktop", "Downloads", "node_modules", ".venv", "Applications", "Pictures",
+                    "Movies", "Music"}
+
+
+def locate_folder(name: str, entries: list, budget_s: float = 3.0, limit: int = 20) -> dict:
+    """Where a dropped folder lives: the browser gives only its name and entry names. No git
+    calls; one deadline over session-history cwds and a shallow scan of the home folder."""
+    if not isinstance(name, str) or not name or "/" in name or name in (".", "..") or "\0" in name:
+        raise ProjectError("folder name must be a single path component")
+    want = {e for e in (entries or [])[:50] if isinstance(e, str)}
+    deadline = time.monotonic() + budget_s
+    home = Path.home()
+    skip_real = {str(p.resolve()) for p in (WORKTREE_ROOT, *(Path(t) for t in _TEMP_ROOTS)) if p.exists()}
+    skip_real |= {str((home / n).resolve()) for n in ("Library", "Desktop", "Downloads")}
+    found: dict[str, float] = {}
+    complete = True
+
+    def consider(d: Path) -> None:
+        try:
+            real = d.resolve()
+            if any(str(real) == s or str(real).startswith(s + "/") for s in skip_real) or d.is_symlink():
+                return
+            names = set(os.listdir(d))
+        except OSError:
+            return
+        if (want <= names) if want else not names:
+            found[str(real)] = d.stat().st_mtime
+
+    # (a) session-history cwds and their ancestors: string ops only
+    cwds: set[str] = set()
+    with contextlib.suppress(OSError):
+        for proj in CLAUDE_PROJECTS.iterdir() if CLAUDE_PROJECTS.is_dir() else []:
+            for f in proj.glob("*.jsonl") if proj.is_dir() else []:
+                if time.monotonic() > deadline:
+                    complete = False
+                    break
+                with contextlib.suppress(Exception):
+                    from usage_reader import _cached_by_stat
+                    cwd = _cached_by_stat("session_cwd", f, f.stat(), _first_cwd)
+                    if cwd:
+                        cwds.add(cwd)
+    if CODEX_DB.exists():
+        import sqlite3
+        with contextlib.suppress(sqlite3.Error):
+            db = sqlite3.connect(f"file:{CODEX_DB}?mode=ro", uri=True)
+            try:
+                cwds |= {c for (c,) in db.execute("SELECT DISTINCT cwd FROM threads") if isinstance(c, str)}
+            finally:
+                db.close()
+    for cwd in cwds:
+        parts = Path(cwd).parts
+        if name in parts:
+            consider(Path(*parts[:len(parts) - parts[::-1].index(name)]))
+    # (b) breadth-first scan, at most 4 levels under each root, symlinked dirs not followed
+    queue = [(home / r, 0) for r in _SCAN_ROOTS if (home / r).is_dir()]
+    seen: set[str] = set()
+    while queue and len(found) < limit:
+        if time.monotonic() > deadline:
+            complete = False
+            break
+        d, depth = queue.pop(0)
+        try:
+            real = str(d.resolve())
+            if real in seen or any(real == s or real.startswith(s + "/") for s in skip_real):
+                continue
+            seen.add(real)
+            children = [c for c in os.scandir(d) if c.is_dir(follow_symlinks=False)]
+        except OSError:
+            continue
+        for c in children:
+            if c.name.startswith(".") or c.name in _SCAN_SKIP_NAMES:
+                continue
+            if c.name == name:
+                consider(Path(c.path))
+            if depth < 3 and not (d == home and depth == 0 and c.name in _SCAN_ROOTS):
+                queue.append((Path(c.path), depth + 1))
+    if len(found) >= limit:
+        complete = False
+    home_s = str(home)
+    ordered = sorted(found, key=lambda p: found[p], reverse=True)[:limit]
+    return {"matches": ["~" + p[len(home_s):] if p.startswith(home_s + "/") else p for p in ordered],
+            "complete": complete}
 
 
 def get_project(key: str, registry: dict[str, Project] | None = None) -> Project:
@@ -1027,6 +1164,8 @@ def run_verify(project: Project, worktree: Path, base: str | None = None, prefix
 
     Confidential projects run under the sandbox-exec profile (Decision 9) unless `prefix` is given.
     """
+    if not project.verify:
+        raise ProjectError(f"{project.key}: no verify command configured")
     wt = Path(worktree).expanduser().resolve()
     ident = ticket_from_worktree(project, wt)
     meta = load_binding(project, ident)  # exact owned worktree + valid binding

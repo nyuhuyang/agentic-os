@@ -953,7 +953,7 @@ def test_project_api_token_validation_and_conflicts(helper):
     r = c.put("/api/projects/demo", json={"entry": {"path": "x"}, "registry_hash": "stale"})
     assert r.status_code == 409
     fresh = pj.REGISTRY_PATH.parent / "fresh-repo"
-    r = c.post("/api/projects", json={"key": "fresh", "init": True, "registry_hash": snap,
+    r = c.post("/api/projects", json={"key": "fresh", "registry_hash": snap,
                                       "entry": {"path": str(fresh), "verify": "true", "env": {"A": 1}}})
     assert r.status_code == 400 and r.get_json()["initialized"] == str(fresh) and (fresh / ".git").exists()
     run()  # leaves worktree T-1
@@ -998,3 +998,60 @@ def test_project_added_through_save_dispatches_into_its_worktree(helper):
     out = app_mod._run_project_ticket(project_key="demo2", ident="N-1", agent="claude", prompt="p", title="t",
                                       run_id="run-n1", linear_issue_id="iss-n1", task_id="task-n1", launch_gen=0)
     assert out["status"] == "review" and out["worktree"].endswith("demo2/N-1") and out["branch"] == "agent/N-1"
+
+
+def test_project_without_verify_dispatches_with_no_check(helper, monkeypatch):
+    app_mod, run, records, state, events, comments, pushes, repo, _ = helper
+    pj.REGISTRY_PATH.write_text(f"projects:\n  demo:\n    path: {repo}\n    seed: [data]\n    confidential: false\n")
+    prompts = []
+    real = pr.project_prompt
+    monkeypatch.setattr(pr, "project_prompt", lambda *a: prompts.append(real(*a)) or prompts[-1])
+    run()
+    rec = records()[-1]
+    assert rec["status"] == "review" and rec["verify_badge"] == "no check" and "verify" not in rec
+    assert "1 file changed" in rec["shortstat"] and rec["main_checkout_changed"] is False
+    assert "find and run its own tests" in prompts[-1]
+    assert pj.main(["verify", "demo", "--worktree", rec["worktree"]]) == 2
+
+
+def test_baseline_refuses_a_project_without_verify_synchronously(helper, monkeypatch):
+    app_mod, *_, repo, _ = helper
+    pj.REGISTRY_PATH.write_text(f"projects:\n  demo:\n    path: {repo}\n    confidential: false\n")
+    monkeypatch.setattr(app_mod, "_BASELINES", {})
+    started = []
+    monkeypatch.setattr(app_mod.threading, "Thread", lambda *a, **k: started.append(1))
+    r = api(app_mod).post("/api/projects/demo/baseline")
+    assert r.status_code == 400 and "no verify" in r.get_json()["error"]
+    assert not started and app_mod._BASELINES == {} and not (pj.WORKTREE_ROOT / "demo").exists()
+
+
+def test_colliding_baseline_never_unlinks_a_held_ticket_lock(helper, monkeypatch):
+    app_mod, *_ = helper
+    monkeypatch.setattr(app_mod, "_BASELINES", {})
+    monkeypatch.setattr(app_mod.time, "time", lambda: 1234.5)
+    lock = pj.WORKTREE_ROOT / "demo" / ".meta" / "BASELINE-1234500.lock"
+    with pj.ticket_lock("demo", "BASELINE-1234500"):
+        app_mod._run_baseline("demo")
+        assert "busy" in app_mod._BASELINES["demo"]["error"] and lock.exists()
+        with pytest.raises(pj.TicketLocked):  # the holder's lock still excludes a second acquirer
+            with pj.ticket_lock("demo", "BASELINE-1234500"):
+                pass
+
+
+def test_locate_route_reports_completeness(helper, monkeypatch):
+    app_mod, *_ = helper
+    monkeypatch.setattr(pj, "locate_folder", lambda name, entries: {"matches": ["~/x/" + name], "complete": len(entries) < 2})
+    c = api(app_mod)
+    assert c.post("/api/projects/locate", json={"name": "p", "entries": ["a"]}).get_json() == {"matches": ["~/x/p"], "complete": True}
+    assert c.post("/api/projects/locate", json={"name": "p", "entries": ["a", "b"]}).get_json()["complete"] is False
+    monkeypatch.undo()
+    assert c.post("/api/projects/locate", json={"name": "../x", "entries": []}).status_code == 400
+
+
+def test_create_without_key_uses_the_folder_name(helper):
+    app_mod, *_, repo, _ = helper
+    c = api(app_mod)
+    snap = c.get("/api/projects").get_json()["registry_hash"]
+    fresh = pj.REGISTRY_PATH.parent / "Fresh Folder"
+    r = c.post("/api/projects", json={"registry_hash": snap, "entry": {"path": str(fresh), "confidential": False, "no_push": True}})
+    assert r.status_code == 200 and r.get_json()["key"] == "Fresh-Folder" and (fresh / ".git").exists()

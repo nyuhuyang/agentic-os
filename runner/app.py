@@ -3026,8 +3026,9 @@ def api_project_create():
     body = request.get_json(silent=True) or {}
     entry = body.get("entry") or {}
     try:
-        result = _projects.save_project(body.get("key"), entry, str(body.get("registry_hash") or ""), create=True,
-                                        init=bool(body.get("init")))
+        key = body.get("key") or _projects.derive_key(  # the folder name by default
+            Path(str(entry.get("path") or "")).expanduser().name, _projects.raw_entries(_projects.registry_snapshot()[0]))
+        result = _projects.save_project(key, entry, str(body.get("registry_hash") or ""), create=True)
     except _projects.ProjectError as exc:
         return _project_error(exc)
     return jsonify({"ok": True, **result, "warning": _records_unsafe() if result["confidential"] else None})
@@ -3041,6 +3042,26 @@ def api_project_edit(key: str):
     except _projects.ProjectError as exc:
         return _project_error(exc)
     return jsonify({"ok": True, **result, "warning": _records_unsafe() if result["confidential"] else None})
+
+
+@app.route("/api/projects/<key>", methods=["PATCH"])
+def api_project_confidential(key: str):
+    body = request.get_json(silent=True) or {}
+    try:
+        result = _projects.set_confidential(key, body.get("confidential"), str(body.get("registry_hash") or ""))
+    except _projects.ProjectError as exc:
+        return _project_error(exc)
+    return jsonify({"ok": True, **result, "warning": _records_unsafe() if result["confidential"] else None})
+
+
+@app.route("/api/projects/locate", methods=["POST"])
+def api_project_locate():
+    body = request.get_json(silent=True) or {}
+    entries = body.get("entries") if isinstance(body.get("entries"), list) else []
+    try:
+        return jsonify(_projects.locate_folder(body.get("name"), entries))
+    except _projects.ProjectError as exc:
+        return _project_error(exc)
 
 
 @app.route("/api/projects/<key>", methods=["DELETE"])
@@ -3063,6 +3084,8 @@ def _run_baseline(key: str) -> None:
     try:
         with _projects.project_lock(key):  # shared: remove/lifecycle edits wait (REGUI-004)
             project = _projects.get_project(key, _projects.load_registry(errors={}))
+            if not project.verify:  # re-checked under the lock (SAP-005)
+                raise _projects.ProjectError(f"{key}: no verify command configured")
             ident = f"BASELINE-{int(time.time() * 1000)}"
             with _projects.ticket_lock(key, ident):
                 info = _projects.create_worktree(project, ident)
@@ -3072,7 +3095,8 @@ def _run_baseline(key: str) -> None:
                     result.update(_projects.run_verify(project, Path(info["worktree"])))
                 finally:
                     _projects.remove_worktree(project, ident)
-            _projects.drop_ticket_lock(key, ident)
+            # ponytail: the one-off lock file stays (only the shared project lock is held here, so
+            # unlinking could split a lock another holder shares, SAP-009); remove clears it.
     except Exception as exc:
         result.setdefault("status", "error")
         result["error"] = str(exc)
@@ -3083,6 +3107,11 @@ def _run_baseline(key: str) -> None:
 
 @app.route("/api/projects/<key>/baseline", methods=["POST"])
 def api_project_baseline(key: str):
+    try:  # refused before any state or thread (SAP-005)
+        if not _projects.get_project(key, _projects.load_registry(errors={})).verify:
+            return jsonify({"error": f"{key}: no verify command configured"}), 400
+    except _projects.ProjectError as exc:
+        return _project_error(exc)
     with _BASELINE_LOCK:
         if (_BASELINES.get(key) or {}).get("state") == "running":
             return jsonify({"error": f"a baseline for {key} is already running"}), 409

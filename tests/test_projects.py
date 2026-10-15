@@ -55,7 +55,7 @@ def make(repo, ident="T-1", **kw):
 @pytest.mark.parametrize("entry, msg", [
     ({"path": None, "verify": "x"}, "'path' is required"),
     ({"path": "/nonexistent/x", "verify": "x"}, "not a git repository"),
-    ({"verify": ""}, "'verify' is required"),
+    ({"verify": ""}, "'verify' must be a non-empty string"),
     ({"verify": "x", "colour": "red"}, "unknown field"),
     ({"verify": "x", "seed": ["/etc/passwd"]}, "must be relative"),
     ({"verify": "x", "seed": ["../outside"]}, "without '..'"),

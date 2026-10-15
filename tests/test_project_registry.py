@@ -86,10 +86,10 @@ def test_create_edit_remove_round_trip_keeps_others_and_order(reg, tmp_path):
 
 
 @pytest.mark.parametrize("key, bad, msg", [
-    ("gamma", {"verify": ""}, "'verify' is required"),
+    ("gamma", {"verify": "   "}, "'verify' must be a non-empty string"),
     ("gamma", {"env": {"A": 1}}, "'env' must map"),
     ("gamma", {"note": 3}, "'note' must be a string"),
-    ("gamma", {"path": "/nonexistent/x"}, "not a git repository"),
+    ("gamma", {"path": "/nonexistent/x"}, "does not exist"),
     ("alpha", {}, "already exists"),
     ("bad key", {}, "must match"),
     ("../x", {}, "must match"),
@@ -208,13 +208,13 @@ def test_init_runs_after_the_checks_and_is_rolled_back_on_failure(reg, tmp_path)
     path, a, b = reg
     fresh = tmp_path / "fresh"
     with pytest.raises(pj.RegistryConflict):
-        pj.save_project("gamma", entry(fresh, verify="true"), "stale", create=True, init=True)
+        pj.save_project("gamma", entry(fresh, verify="true"), "stale", create=True)
     assert not fresh.exists()  # a stale hash creates nothing
     with pytest.raises(pj.ProjectError, match="already exists"):
-        pj.save_project("alpha", entry(fresh, verify="true"), h(path), create=True, init=True)
+        pj.save_project("alpha", entry(fresh, verify="true"), h(path), create=True)
     assert not fresh.exists()
     with pytest.raises(pj.ProjectError, match="'env' must map.*created and kept") as exc:
-        pj.save_project("gamma", entry(fresh, verify="true", env={"A": 1}), h(path), create=True, init=True)
+        pj.save_project("gamma", entry(fresh, verify="true", env={"A": 1}), h(path), create=True)
     assert exc.value.initialized == str(fresh) and (fresh / ".git").exists()  # never deleted (B006)
     pj.save_project("gamma", entry(fresh, verify="true"), h(path), create=True)  # retry without init
     assert "gamma" in pj.load_registry()
@@ -231,7 +231,7 @@ def test_init_folder_kept_when_a_hand_edit_lands_during_validation(reg, tmp_path
         return out
     monkeypatch.setattr(pj, "_validate_for_save", editing)
     with pytest.raises(pj.RegistryConflict) as exc:
-        pj.save_project("gamma", entry(fresh, verify="true"), h(path), create=True, init=True)
+        pj.save_project("gamma", entry(fresh, verify="true"), h(path), create=True)
     assert exc.value.initialized == str(fresh) and (fresh / ".git").exists()
 
 
@@ -369,8 +369,11 @@ def test_init_repo(reg, tmp_path):
     root = pj.init_repo(str(tmp_path / "fresh"))
     log = subprocess.run(["git", "-C", str(root), "log", "--oneline"], capture_output=True, text=True).stdout
     assert len(log.splitlines()) == 1
-    with pytest.raises(pj.ProjectError, match="already exists"):
+    with pytest.raises(pj.ProjectError, match="not an empty folder"):
         pj.init_repo(str(root))
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert pj.init_repo(str(empty)) == empty and (empty / ".git").is_dir()
     with pytest.raises(pj.ProjectError, match="does not exist"):
         pj.init_repo(str(tmp_path / "missing" / "child"))
 
@@ -413,8 +416,98 @@ def test_registry_write_failure_after_init_keeps_and_reports_the_folder(reg, tmp
     real = pj.tempfile.mkstemp
     monkeypatch.setattr(pj.tempfile, "mkstemp", lambda **kw: (_ for _ in ()).throw(PermissionError("read-only dir")))
     with pytest.raises(pj.ProjectError, match="cannot write.*created and kept") as exc:
-        pj.save_project("gamma", entry(fresh, verify="true"), h(path), create=True, init=True)
+        pj.save_project("gamma", entry(fresh, verify="true"), h(path), create=True)
     assert exc.value.initialized == str(fresh) and (fresh / ".git").exists()
     monkeypatch.setattr(pj.tempfile, "mkstemp", real)
     pj.save_project("gamma", entry(fresh, verify="true"), h(path), create=True)
     assert "gamma" in pj.load_registry()
+
+
+# ── simpler add-project: optional verify, auto-init, confidential-only edit, locate, keys ──
+
+def test_verify_is_optional_but_never_blank(reg, tmp_path):
+    path, a, b = reg
+    assert pj._parse_project("x", {"path": str(a)}).verify == ""
+    for bad in ("   ", 3):
+        with pytest.raises(pj.ProjectError, match="'verify' must be a non-empty string"):
+            pj._parse_project("x", {"path": str(a), "verify": bad})
+    p = pj._parse_project("x", {"path": str(a)})
+    with pytest.raises(pj.ProjectError, match="no verify command"):
+        pj.run_verify(p, a)
+
+
+def test_create_auto_inits_missing_and_empty_folders_only(reg, tmp_path):
+    path, a, b = reg
+    missing, empty, inside = tmp_path / "missing", tmp_path / "empty", a / "sub-empty"
+    empty.mkdir(); inside.mkdir()
+    for key, folder in (("m", missing), ("e", empty), ("i", inside)):
+        pj.save_project(key, {"path": str(folder), "confidential": False}, h(path), create=True)
+        assert pj._is_repo_root(folder), key
+    full = tmp_path / "full"
+    full.mkdir(); (full / "data.csv").write_text("x")
+    (a / "src").mkdir(); (a / "src" / "f.py").write_text("x")
+    before = path.read_bytes()
+    for folder in (full, a / "src"):
+        with pytest.raises(pj.ProjectError, match="not empty; run git init"):
+            pj.save_project("n", {"path": str(folder)}, h(path), create=True)
+    assert path.read_bytes() == before and not (full / ".git").exists()
+
+
+def test_set_confidential_changes_only_that_field(reg):
+    path, a, b = reg
+    doc = yaml.safe_load(path.read_text())
+    doc["projects"]["beta"].update({"note": "", "env": {}, "seed": [], "kind": None})
+    path.write_text(yaml.safe_dump(doc, sort_keys=False))
+    before = dict(pj.raw_entries(path.read_bytes())["beta"])
+    pj.set_confidential("beta", True, h(path))
+    after = pj.raw_entries(path.read_bytes())["beta"]
+    assert after.pop("confidential") is True and before.pop("confidential") is False and after == before
+    with pj.project_lock("beta"):
+        with pytest.raises(pj.ProjectBusy):
+            pj.set_confidential("beta", False, h(path))
+    with pytest.raises(pj.RegistryConflict):
+        pj.set_confidential("beta", False, "stale")
+
+
+@pytest.mark.parametrize("name, want", [("my-repo", "my-repo"), ("My Repo!", "My-Repo-"), ("研究", "project"),
+                                        ("---", "project"), ("_x", "x"), ("alpha", "alpha-2")])
+def test_derive_key(name, want):
+    assert pj.derive_key(name, {"alpha": {}}) == want
+
+
+@pytest.fixture
+def home(tmp_path, monkeypatch):
+    h_ = tmp_path / "home"
+    h_.mkdir()
+    monkeypatch.setenv("HOME", str(h_))
+    monkeypatch.setattr(pj, "_TEMP_ROOTS", ())
+    monkeypatch.setattr(pj, "CLAUDE_PROJECTS", tmp_path / "no-claude")
+    monkeypatch.setattr(pj, "CODEX_DB", tmp_path / "no-codex.sqlite")
+    monkeypatch.setattr(pj, "WORKTREE_ROOT", tmp_path / "wt")
+    return h_
+
+
+def mk(root, *files):
+    root.mkdir(parents=True)
+    for f in files:
+        (root / f).write_text("x")
+    return root
+
+
+def test_locate_folder(home):
+    one = mk(home / "Documents" / "a" / "proj", "app.R", "README.md")
+    mk(home / "code" / "proj", "main.py")
+    mk(home / "Desktop" / "proj", "app.R", "README.md")      # never scanned
+    mk(home / "Library" / "x" / "proj", "app.R", "README.md")
+    os.symlink(one.parent, home / "code" / "linked")           # symlinked dirs are not followed
+    mk(home / "Documents" / "deep" / "1" / "2" / "3" / "4" / "proj", "app.R", "README.md")  # too deep
+    out = pj.locate_folder("proj", ["app.R", "README.md"])
+    assert out == {"matches": ["~/Documents/a/proj"], "complete": True}
+    assert len(pj.locate_folder("proj", [])["matches"]) == 0  # an empty drop matches only empty dirs
+    mk(home / "work" / "proj")
+    assert pj.locate_folder("proj", [])["matches"] == ["~/work/proj"]
+    assert len(pj.locate_folder("proj", ["x-not-there"])["matches"]) == 0
+    assert pj.locate_folder("proj", ["app.R"], budget_s=0)["complete"] is False
+    for bad in ("a/b", "..", ".", ""):
+        with pytest.raises(pj.ProjectError, match="single path component"):
+            pj.locate_folder(bad, [])

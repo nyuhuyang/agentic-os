@@ -380,7 +380,10 @@
   .session-copy:hover { color: var(--accent); border-color: var(--accent); }
   .session-empty { color: var(--text-dim); font-size: calc(12px * var(--fs)); padding: 4px 0; }
   .project-toolbar { display: flex; justify-content: flex-end; padding: 6px 4px; }
-  .project-note { padding: 0 4px 6px 20px; color: var(--text-dim); font-size: calc(11px * var(--fs)); white-space: pre-wrap; }
+  .project-btn { border-radius: 4px !important; }
+  #project-dialog .drop-zone { margin-top: 10px; border: 2px dashed var(--border); border-radius: 6px; padding: 18px; text-align: center; color: var(--text-dim); font-size: calc(12px * var(--fs)); }
+  #project-dialog .drop-zone.over { border-color: var(--accent); color: var(--accent); }
+  #project-dialog .key-preview { margin-top: 6px; color: var(--text-dim); font-size: calc(11px * var(--fs)); }
   .project-baseline { padding: 0 4px 6px 20px; font-size: calc(11px * var(--fs)); }
   .project-baseline .ok { color: var(--green); } .project-baseline .bad { color: var(--red); }
   .project-baseline pre { max-height: 240px; overflow: auto; white-space: pre-wrap; background: var(--surface); padding: 6px; }
@@ -775,25 +778,18 @@
       <dialog id="project-dialog">
         <form id="project-form" method="dialog">
           <b id="project-form-title">Add project</b>
-          <label>Key (Linear label <code>project:&lt;key&gt;</code>; cannot change later)<input type="text" name="key" required pattern="[A-Za-z0-9][A-Za-z0-9._\-]*"></label>
-          <label>Path (git repo root)
-            <div class="row"><input type="text" name="path" required placeholder="~/code/my-repo">
+          <div id="project-drop" class="drop-zone">Drop a project folder here</div>
+          <label>Folder
+            <div class="row"><input type="text" name="path" required placeholder="~/code/my-repo or pick from history">
               <button type="button" class="session-copy" id="project-history-btn">From history</button></div>
           </label>
           <select id="project-history" style="display:none"></select>
-          <label class="check"><input type="checkbox" name="init"> Create this folder as a new git repo (git init + empty commit)</label>
-          <label>Kind<input type="text" name="kind" placeholder="python | r-shiny | wiki"></label>
-          <label>Verify command (runs in the ticket's worktree; exit 0 = pass)<input type="text" name="verify" required placeholder="{root}/.venv/bin/python -m pytest -q"></label>
-          <label>Verify timeout (s)<input type="number" name="verify_timeout_s" min="1" placeholder="600"></label>
-          <label>Env (JSON object of strings, e.g. {"LANG": "en_US.UTF-8"}; PATH is prepended)<textarea name="env" rows="2" spellcheck="false"></textarea></label>
-          <label>Seed (gitignored paths copied into each worktree, one per line)<textarea name="seed" rows="2"></textarea></label>
+          <div class="key-preview" id="project-key-preview"></div>
           <label class="check"><input type="checkbox" name="confidential" checked> Confidential (sandboxed; only template comments reach Linear)</label>
-          <label class="check"><input type="checkbox" name="no_push" checked> No push / deploy</label>
-          <label>Note<textarea name="note" rows="3"></textarea></label>
           <div class="error" id="project-form-error"></div>
           <div class="actions">
             <button type="button" class="session-copy" id="project-form-cancel">Cancel</button>
-            <button type="submit" class="session-copy" id="project-form-save">Save</button>
+            <button type="submit" class="agent-btn active project-btn" id="project-form-save">Save</button>
           </div>
         </form>
       </dialog>
@@ -1059,7 +1055,7 @@ function _renderProjects() {
   const el = document.getElementById('project-panel-content');
   if (!el) return;
   const ps = _projectData.projects || [];
-  const toolbar = '<div class="project-toolbar"><button class="session-copy" data-proj-action="add">+ Project</button></div>';
+  const toolbar = '<div class="project-toolbar"><button class="agent-btn active project-btn" data-proj-action="add">+ Project</button></div>';
   if (_projectData.error) { el.innerHTML = toolbar + `<div class="job-board-empty">Registry error: ${_esc(_projectData.error)}</div>`; return; }
   if (!ps.length) { el.innerHTML = toolbar + '<div class="job-board-empty">No projects registered yet.</div>'; return; }
   const removeBtn = p => `<button class="session-copy" data-proj-action="remove" data-key="${_esc(p.key)}">Remove</button>`;
@@ -1080,10 +1076,9 @@ function _renderProjects() {
       <div class="project-head" data-key="${_esc(p.key)}">${open ? '▾' : '▸'} <b>${_esc(p.key)}</b> ${badges}
         <span class="session-meta">${(p.sessions || []).length} sessions</span>
         <button class="session-copy" data-open-terminal="${_esc(p.key)}">Open terminal</button>
-        <button class="session-copy" data-proj-action="baseline" data-key="${_esc(p.key)}">Baseline</button>
+        ${(p.entry || {}).verify ? `<button class="session-copy" data-proj-action="baseline" data-key="${_esc(p.key)}">Baseline</button>` : ''}
         <button class="session-copy" data-proj-action="edit" data-key="${_esc(p.key)}">Edit</button>
         ${removeBtn(p)}</div>
-      ${p.note ? `<div class="project-note">${_esc(p.note)}</div>` : ''}
       ${_baselineHtml(p.baseline)}
       ${open ? `<div class="session-list">${rows}</div>` : ''}</div>`;
   }).join('');
@@ -1116,57 +1111,57 @@ async function _projectApi(method, url, body) {
   return { ok: res.ok, status: res.status, data };
 }
 
+// The key is the folder name (same rules as projects.derive_key; the server re-checks).
+function _deriveKey(folder) {
+  const base = (folder || '').replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[^A-Za-z0-9]+/, '') || 'project';
+  const taken = new Set((_projectData.projects || []).map(p => p.key));
+  let key = base, n = 1;
+  while (taken.has(key)) key = `${base}-${++n}`;
+  return key;
+}
+
+function _projectKeyPreview() {
+  const f = document.getElementById('project-form');
+  const folder = f.path.value.trim().replace(/\/+$/, '').split('/').pop();
+  document.getElementById('project-key-preview').textContent =
+    f.dataset.mode === 'edit' ? `Key: ${f.dataset.key}` : (folder ? `Key: ${_deriveKey(folder)}  (Linear label project:${_deriveKey(folder)})` : '');
+}
+
 function _projectFormOpen(p) {
-  const dlg = document.getElementById('project-dialog');
   const f = document.getElementById('project-form');
   f.reset();
   const e = (p && p.entry) || {};
   f.dataset.mode = p ? 'edit' : 'add';
+  f.dataset.key = p ? p.key : '';
   f.dataset.hash = _projectData.registry_hash || '';  // the version these fields came from (REGUI-B001)
   document.getElementById('project-form-title').textContent = p ? `Edit ${p.key}` : 'Add project';
-  f.key.value = p ? p.key : ''; f.key.readOnly = !!p;
-  f.path.value = e.path || ''; f.kind.value = e.kind || ''; f.verify.value = e.verify || '';
-  f.verify_timeout_s.value = e.verify_timeout_s || '';
-  f.env.value = e.env && Object.keys(e.env).length ? JSON.stringify(e.env, null, 1) : '';
-  f.seed.value = (e.seed || []).join('\n');
+  f.path.value = e.path || ''; f.path.readOnly = !!p;
   f.confidential.checked = p ? !!e.confidential : true;
-  f.no_push.checked = p ? !!e.no_push : true;
-  f.note.value = e.note || '';
-  f.init.checked = false; f.init.closest('label').style.display = p ? 'none' : '';
-  document.getElementById('project-history-btn').style.display = p ? 'none' : '';
+  for (const id of ['project-history-btn', 'project-drop']) document.getElementById(id).style.display = p ? 'none' : '';
   document.getElementById('project-history').style.display = 'none';
   document.getElementById('project-form-error').textContent = '';
-  dlg.showModal();
+  _projectKeyPreview();
+  document.getElementById('project-dialog').showModal();
 }
 
-function _projectFormEntry(f) {
-  let env = {};
-  if (f.env.value.trim()) {
-    try { env = JSON.parse(f.env.value); } catch (_) { throw new Error('Env must be a JSON object, e.g. {"LANG": "en_US.UTF-8"}'); }
-    if (!env || typeof env !== 'object' || Array.isArray(env)) throw new Error('Env must be a JSON object');
-  }
-  const timeout = parseInt(f.verify_timeout_s.value, 10);
-  return {
-    path: f.path.value.trim(), kind: f.kind.value.trim(), verify: f.verify.value.trim(),
-    verify_timeout_s: Number.isFinite(timeout) ? timeout : null, env,
-    seed: f.seed.value.split('\n').filter(x => x !== ''),  // kept verbatim: no trimming
-    confidential: f.confidential.checked, no_push: f.no_push.checked, note: f.note.value.trim(),
-  };
-}
+document.getElementById('project-form')?.addEventListener('input', _projectKeyPreview);
 
 document.getElementById('project-form')?.addEventListener('submit', async (event) => {
   event.preventDefault();
   const f = event.target, errEl = document.getElementById('project-form-error');
   const save = document.getElementById('project-form-save');
-  const key = f.key.value.trim(), hash = f.dataset.hash || '';
-  let entry;
-  try { entry = _projectFormEntry(f); } catch (err) { errEl.textContent = err.message; return; }
-  save.disabled = true; errEl.textContent = 'Saving… (validates in a throwaway worktree)';
-  const r = f.dataset.mode === 'edit'
-    ? await _projectApi('PUT', `/api/projects/${encodeURIComponent(key)}`, { entry, registry_hash: hash })
-    : await _projectApi('POST', '/api/projects', { key, entry, registry_hash: hash, init: f.init.checked });
+  const hash = f.dataset.hash || '';
+  save.disabled = true; errEl.textContent = 'Saving…';
+  let r;
+  if (f.dataset.mode === 'edit') {  // only confidential changes; every other field stays (SAP-007)
+    r = await _projectApi('PATCH', `/api/projects/${encodeURIComponent(f.dataset.key)}`, { confidential: f.confidential.checked, registry_hash: hash });
+  } else {
+    const path = f.path.value.trim();
+    const key = _deriveKey(path.replace(/\/+$/, '').split('/').pop());
+    r = await _projectApi('POST', '/api/projects', { key, registry_hash: hash,
+      entry: { path, confidential: f.confidential.checked, no_push: true } });
+  }
   save.disabled = false;
-  if (!r.ok && r.data.initialized) f.init.checked = false;  // the folder exists now (REGUI-B006)
   if (!r.ok) {
     // A conflict keeps the stale hash: saving again keeps failing until the form is reopened
     // from the current registry, so a hand edit is never overwritten (REGUI-B001).
@@ -1175,27 +1170,62 @@ document.getElementById('project-form')?.addEventListener('submit', async (event
     return;
   }
   errEl.textContent = '';
+  await loadProjects();  // the next form must open with the new registry hash
   document.getElementById('project-dialog').close();
   if (r.data.warning) alert(`Saved. Warning: ${r.data.warning}`);
-  loadProjects();
 });
 document.getElementById('project-form-cancel')?.addEventListener('click', () => document.getElementById('project-dialog').close());
+
+function _projectOfferPaths(paths, label) {
+  const sel = document.getElementById('project-history');
+  sel.style.display = '';
+  sel.innerHTML = `<option value="">— ${_esc(label)} —</option>` + paths.map(p => `<option value="${_esc(p)}">${_esc(p)}</option>`).join('');
+  sel.onchange = () => {
+    if (!sel.value) return;
+    document.getElementById('project-form').path.value = sel.value;
+    _projectKeyPreview();
+  };
+}
 
 document.getElementById('project-history-btn')?.addEventListener('click', async () => {
   const sel = document.getElementById('project-history');
   sel.innerHTML = '<option>Loading…</option>'; sel.style.display = '';
   const r = await _projectApi('GET', '/api/projects/suggestions');
-  const rows = (r.data.suggestions || []);
-  sel.innerHTML = '<option value="">— pick a folder from session history —</option>' + rows.map((s, i) =>
-    `<option value="${i}">${_esc(s.path)} · ${_esc(s.agents.join('+'))} · ${s.sessions} sessions · ${_ago(s.last_used)}</option>`).join('');
-  sel.onchange = () => {
-    const s = rows[parseInt(sel.value, 10)];
-    if (!s) return;
-    const f = document.getElementById('project-form');
-    f.path.value = s.path;
-    if (!f.key.value) f.key.value = s.name.replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[^A-Za-z0-9]+/, '').toLowerCase();
-  };
+  _projectOfferPaths((r.data.suggestions || []).map(s => s.path), 'pick a folder from session history');
 });
+
+// Drag a folder from Finder: the browser gives only its name and entries, never its path,
+// so the server finds it by name + entry names (SAP-003: fill only a complete, unique match).
+(() => {
+  const zone = document.getElementById('project-drop');
+  if (!zone) return;
+  const errEl = () => document.getElementById('project-form-error');
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+  zone.addEventListener('drop', async (e) => {
+    e.preventDefault(); zone.classList.remove('over');
+    const item = e.dataTransfer.items && e.dataTransfer.items[0];
+    const entry = item && item.webkitGetAsEntry && item.webkitGetAsEntry();
+    await _projectHandleDrop(entry);
+  });
+})();
+
+async function _projectHandleDrop(entry) {
+  const errEl = document.getElementById('project-form-error');
+  if (!entry || !entry.isDirectory) { errEl.textContent = 'Drop a folder, not a file.'; return; }
+  const names = await new Promise(resolve => entry.createReader().readEntries(es => resolve(es.slice(0, 50).map(x => x.name)), () => resolve([])));
+  errEl.textContent = `Looking for "${entry.name}"…`;
+  const r = await _projectApi('POST', '/api/projects/locate', { name: entry.name, entries: names });
+  if (!r.ok) { errEl.textContent = r.data.error || `HTTP ${r.status}`; return; }
+  const { matches = [], complete } = r.data;
+  const f = document.getElementById('project-form');
+  if (complete && matches.length === 1) {
+    f.path.value = matches[0]; errEl.textContent = ''; _projectKeyPreview(); return;
+  }
+  if (!matches.length) { errEl.textContent = `Could not find "${entry.name}" — paste its path instead.`; return; }
+  errEl.textContent = complete ? `Several folders named "${entry.name}" — pick one.` : `Search incomplete — pick the right "${entry.name}" or paste its path.`;
+  _projectOfferPaths(matches, complete ? 'pick the dropped folder' : 'search incomplete: pick the dropped folder');
+}
 
 async function _projectRemove(key) {
   if (!confirm(`Remove project "${key}" from AgenticOS? Its files are not touched.`)) return;

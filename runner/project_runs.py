@@ -106,6 +106,9 @@ def project_prompt(prompt: str, project: projects.Project, binding: dict, agent:
     if project.no_push:
         rules.append("Do not push, deploy or publish anything.")
     rules.append("Never edit files outside this worktree.")
+    if not project.verify:
+        rules.append("No check command is configured for this project: find and run its own tests "
+                     "before you finish, and report the result.")
     return "\n".join(rules) + "\n\n" + prompt
 
 
@@ -262,9 +265,10 @@ def post_run(project: projects.Project, binding: dict, agent: str, title: str,
         dirty = projects.uncommitted(project, wt)
         result["uncommitted"] = dirty[:50]
         if not stopped():  # a cancel skips verify, never the closing check and badge (I8-05)
-            verify = projects.run_verify(project, wt, base=binding["base_sha"], on_start=on_start)
-            result["verify"] = {k: verify[k] for k in ("status", "exit", "duration_s")}
-            result["verify_tail"] = verify["tail"]  # local run record only, never a tracker comment
+            if project.verify:  # optional: without it the agent ran the project's own tests
+                verify = projects.run_verify(project, wt, base=binding["base_sha"], on_start=on_start)
+                result["verify"] = {k: verify[k] for k in ("status", "exit", "duration_s")}
+                result["verify_tail"] = verify["tail"]  # local run record only, never a tracker comment
             projects.load_binding(project, binding["issue_identifier"])  # still on agent/<id> after verify
             dirty = sorted(set(dirty) | set(projects.uncommitted(project, wt)))  # verify may dirty it too (I6-09)
             result["uncommitted"] = dirty[:50]
@@ -285,10 +289,12 @@ def post_run(project: projects.Project, binding: dict, agent: str, title: str,
         badge = "main checkout changed"
     elif "post_run_error" in result:
         badge = "error"
-    elif verify is None:
-        badge = None if stopped() else "error"  # cancelled before verify: the status says it
+    elif verify is None and stopped():
+        badge = None  # cancelled before verify: the status says it
     elif dirty:
-        badge = "uncommitted changes"  # verify ran on files the branch does not hold
+        badge = "uncommitted changes"  # verify (if any) ran on files the branch does not hold
+    elif verify is None:
+        badge = "no check" if not project.verify else "error"
     else:
         badge = verify["status"]
     if badge:
