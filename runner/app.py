@@ -13,6 +13,11 @@ import argparse
 import dataclasses
 import contextlib
 import functools
+import sys
+
+# Run as a script, this file is __main__; modules that `from app import ...` must get this same
+# instance (one Flask app, one _running_jobs, one maintenance gate), not a second copy (BUILD-001).
+sys.modules.setdefault("app", sys.modules[__name__])
 import hashlib
 import hmac
 import json
@@ -2581,18 +2586,62 @@ class MaintenanceRefused(RuntimeError):
     pass
 
 
-@contextlib.contextmanager
-def _inflight_work():
+_TL = threading.local()  # .admitted: this thread already works under a reservation
+
+
+def _admit() -> None:
+    """Reserve one in-flight slot for a new run, or refuse under maintenance. Same lock as
+    switching maintenance on, so a run is either counted or refused."""
     global _INFLIGHT
-    with _INFLIGHT_LOCK:  # same lock as switching maintenance on: either counted or refused
+    with _INFLIGHT_LOCK:
         if _MAINTENANCE.is_set():
             raise MaintenanceRefused("maintenance in progress (the checkout is being moved); try again shortly")
         _INFLIGHT += 1
+
+
+def _reserve_continuation() -> None:
+    """A follow-up write of an already admitted run (e.g. the final tracker push): counted,
+    allowed even after admission closed (BUILD-005). The caller's thread releases it."""
+    global _INFLIGHT
+    with _INFLIGHT_LOCK:
+        _INFLIGHT += 1
+
+
+def _release() -> None:
+    global _INFLIGHT
+    with _INFLIGHT_LOCK:
+        _INFLIGHT -= 1
+
+
+@contextlib.contextmanager
+def _inflight_work(reserved: bool = False):
+    """Run the body counted. Nested inside an admitted thread it neither re-checks nor counts
+    twice; `reserved` takes over a slot the caller already reserved (BUILD-004)."""
+    if getattr(_TL, "admitted", False):
+        if reserved:
+            _release()
+        yield
+        return
+    if not reserved:
+        _admit()
+    _TL.admitted = True
     try:
         yield
     finally:
-        with _INFLIGHT_LOCK:
-            _INFLIGHT -= 1
+        _TL.admitted = False
+        _release()
+
+
+def _start_reserved(target, *args, **kwargs) -> None:
+    """Start a worker that takes over the caller's reservation (one reservation per call)."""
+    def run():
+        with _inflight_work(reserved=True):
+            target(*args, **kwargs)
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except BaseException:
+        _release()
+        raise
 
 
 def _counted(fn):
@@ -3187,11 +3236,16 @@ def api_project_baseline(key: str):
             return jsonify({"error": f"{key}: no verify command configured"}), 400
     except _projects.ProjectError as exc:
         return _project_error(exc)
+    try:
+        _admit()  # before any state is published (BUILD-004)
+    except MaintenanceRefused as exc:
+        return jsonify({"error": str(exc)}), 409
     with _BASELINE_LOCK:
         if (_BASELINES.get(key) or {}).get("state") == "running":
+            _release()
             return jsonify({"error": f"a baseline for {key} is already running"}), 409
         _BASELINES[key] = {"state": "running", "started_at": time.time()}
-    threading.Thread(target=_run_baseline, args=(key,), daemon=True).start()
+    _start_reserved(_run_baseline, key)
     return jsonify({"ok": True, "state": "running"})
 
 
@@ -3412,6 +3466,19 @@ def api_run_cancel(run_id: str):
 
 @app.route("/api/runs/<run_id>/retry", methods=["POST"])
 def api_run_retry(run_id: str):
+    try:
+        _admit()  # before any comment, state or thread (BUILD-004)
+    except MaintenanceRefused as exc:
+        return jsonify({"error": str(exc)}), 409
+    _TL.retry_handed = False
+    try:
+        return _api_run_retry(run_id)
+    finally:
+        if not _TL.retry_handed:
+            _release()
+
+
+def _api_run_retry(run_id: str):
     if not RUN_LOG.exists():
         return jsonify({"error": "not found"}), 404
     original = None
@@ -3505,12 +3572,13 @@ def api_run_retry(run_id: str):
                     fallback=lambda: _linear_comment_body(title="Human Feedback", feedback=reply, attachments=attachments))
                 if body:
                     _post_linear_comment(linear_issue_id, body)
-        threading.Thread(target=_run_project_ticket, kwargs=dict(
+        _TL.retry_handed = True
+        _start_reserved(_run_project_ticket,
             project_key=bound["project_key"], ident=bound.get("issue_identifier") or "",
             agent=agent, prompt=prompt, title=original.get("prompt", "")[:80], run_id=new_run_id,
             linear_issue_id=linear_issue_id, task_id=task_id, launch_gen=_launch_gen,
             attempt=prev_attempt + 1, parent_run_id=run_id, resume_session=_lock_session_id,
-            reuse_only=True, skill=skill, confidential=bound.get("confidential")), daemon=True).start()
+            reuse_only=True, skill=skill, confidential=bound.get("confidential"))
         return jsonify({"ok": True, "run_id": new_run_id, "skill": skill, "attempt": prev_attempt + 1, "agent": agent})
 
     def _finish(final_state: str) -> None:
@@ -3543,7 +3611,6 @@ def api_run_retry(run_id: str):
     }
     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "running", "skill": skill})
 
-    @_counted
     def _do_retry():
             nonlocal agent
             # Claude / Codex / dsh — subprocess dispatch with streaming + resume
@@ -3661,7 +3728,8 @@ def api_run_retry(run_id: str):
                     )
                 _finish("review")
 
-    threading.Thread(target=_do_retry, daemon=True).start()
+    _TL.retry_handed = True
+    _start_reserved(_do_retry)
     return jsonify({"ok": True, "run_id": new_run_id, "skill": skill, "attempt": prev_attempt + 1, "agent": agent})
 
 

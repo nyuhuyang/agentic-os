@@ -79,4 +79,7 @@ The Claude Code shell here cannot read the workspace root (macOS privacy), so th
 - [x] Fix: maintenance gate — every run counted in flight until its record is written; new runs refused while the gate is closed; the script closes it and requires zero in flight before stopping the runner (BUILD-001, first deferred, then fixed after inspection 2)
 - [x] Fix: escaped pgrep patterns; device check on physical paths (BUILD-002, BUILD-003 remainders)
 - [x] Test: gate counts and refuses (/run, project dispatch, Linear dispatch); script refuses and reopens the gate with runs in flight; look-alike runner ignored on rollback; dotted OLD replaced literally; symlinked parent on another filesystem refused
-- [ ] Fresh cross-provider (Codex) build inspection of the script and tests returns no unresolved material findings — inspection 1 REVISE (2 fixed, 1 deferred); inspection 2 REVISE (3 fixed, deferral reversed); inspection 3 pending
+- [x] Fix: `app.py` registers itself as module `app`, so the served instance and `from app import …` are one (BUILD-001: Linear jobs had lived in a second copy)
+- [x] Fix: route-level reservations for retry, baseline and Linear dispatch (409 before any state); continuation slots for final tracker pushes; script takes the lock, then traps, then the gate, reopening it on any pre-stop exit (BUILD-004..007)
+- [x] Test: script entrypoint shares one module; retry/baseline refused before state; push counted until persisted; lost gate answer, early signal, overlapping relocations
+- [ ] Fresh cross-provider (Codex) build inspection of the script and tests returns no unresolved material findings — inspection 1 REVISE (2 fixed, 1 deferred); inspection 2 REVISE (3 fixed, deferral reversed); inspection 3 REVISE (5 fixed); inspection 4 pending

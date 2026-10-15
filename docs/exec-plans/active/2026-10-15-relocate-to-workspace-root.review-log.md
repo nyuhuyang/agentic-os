@@ -356,3 +356,72 @@
 - BUILD-002: every pgrep pattern is escaped (`lit`, including the dot in `app.py`). Tests: rollback with a dotted NEW and a look-alike runner (shim pgrep now applies the real regex); a dotted OLD is replaced literally while a look-alike path survives.
 - BUILD-003: devices are compared on physical paths (`cd -P` + `stat -f %d .`). Test: a destination parent that is a symlink to /dev is refused.
 - pytest 393 passed (relocate suite 23).
+
+## Build inspection 3 (2026-10-15)
+- Fresh Codex session 01a1410d-d310-7d62-8ef2-f0dd050ecc97, base 1d139fe, cross-provider, 298 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/move/i3/claudex-8lf3fxf2/result.json`.
+- Verdict: **REVISE**, 5 findings.
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "BUILD-002 and BUILD-003 address the reported scenarios. BUILD-001 remains unresolved, and the maintenance gate introduces admission and cleanup defects.",
+ "findings": [
+  {
+   "id": "BUILD-001",
+   "severity": "high",
+   "path": "runner/modules/linear/__init__.py:574",
+   "evidence": "The installed LaunchAgent executes runner/app.py directly, so the serving application and maintenance endpoint belong to __main__. Linear imports _inflight_work from app, loading a separate module with its own _MAINTENANCE, _INFLIGHT and _running_jobs; app.py contains no module alias. A Linear worker paused between removing its job and writing its record can therefore remain active while the serving endpoint reports inflight=0 and no running jobs. Relocation then stops the runner and loses the completion record. The new tests use import app throughout, hiding this split.",
+   "fix": "Use one canonical application/state instance, or move admission and job state into a shared module. Add coverage using the actual script entrypoint, with a Linear completion paused before its record write."
+  },
+  {
+   "id": "BUILD-004",
+   "severity": "medium",
+   "path": "runner/app.py:3546",
+   "evidence": "Retry admission happens inside the background worker, after the route publishes running state and returns success. During maintenance, an unbound retry inserts _running_jobs at line 3537, but _counted refuses its worker without executing cleanup or logging. Bound retries similarly push the tracker to running before their project worker refuses. Baseline admission has the same ordering: lines 3193–3195 publish running and return success, while the refused worker never clears _BASELINES; subsequent baseline requests remain blocked after maintenance ends.",
+   "fix": "Reserve admission atomically before publishing state or launching a thread, return 409 on refusal, and transfer that reservation to the worker through finalization. Reuse the reservation across nested project dispatch rather than checking admission again."
+  },
+  {
+   "id": "BUILD-005",
+   "severity": "medium",
+   "path": "runner/modules/linear/__init__.py:1216",
+   "evidence": "Counted workers still return before their final tracker writes finish. Project completion calls _push_linear_state_async at app.py:2814, and non-project Linear completion reaches push_state through _mark_issue_review. push_state only updates memory and launches an uncounted daemon thread; _push_sync performs the durable local or remote update later. If that thread is delayed, inflight reaches zero and relocation can terminate it, leaving a completed ticket persistently In Progress. This remains possible even after the module-instance defect is fixed.",
+   "fix": "Keep final tracker updates within the admitted operation, or reserve continuation work before spawning the thread and release it only after persistence finishes. Existing completion work must remain allowed after admission closes."
+  },
+  {
+   "id": "BUILD-006",
+   "severity": "medium",
+   "path": "scripts/relocate_checkout.sh:50",
+   "evidence": "The script closes admission at line 50, but installs HUP/INT/TERM handlers only at line 179. A signal during worktree checks, lock acquisition or backup exits without reopening admission; the EXIT trap at line 95 only releases the lock helper. The runner stays up but rejects new runs indefinitely. Also, if the server closes admission but curl times out receiving its response, MAINT is still off and die skips reopening it.",
+   "fix": "Install phase-aware cleanup before attempting to close admission. Handle uncertain request outcomes and every pre-stop exit by restoring admission, and report explicitly if restoration cannot be confirmed. Cover early interruption and a response timeout after server-side gate activation."
+  },
+  {
+   "id": "BUILD-007",
+   "severity": "medium",
+   "path": "scripts/relocate_checkout.sh:27",
+   "evidence": "Admission is a shared boolean without ownership, and scripts modify it before obtaining the exclusive maintenance lock. If attempt A holds the lock and pauses before bootout, attempt B closes the already-closed gate, detects A's lock helper in others(), and aborts. B's die then reopens A's gate. A never rechecks admission or inflight before stopping the runner, allowing newly admitted work to be interrupted and its completion lost.",
+   "fix": "Serialize relocation attempts before modifying the runner gate, or introduce ownership so an abort can release only its own maintenance reservation. Cover overlapping attempts where the second aborts while the first remains active."
+  }
+ ],
+ "coverage": [
+  "Verified all seven manifested file hashes, the supplied plan SHA256, and the tracked diff SHA256 against the supplied base.",
+  "Inspected every manifested file, including relocation logic, review history, changed runtime paths and regression tests.",
+  "Traced launchd startup, module registration and lazy imports, run/retry/project/baseline admission, Linear dispatch, completion logging and shutdown.",
+  "Inspected related CLI maintenance locking, tracker persistence, shared-state helpers, cancellation, stall detection and PTY handoff writers beyond the manifest.",
+  "Checked relevant specification requirements and confirmed the reported regex-escaping and symlinked-filesystem fixes statically."
+ ],
+ "limitations": [
+  "No files were edited, tests run, services changed or work delegated.",
+  "Failure scenarios were established through static source and interleaving analysis, without reproduction.",
+  "The reported successful relocation and 393 passing tests were not independently verified.",
+  "External configuration and historical runtime paths were not exhaustively audited; the installed LaunchAgent plist was inspected."
+ ]
+}
+```
+
+### Host dispositions (build inspection 3, all accepted)
+- BUILD-001: `app.py` registers itself as `sys.modules["app"]` (setdefault). When launchd runs it as `__main__`, the Linear, PTY and backends modules now reach the same instance: one Flask app, one `_running_jobs`, one gate. Before this fix, Linear dispatch registered its jobs in a second copy the dashboard never saw. Test: runs `runner/app.py` via `runpy` as `__main__` (with `--help`, so it does not serve), then checks `import app` returns that module.
+- BUILD-004: an explicit reservation API (`_admit`, `_release`, `_start_reserved`, plus a thread-local "admitted" flag so nested work such as retry → project launch neither re-checks nor double-counts). Retry, baseline and the Linear PATCH dispatch reserve at the route start, before any comment, state, job or thread, and return 409 when refused. The single worker they start takes over the slot; if no worker starts, the route releases it. Test: retry and baseline under maintenance return 409 with no job, event, comment or baseline state, and inflight returns to 0.
+- BUILD-005: `push_state` reserves a continuation slot before spawning the sync thread. Continuations are allowed after admission closes, and the thread releases the slot after `_push_sync` persists. Test: a push started inside an admitted run keeps inflight at 1 under maintenance until it persists, then 0.
+- BUILD-006: the script installs its signal handler (defined before use) right after taking the maintenance lock, before touching the gate. `MAINT=on` is set before the close request, so a lost answer still leads to a reopen. `reopen` confirms `"maintenance":false` and otherwise prints a warning with the manual command. Tests: a lost gate answer reopens; a TERM right after the gate closes reopens and never stops the runner.
+- BUILD-007: the maintenance lock is taken before the gate is touched, so a second relocation fails at the lock and never changes the first one's gate. Test covers overlapping attempts.
+- pytest 399 passed (relocate suite 26).

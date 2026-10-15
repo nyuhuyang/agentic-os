@@ -24,8 +24,13 @@ maint() {  # switch the runner's maintenance gate; prints its JSON answer
   http -X POST -H "X-AgenticOS-Token: $token" -H "Origin: $URL" -H 'Content-Type: application/json' \
     -d "{\"on\": $1}" "$URL/api/maintenance"
 }
+reopen() {  # give the still-running old runner its admission back; say so if that fails
+  [ "$MAINT" = on ] || return 0
+  case "$(maint false)" in *'"maintenance":false'*|*'"maintenance": false'*) MAINT=off ;;
+    *) say "WARNING: admission may still be closed; reopen it with: curl -X POST -H 'X-AgenticOS-Token: <token>' -H 'Content-Type: application/json' -d '{\"on\": false}' $URL/api/maintenance" ;; esac
+}
 die() {  # before the runner is stopped, give the old runner its gate back
-  [ "$MAINT" = on ] && [ "$PHASE" = check ] && maint false >/dev/null
+  [ "$PHASE" = check ] && reopen
   say "ABORT: $*"; exit 1
 }
 manual() { say "NEEDS A HUMAN: $*"; exit 2; }
@@ -45,13 +50,6 @@ new_dev=$(cd -P "$(dirname "$NEW")" && stat -f %d .) || die "cannot resolve the 
 
 token=$(http "$URL/" | sed -n 's/.*name="agentic-os-token" content="\([^"]*\)".*/\1/p')
 [ -n "$token" ] || die "runner not reachable; start it first so running jobs can be checked"
-# Close admission first, then require nothing in flight: no dashboard or Linear run is working
-# or still writing its record, and none can start before the runner stops (BUILD-001).
-gate=$(maint true) || die "could not close the runner's admission"
-MAINT=on
-case "$gate" in *'"inflight": 0'*|*'"inflight":0'*) ;; *) die "runs are in flight: $gate" ;; esac
-jobs=$(http -H "X-AgenticOS-Token: $token" "$URL/api/runs?state=running")
-[ "$jobs" = "[]" ] || die "jobs are running (or the check failed): $jobs"
 LOCKER=none
 # Processes naming the checkout, minus the runner, this script and its own lock helper (REL-010).
 # Succeeds (busy) and prints them when any remain; matched by PID, so multi-line argv is fine.
@@ -94,8 +92,30 @@ LOCK_STATUS=$(mktemp -t agenticos-lock) || die "cannot create a temp file"
 LOCKER=$!
 trap 'kill $LOCKER 2>/dev/null; rm -f "$LOCK_STATUS"' EXIT
 i=0; until [ -s "$LOCK_STATUS" ]; do i=$((i + 1)); [ $i -gt 20 ] && die "maintenance lock helper did not answer"; sleep 0.5; done
-[ "$(cat "$LOCK_STATUS")" = held ] || die "a skill run holds the maintenance lock"
+[ "$(cat "$LOCK_STATUS")" = held ] || die "a skill run or another relocation holds the maintenance lock"
 say "maintenance lock held"
+# Signals from here on are handled; the lock serializes relocations, so only this attempt
+# ever touches the runner's gate (BUILD-006, BUILD-007).
+on_signal() {
+  case "$PHASE" in
+    moving)  # the rename may or may not have happened: look, then recover (REL-008)
+      if [ -e "$NEW" ] && [ ! -e "$OLD" ]; then rollback "interrupted during the move"; fi
+      say "interrupted before the move"; restart_old; exit 1 ;;
+    stopped) say "interrupted before the move"; restart_old; exit 1 ;;
+    moved) rollback "interrupted" ;;
+    *) reopen; exit 1 ;;  # still before the stop
+  esac
+}
+trap on_signal HUP INT TERM
+
+# Close admission, then require nothing in flight: no dashboard or Linear run is working or
+# still writing its record, and none can start before the runner stops (BUILD-001). MAINT is
+# set before the request: a lost response still gets the gate reopened on abort.
+MAINT=on
+gate=$(maint true) || die "could not close the runner's admission (no answer)"
+case "$gate" in *'"inflight":0,'*|*'"inflight": 0,'*) ;; *) die "runs are in flight or the gate did not answer: $gate" ;; esac
+jobs=$(http -H "X-AgenticOS-Token: $token" "$URL/api/runs?state=running")
+[ "$jobs" = "[]" ] || die "jobs are running (or the check failed): $jobs"
 
 BACKUP=$(mktemp -t agenticos-plist) || die "cannot create a plist backup"
 cp "$PLIST" "$BACKUP" && cmp -s "$PLIST" "$BACKUP" || die "plist backup did not verify"
@@ -166,17 +186,6 @@ rollback() {
   say "rolled back; runner up on $OLD"
   exit 1
 }
-on_signal() {
-  case "$PHASE" in
-    moving)  # the rename may or may not have happened: look, then recover (REL-008)
-      if [ -e "$NEW" ] && [ ! -e "$OLD" ]; then rollback "interrupted during the move"; fi
-      say "interrupted before the move"; restart_old; exit 1 ;;
-    stopped) say "interrupted before the move"; restart_old; exit 1 ;;
-    moved) rollback "interrupted" ;;
-    *) [ "$MAINT" = on ] && maint false >/dev/null; exit 1 ;;  # still before the stop
-  esac
-}
-trap on_signal HUP INT TERM
 
 PHASE=stopped
 launchctl bootout "$DOMAIN/$LABEL" || { PHASE=check; die "could not stop $LABEL"; }

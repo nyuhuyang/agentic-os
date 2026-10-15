@@ -24,7 +24,10 @@ case "$1" in
     [ "$at" = "${SHIM_FAIL_AT:-}" ] || echo "$at" > "$SHIM_UP" ;;
 esac''',
     "curl": '''case "$*" in
-  *api/maintenance*) echo "curl maintenance $*" >> "$SHIM_LOG"; echo "{\\"inflight\\":${SHIM_INFLIGHT:-0},\\"maintenance\\":true}" ;;
+  *api/maintenance*) echo "curl maintenance $*" >> "$SHIM_LOG"
+    case "$*" in *'"on": false'*) m=false ;; *) m=true ;; esac
+    [ -n "${SHIM_GATE_TIMEOUT:-}" ] && [ "$m" = true ] && exit 28  # closed server-side, answer lost
+    echo "{\\"inflight\\":${SHIM_INFLIGHT:-0},\\"maintenance\\":$m}" ;;
   *api/runs*) echo "${SHIM_JOBS:-[]}" ;;
   *%{http_code}*) [ -s "$SHIM_UP" ] && echo 200 || echo 000 ;;
   *) [ -s "$SHIM_UP" ] && echo '<meta name="agentic-os-token" content="tok">' ;;
@@ -172,7 +175,7 @@ def test_a_running_skill_blocks_the_move(env):
     holder.stdout.readline()
     try:
         r = run(old, new, e)
-        assert r.returncode == 1 and "a skill run holds the maintenance lock" in r.stdout
+        assert r.returncode == 1 and "holds the maintenance lock" in r.stdout
         assert old.exists() and up.read_text().strip() == str(old)
     finally:
         holder.kill()
@@ -345,3 +348,39 @@ def test_a_symlinked_parent_on_another_filesystem_is_refused(env, tmp_path):
     (tmp_path / "ext").symlink_to("/dev")  # looks local, resolves to devfs
     r = run(old, tmp_path / "ext" / "agentic-os", e)
     assert r.returncode == 1 and "another filesystem" in r.stdout and old.exists()
+
+
+def test_a_lost_gate_answer_still_reopens_admission(env):
+    old, new, plist, up, e = env
+    r = run(old, new, {**e, "SHIM_GATE_TIMEOUT": "1"})
+    assert r.returncode == 1 and "no answer" in r.stdout and "WARNING" not in r.stdout
+    calls = Path(e["SHIM_LOG"]).read_text()
+    assert calls.index('{"on": true}') < calls.index('{"on": false}') and "bootout" not in calls
+
+
+def test_a_second_relocation_is_refused_without_touching_the_gate(env):
+    old, new, plist, up, e = env
+    lock = old / "outputs" / "locks" / "maintenance.lock"
+    holder = subprocess.Popen(["/usr/bin/python3", "-c", (
+        "import fcntl, os, sys, time; os.makedirs(os.path.dirname(sys.argv[1]), exist_ok=True); "
+        "f = open(sys.argv[1], 'a'); fcntl.flock(f, fcntl.LOCK_EX); print('x', flush=True); time.sleep(30)"),
+        "outputs/locks/maintenance.lock"], stdout=subprocess.PIPE, cwd=str(old))  # attempt A
+    holder.stdout.readline()
+    try:
+        r = run(old, new, e)  # attempt B
+        assert r.returncode == 1 and "another relocation holds the maintenance lock" in r.stdout
+        log = Path(e["SHIM_LOG"])
+        assert not log.exists() or "maintenance" not in log.read_text()  # B never touched A's gate
+    finally:
+        holder.kill()
+
+
+def test_an_early_signal_reopens_admission(env, tmp_path):
+    old, new, plist, up, e = env
+    # TERM as soon as the gate closes (from the curl shim), i.e. before the runner is stopped
+    shim = Path(e["PATH"].split(":")[0]) / "curl"
+    shim.write_text(shim.read_text().replace(
+        'echo "{\\"inflight\\"', '[ "$m" = true ] && [ -z "${SHIM_SENT:-}" ] && kill -TERM $PPID; echo "{\\"inflight\\"'))
+    r = run(old, new, e)
+    calls = Path(e["SHIM_LOG"]).read_text()
+    assert r.returncode == 1 and '{"on": false}' in calls and "bootout" not in calls and old.exists()

@@ -1112,3 +1112,54 @@ def test_linear_dispatch_is_refused_under_maintenance(helper, monkeypatch):
         app_mod._MAINTENANCE.clear()
     mod._dispatch_issue({"id": "i1"}, {}, None)
     assert called == [1]
+
+
+def test_script_entrypoint_shares_one_app_module():
+    """launchd runs runner/app.py as __main__; `from app import ...` must reach that same module."""
+    code = ("import runpy, sys; sys.argv = ['app.py', '--help']\n"
+            "try:\n    runpy.run_path('runner/app.py', run_name='__main__')\nexcept SystemExit:\n    pass\n"
+            "import app; print(app.__name__, hasattr(app, '_MAINTENANCE'))")
+    out = subprocess.run([sys.executable, "-c", code], cwd=str(RUNNER.parent), capture_output=True, text=True,
+                         env={**os.environ, "PYTHONPATH": f"{RUNNER}:{RUNNER.parent}"})
+    assert out.stdout.strip().splitlines()[-1] == "__main__ True", out.stdout + out.stderr
+
+
+def test_retry_and_baseline_are_refused_before_any_state(helper, monkeypatch):
+    app_mod, run, records, state, events, comments, pushes, *_ = helper
+    run()
+    rid = records()[-1]["run_id"]
+    c = api(app_mod)
+    monkeypatch.setattr(app_mod, "_BASELINES", {})
+    jobs_before, n_events = dict(app_mod._running_jobs), len(events)
+    app_mod._MAINTENANCE.set()
+    try:
+        r = c.post(f"/api/runs/{rid}/retry", json={"reply": "again"})
+        assert r.status_code == 409
+        r = c.post("/api/projects/demo/baseline")
+        assert r.status_code == 409 and app_mod._BASELINES == {}
+        assert app_mod._running_jobs == jobs_before and len(events) == n_events and len(comments) == 1
+        assert c.get("/api/maintenance").get_json()["inflight"] == 0  # nothing leaked
+    finally:
+        app_mod._MAINTENANCE.clear()
+
+
+def test_final_tracker_push_counted_until_persisted_even_after_admission_closes(helper, monkeypatch):
+    app_mod, *_ = helper
+    from runner.modules.linear import LinearModule
+    mod = LinearModule()
+    calls = []
+    monkeypatch.setattr(mod, "_dispatch_issue", lambda *a, **k: calls.append("dispatch"))
+    gate = threading.Event()
+    monkeypatch.setattr(mod, "_push_sync", lambda *a, **k: gate.wait(5))
+    mod.issues_cache["i1"] = {"id": "i1", "state": "Todo"}
+    with app_mod._inflight_work():  # an admitted run pushing its final tracker state
+        mod.push_state("i1", "review")
+    app_mod._MAINTENANCE.set()
+    try:  # admission closed, but the continuation is still counted until it persists
+        assert app_mod.app.test_client().get("/api/maintenance",
+               headers={"X-AgenticOS-Token": app_mod.REQUEST_TOKEN}).get_json()["inflight"] == 1
+        gate.set()
+        time.sleep(0.3)
+        assert app_mod._INFLIGHT == 0
+    finally:
+        app_mod._MAINTENANCE.clear()
