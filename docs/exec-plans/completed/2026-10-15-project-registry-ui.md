@@ -1,6 +1,7 @@
 ---
-status: in-progress
+status: completed
 created: 2026-10-15
+completed: 2026-10-15
 ---
 
 # Project registry in the dashboard
@@ -134,4 +135,4 @@ The user adds, edits and removes AgenticOS projects from the dashboard's Project
 - [x] Test: invalid entry and mid-validation hand edit both keep the initialized folder; API returns `initialized`; retry without init registers it
 - [x] Fix: registry write errors become `ProjectError`; after `init` every failure carries `initialized` (REGUI-B007)
 - [x] Test: a registry write failure after init keeps and reports the folder; retry without init registers it
-- [ ] Fresh cross-provider (Codex) build inspection returns no unresolved material findings — inspection 1 REVISE (5, fixed); inspection 2 REVISE (1, fixed); inspection 3 REVISE (1, fixed); inspection 4 pending
+- [x] Fresh cross-provider (Codex) build inspection returns no unresolved material findings — inspection 1 REVISE (5, fixed); inspection 2 REVISE (1, fixed); inspection 3 REVISE (1, fixed); inspection 4 APPROVED, 0 findings (2026-10-15)

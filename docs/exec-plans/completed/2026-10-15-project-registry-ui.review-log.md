@@ -367,3 +367,27 @@
 
 ### Host disposition (build inspection 3, accepted)
 - REGUI-B007: `_write_registry` turns any OSError (mkstemp, write, chmod, replace) into `ProjectError("cannot write …")`, and its temp file is removed in `finally`. After `init`, any exception becomes a ProjectError carrying `initialized`, so the API answers with structured JSON rather than a 500. Test: a registry write failure after init keeps the folder and reports `initialized`; a retry without init registers it. pytest 345 passed.
+
+## Build inspection 4 (2026-10-15)
+- Fresh Codex session 01a14089-7f8c-71a1-bd2b-2d3e150ed12a, base ccf5fcc, cross-provider, 68 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/reg/i4/claudex-wb2gd49n/result.json`.
+- Verdict: **APPROVED**, 0 findings.
+
+```json
+{
+ "verdict": "APPROVED",
+ "summary": "REGUI-B007 is fixed: post-initialization save failures retain the repository and return initialized metadata through the API to the form. No material regressions were identified within the requested scope.",
+ "findings": [],
+ "coverage": [
+  "Verified all four manifested file hashes, including the plan, and the tracked diff hash.",
+  "Reviewed manifested changes and regression-test source covering registry-write failure, repository retention and retry.",
+  "Traced initialization, validation, registry replacement, exception handling, API responses and form recovery.",
+  "Inspected related registry-removal callers, lifecycle locks, dispatch, worktree sidecar and durable-binding writers, baseline, CLI and PTY paths."
+ ],
+ "limitations": [
+  "Static review only; no files edited, tests or browser checks run, or work delegated. Builder-reported results were not independently verified.",
+  "Reinspection focused on B007 and its interactions, rather than a fresh audit of the entire feature.",
+  "Live registry and session data were not inspected. Spec fidelity was assessed against the supplied plan and inspected repository contracts."
+ ]
+}
+```
+- Summary: plan review 4 rounds (8 → 5 → 1 → 0); build inspections 4 of 20 (5 → 1 → 1 → 0), all cross-provider. Final proof: pytest 345 passed; headless-browser checks of add/edit/baseline/remove and of the stale-form 409 passed.
