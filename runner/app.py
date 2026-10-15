@@ -44,7 +44,7 @@ import os
 import termios
 import threading
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, g
 from flask_socketio import SocketIO, emit
 
 from state_io import file_lock, json_transaction, read_json, write_json_atomic
@@ -2590,20 +2590,12 @@ _TL = threading.local()  # .admitted: this thread already works under a reservat
 
 
 def _admit() -> None:
-    """Reserve one in-flight slot for a new run, or refuse under maintenance. Same lock as
-    switching maintenance on, so a run is either counted or refused."""
+    """Reserve one in-flight slot for new work, or refuse under maintenance. Same lock as
+    switching maintenance on, so work is either counted or refused."""
     global _INFLIGHT
     with _INFLIGHT_LOCK:
         if _MAINTENANCE.is_set():
             raise MaintenanceRefused("maintenance in progress (the checkout is being moved); try again shortly")
-        _INFLIGHT += 1
-
-
-def _reserve_continuation() -> None:
-    """A follow-up write of an already admitted run (e.g. the final tracker push): counted,
-    allowed even after admission closed (BUILD-005). The caller's thread releases it."""
-    global _INFLIGHT
-    with _INFLIGHT_LOCK:
         _INFLIGHT += 1
 
 
@@ -2614,16 +2606,13 @@ def _release() -> None:
 
 
 @contextlib.contextmanager
-def _inflight_work(reserved: bool = False):
-    """Run the body counted. Nested inside an admitted thread it neither re-checks nor counts
-    twice; `reserved` takes over a slot the caller already reserved (BUILD-004)."""
+def _inflight_work():
+    """Run the body counted; nested inside already admitted work it neither re-checks nor
+    counts twice."""
     if getattr(_TL, "admitted", False):
-        if reserved:
-            _release()
         yield
         return
-    if not reserved:
-        _admit()
+    _admit()
     _TL.admitted = True
     try:
         yield
@@ -2632,11 +2621,25 @@ def _inflight_work(reserved: bool = False):
         _release()
 
 
-def _start_reserved(target, *args, **kwargs) -> None:
-    """Start a worker that takes over the caller's reservation (one reservation per call)."""
+def _start_counted(target, *args, **kwargs) -> None:
+    """Every background writer starts here. Spawned from admitted work (a request, a counted
+    worker) it takes its own slot even after admission closed, because its parent is still
+    counted at that moment; spawned from anywhere else it must be admitted (BUILD-008). The
+    slot is released when the thread ends, or at once if it cannot start (BUILD-009)."""
+    global _INFLIGHT
+    if getattr(_TL, "admitted", False):
+        with _INFLIGHT_LOCK:
+            _INFLIGHT += 1
+    else:
+        _admit()
+
     def run():
-        with _inflight_work(reserved=True):
+        _TL.admitted = True
+        try:
             target(*args, **kwargs)
+        finally:
+            _TL.admitted = False
+            _release()
     try:
         threading.Thread(target=run, daemon=True).start()
     except BaseException:
@@ -2655,6 +2658,29 @@ def _counted(fn):
             logger.warning("%s refused: %s", fn.__name__, exc)
             return {"status": "error", "error": str(exc)}
     return wrapper
+
+
+@app.before_request
+def _maintenance_gate():
+    """Every mutating request is admitted (counted until it ends) or refused with 409 while
+    maintenance is on, so no HTTP writer is mid-flight when the runner stops (BUILD-008)."""
+    if request.method in ("GET", "HEAD", "OPTIONS") or request.path == "/api/maintenance" \
+            or request.path.startswith("/socket.io"):
+        return None
+    try:
+        _admit()
+    except MaintenanceRefused as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 409
+    g.aos_admitted = True
+    _TL.admitted = True
+    return None
+
+
+@app.teardown_request
+def _maintenance_release(_exc=None):
+    if g.pop("aos_admitted", False):
+        _TL.admitted = False
+        _release()
 
 
 @app.route("/api/maintenance", methods=["GET", "POST"])
@@ -2902,14 +2928,6 @@ def _extract_skill_name(raw: str, registry: dict) -> str:
 
 @app.route("/run", methods=["POST"])
 def run():
-    try:
-        with _inflight_work():
-            return _run_route()
-    except MaintenanceRefused as exc:
-        return jsonify({"ok": False, "error": str(exc)}), 409
-
-
-def _run_route():
     data = request.get_json(silent=True) or {}
     skill  = data.get("skill")
     prompt = data.get("prompt", "").strip()
@@ -3236,16 +3254,11 @@ def api_project_baseline(key: str):
             return jsonify({"error": f"{key}: no verify command configured"}), 400
     except _projects.ProjectError as exc:
         return _project_error(exc)
-    try:
-        _admit()  # before any state is published (BUILD-004)
-    except MaintenanceRefused as exc:
-        return jsonify({"error": str(exc)}), 409
     with _BASELINE_LOCK:
         if (_BASELINES.get(key) or {}).get("state") == "running":
-            _release()
             return jsonify({"error": f"a baseline for {key} is already running"}), 409
         _BASELINES[key] = {"state": "running", "started_at": time.time()}
-    _start_reserved(_run_baseline, key)
+    _start_counted(_run_baseline, key)
     return jsonify({"ok": True, "state": "running"})
 
 
@@ -3466,19 +3479,6 @@ def api_run_cancel(run_id: str):
 
 @app.route("/api/runs/<run_id>/retry", methods=["POST"])
 def api_run_retry(run_id: str):
-    try:
-        _admit()  # before any comment, state or thread (BUILD-004)
-    except MaintenanceRefused as exc:
-        return jsonify({"error": str(exc)}), 409
-    _TL.retry_handed = False
-    try:
-        return _api_run_retry(run_id)
-    finally:
-        if not _TL.retry_handed:
-            _release()
-
-
-def _api_run_retry(run_id: str):
     if not RUN_LOG.exists():
         return jsonify({"error": "not found"}), 404
     original = None
@@ -3572,8 +3572,7 @@ def _api_run_retry(run_id: str):
                     fallback=lambda: _linear_comment_body(title="Human Feedback", feedback=reply, attachments=attachments))
                 if body:
                     _post_linear_comment(linear_issue_id, body)
-        _TL.retry_handed = True
-        _start_reserved(_run_project_ticket,
+        _start_counted(_run_project_ticket,
             project_key=bound["project_key"], ident=bound.get("issue_identifier") or "",
             agent=agent, prompt=prompt, title=original.get("prompt", "")[:80], run_id=new_run_id,
             linear_issue_id=linear_issue_id, task_id=task_id, launch_gen=_launch_gen,
@@ -3728,8 +3727,7 @@ def _api_run_retry(run_id: str):
                     )
                 _finish("review")
 
-    _TL.retry_handed = True
-    _start_reserved(_do_retry)
+    _start_counted(_do_retry)
     return jsonify({"ok": True, "run_id": new_run_id, "skill": skill, "attempt": prev_attempt + 1, "agent": agent})
 
 

@@ -65,6 +65,8 @@ def env(tmp_path):
     old, new = tmp_path / "proto" / "agentic-os", tmp_path / "agentic-os"
     (old / "runner").mkdir(parents=True)
     (old / "runner" / "app.py").write_text("")
+    (old / "scripts").mkdir()
+    (old / "scripts" / "maintenance_lock.py").write_text((SCRIPT.parent / "maintenance_lock.py").read_text())
     (old / ".venv" / "bin").mkdir(parents=True)
     (old / ".venv" / "bin" / "pip").write_text(f"#!{old}/.venv/bin/python3\n")
     (old / ".venv" / "pyvenv.cfg").write_text(f"command = python3 -m venv {old}/.venv\n")
@@ -384,3 +386,18 @@ def test_an_early_signal_reopens_admission(env, tmp_path):
     r = run(old, new, e)
     calls = Path(e["SHIM_LOG"]).read_text()
     assert r.returncode == 1 and '{"on": false}' in calls and "bootout" not in calls and old.exists()
+
+
+def test_lock_helper_never_recreates_a_checkout_moved_before_it_starts(tmp_path):
+    """Attempt B checked OLD, then attempt A renamed it before B's helper ran."""
+    old = tmp_path / "old"
+    (old / "outputs").mkdir(parents=True)
+    inode = old.stat().st_ino
+    old.rename(tmp_path / "new")
+    out = subprocess.run(["/usr/bin/python3", str(SCRIPT.parent / "maintenance_lock.py"), str(old), str(inode),
+                          str(os.getpid())], capture_output=True, text=True)
+    assert out.stdout.strip() == "busy" and not old.exists()
+    old.mkdir()  # a different folder now at the old path
+    out = subprocess.run(["/usr/bin/python3", str(SCRIPT.parent / "maintenance_lock.py"), str(old), str(inode),
+                          str(os.getpid())], capture_output=True, text=True)
+    assert out.stdout.strip() == "busy" and not (old / "outputs").exists()

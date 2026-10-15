@@ -351,6 +351,7 @@ class LinearModule(AgenticModule):
 
     def _polling_loop(self, socketio) -> None:
         while True:
+            admitted = False
             try:
                 cfg = _load_workflow_config()
                 tracker = cfg.get("tracker", {})
@@ -364,6 +365,14 @@ class LinearModule(AgenticModule):
                     time.sleep(30)
                     continue
                 interval_ms = cfg.get("polling", {}).get("interval_ms", 5000)
+                from app import _admit, _TL, MaintenanceRefused
+                try:  # each iteration writes local state: counted, paused under maintenance
+                    _admit()
+                except MaintenanceRefused:
+                    time.sleep(5)
+                    continue
+                admitted = True
+                _TL.admitted = True
                 from linear_client import LinearClient
                 client = LinearClient(api_key, tracker.get("project_slug", ""))
                 states = _linear_poll_states(tracker)
@@ -461,6 +470,10 @@ class LinearModule(AgenticModule):
                 socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
             except Exception as e:
                 logger.error("Linear polling error: %s", e)
+            if admitted:
+                from app import _release, _TL
+                admitted = _TL.admitted = False
+                _release()
             time.sleep(max(1, interval_ms / 1000))
 
     def _warm_dispatches(self) -> None:
@@ -532,11 +545,9 @@ class LinearModule(AgenticModule):
         self.issues_cache[issue_id] = cached
         if self._capability.get("type") == "linear":
             import reset_gen
-            threading.Thread(
-                target=self._linear_sync_patch,
-                args=(issue_id, {"state_name": state_name}, cfg, None, reset_gen.current(issue_id)),
-                daemon=True,
-            ).start()
+            from app import _start_counted
+            _start_counted(self._linear_sync_patch, issue_id, {"state_name": state_name}, cfg, None,
+                           reset_gen.current(issue_id))
 
     def _is_confidential_issue(self, issue_id: str) -> bool:
         import project_runs
@@ -571,14 +582,9 @@ class LinearModule(AgenticModule):
             self.push_state(issue_id, "review", gen=gen)
 
     def _start_dispatch(self, issue: dict, cfg: dict, previous_board_status) -> None:
-        """Dispatch on a worker that takes over a slot reserved here (the PATCH route checked
-        admission before changing any state)."""
-        from app import _start_reserved, _admit, _TL
-        if getattr(_TL, "dispatch_reserved", False):
-            _TL.dispatch_reserved = False  # hand the route's slot to the worker
-        else:
-            _admit()
-        _start_reserved(self._dispatch_issue, issue, cfg, self._socketio, previous_board_status)
+        """Dispatch on a counted worker (the request that asked for it was admitted by the gate)."""
+        from app import _start_counted
+        _start_counted(self._dispatch_issue, issue, cfg, self._socketio, previous_board_status)
 
     def _dispatch_issue(self, issue: dict, cfg: dict, socketio, previous_board_status: str | None = None) -> None:
         from app import _inflight_work, MaintenanceRefused
@@ -875,7 +881,8 @@ class LinearModule(AgenticModule):
                 except Exception as e:
                     logger.error("Background Linear create failed: %s", e)
 
-            threading.Thread(target=_bg_sync_to_linear, daemon=True).start()
+            from app import _start_counted
+            _start_counted(_bg_sync_to_linear)
             return jsonify({"ok": True, "issue": local_issue})
 
         @app.route("/api/linear/issues/<issue_id>")
@@ -935,23 +942,7 @@ class LinearModule(AgenticModule):
         @app.route("/api/linear/issues/<issue_id>", methods=["PATCH", "POST"])
         @_tracker_reset_route
         def _issues_patch(issue_id: str):
-            from app import _admit, _release, _TL, MaintenanceRefused
             data = request.get_json(silent=True) or {}
-            wants_dispatch = bool(data.get("state_name")) and _is_linear_in_progress(data["state_name"])
-            if wants_dispatch:
-                try:
-                    _admit()  # before any state changes; the dispatch worker takes it over (BUILD-004)
-                except MaintenanceRefused as exc:
-                    return jsonify({"error": str(exc)}), 409
-            _TL.dispatch_reserved = wants_dispatch
-            try:
-                return _issues_patch_body(issue_id, data)
-            finally:
-                if getattr(_TL, "dispatch_reserved", False):
-                    _TL.dispatch_reserved = False
-                    _release()  # no dispatch was started
-
-        def _issues_patch_body(issue_id: str, data: dict):
             cfg = _load_workflow_config()
             tc = cfg.get("tracker", {})
             preferred_agent = canonical_agent(data.get("preferred_agent"))
@@ -999,8 +990,9 @@ class LinearModule(AgenticModule):
                     self.dispatched.pop(issue_id, None)
                     self._start_dispatch(cached, cfg, previous_board_status)
                 import reset_gen
-                threading.Thread(target=self._linear_sync_patch, args=(issue_id, data, cfg, preferred_agent,
-                                                                       reset_gen.current(issue_id)), daemon=True).start()
+                from app import _start_counted
+                _start_counted(self._linear_sync_patch, issue_id, data, cfg, preferred_agent,
+                               reset_gen.current(issue_id))  # counted until persisted (BUILD-005)
                 return jsonify({"ok": True, "issue": cached})
 
             # ── Synchronous Linear path for non-dispatch updates ──────────
@@ -1235,15 +1227,11 @@ class LinearModule(AgenticModule):
                     self.dispatched.pop(issue_id, None)
                 if self._socketio:
                     self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
-        from app import _reserve_continuation, _release
-        _reserve_continuation()  # counted until persisted, also after admission closed (BUILD-005)
-
-        def push():
-            try:
-                self._push_sync(issue_id, board_status, gen)
-            finally:
-                _release()
-        threading.Thread(target=push, daemon=True).start()
+        from app import _start_counted, MaintenanceRefused
+        try:  # counted until persisted; inherits the caller's admission (BUILD-005/008)
+            _start_counted(self._push_sync, issue_id, board_status, gen)
+        except MaintenanceRefused as exc:  # an uncounted caller during maintenance
+            logger.warning("tracker push for %s refused: %s", issue_id, exc)
 
     def _push_sync(self, issue_id: str, board_status: str, gen: int | None = None) -> None:
         """Apply a state push. The generation is re-checked inside the issue lock, so a push

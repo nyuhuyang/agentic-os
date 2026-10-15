@@ -425,3 +425,63 @@
 - BUILD-006: the script installs its signal handler (defined before use) right after taking the maintenance lock, before touching the gate. `MAINT=on` is set before the close request, so a lost answer still leads to a reopen. `reopen` confirms `"maintenance":false` and otherwise prints a warning with the manual command. Tests: a lost gate answer reopens; a TERM right after the gate closes reopens and never stops the runner.
 - BUILD-007: the maintenance lock is taken before the gate is touched, so a second relocation fails at the lock and never changes the first one's gate. Test covers overlapping attempts.
 - pytest 399 passed (relocate suite 26).
+
+## Build inspection 4 (2026-10-15)
+- Fresh Codex session 01a1411e-92d6-7eb2-83a2-32570d081e1f, base ca21bf8, cross-provider, 162 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/move/i4/claudex-n8aorsof/result.json`.
+- Verdict: **REVISE**, 4 findings (BUILD-001/004/006 confirmed).
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "BUILD-001, BUILD-004 and BUILD-006 are addressed in the inspected paths. Tracker persistence and overlapping relocations still have material gaps.",
+ "findings": [
+  {
+   "id": "BUILD-005",
+   "severity": "medium",
+   "path": "runner/modules/linear/__init__.py:1002",
+   "evidence": "The Linear PATCH route transfers its reservation to the dispatch worker but starts _linear_sync_patch in an uncounted daemon thread. That thread can remain delayed before acquiring the issue lock while the dispatch and its counted final pushes finish. Maintenance then reports inflight=0 and relocation terminates the pending writer. Accepted title, description or preferred-agent edits can be lost: this branch persists only the state locally at line 985.",
+   "fix": "Reserve a separate continuation before starting _linear_sync_patch and release it after persistence, including exception and thread-start failure paths. Cover a delayed PATCH sync after dispatch completion."
+  },
+  {
+   "id": "BUILD-007",
+   "severity": "medium",
+   "path": "scripts/relocate_checkout.sh:81",
+   "evidence": "Overlapping attempts are serialized only if both helpers open the same lock inode. Attempt B can finish preflight and pause before starting its helper; attempt A then locks and renames OLD to NEW. B resumes and os.makedirs recreates OLD/outputs/locks, opening a different maintenance.lock. A can report success with OLD recreated, or refuse rollback at line 179 and leave the service stopped. The overlap test covers an already-held lock, not this interleaving.",
+   "fix": "Prevent helper initialization from recreating checkout ancestors and verify checkout and lock identity after acquisition, as run_skill.py does, or use a stable external relocation lock. Add coverage with B paused before helper initialization until A renames the checkout."
+  },
+  {
+   "id": "BUILD-008",
+   "severity": "medium",
+   "path": "runner/app.py:2602",
+   "evidence": "_reserve_continuation unconditionally accepts work after maintenance closes, without requiring an existing admitted operation. PATCH /api/runs/<id>/status remains ungated and calls push_state through line 3394. After relocation observes inflight=0, a user can mark a linked run successful, receive success, and queue a remote Done update that bootout terminates. The saved run and tracker then disagree despite the claimed maintenance barrier.",
+   "fix": "Admit independent mutation requests before their side effects and refuse them during maintenance. Permit post-closure continuations only under an existing reservation, keeping that reservation alive until the continuation is reserved."
+  },
+  {
+   "id": "BUILD-009",
+   "severity": "low",
+   "path": "runner/modules/linear/__init__.py:1246",
+   "evidence": "push_state increments _INFLIGHT before constructing and starting its thread, but releases the slot only inside that thread. If Thread.start raises, such as when thread resources are exhausted, the counter permanently retains the slot. Subsequent relocations refuse with runs in flight even after every actual worker finishes.",
+   "fix": "Release the continuation reservation if thread construction or startup fails, following the exception handling in _start_reserved. Cover a failed thread start."
+  }
+ ],
+ "coverage": [
+  "Verified all seven manifested file hashes, the supplied plan SHA256 and tracked diff SHA256 against the supplied base.",
+  "Inspected every manifested file, including the plan, review history, relocation script and both test files; runtime inspection focused on changed code and related callers.",
+  "Traced script module aliasing, run/retry/baseline/Linear admission, nested project launch, reservation transfer, completion logging and tracker persistence.",
+  "Inspected related CLI maintenance locking, local tracker writes, reset-generation locks, shared-state helpers, stall detection and PTY handoff logging beyond the manifest.",
+  "Checked relevant specification requirements for dispatch records, state persistence and concurrent execution."
+ ],
+ "limitations": [
+  "No files were edited, tests executed, services changed or work delegated.",
+  "Findings rely on static source and interleaving analysis; scenarios were not reproduced.",
+  "The reported successful relocation and 399 passing tests were not independently verified.",
+  "Live launchd configuration, external settings and historical runtime paths were not independently audited."
+ ]
+}
+```
+
+### Host dispositions (build inspection 4, all accepted; per-route patches replaced by one mechanism)
+- BUILD-008 + BUILD-005: instead of reserving route by route, a Flask `before_request` gate admits every mutating request (anything but GET/HEAD/OPTIONS, `/api/maintenance` and `/socket.io`) and counts it until `teardown_request`, or returns 409 under maintenance. Every background writer now starts through `_start_counted`: spawned from admitted work (a request, or a counted worker or poll iteration), it takes its own slot even after admission closed, because its parent is still counted at that moment; spawned from anywhere else it must be admitted. This covers Linear PATCH sync threads, background creates, dispatch, retry, baseline and final pushes; `_reserve_continuation` is gone. The Linear poller admits each iteration (it writes the local tracker) and sleeps while maintenance is on. Tests: status PATCH and project POST return 409 while reads stay open; counted threads inherit admission.
+- BUILD-009: `_start_counted` releases the slot when `Thread.start` raises. Test monkeypatches `Thread.start` to fail and checks inflight returns to 0.
+- BUILD-007: the lock helper is now `scripts/maintenance_lock.py`, with the same rules as run_skill. It requires the checkout's inode recorded at the script's preflight, creates folders one level at a time, and re-checks the checkout and lock-file inodes after locking. Test: a checkout renamed before the helper starts gives "busy" without recreating it; a different folder at the old path gives "busy" without creating `outputs/`.
+- Live check after restart: gate on → `POST /api/projects` returns 409 → gate off. pytest 402 passed.

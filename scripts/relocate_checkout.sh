@@ -38,6 +38,7 @@ http() { curl -s --connect-timeout 2 -m 5 "$@"; }
 
 case "$OLD$NEW" in *[!A-Za-z0-9_./-]*) die "paths may only use A-Z a-z 0-9 _ . / - (sed, grep and pgrep see them as patterns)" ;; esac
 [ -f "$OLD/runner/app.py" ] || die "$OLD is not an AgenticOS checkout"
+OLD_INODE=$(stat -f %i "$OLD")  # the checkout this run checked; the lock helper insists on it
 [ -e "$NEW" ] && die "$NEW already exists"
 [ -d "$(dirname "$NEW")" ] || die "parent of $NEW does not exist"
 [ -f "$PLIST" ] || die "no launchd agent at $PLIST"
@@ -76,19 +77,8 @@ done
 
 # Exclusive maintenance lock, held by a helper until this script ends: run_skill.py holds it
 # shared for its whole run, so no skill is mid-run now and none can start until we finish (REL-002).
-LOCKER_PY='import fcntl, os, sys, time
-path, parent = sys.argv[1], int(sys.argv[2])
-os.makedirs(os.path.dirname(path), exist_ok=True)
-f = open(path, "a")
-try:
-    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-except OSError:
-    print("busy", flush=True); sys.exit(1)
-print("held", flush=True)
-while os.getppid() == parent:
-    time.sleep(0.5)'
 LOCK_STATUS=$(mktemp -t agenticos-lock) || die "cannot create a temp file"
-/usr/bin/python3 -c "$LOCKER_PY" "$OLD/outputs/locks/maintenance.lock" $$ > "$LOCK_STATUS" &
+/usr/bin/python3 "$OLD/scripts/maintenance_lock.py" "$OLD" "$OLD_INODE" $$ > "$LOCK_STATUS" &
 LOCKER=$!
 trap 'kill $LOCKER 2>/dev/null; rm -f "$LOCK_STATUS"' EXIT
 i=0; until [ -s "$LOCK_STATUS" ]; do i=$((i + 1)); [ $i -gt 20 ] && die "maintenance lock helper did not answer"; sleep 0.5; done

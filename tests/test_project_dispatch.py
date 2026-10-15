@@ -1163,3 +1163,45 @@ def test_final_tracker_push_counted_until_persisted_even_after_admission_closes(
         assert app_mod._INFLIGHT == 0
     finally:
         app_mod._MAINTENANCE.clear()
+
+
+def test_every_mutating_request_is_gated(helper):
+    app_mod, run, records, *_ = helper
+    run()
+    rid = records()[-1]["run_id"]
+    c = api(app_mod)
+    app_mod._MAINTENANCE.set()
+    try:
+        assert c.patch(f"/api/runs/{rid}/status", json={"status": "success"}).status_code == 409
+        assert c.post("/api/projects", json={}).status_code == 409
+        assert c.get("/api/projects").status_code == 200  # reads stay open
+        assert c.get("/api/maintenance").get_json()["inflight"] == 0
+    finally:
+        app_mod._MAINTENANCE.clear()
+
+
+def test_counted_threads_inherit_admission_and_release_on_failed_start(helper, monkeypatch):
+    app_mod, *_ = helper
+    done = threading.Event()
+    app_mod._MAINTENANCE.set()
+    try:
+        with pytest.raises(app_mod.MaintenanceRefused):  # nothing admitted: refused
+            app_mod._start_counted(done.set)
+        app_mod._TL.admitted = True  # inside admitted work: a follow-up writer is still allowed
+        try:
+            app_mod._start_counted(done.wait, 5)
+            assert app_mod._INFLIGHT == 1
+        finally:
+            app_mod._TL.admitted = False
+        done.set()
+        time.sleep(0.3)
+        assert app_mod._INFLIGHT == 0
+    finally:
+        app_mod._MAINTENANCE.clear()
+
+    def boom(self):
+        raise RuntimeError("can't start new thread")
+    monkeypatch.setattr(threading.Thread, "start", boom)
+    with pytest.raises(RuntimeError):
+        app_mod._start_counted(lambda: None)
+    assert app_mod._INFLIGHT == 0  # the slot came back (BUILD-009)
