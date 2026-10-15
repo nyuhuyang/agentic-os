@@ -7,6 +7,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from runner.agent_ids import agent_ids_for
+
 _PROJECT_ROOT: Path | None = None
 _VENV_PYTHON: Path | None = None
 _MASTER_REGISTRY_JSON: Path | None = None
@@ -128,6 +130,22 @@ def load_registry(agent: str | None = None) -> dict[str, dict]:
         return ensure_claude_registry()
     if agent == "codex":
         return filter_registry_for_agent("codex")
-    if agent == "deepseek":
-        return filter_registry_for_agent("deepseek")
+    if agent == "dsh":
+        return filter_registry_for_dsh()
     return read_registry_json(_MASTER_REGISTRY_JSON)
+
+
+def filter_registry_for_dsh() -> dict[str, dict]:
+    """Skills whose agents list names dsh or one of its legacy aliases (see runner/agent_ids.py).
+
+    Returned entries are copies with "dsh" added to agents, so the /run check and the UI's
+    data-agents see dsh. The source registry files are not rewritten.
+    """
+    _ensure_paths()
+    ids = agent_ids_for("dsh")
+    result: dict[str, dict] = {}
+    for name, entry in read_registry_json(_MASTER_REGISTRY_JSON).items():
+        agents = list(entry.get("agents") or [])
+        if ids & set(agents):
+            result[name] = {**entry, "agents": agents if "dsh" in agents else agents + ["dsh"]}
+    return result

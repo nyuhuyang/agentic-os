@@ -82,42 +82,36 @@ class TestCodexModule:
 
 
 class TestDeepSeekModule:
-    """DeepSeekModule capability detection."""
+    """DeepSeekModule: monitoring-only; available when dsh + Node >= 22 + key; dispatches as dsh."""
 
-    def test_available_with_key_and_httpx(self):
-        from runner.modules.backends.deepseek import DeepSeekModule
-        mod = DeepSeekModule()
+    def _patch(self, monkeypatch, *, bin="/x/dsh", node=25, key="sk-test-123", version="0.2.0-rc.2"):
+        from runner.modules.backends import deepseek as mod
+        monkeypatch.setattr(mod.dsh_cli, "resolve_bin", lambda: bin)
+        monkeypatch.setattr(mod.dsh_cli, "resolve_api_key", lambda: key)
+        monkeypatch.setattr(mod, "_node_major", lambda: node)
+        def _check(b):
+            if version is None:
+                raise RuntimeError("dsh 0.1.0 too old")
+            return version
+        monkeypatch.setattr(mod.dsh_cli, "check_version", _check)
+        return mod.DeepSeekModule()
 
-        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "sk-test-123"}, clear=False):
-            with patch("runner.modules.backends.deepseek.has_env_key", return_value=True):
-                with patch("importlib.util.find_spec") as mock_find:
-                    mock_find.return_value = True
-                    cap = mod.check_capabilities()
-                    assert cap["available"] is True
-                    assert cap["backend"] == "deepseek"
-                    assert "deepseek-v4-flash" in cap["models"]
+    def test_available_advertises_dsh(self, monkeypatch):
+        cap = self._patch(monkeypatch).check_capabilities()
+        assert cap["available"] is True and cap["backend"] == "dsh"
 
-    def test_unavailable_without_key(self):
-        from runner.modules.backends.deepseek import DeepSeekModule
-        mod = DeepSeekModule()
+    def test_unavailable_without_binary(self, monkeypatch):
+        cap = self._patch(monkeypatch, bin=None).check_capabilities()
+        assert cap["available"] is False and "dsh" in cap["reason"]
 
-        with patch("runner.modules.backends.deepseek.has_env_key", return_value=False):
-            cap = mod.check_capabilities()
-            assert cap["available"] is False
-            assert "API_KEY" in cap["reason"]
+    def test_unavailable_with_old_node(self, monkeypatch):
+        cap = self._patch(monkeypatch, node=20).check_capabilities()
+        assert cap["available"] is False and "Node" in cap["reason"]
 
-    def test_unavailable_without_httpx(self):
-        from runner.modules.backends.deepseek import DeepSeekModule
-        mod = DeepSeekModule()
+    def test_unavailable_with_old_dsh(self, monkeypatch):
+        cap = self._patch(monkeypatch, version=None).check_capabilities()
+        assert cap["available"] is False and "too old" in cap["reason"]
 
-        with patch("runner.modules.backends.deepseek.has_env_key", return_value=True):
-            import builtins
-            original_import = builtins.__import__
-            def _mock_import(name, *args, **kwargs):
-                if name == "httpx":
-                    raise ModuleNotFoundError("httpx not installed")
-                return original_import(name, *args, **kwargs)
-            with patch("builtins.__import__", _mock_import):
-                cap = mod.check_capabilities()
-                assert cap["available"] is False
-                assert "httpx" in cap["reason"]
+    def test_unavailable_without_key(self, monkeypatch):
+        cap = self._patch(monkeypatch, key=None).check_capabilities()
+        assert cap["available"] is False and "API_KEY" in cap["reason"]

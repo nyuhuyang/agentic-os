@@ -25,8 +25,9 @@ agentic-os/
 │   ├── usage_reader.py     # Token usage aggregator (Claude JSONL + Codex SQLite)
 │   ├── dashboard.py        # Rich TUI — read-only CLI view
 │   ├── linear_client.py    # Linear API client
-│   ├── deepseek_agent.py   # DeepSeek dispatcher
-│   ├── deepseek_monitor.py # DeepSeek process monitor
+│   ├── agent_ids.py        # Canonical agent ids (claude, codex, dsh) + legacy aliases
+│   ├── dsh_cli.py          # DeepSeek Harness (dsh) CLI: binary, version gate, key, NDJSON events
+│   ├── deepseek_monitor.py # DeepSeek balance/spend monitor
 │   ├── core/               # Registry and feature flags
 │   ├── modules/            # Modular backends and integrations
 │   ├── outputs/            # Runner logs and uploads
@@ -105,7 +106,9 @@ agentic-os/
 ## DeepSeek Delegation
 
 Delegate reviews, metric analysis, strategy comparisons, second opinions, and docs synthesis with `runner/scripts/ask_deepseek.py`.
-Use `--agentic --prompt-file task.md` for multi-step coding. Key: env or `~/.deepseek/config.toml`.
+Key: env or `~/.deepseek/config.toml`. Only the direct-API mode works: `--agentic` needs the removed Rust `deepseek` CLI.
+
+Dashboard agents are `claude`, `codex` and `dsh` (labelled "DeepSeek", runs `dsh --profile headless --json`). Old ids `deepseek`, `deepseek-tui` and `aider` are aliased to `dsh` on read; stored records are never rewritten. `dsh` is rejected for confidential projects (its sandbox leaves shell network open).
 Do not delegate visual/chart/browser/clipboard tasks.
 
 ## Escalation — Do Not Proceed Without Human Confirmation

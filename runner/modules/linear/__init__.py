@@ -23,6 +23,7 @@ from pathlib import Path
 
 from flask import jsonify, request
 
+from runner.agent_ids import canonical_agent
 from runner.core.module_registry import AgenticModule
 
 logger = logging.getLogger(__name__)
@@ -154,7 +155,7 @@ mutation AgenticOSCommentCreate($issueId: String!, $body: String!) {
 """
 
 _ISSUE_AGENT_MARKER_RE = re.compile(
-    r"<!--\s*agent_backend:\s*(claude|codex|aider|deepseek|deepseek-tui)\s*-->\s*", re.IGNORECASE
+    r"<!--\s*agent_backend:\s*(claude|codex|dsh|aider|deepseek|deepseek-tui)\s*-->\s*", re.IGNORECASE
 )
 
 
@@ -163,8 +164,7 @@ def _extract_issue_agent(description: str | None) -> str | None:
         return None
     m = _ISSUE_AGENT_MARKER_RE.search(description)
     if m:
-        agent = m.group(1).strip().lower()
-        return "deepseek" if agent == "aider" else agent
+        return canonical_agent(m.group(1))  # legacy ids resolve to dsh
     return None
 
 
@@ -176,7 +176,8 @@ def _strip_issue_metadata(description: str | None) -> str:
 
 def _compose_issue_description(description: str, preferred_agent: str | None) -> str:
     base = (description or "").strip()
-    if preferred_agent in {"claude", "codex", "deepseek", "deepseek-tui"}:
+    preferred_agent = canonical_agent(preferred_agent)
+    if preferred_agent:
         marker = f"<!-- agent_backend: {preferred_agent} -->"
         return f"{base}\n\n{marker}" if base else marker
     return base
@@ -518,101 +519,14 @@ class LinearModule(AgenticModule):
 
     def _dispatch_issue(self, issue: dict, cfg: dict, socketio, previous_board_status: str | None = None) -> None:
         import subprocess
-        from app import _running_jobs, _running_procs, _python_path, RUNNER, ROOT, _load_registry, _ai_command, _agent_model, _parse_agent_output, _extract_skill_name, _write_run_log, AI_RUN_TIMEOUT_S, _extract_real_errors, _registry_exec_env, _run_deepseek_agent
+        from app import _running_jobs, _running_procs, _python_path, RUNNER, ROOT, _load_registry, _ai_command, _agent_model, _parse_agent_output, _extract_skill_name, _write_run_log, AI_RUN_TIMEOUT_S, _extract_real_errors, _registry_exec_env, _stream_dsh_run, _dsh_ok
         issue_id = issue["id"]
         if issue_id in self.dispatched:
             return
 
         agent_cfg = cfg.get("agent", {})
-        backend = issue.get("preferred_agent") or agent_cfg.get("backend", "claude")
-
-        if backend == "deepseek":
-            run_id = str(uuid.uuid4())
-            started_at = datetime.now(timezone.utc).isoformat()
-            t0 = time.monotonic()
-            prompt = f"{issue['identifier']}: {issue['title']}\n\n{_strip_issue_metadata(issue.get('description') or '')}"
-            self.dispatched[issue_id] = run_id
-            _running_jobs[run_id] = {
-                "run_id": run_id,
-                "skill": "_prompt",
-                "started_at": started_at,
-                "prompt": prompt,
-                "state": "running",
-                "last_progress_at": time.monotonic(),
-                "linear_issue_id": issue_id,
-                "agent": "deepseek",
-                "model": _agent_model("deepseek", cfg),
-            }
-            self.push_state(issue_id, "running")
-            socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": "_prompt"})
-            try:
-                if _run_deepseek_agent is None:
-                    raise RuntimeError("_run_deepseek_agent not available (httpx missing?)")
-                result = _run_deepseek_agent(prompt, workspace=str(ROOT))
-                dur = time.monotonic() - t0
-                _running_jobs.pop(run_id, None)
-                _running_procs.pop(run_id, None)
-                if result.get("ok"):
-                    output = result.get("output", "")
-
-                    it = result.get("input_tokens")
-                    ot = result.get("output_tokens")
-                    pm = result.get("model")
-                    _write_run_log(
-                        "_prompt",
-                        "review",
-                        started_at,
-                        dur,
-                        prompt=prompt,
-                        output=output,
-                        run_id=run_id,
-                        linear_issue_id=issue_id,
-                        selected_skill="_prompt",
-                        input_tokens=it,
-                        output_tokens=ot,
-                        agent="deepseek",
-                        model=pm or _agent_model("deepseek", cfg),
-                        task_id=run_id,
-                    )
-                    self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output))
-                    self._mark_issue_review(issue_id)
-                    socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": "_prompt"})
-                else:
-                    err = result.get("error", "unknown deepseek error")
-                    _write_run_log(
-                        "_prompt",
-                        "error",
-                        started_at,
-                        dur,
-                        prompt=prompt,
-                        error=err,
-                        run_id=run_id,
-                        linear_issue_id=issue_id,
-                        agent="deepseek",
-                    )
-                    self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=err))
-                    self._mark_issue_review(issue_id)
-                    socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": "_prompt"})
-                socketio.emit("run_logged", {"skill": "_prompt", "run_id": run_id})
-            except Exception as e:
-                _running_jobs.pop(run_id, None)
-                _running_procs.pop(run_id, None)
-                _write_run_log(
-                    "_prompt",
-                    "error",
-                    started_at,
-                    0.0,
-                    prompt=prompt,
-                    error=str(e),
-                    run_id=run_id,
-                    linear_issue_id=issue_id,
-                    agent="deepseek",
-                )
-                self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
-                self._mark_issue_review(issue_id)
-                socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": "_prompt"})
-                socketio.emit("run_logged", {"skill": "_prompt", "run_id": run_id})
-            return
+        backend = (canonical_agent(issue.get("preferred_agent"))
+                   or canonical_agent(agent_cfg.get("backend")) or "claude")
 
         try:
             registry = _load_registry(backend)
@@ -628,6 +542,7 @@ class LinearModule(AgenticModule):
                 result = subprocess.run(
                     _ai_command(backend, routing_prompt, output_format="text"),
                     cwd=str(ROOT),
+                    env=_registry_exec_env(backend, registry),
                     capture_output=True,
                     text=True,
                     timeout=60,
@@ -654,8 +569,12 @@ class LinearModule(AgenticModule):
             self.push_state(issue_id, "running")
             socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": selected_skill})
             entry = registry.get(selected_skill, {})
-            cmd = [_python_path(), str(RUNNER), selected_skill] if entry.get("schedule_eligible") and entry.get("entrypoint") else _ai_command(backend, prompt, output_format="json")
+            is_entrypoint = bool(entry.get("schedule_eligible") and entry.get("entrypoint"))
             try:
+                # Built inside the try: a missing/old dsh fails this run cleanly (error record,
+                # running/dispatch entries cleared, ticket back to review) instead of hanging as running.
+                cmd = ([_python_path(), str(RUNNER), selected_skill] if is_entrypoint else
+                       _ai_command(backend, prompt, output_format="json", skill_name=selected_skill, registry=registry))
                 proc = subprocess.Popen(
                     cmd,
                     cwd=str(ROOT),
@@ -664,15 +583,22 @@ class LinearModule(AgenticModule):
                     stderr=subprocess.PIPE,
                 )
                 _running_procs[run_id] = proc
-                stdout_b, stderr_b = proc.communicate(timeout=AI_RUN_TIMEOUT_S)
+                session_id = None
+                if backend == "dsh" and not is_entrypoint:
+                    output, it, ot, pm, session_id, stderr_s = _stream_dsh_run(proc, run_id, timeout=AI_RUN_TIMEOUT_S)
+                    ok = _dsh_ok(proc, output)
+                    output = output or ""
+                else:
+                    stdout_b, stderr_b = proc.communicate(timeout=AI_RUN_TIMEOUT_S)
+                    stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
+                    stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
+                    output, it, ot, pm = _parse_agent_output(backend, stdout_s)
+                    ok = True  # other agents keep the unconditional review status
                 dur = time.monotonic() - t0
-                stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
-                stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
                 error_s = _extract_real_errors(stderr_s)
-                output, it, ot, pm = _parse_agent_output(backend, stdout_s)
                 _running_jobs.pop(run_id, None)
                 _running_procs.pop(run_id, None)
-                final_state = "review"
+                final_state = "review" if ok else "error"
                 _write_run_log(
                     selected_skill,
                     final_state,
@@ -689,6 +615,7 @@ class LinearModule(AgenticModule):
                     agent=backend,
                     model=pm or _agent_model(backend, cfg),
                     task_id=run_id,
+                    agent_session_id=session_id,
                 )
                 self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output, error=error_s))
                 self._mark_issue_review(issue_id)
@@ -787,7 +714,7 @@ class LinearModule(AgenticModule):
             attachments = data.get("attachments") or []
             desc = _append_attachments_to_text(desc, attachments)
             pa = (data.get("agent") or "").strip().lower()
-            pa = pa if pa in {"claude", "codex", "deepseek", "deepseek-tui"} else None
+            pa = canonical_agent(pa)
             desc = _compose_issue_description(desc, pa)
             cfg = _load_workflow_config()
             tc = cfg.get("tracker", {})
@@ -873,9 +800,7 @@ class LinearModule(AgenticModule):
             """Write-only local state update, no Linear API call."""
             data = request.get_json(silent=True) or {}
             local = self.get_local_tracker()
-            preferred_agent = (data.get("preferred_agent") or "").strip().lower() or None
-            if preferred_agent not in {"claude", "codex", "deepseek", "deepseek-tui"}:
-                preferred_agent = None
+            preferred_agent = canonical_agent(data.get("preferred_agent"))
             self._remember_local_override(issue_id, data, preferred_agent)
             local.update_issue(
                 issue_id,
@@ -908,9 +833,7 @@ class LinearModule(AgenticModule):
             data = request.get_json(silent=True) or {}
             cfg = _load_workflow_config()
             tc = cfg.get("tracker", {})
-            preferred_agent = (data.get("preferred_agent") or "").strip().lower() or None
-            if preferred_agent not in {"claude", "codex", "deepseek", "deepseek-tui"}:
-                preferred_agent = None
+            preferred_agent = canonical_agent(data.get("preferred_agent"))
             if self._capability.get("type") == "local":
                 previous_board_status = _linear_state_to_board(self.issues_cache.get(issue_id, {}).get("state"))
                 issue = self.get_local_tracker().update_issue(

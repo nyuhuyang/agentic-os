@@ -413,8 +413,7 @@ def load_deepseek_usage() -> dict[str, Any]:
                      "window_5h_cost", "window_5h_cost_cny",
                      "window_7d_cost", "window_7d_cost_cny",
                      "window_30d_cost", "window_30d_cost_cny",
-                     "_session_history", "_balance_snapshots",
-                     "_known_total_cost_cny", "_seed_initial_balance_cny"):
+                     "_balance_snapshots", "stale", "last_error", "spend_scope"):
             val = data.get(key)
             if val is not None:
                 result[key] = val
@@ -804,40 +803,8 @@ def _codex_window_range(since: datetime, until: datetime) -> dict[str, Any]:
 
 
 def _deepseek_window_range(since: datetime, until: datetime) -> dict[str, Any]:
-    """Aggregate DeepSeek token usage from ~/.deepseek/usage.json between two datetimes."""
-    usage = load_deepseek_usage()
-    if not usage:
-        return {"tokens": 0, "sessions": 0, "output": 0, "earliest_ts": None}
-    # usage.json stores pre‑aggregated windows; we approximate by returning
-    # the 7‑day window for any range that includes the last 7 days.
-    # For finer granularity we would need per‑session logs.
-    now = datetime.now(timezone.utc)
-    # If the requested range covers the last 7 days, return the 7‑day total.
-    if since <= now - timedelta(days=7) and until >= now:
-        w7 = usage.get("window_7d", {})
-        return {
-            "tokens":   w7.get("tokens", 0),
-            "sessions": w7.get("sessions", 0),
-            "output":   0,
-            "earliest_ts": None,
-        }
-    # If the requested range covers the last 5 hours, return the 5‑hour total.
-    if since <= now - timedelta(hours=5) and until >= now:
-        w5 = usage.get("window_5h", {})
-        return {
-            "tokens":   w5.get("tokens", 0),
-            "sessions": w5.get("sessions", 0),
-            "output":   0,
-            "earliest_ts": None,
-        }
-    # Otherwise return today's total (best approximation).
-    today = usage.get("today", {})
-    return {
-        "tokens":   today.get("tokens", 0),
-        "sessions": today.get("sessions", 0),
-        "output":   0,
-        "earliest_ts": None,
-    }
+    """DeepSeek tokens are unknown at account level; the monitor tracks spend from balance changes."""
+    return {"tokens": None, "sessions": None, "output": 0, "earliest_ts": None}
 
 
 def _trend_badge(current: int, prior: int) -> str:
@@ -1031,33 +998,6 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
             _cost_weekly = float(_ds_usage.get("window_7d_cost_cny", 0) or 0)
             _cost_monthly = float(_ds_usage.get("window_30d_cost_cny", 0) or 0)
 
-            # ── Calibrate: token-proportional distribution of real cost ──
-            _real_total = float(
-                _ds_usage.get("_known_total_cost_cny", 0)
-                or _ds_usage.get("total_cost_cny", 0)
-                or 0
-            )
-            if _real_total > 0:
-                _sessions = _ds_usage.get("_session_history", [])
-                _cut_5h = now - timedelta(hours=5)
-                _cut_7d = now - timedelta(days=7)
-                _cut_30d = now - timedelta(days=30)
-                _tok_5h = _tok_7d = _tok_30d = 0
-                for _s in _sessions:
-                    _ts = _s.get("created_at", "") or _s.get("started_at", "")
-                    _tok = _s.get("total_tokens", 0) or 0
-                    if _ts >= _cut_30d.isoformat():
-                        _tok_30d += _tok
-                        if _ts >= _cut_7d.isoformat():
-                            _tok_7d += _tok
-                            if _ts >= _cut_5h.isoformat():
-                                _tok_5h += _tok
-                _total_tok = _tok_30d
-                if _total_tok > 0:
-                    _cost_5h = round(_real_total * _tok_5h / _total_tok, 2)
-                    _cost_weekly = round(_real_total * _tok_7d / _total_tok, 2)
-                    _cost_monthly = round(_real_total, 2)
-
         def _cost_pct(cost: float, cap: float) -> int:
             return min(100, round(cost / cap * 100)) if cap else 0
 
@@ -1086,24 +1026,29 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
                 card["balance_marker_pct"] = marker
             return card
 
-        _total_cost = max(float(_ds_usage.get("total_cost_cny", 0) or 0), _real_total)
+        _total_cost = float(_ds_usage.get("total_cost_cny", 0) or 0)
         _total_value = _bal_cny + _total_cost
         _total_pct = min(100, round(_total_cost / _total_value * 100)) if _total_value > 0 else 0
         _total_rem = max(0, 100 - _total_pct)
-        _ds_bm = _ds_usage.get("by_model_detail", {})
-        _ds_tok = sum(bm.get("total_tokens", 0) or 0 for bm in _ds_bm.values())
-        _ds_tok_fmt = f"{_ds_tok/1_000_000:.1f}M" if _ds_tok >= 1_000_000 else f"{_ds_tok/1_000:.1f}K"
+        # Tokens are unknown at account level (per-run tokens are in run records).
+        _ds_tok = 0
+        _ds_tok_fmt = "n/a"
+        _stale = bool(_ds_usage.get("stale"))
         return {
             "agent": agent, "limits_estimated": True,
             "quota_source": "usage.json",
             "balance_cny": round(_bal_cny, 2),
+            "stale": _stale,
+            "last_error": _ds_usage.get("last_error"),
             "window_5h": {
-                "title": "Total Spend", "reset": "Lifetime",
+                "title": "Total Spend", "reset": "Tracked",
                 "pct": _total_pct, "remaining_pct": _total_rem,
                 "tokens": _ds_tok, "limit": _ds_tok,
                 "value_line": f"¥{_total_cost:.2f} / ¥{_total_value:.2f}",
-                "sub_line": f"¥{_bal_cny:.2f} remaining · {_ds_tok_fmt} tokens",
-                "display_line": f"¥{_total_cost:.2f} spent · ¥{_bal_cny:.2f} left · {_ds_tok_fmt} tokens",
+                "sub_line": f"¥{_bal_cny:.2f} remaining · {_ds_tok_fmt} tokens" + (" · stale" if _stale else ""),
+                "display_line": f"¥{_total_cost:.2f} spent · ¥{_bal_cny:.2f} left · {_ds_tok_fmt} tokens"
+                                + " · account-level (all uses of this key, incl. ask_deepseek.py)"
+                                + (" · stale" if _stale else ""),
                 "resets_at_unix": None, "window_minutes": 0,
             },
             "window_7d": {
@@ -1119,7 +1064,7 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
                 "title": "Recent Spend", "reset": midnight_label,
                 "pct": _cost_pct(_cost_5h, CAP_5H) if CAP_5H else 0,
                 "value_line": f"¥{_cost_5h:.2f} (5h) · ¥{_cost_weekly:.2f} (7d)",
-                "sub_line": f"¥{_cost_monthly:.2f} total",
+                "sub_line": f"¥{_cost_monthly:.2f} (30d) · account-level, all uses of this key",
                 "tokens": int(_cost_5h * 100),
                 "display_line": f"¥{_cost_5h:.2f} last 5h · ¥{_cost_weekly:.2f} last 7d",
                 "resets_at_unix": None, "window_minutes": 0,

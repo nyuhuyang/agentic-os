@@ -20,6 +20,7 @@
 - P15, P20, P23 parked in `docs/exec-plans/deferred/` (2026-10-13); P20 depended on `../symphony-ts`, which no longer exists
 - Server bound to 127.0.0.1 only — multi-host/remote scope is explicitly out of scope
 - Usage reset weekly limit is fixed at 3; unavailable Codex app-server data renders as no data
+- One DeepSeek agent: `dsh` (official DeepSeek Harness, `workspace-write`); direct-API `deepseek` and Rust `deepseek-tui` retired, ids aliased on read; DeepSeek usage row is balance-delta spend, tokens n/a (2026-10-14, plan `2026-10-14-dsh-backend-swap`)
 
 ## Next Action
 <!-- Concrete first step for the next session -->

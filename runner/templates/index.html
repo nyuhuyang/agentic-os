@@ -181,15 +181,12 @@
   .job-btn.retry-claude:hover { background: rgba(232,114,58,.12); }
   .job-btn.retry-codex { color: #6fb5d4; border-color: #3a6a80; }
   .job-btn.retry-codex:hover { background: rgba(111,181,212,.1); }
-  .job-btn.retry-deepseek { color: #7ec8a0; border-color: #3a6a52; }
-  .job-btn.retry-deepseek:hover { background: rgba(126,200,160,.1); }
-  .job-btn.retry-deepseek-tui { color: #2e8b57; border-color: #1a5c38; }
-  .job-btn.retry-deepseek-tui:hover { background: rgba(46,139,87,.1); }
+  .job-btn.retry-dsh { color: #7ec8a0; border-color: #3a6a52; }
+  .job-btn.retry-dsh:hover { background: rgba(126,200,160,.1); }
   .job-btn.agent-locked-out { opacity: 0.25; filter: grayscale(1); pointer-events: none; }
   .job-btn.retry-claude.selected { background: rgba(232,114,58,.10); border-color: var(--accent); }
   .job-btn.retry-codex.selected { background: rgba(111,181,212,.10); border-color: #6fb5d4; }
-  .job-btn.retry-deepseek.selected { background: rgba(126,200,160,.10); border-color: #7ec8a0; }
-  .job-btn.retry-deepseek-tui.selected { background: rgba(46,139,87,.10); border-color: #2e8b57; }
+  .job-btn.retry-dsh.selected { background: rgba(126,200,160,.10); border-color: #7ec8a0; }
   .job-btn-group { display: inline-flex; gap: 4px; flex-wrap: wrap; margin-top: 8px; }
   .job-card-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
   .model-badge {
@@ -224,8 +221,7 @@
   }
   .agent-badge.claude { color: #e8a87c; border-color: rgba(232,168,124,.4); background: rgba(232,168,124,.1); }
   .agent-badge.codex  { color: #6fb5d4; border-color: rgba(111,181,212,.4); background: rgba(111,181,212,.1); }
-  .agent-badge.deepseek { color: #7ec8a0; border-color: rgba(126,200,160,.4); background: rgba(126,200,160,.1); }
-  .agent-badge.deepseek-tui { color: #2e8b57; border-color: rgba(46,139,87,.4); background: rgba(46,139,87,.1); }
+  .agent-badge.dsh { color: #7ec8a0; border-color: rgba(126,200,160,.4); background: rgba(126,200,160,.1); }
   .agent-badge.none   { color: var(--text-dim); border-color: var(--border); background: rgba(255,255,255,0.04); }
   .agent-badge:hover { opacity: .75; }
   .agent-badge.locked { cursor: default; opacity: .45; }
@@ -238,12 +234,9 @@
   .todo-run-btn.codex { color: #6fb5d4; border-color: #3a6a80; }
   .todo-run-btn.codex:hover { background: rgba(111,181,212,.12); border-color: #6fb5d4; }
   .todo-run-btn.codex.selected { background: rgba(111,181,212,.10); border-color: #6fb5d4; }
-  .todo-run-btn.deepseek { color: #7ec8a0; border-color: #3a6a52; }
-  .todo-run-btn.deepseek:hover { background: rgba(126,200,160,.12); border-color: #7ec8a0; }
-  .todo-run-btn.deepseek.selected { background: rgba(126,200,160,.10); border-color: #7ec8a0; }
-  .todo-run-btn.deepseek-tui { color: #2e8b57; border-color: #1a5c38; }
-  .todo-run-btn.deepseek-tui:hover { background: rgba(46,139,87,.12); border-color: #2e8b57; }
-  .todo-run-btn.deepseek-tui.selected { background: rgba(46,139,87,.10); border-color: #2e8b57; }
+  .todo-run-btn.dsh { color: #7ec8a0; border-color: #3a6a52; }
+  .todo-run-btn.dsh:hover { background: rgba(126,200,160,.12); border-color: #7ec8a0; }
+  .todo-run-btn.dsh.selected { background: rgba(126,200,160,.10); border-color: #7ec8a0; }
 
 
   /* Trash panel */
@@ -724,8 +717,7 @@
         <div class="agent-toggle">
           <button class="agent-btn active" id="agent-claude" onclick="setAgent('claude')">Claude</button>
           <button class="agent-btn" id="agent-codex" onclick="setAgent('codex')">Codex</button>
-          <button class="agent-btn" id="agent-deepseek" onclick="setAgent('deepseek')">DeepSeek</button>
-          <button class="agent-btn agent-hidden" id="agent-deepseek-tui" onclick="setAgent('deepseek-tui')">DS TUI</button>
+          <button class="agent-btn" id="agent-dsh" onclick="setAgent('dsh')">DeepSeek</button>
           <button class="agent-btn" id="ds-refresh" onclick="refreshDeepSeek()" style="display:none; font-size:calc(10px * var(--fs)); letter-spacing:.3px; opacity:.7;">↻ Refresh</button>
         </div>
         <span style="font-size:calc(11px * var(--fs));color:var(--text-dim)">Active agent for skill cards &amp; terminal injection</span>
@@ -875,14 +867,12 @@
       <div class="job-btn-group" id="detail-dispatch-group" style="display:none;margin-top:0">
         <button class="job-btn retry-claude" id="detail-dispatch-claude" onclick="dispatchFromDetail('claude')">▶ Claude</button>
         <button class="job-btn retry-codex" id="detail-dispatch-codex" onclick="dispatchFromDetail('codex')">▶ Codex</button>
-        <button class="job-btn retry-deepseek" id="detail-dispatch-deepseek" onclick="dispatchFromDetail('deepseek')">▶ DeepSeek</button>
-        <button class="job-btn retry-deepseek-tui agent-hidden" id="detail-dispatch-deepseek-tui" onclick="dispatchFromDetail('deepseek-tui')">▶ DS TUI</button>
+        <button class="job-btn retry-dsh" id="detail-dispatch-dsh" onclick="dispatchFromDetail('dsh')">▶ DeepSeek</button>
       </div>
       <div class="job-btn-group" id="detail-retry-group" style="display:none;margin-top:0">
         <button class="job-btn retry-claude" id="detail-retry-claude" onclick="retryFromDetail('claude')">↺ Claude</button>
         <button class="job-btn retry-codex" id="detail-retry-codex" onclick="retryFromDetail('codex')">↺ Codex</button>
-        <button class="job-btn retry-deepseek" id="detail-retry-deepseek" onclick="retryFromDetail('deepseek')">↺ DeepSeek</button>
-        <button class="job-btn retry-deepseek-tui agent-hidden" id="detail-retry-deepseek-tui" onclick="retryFromDetail('deepseek-tui')">↺ DS TUI</button>
+        <button class="job-btn retry-dsh" id="detail-retry-dsh" onclick="retryFromDetail('dsh')">↺ DeepSeek</button>
       </div>
     </div>
   </div>
@@ -1061,7 +1051,7 @@ function _renderSkillPanel(reg) {
     else selectedSkill = null;
   }
   document.querySelectorAll('.skill-card').forEach(card => {
-    const agents = (card.dataset.agents || 'claude').split(',');
+    const agents = (card.dataset.agents || 'claude').split(',').map(canonAgent);
     if (!agents.includes(selectedAgent)) card.classList.add('agent-disabled');
     else card.classList.remove('agent-disabled');
   });
@@ -1176,7 +1166,7 @@ async function updateWindows(agent) {
   try {
     const res = await fetch('/api/windows/all');
     const all = await res.json();
-    ['claude', 'codex', 'gemini', 'deepseek', 'deepseek-tui'].forEach(ag => {
+    ['claude', 'codex', 'gemini', 'deepseek'].forEach(ag => {
       const row = document.getElementById('windows-row-' + ag);
       if (row && all[ag]) _updateOneRow(row, all[ag]);
     });
@@ -1184,12 +1174,13 @@ async function updateWindows(agent) {
 }
 
 async function setAgent(agent) {
+  agent = canonAgent(agent) || 'claude';
   selectedAgent = agent;
   document.getElementById('agent-claude').classList.toggle('active', agent === 'claude');
   document.getElementById('agent-codex').classList.toggle('active', agent === 'codex');
-  document.getElementById('agent-deepseek')?.classList.toggle('active', agent === 'deepseek');
+  document.getElementById('agent-dsh')?.classList.toggle('active', agent === 'dsh');
   const dsr = document.getElementById('ds-refresh');
-  if (dsr) dsr.style.display = agent === 'deepseek' ? '' : 'none';
+  if (dsr) dsr.style.display = agent === 'dsh' ? '' : 'none';
   updateWindows();
   await _refreshRegistry(agent);
   try {
@@ -1245,10 +1236,10 @@ async function _initBackends() {
 }
 
 let _trackerType = 'none';
-let _availableBackends = ['claude', 'codex', 'deepseek', 'deepseek-tui'];
+let _availableBackends = ['claude', 'codex', 'dsh'];
 
 function _updateAgentVisibility() {
-  for (const agent of ['claude', 'codex', 'deepseek', 'deepseek-tui']) {
+  for (const agent of AGENT_IDS) {
     const visible = _availableBackends.includes(agent);
     const toggle = document.getElementById('agent-' + agent);
     const newToggle = document.getElementById('new-issue-agent-' + agent);
@@ -1853,7 +1844,6 @@ function _displayModelLabel(run) {
   if (model && model !== 'codex') return model;
   const agent = (run?.agent || '').toLowerCase();
   if (agent === 'codex') return 'gpt-5.4-mini';
-  if (agent === 'deepseek') return 'deepseek-v4-flash';
   return model === 'codex' ? 'gpt-5.4-mini' : '';
 }
 
@@ -1864,17 +1854,30 @@ function _modelBadgeHtml(modelLabel, running = false, onClick = '') {
   return `<span class="model-badge${running ? ' running' : ''}"${clickAttr}>MODEL · ${_esc(label)}</span>`;
 }
 
-function _normalizeAgentName(agent) {
+// Canonical agent ids. Legacy ids in old run records and tickets are aliased on read only.
+const AGENT_IDS = ['claude', 'codex', 'dsh'];
+const _AGENT_ALIASES = { 'deepseek': 'dsh', 'deepseek-tui': 'dsh', 'aider': 'dsh' };
+
+function canonAgent(agent) {
   const value = (agent || '').trim().toLowerCase();
-  if (['claude', 'codex', 'deepseek', 'deepseek-tui'].includes(value)) return value;
-  return '';
+  const canon = _AGENT_ALIASES[value] || value;
+  return AGENT_IDS.includes(canon) ? canon : '';
+}
+
+function _normalizeAgentName(agent) {
+  return canonAgent(agent);
+}
+
+// A historical direct-API "deepseek" run has no CLI session, so it never locks retry.
+function _agentLocksRetry(rawAgent) {
+  const value = (rawAgent || '').trim().toLowerCase();
+  return !!value && value !== 'deepseek';
 }
 
 function _agentLabel(agent) {
   if (agent === 'claude') return 'CLAUDE';
   if (agent === 'codex') return 'CODEX';
-  if (agent === 'deepseek') return 'DEEPSEEK';
-  if (agent === 'deepseek-tui') return 'DS TUI';
+  if (agent === 'dsh') return 'DEEPSEEK';
   return '·';
 }
 
@@ -2007,7 +2010,7 @@ function _buildColCard(run) {
   const agentBadge = run._is_linear_issue
     ? `<span class="agent-badge ${_esc(paClass)}${agentLocked ? ' locked' : ''}" title="${_esc(badgeTitle)}" ${agentBadgeClick}>${_esc(paLabel)}</span>`
     : '';
-  const hasAssignedAgent = ['claude','codex','deepseek','deepseek-tui'].includes(preferredAgent);
+  const hasAssignedAgent = AGENT_IDS.includes(preferredAgent);
   const todoAgentToggle = run._is_linear_issue && state === 'todo' && hasAssignedAgent
     ? `<div class="todo-agent-toggle" aria-label="Assign agent">
          <button type="button" class="todo-run-btn ${_esc(preferredAgent)} selected" title="Start with ${_esc(_agentLabel(preferredAgent))}" onclick="event.stopPropagation();triggerLinearIssueWithAgent('${_esc(run.linear_issue_id)}','${_esc(preferredAgent)}')">▶ ${_esc(_agentLabel(preferredAgent))}</button>
@@ -2071,19 +2074,18 @@ function _buildColCard(run) {
     });
   }
   if (canRetry) {
-    const preferredAgent = (run.preferred_agent || run.agent || '').toLowerCase() || null;
+    const preferredAgent = canonAgent(run.preferred_agent || run.agent) || null;
     // Session lock: if agent_session_id exists and status is not todo, dim non-locked agents
     // Lock to run.agent once a run has completed (todo reset clears the lock visually)
-    const sessionLocked = !!(run.agent && state !== 'todo' && state !== 'running' && state !== 'unknown');
-    const lockedAgent = sessionLocked ? (run.agent || '').toLowerCase() : null;
+    const sessionLocked = _agentLocksRetry(run.agent) && state !== 'todo' && state !== 'running' && state !== 'unknown';
+    const lockedAgent = sessionLocked ? canonAgent(run.agent) : null;
 
     const group = document.createElement('div');
     group.className = 'job-btn-group';
     const _cardAgents = [
       { key: 'claude',        label: '↺ Claude',   cls: 'retry-claude' },
       { key: 'codex',         label: '↺ Codex',    cls: 'retry-codex' },
-      { key: 'deepseek',      label: '↺ DeepSeek', cls: 'retry-deepseek' },
-      { key: 'deepseek-tui',  label: '↺ DS TUI',   cls: 'retry-deepseek-tui' },
+      { key: 'dsh',           label: '↺ DeepSeek', cls: 'retry-dsh' },
     ];
     for (const { key, label, cls } of _cardAgents) {
       if (sessionLocked && lockedAgent !== key) continue; // hide non-locked agents
@@ -2112,7 +2114,8 @@ async function cancelRun(run_id) {
 
 async function setIssueAgent(issueId, currentAgent) {
   if (!issueId) return;
-  const next = currentAgent === 'claude' ? 'codex' : currentAgent === 'codex' ? 'deepseek' : currentAgent === 'deepseek' ? 'deepseek-tui' : 'claude';
+  const current = canonAgent(currentAgent);
+  const next = current === 'claude' ? 'codex' : current === 'codex' ? 'dsh' : 'claude';
   // Set agent and move to In Progress (server skips dispatch if already running)
   _sttCancelIssue(issueId);
   await fetch(`/api/linear/issues/${issueId}`, {
@@ -2125,7 +2128,7 @@ async function setIssueAgent(issueId, currentAgent) {
 
 async function setLinearIssuePreferredAgent(issueId, next) {
   if (!issueId) return;
-  const agent = ['claude','codex','deepseek','deepseek-tui'].includes(next) ? next : 'claude';
+  const agent = canonAgent(next) || 'claude';
   try {
     await fetch(`/api/linear/issues/${issueId}`, {
       method: 'PATCH',
@@ -2154,7 +2157,7 @@ async function startLinearIssue(issueId) {
 
 async function triggerLinearIssueWithAgent(issueId, agent, { refresh = true } = {}) {
   if (!issueId) return;
-  const agentVal = ['claude', 'codex', 'deepseek', 'deepseek-tui'].includes(agent) ? agent : 'claude';
+  const agentVal = canonAgent(agent) || 'claude';
   const titleEl = document.getElementById('linear-edit-title');
   const descEl = document.getElementById('linear-edit-desc');
   const body = { preferred_agent: agentVal, state_name: 'In Progress' };
@@ -2471,7 +2474,7 @@ async function openDetailModal(run_id) {
     if (isInReviewVirtual) {
       const lockedAgent = (boardItem?.agent || '').toLowerCase() || null;
       const prefAgent = (boardItem?.preferred_agent || lockedAgent || '').toLowerCase() || null;
-      _updateDetailRetryLock(prefAgent, !!lockedAgent);
+      _updateDetailRetryLock(prefAgent, _agentLocksRetry(lockedAgent));
     }
     document.getElementById('detail-approve-btn').style.display = isInReviewVirtual ? '' : 'none';
     if (_linearConfigured) _loadLinearIssueIntoModal(issueId, boardItem);
@@ -2545,7 +2548,7 @@ async function openDetailModal(run_id) {
 
     const canRetry = !!r.linear_issue_id && state !== 'done' && state !== 'cancelled' && state !== 'todo' && r.status !== 'running';
     document.getElementById('detail-retry-group').style.display = canRetry ? 'inline-flex' : 'none';
-    if (canRetry) _updateDetailRetryLock(r.preferred_agent || r.agent || null, !!(r.agent));
+    if (canRetry) _updateDetailRetryLock(r.preferred_agent || r.agent || null, _agentLocksRetry(r.agent));
 
     const isTodo = state === 'todo';
     document.getElementById('detail-dispatch-group').style.display = (isTodo && r.linear_issue_id) ? 'inline-flex' : 'none';
@@ -2614,15 +2617,15 @@ function closeDetailModal({ flush = true } = {}) {
 }
 
 function _updateDetailRetryLock(preferredAgent, sessionLocked = false) {
+  preferredAgent = canonAgent(preferredAgent) || null;
   const retryGroup = document.getElementById('detail-retry-group');
   if (!retryGroup || retryGroup.style.display === 'none') return;
   const _detailBtns = {
     'claude':       document.getElementById('detail-retry-claude'),
     'codex':        document.getElementById('detail-retry-codex'),
-    'deepseek':     document.getElementById('detail-retry-deepseek'),
-    'deepseek-tui': document.getElementById('detail-retry-deepseek-tui'),
+    'dsh':          document.getElementById('detail-retry-dsh'),
   };
-  const _labels = { 'claude': 'Claude', 'codex': 'Codex', 'deepseek': 'DeepSeek', 'deepseek-tui': 'DS TUI' };
+  const _labels = { 'claude': 'Claude', 'codex': 'Codex', 'dsh': 'DeepSeek' };
   for (const [agent, btn] of Object.entries(_detailBtns)) {
     if (!btn) continue;
     const isLocked = sessionLocked && agent !== preferredAgent;
@@ -2815,11 +2818,10 @@ function _setLinearEditDisabled(disabled) {
 }
 
 function setDetailIssueAgent(agent, { dispatch = false } = {}) {
-  _detailPreferredAgent = ['claude','codex','deepseek','deepseek-tui'].includes(agent) ? agent : 'claude';
+  _detailPreferredAgent = canonAgent(agent) || 'claude';
   document.getElementById('linear-edit-agent-claude')?.classList.toggle('active', _detailPreferredAgent === 'claude');
   document.getElementById('linear-edit-agent-codex')?.classList.toggle('active', _detailPreferredAgent === 'codex');
-  document.getElementById('linear-edit-agent-deepseek')?.classList.toggle('active', _detailPreferredAgent === 'deepseek');
-  document.getElementById('linear-edit-agent-deepseek-tui')?.classList.toggle('active', _detailPreferredAgent === 'deepseek-tui');
+  document.getElementById('linear-edit-agent-dsh')?.classList.toggle('active', _detailPreferredAgent === 'dsh');
   _updateDetailRetryLock(_detailPreferredAgent);
   _saveLinearDraft();
   // dispatch=true only when user clicks the button; skip on programmatic load
@@ -3884,8 +3886,7 @@ terminalEl.addEventListener('drop', async (e) => {
         <div class="agent-toggle" aria-label="New task agent">
           <button type="button" class="agent-btn active" id="new-issue-agent-claude" onclick="setNewIssueAgent('claude')">Claude</button>
           <button type="button" class="agent-btn" id="new-issue-agent-codex" onclick="setNewIssueAgent('codex')">Codex</button>
-          <button type="button" class="agent-btn" id="new-issue-agent-deepseek" onclick="setNewIssueAgent('deepseek')">DeepSeek</button>
-          <button type="button" class="agent-btn agent-hidden" id="new-issue-agent-deepseek-tui" onclick="setNewIssueAgent('deepseek-tui')">DS TUI</button>
+          <button type="button" class="agent-btn" id="new-issue-agent-dsh" onclick="setNewIssueAgent('dsh')">DeepSeek</button>
         </div>
         <span class="new-issue-agent-hint">Preferred agent for first dispatch</span>
       </div>
@@ -3921,11 +3922,10 @@ let _newIssueAgent = 'claude';
 let _newIssueFocusTimer = null;
 
 function setNewIssueAgent(agent) {
-  _newIssueAgent = ['claude','codex','deepseek','deepseek-tui'].includes(agent) ? agent : 'claude';
+  _newIssueAgent = canonAgent(agent) || 'claude';
   document.getElementById('new-issue-agent-claude')?.classList.toggle('active', _newIssueAgent === 'claude');
   document.getElementById('new-issue-agent-codex')?.classList.toggle('active', _newIssueAgent === 'codex');
-  document.getElementById('new-issue-agent-deepseek')?.classList.toggle('active', _newIssueAgent === 'deepseek');
-  document.getElementById('new-issue-agent-deepseek-tui')?.classList.toggle('active', _newIssueAgent === 'deepseek-tui');
+  document.getElementById('new-issue-agent-dsh')?.classList.toggle('active', _newIssueAgent === 'dsh');
   _saveDraft('agenticos.draft.new_issue.agent', _newIssueAgent);
 }
 

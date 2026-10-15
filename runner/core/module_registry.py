@@ -162,7 +162,7 @@ class ModuleRegistry:
 
         返回格式:
             {
-                "backends": ["claude", "deepseek"],
+                "backends": ["claude", "dsh"],
                 "linear": {"available": true, "type": "linear"},
                 "stt": {"available": true, "backends": ["browser", "openai"]},
             }
@@ -180,7 +180,10 @@ class ModuleRegistry:
             if cap.get("available"):
                 result["available"].append(name)
                 if "backend" in cap:
-                    backend_names.append(name)
+                    # A module may advertise a dispatch id that differs from its own name
+                    # (the "deepseek" monitoring module dispatches as "dsh").
+                    backend = cap["backend"]
+                    backend_names.append(backend if isinstance(backend, str) else name)
             else:
                 result["disabled"].append(name)
         result["backends"] = backend_names
