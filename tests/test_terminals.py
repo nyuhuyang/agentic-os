@@ -289,3 +289,28 @@ def test_project_tab_holds_the_project_lifecycle_lock(env):
     c.emit("term_close", {"term_id": a["term_id"]}, callback=True)
     with pj.project_lock("alpha", exclusive=True, blocking=False):  # released on close
         pass
+
+
+def test_skill_handoff_refused_under_maintenance(env):
+    app_mod, tpty, repos, _ = env
+    c = connect(app_mod)
+    a = open_tab(c, kind="shell", project_key="alpha")
+    recorded = []
+    real = tpty._record_pending_handoff
+    tpty._record_pending_handoff = lambda t, line, s: recorded.append(line)
+    try:
+        c.emit("skill_selected", {"term_id": a["term_id"], "skill": "demo-skill"}, callback=True)
+        app_mod._MAINTENANCE.set()
+        try:
+            say(c, a["term_id"], "echo handoff")
+            out = output_for(c, a["term_id"], until="maintenance")
+            assert "maintenance" in out and recorded == []
+        finally:
+            app_mod._MAINTENANCE.clear()
+        c.emit("skill_selected", {"term_id": a["term_id"], "skill": "demo-skill"}, callback=True)
+        say(c, a["term_id"], "echo handoff2")
+        time.sleep(0.3)
+        assert recorded == ["echo handoff2"]
+    finally:
+        tpty._record_pending_handoff = real
+        c.emit("term_close", {"term_id": a["term_id"]}, callback=True)

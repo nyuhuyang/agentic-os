@@ -485,3 +485,66 @@
 - BUILD-009: `_start_counted` releases the slot when `Thread.start` raises. Test monkeypatches `Thread.start` to fail and checks inflight returns to 0.
 - BUILD-007: the lock helper is now `scripts/maintenance_lock.py`, with the same rules as run_skill. It requires the checkout's inode recorded at the script's preflight, creates folders one level at a time, and re-checks the checkout and lock-file inodes after locking. Test: a checkout renamed before the helper starts gives "busy" without recreating it; a different folder at the old path gives "busy" without creating `outputs/`.
 - Live check after restart: gate on → `POST /api/projects` returns 409 → gate off. pytest 402 passed.
+
+## Build inspection 5 (2026-10-15)
+- Fresh Codex session 01a1412c-6d89-7c81-9ba2-4b206980d4a6, base a6289ab, cross-provider, 179 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/move/i5/claudex-q46c5rkg/result.json`.
+- Verdict: **REVISE**, 3 findings (BUILD-005/007/008/009 confirmed).
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "The BUILD-005/007/008/009 fixes address their reported scenarios, but maintenance still excludes three paths that write persistent state.",
+ "findings": [
+  {
+   "id": "BUILD-010",
+   "severity": "medium",
+   "path": "runner/app.py:2667",
+   "evidence": "All GET/HEAD requests bypass admission, but both progress GET endpoints call _build_progress_payload, which rewrites the saved progress JSON at line 928 using non-atomic write_text at line 677. An open detail panel polls these endpoints every three seconds. Maintenance can report inflight=0 while such a request is writing; bootout can leave the file truncated, losing its saved stream_log reference and making historical events disappear despite the relocation acceptance criterion.",
+   "fix": "Make progress GETs read-only, or admit and count these handlers before any persistence and refuse them during maintenance. Audit other GET-side writes, including task-state migration. Add coverage for a progress request paused during persistence."
+  },
+  {
+   "id": "BUILD-011",
+   "severity": "medium",
+   "path": "runner/modules/pty/__init__.py:421",
+   "evidence": "Socket.IO handlers bypass Flask before_request admission. term_input calls _record_pending_handoff, which writes journals and task state through _write_run_log at line 384 without a reservation. After maintenance reports zero, an existing terminal can submit a selected skill and start this writer. Shutdown closes terminal processes but does not join these handlers, so relocation can interrupt the handoff record between its journal and state writes. This path never registers a _running_jobs entry.",
+   "fix": "Apply admission to terminal mutation handlers before consuming pending handoffs or forwarding commands, and hold it through their persistent writes. Return an explicit maintenance refusal to the client. Cover both a handoff already writing when maintenance closes and a new handoff after closure."
+  },
+  {
+   "id": "BUILD-012",
+   "severity": "medium",
+   "path": "runner/modules/stall_detection/__init__.py:43",
+   "evidence": "The stall-detection daemon remains uncounted and does not pause under maintenance. Its hourly _archive_stale_sent call appends to RUN_LOG and STATE_RUN_LOG separately (app.py:345–349), even with no running jobs. Relocation can therefore observe inflight=0 and stop the runner between those appends, leaving the journals inconsistent. check_once also writes run records directly at line 73 and can outlive the counted worker whose job it inspected.",
+   "fix": "Admit each stall/cleanup iteration through _inflight_work, skip it while maintenance is closed, and retain the reservation through all journal and state writes. Keep the sleep outside the reservation. Add coverage with cleanup paused between journal writes."
+  }
+ ],
+ "coverage": [
+  "Verified all eight manifested file hashes, the plan SHA256, and the tracked diff SHA256 against the supplied base.",
+  "Inspected every manifested file, including the relocation script, lock helper, review history, and both test files.",
+  "Traced request admission, counted thread startup, retry, baseline, project dispatch, Linear dispatch/sync/push, and poller reservations.",
+  "Inspected related CLI locking, shared-state helpers, progress polling, Socket.IO handoffs, periodic cleanup, module startup, and shutdown beyond the manifest.",
+  "Checked relevant SPEC.md requirements for dispatch records, journal integrity, and persistent state; inspected installed Flask-SocketIO event handling."
+ ],
+ "limitations": [
+  "No files were edited, tests executed, services changed, or work delegated.",
+  "Failure scenarios were established through static source and interleaving analysis, without reproduction.",
+  "The reported relocation success and 402 passing tests were not independently verified.",
+  "Live launchd configuration, external settings, and historical runtime records were not independently audited."
+ ]
+}
+```
+
+### Host dispositions (build inspection 5, all accepted) and a full writer audit
+- BUILD-010: `_write_run_progress_json` now uses `write_json_atomic`. The GET progress handlers only refresh this cache, and an interrupted write leaves the previous file whole, so they stay outside admission. Task-state migration on GET was already atomic (`write_json_atomic`). Test: a write killed at `os.replace` leaves the old file intact.
+- BUILD-011: `term_input` that completes a pending skill handoff runs `_record_pending_handoff` and the forward under `_inflight_work()`. Under maintenance the handoff is dropped before anything is recorded or forwarded, and the terminal shows the refusal. Ordinary keystrokes are not file writes and pass through. Test: refused under maintenance with nothing recorded; recorded after the gate reopens.
+- BUILD-012: each stall/cleanup pass (`run_pass`) is admitted and counted through `check_once` and `_archive_stale_sent`, and skipped under maintenance; the sleep stays outside. Test: counted (inflight 1 inside), skipped under maintenance.
+- Writer audit (grep of every write in runner/, by context), so coverage can be checked as a whole:
+  - mutating HTTP routes → request gate (`before_request` / `teardown_request`)
+  - background threads → `_start_counted` (dispatch, retry, baseline, Linear sync/create/push)
+  - Linear poller iteration → admitted per iteration, paused under maintenance
+  - stall/cleanup pass → admitted per pass
+  - terminal skill handoff (Socket.IO) → admitted around the record
+  - GET-side writes (progress cache, task-state migration) → atomic replace only
+  - DeepSeek usage poller → its cache is written with `os.replace` under its own lock (atomic; not counted)
+  - startup migration → runs before serving
+  - run_skill.py CLI → shared maintenance lock
+- pytest 405 passed.

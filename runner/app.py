@@ -674,7 +674,9 @@ def _write_run_progress_json(run_id: str, payload: dict) -> str:
     existing.update(payload)
     existing["run_id"] = run_id
     existing["updated_at"] = datetime.now(timezone.utc).isoformat()
-    path.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Atomic: GET progress requests refresh this cache outside admission, so an interrupted
+    # write must leave the previous file intact (BUILD-010).
+    write_json_atomic(path, existing, indent=2, ensure_ascii=False)
     return str(path)
 
 

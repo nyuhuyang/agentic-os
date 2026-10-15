@@ -1205,3 +1205,32 @@ def test_counted_threads_inherit_admission_and_release_on_failed_start(helper, m
     with pytest.raises(RuntimeError):
         app_mod._start_counted(lambda: None)
     assert app_mod._INFLIGHT == 0  # the slot came back (BUILD-009)
+
+
+def test_stall_pass_is_counted_and_skipped_under_maintenance(helper, monkeypatch):
+    app_mod, *_ = helper
+    from runner.modules import stall_detection as sd
+    seen = []
+    monkeypatch.setattr(sd, "check_once", lambda a, s: seen.append(app_mod._INFLIGHT))
+    monkeypatch.setattr(app_mod, "_archive_stale_sent", lambda: seen.append("archive"))
+    sd.run_pass(app_mod, None, 0.0)
+    assert seen == [1, "archive"]  # counted while it writes
+    seen.clear()
+    app_mod._MAINTENANCE.set()
+    try:
+        sd.run_pass(app_mod, None, 0.0)
+        assert seen == []
+    finally:
+        app_mod._MAINTENANCE.clear()
+
+
+def test_progress_cache_write_is_atomic(helper, monkeypatch):
+    app_mod, *_ = helper
+    path = app_mod._run_progress_path("r1")
+    app_mod._write_run_progress_json("r1", {"stream_log": "/x/outputs/logs/r1.stream"})
+    before = path.read_text()
+    import state_io
+    monkeypatch.setattr(state_io.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("killed mid-write")))
+    with pytest.raises(OSError):
+        app_mod._write_run_progress_json("r1", {"state": "x"})
+    assert path.read_text() == before  # an interrupted write leaves the old file whole

@@ -41,12 +41,22 @@ class StallDetectionModule(AgenticModule):
         last_cleanup = 0.0
 
         while True:
-            time.sleep(30)
-            check_once(_app, socketio)
+            time.sleep(30)  # outside the reservation
+            last_cleanup = run_pass(_app, socketio, last_cleanup)
 
+
+def run_pass(_app, socketio, last_cleanup: float) -> float:
+    """One stall/cleanup pass. It writes run records, so it is counted and skipped under
+    maintenance (BUILD-012). Returns the new last-cleanup time."""
+    try:
+        with _app._inflight_work():
+            check_once(_app, socketio)
             if time.monotonic() - last_cleanup > 3600:
                 last_cleanup = time.monotonic()
                 _app._archive_stale_sent()
+    except _app.MaintenanceRefused:
+        pass
+    return last_cleanup
 
 
 def check_once(_app, socketio) -> None:
