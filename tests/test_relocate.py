@@ -269,3 +269,30 @@ def test_run_skill_never_recreates_a_checkout_moved_mid_acquire(tmp_path, monkey
     monkeypatch.setattr(pathlib.Path, "mkdir", mkdir)
     assert run_skill._maintenance_shared() is None
     assert not old.exists() and (tmp_path / "new" / "runner").is_dir()
+
+
+@pytest.mark.parametrize("bad", ["agentic-os&x", "agentic-os|x", "agentic os"])
+def test_paths_with_pattern_characters_are_refused_up_front(env, bad):
+    old, new, plist, up, e = env
+    before = plist.read_text()
+    r = run(old, new.parent / bad, e)
+    assert r.returncode == 1 and "paths may only use" in r.stdout
+    assert old.exists() and plist.read_text() == before
+
+
+def test_a_dotted_path_is_replaced_literally(env):
+    old, new, plist, up, e = env
+    other = str(old).replace("agentic-os", "agenticXos")  # what an unescaped "." would also match
+    pip = old / ".venv" / "bin" / "pip"
+    pip.write_text(pip.read_text() + f"# keep {other}\n")
+    dotted = new.parent / "agentic.os"
+    r = run(old, dotted, e)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"keep {other}" in (dotted / ".venv" / "bin" / "pip").read_text()
+
+
+def test_another_filesystem_is_refused(env, monkeypatch):
+    old, new, plist, up, e = env
+    r = run(old, Path("/dev/fd/agentic-os"), e)  # devfs: never the checkout's filesystem
+    assert r.returncode == 1 and ("another filesystem" in r.stdout or "parent of" in r.stdout)
+    assert old.exists()

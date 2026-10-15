@@ -22,11 +22,14 @@ die() { say "ABORT: $*"; exit 1; }
 manual() { say "NEEDS A HUMAN: $*"; exit 2; }
 http() { curl -s --connect-timeout 2 -m 5 "$@"; }
 
+case "$OLD$NEW" in *[!A-Za-z0-9_./-]*) die "paths may only use A-Z a-z 0-9 _ . / - (sed, grep and pgrep see them as patterns)" ;; esac
 [ -f "$OLD/runner/app.py" ] || die "$OLD is not an AgenticOS checkout"
 [ -e "$NEW" ] && die "$NEW already exists"
 [ -d "$(dirname "$NEW")" ] || die "parent of $NEW does not exist"
 [ -f "$PLIST" ] || die "no launchd agent at $PLIST"
 case "$NEW/" in "$OLD"/*) die "$NEW is inside $OLD" ;; esac
+# One filesystem, so mv is an atomic rename (a copy-and-delete could leave two partial trees, BUILD-003).
+[ "$(stat -f %d "$OLD")" = "$(stat -f %d "$(dirname "$NEW")")" ] || die "$NEW is on another filesystem"
 
 token=$(http "$URL/" | sed -n 's/.*name="agentic-os-token" content="\([^"]*\)".*/\1/p')
 [ -n "$token" ] || die "runner not reachable; start it first so running jobs can be checked"
@@ -96,23 +99,25 @@ restart_old() {
   cp "$BACKUP" "$PLIST" && launchctl bootstrap "$DOMAIN" "$PLIST" && wait_up "$OLD" \
     && say "runner restarted on $OLD" || manual "runner did not restart on $OLD; plist backup at $BACKUP"
 }
+lit() { printf '%s' "$1" | sed 's/[.]/\\./g'; }  # a path as a sed/grep pattern (only "." needs escaping here)
 repoint() {  # rewrite $1 -> $2 for the checkout now at $2
-  grep -rlI --null "$1" "$2/.venv/bin" | xargs -0 sed -i '' "s|$1|$2|g" || return 1
-  sed -i '' "s|$1|$2|g" "$2/.venv/pyvenv.cfg" || return 1
+  pat=$(lit "$1")
+  grep -rlIF --null "$1" "$2/.venv/bin" | xargs -0 sed -i '' "s|$pat|$2|g" || return 1
+  sed -i '' "s|$pat|$2|g" "$2/.venv/pyvenv.cfg" || return 1
   hooks=$(git -C "$2" config --local --get core.hooksPath)
   case "$hooks" in "$1"/*) git -C "$2" config --local core.hooksPath "$2${hooks#"$1"}" || return 1 ;; esac
   for wt in "$2"/.claude/worktrees/*; do
     [ -d "$wt" ] || continue
     git -C "$2" worktree repair "$wt" >/dev/null 2>&1 || return 1
   done
-  sed -i '' "s|$1|$2|g" "$PLIST" && plutil -lint "$PLIST" >/dev/null
+  sed -i '' "s|$pat|$2|g" "$PLIST" && plutil -lint "$PLIST" >/dev/null
 }
 verified() {  # nothing operational in checkout $2 still names $1, and every worktree works;
               # an inspection that cannot run fails the check (REL-006)
-  out=$(grep -rlI "$1" "$2/.venv"); rc=$?
+  out=$(grep -rlIF "$1" "$2/.venv"); rc=$?
   [ $rc -le 1 ] || { say "cannot read $2/.venv"; return 1; }
   [ -z "$out" ] || { say "old path left in: $out"; return 1; }
-  grep -q "$1" "$PLIST"; rc=$?
+  grep -qF "$1" "$PLIST"; rc=$?
   [ $rc -eq 1 ] || { say "plist still names the old path, or cannot be read"; return 1; }
   cfg=$(git -C "$2" config --list --local) || { say "cannot read git config"; return 1; }
   case "$cfg" in *"$1"*) say "old path left in git config"; return 1 ;; esac

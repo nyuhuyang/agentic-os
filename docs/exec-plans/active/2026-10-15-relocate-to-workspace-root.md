@@ -74,4 +74,7 @@ The Claude Code shell here cannot read the workspace root (macOS privacy), so th
 - [x] Verify each acceptance criterion from the new path — `verify.log` (runner context, new path): old path gone; launchd arguments name the new path; 0 `.venv` files name the old path; `core.hooksPath` new; 6 worktrees listed under the new path and `git status` ok in each; `WORKSPACE_ROOT` = `~/Documents/AI_Workspace`, knowledge base found; no `~/Documents/.claude`; `/api/projects` lists the 3 projects with sessions (4, 5, 50); pytest 382 passed from the new path
 - [x] Update the workspace map (repo `CLAUDE.md`, and the workspace-level one if separate) — repo `CLAUDE.md` gains an `agentic-os/` row; there is no separate workspace-level `CLAUDE.md` (`~/Documents/AI_Workspace` has none)
 - [x] Give the user the commands for `~/.claude/settings.json`, `~/.codex/config.toml` and the Claude project folder — given in the session reply (2026-10-15): one `sed` per file and a non-clobbering copy of the Claude project folder
-- [ ] Fresh cross-provider (Codex) build inspection of the script and tests returns no unresolved material findings
+- [x] Fix: refuse a destination on another filesystem; refuse paths outside `A-Za-z0-9_./-`; literal matching (BUILD-003, BUILD-002)
+- [x] Test: pattern characters and another filesystem refused up front; a dotted path replaced literally
+- [x] Runner shutdown that drains non-project jobs through their record write — N/A for this plan: pre-existing for every runner restart, recorded as a follow-up for the user (BUILD-001 disposition)
+- [ ] Fresh cross-provider (Codex) build inspection of the script and tests returns no unresolved material findings — inspection 1 REVISE (2 fixed, 1 rejected with reasons); inspection 2 pending

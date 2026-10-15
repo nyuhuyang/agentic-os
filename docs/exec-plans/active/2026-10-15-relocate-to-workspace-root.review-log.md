@@ -250,3 +250,57 @@
 - Verdict: **APPROVED**, 0 findings; bound to plan sha256 `adb570909a6dc7aee46a2b5fe8dae97c00ec2d7c401ababcb45b17b34da41d80`. Plan review: 5 rounds (9 → 4 → 2 → 1 → 0).
 - After approval only checkbox state changed (word diff: 18 `[ ]`→`[x]` plus one evidence note); the strict sha check therefore reports a change. Plan text approved in round 5 is unchanged.
 - Run 2026-10-15: relocation EXIT=0 from a dashboard terminal (runner context); verify.log all green (see plan). Workspace map updated in the repo CLAUDE.md (no workspace-level CLAUDE.md exists). Outside-repo edits handed to the user.
+
+## Build inspection 1 (2026-10-15)
+- Fresh Codex session 01a14100-1bfa-7230-8207-a270bcc8fd6e, base 2395d08, cross-provider, 193 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/move/i1/claudex-5macompx/result.json`.
+- Verdict: **REVISE**, 3 findings.
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "Dashboard writers remain outside maintenance coordination. The reusable script also has unresolved path-handling and cross-filesystem recovery defects.",
+ "findings": [
+  {
+   "id": "BUILD-001",
+   "severity": "high",
+   "path": "scripts/relocate_checkout.sh:33",
+   "evidence": "The empty running-jobs check and exclusive CLI lock do not drain dashboard completion writers. For example, runner/modules/linear/__init__.py:677 removes a job before calling _write_run_log at line 680. Its daemon worker can pause there, allowing relocation to observe [], acquire maintenance, and bootout the runner. runner/app.py:2572 waits only for project jobs, so this non-project completion can be discarded without its record. POST /run has the same ordering at app.py:2841. New AI-only dispatches can also start between preflight and bootout without taking maintenance protection.",
+   "fix": "Apply shared maintenance protection to every dispatch path, from admission through final record and state writes. Acquire exclusive protection before shutdown and refuse relocation while any such worker remains active. Cover a paused non-project completion and dispatch after preflight."
+  },
+  {
+   "id": "BUILD-002",
+   "severity": "medium",
+   "path": "scripts/relocate_checkout.sh:100",
+   "evidence": "OLD and NEW are interpolated directly into sed expressions, while grep and pgrep interpret paths as regular expressions. A valid destination such as /tmp/agentic-os&archive expands '&' to OLD during sed replacement, corrupting shebangs and pyvenv.cfg. Verification triggers rollback, but reverse replacement searches for the intended NEW string, which the corrupted files do not contain, leaving incomplete recovery. The tests use paths without these characters.",
+   "fix": "Use literal byte/string replacement for venv text, structured plist editing, and literal or escaped process/path matching. Add success and rollback cases with regex metacharacters, '&', and the substitution delimiter in paths."
+  },
+  {
+   "id": "BUILD-003",
+   "severity": "medium",
+   "path": "scripts/relocate_checkout.sh:165",
+   "evidence": "Preflight accepts a destination parent on another filesystem, but recovery assumes mv is an atomic rename. Cross-filesystem mv copies and deletes: an interrupted or failed copy can leave both OLD and a partial NEW. The failure branch merely restarts OLD and reports 'nothing changed'; the moving-phase handler likewise restarts OLD whenever both paths exist. Interruption during source removal can leave OLD incomplete. Copying maintenance.lock also creates a different inode, defeating the helper's protection at NEW.",
+   "fix": "Require OLD and the destination parent to share a filesystem before stopping the runner, then use an atomic rename. Otherwise implement an explicit staged-copy transaction with stable external maintenance locking and recovery for partial source/destination states."
+  }
+ ],
+ "coverage": [
+  "Verified all nine manifest file hashes, including the supplied plan SHA256.",
+  "Inspected every changed file, including relocation tests, path-resolution changes, maintenance locking, workspace map, and review history.",
+  "Traced dashboard and Linear dispatch, completion bookkeeping, shared-state writers, stall detection, project shutdown, and PTY cleanup beyond the manifest.",
+  "Traced registry resolution and both saved-stream readers.",
+  "Inspected the current LaunchAgent plist, local Git configuration, and registered worktree paths.",
+  "Checked relevant specification requirements for dispatch records, shared state, running-job visibility, and CLI behavior."
+ ],
+ "limitations": [
+  "No files were edited, tests executed, services changed, or work delegated.",
+  "Failure scenarios were established statically and were not reproduced.",
+  "The reported successful relocation and 382 passing tests were not independently verified.",
+  "External configuration and historical runtime records were not exhaustively audited."
+ ]
+}
+```
+
+### Host dispositions (build inspection 1)
+- BUILD-003 accepted: the script refuses a destination whose parent is on another filesystem (`stat -f %d`) before anything changes, so `mv` is always an atomic rename. Test uses a devfs destination.
+- BUILD-002 accepted (narrowed): OLD and NEW may contain only `A-Za-z0-9_./-`; anything else is refused up front (tests: `&`, `|`, space). Detection uses `grep -F`, and the one remaining pattern character, `.`, is escaped in the sed patterns. Test: a dotted destination leaves a look-alike path (`agenticXos`) untouched.
+- BUILD-001 rejected for this plan, recorded as a follow-up: a non-project dashboard job removes itself from `_running_jobs` before writing its record, and shutdown waits only for project jobs. Any runner restart (`launchctl kickstart -k`, a crash, a reboot) can therefore lose such a record; relocation only adds one more restart. A proper fix changes runner shutdown (drain every job through its record write and refuse new admissions on SIGTERM), which is runner work outside this move. The relocation already refuses while any job is listed as running. Follow-up for the user: "runner shutdown drains all jobs".
+- pytest: relocate suite 19, full suite below.
