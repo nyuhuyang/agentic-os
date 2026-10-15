@@ -1267,3 +1267,13 @@ def test_registry_cache_write_is_atomic(tmp_path, monkeypatch):
     monkeypatch.setattr(state_io.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("killed")))
     rl.ensure_claude_registry()  # best-effort: swallowed, and the old file stays whole (BUILD-013)
     assert (tmp_path / "registry.json").read_text() == before
+
+
+def test_counted_thread_construction_failure_releases_the_slot(helper, monkeypatch):
+    app_mod, *_ = helper
+    def broken(*a, **k):
+        raise MemoryError("no room for a thread")
+    monkeypatch.setattr(app_mod.threading, "Thread", broken)
+    with pytest.raises(MemoryError):
+        app_mod._start_counted(lambda: None)
+    assert app_mod._INFLIGHT == 0  # BUILD-009, constructor variant

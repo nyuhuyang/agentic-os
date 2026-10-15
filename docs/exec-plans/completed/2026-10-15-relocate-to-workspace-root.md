@@ -1,6 +1,7 @@
 ---
-status: in-progress
+status: completed
 created: 2026-10-15
+completed: 2026-10-15
 ---
 
 # Move the checkout to the workspace root
@@ -88,4 +89,6 @@ The Claude Code shell here cannot read the workspace root (macOS privacy), so th
 - [x] Test: interrupted progress write keeps the old file; handoff refused under maintenance and recorded after; stall pass counted and skipped
 - [x] Fix: newline-level admission for terminal handoffs; atomic, locked registry cache; counted stream readers; locked progress read-merge-replace (BUILD-011, 013, 014, 015)
 - [x] Test: concurrent progress writers all survive; stream readers counted; registry cache write atomic
-- [ ] Fresh cross-provider (Codex) build inspection of the script and tests returns no unresolved material findings — inspection 1 REVISE (2 fixed, 1 deferred); inspection 2 REVISE (3 fixed, deferral reversed); inspection 3 REVISE (5 fixed); inspection 4 REVISE (4 fixed); inspection 5 REVISE (3 fixed); inspection 6 REVISE (4 fixed); inspection 7 pending
+- [x] Fix: thread construction inside the release-on-failure handler (BUILD-009 regression); `os.rename` instead of `mv` so a late destination is never nested into (BUILD-017) — both after the last inspection, carried to the follow-up plan for review
+- [x] Test: constructor failure releases the slot; a destination created before the rename leaves the checkout un-nested and the runner on OLD
+- [x] Fresh cross-provider (Codex) build inspection of the script and tests returns no unresolved material findings — N/A by user decision (2026-10-15): stop after inspection 7 (3 → 3 → 5 → 4 → 3 → 4 → 4 findings, all fixed or moved). BUILD-016, the BUILD-014 remainder and a review of the post-inspection fixes are in `docs/exec-plans/active/2026-10-15-runner-write-safety.md`

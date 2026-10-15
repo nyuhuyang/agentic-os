@@ -35,6 +35,10 @@ die() {  # before the runner is stopped, give the old runner its gate back
 }
 manual() { say "NEEDS A HUMAN: $*"; exit 2; }
 http() { curl -s --connect-timeout 2 -m 5 "$@"; }
+PY=${AOS_PYTHON:-/usr/bin/python3}  # override for tests only
+# rename(2), never mv: a destination that appeared meanwhile makes it fail (non-empty) instead of
+# nesting the checkout inside it (BUILD-017).
+rename_dir() { "$PY" -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' "$1" "$2"; }
 
 case "$OLD$NEW" in *[!A-Za-z0-9_./-]*) die "paths may only use A-Z a-z 0-9 _ . / - (sed, grep and pgrep see them as patterns)" ;; esac
 [ -f "$OLD/runner/app.py" ] || die "$OLD is not an AgenticOS checkout"
@@ -78,7 +82,7 @@ done
 # Exclusive maintenance lock, held by a helper until this script ends: run_skill.py holds it
 # shared for its whole run, so no skill is mid-run now and none can start until we finish (REL-002).
 LOCK_STATUS=$(mktemp -t agenticos-lock) || die "cannot create a temp file"
-/usr/bin/python3 "$OLD/scripts/maintenance_lock.py" "$OLD" "$OLD_INODE" $$ > "$LOCK_STATUS" &
+"$PY" "$OLD/scripts/maintenance_lock.py" "$OLD" "$OLD_INODE" $$ > "$LOCK_STATUS" &
 LOCKER=$!
 trap 'kill $LOCKER 2>/dev/null; rm -f "$LOCK_STATUS"' EXIT
 i=0; until [ -s "$LOCK_STATUS" ]; do i=$((i + 1)); [ $i -gt 20 ] && die "maintenance lock helper did not answer"; sleep 0.5; done
@@ -167,7 +171,7 @@ rollback() {
   wait_down "$NEW" || manual "a runner from $NEW is still alive; checkout left at $NEW"
   busy=$(others "$NEW") && manual "processes still use $NEW ($busy); checkout left there"
   [ -e "$OLD" ] && manual "$OLD was recreated meanwhile (a stale process?); checkout left at $NEW"
-  mv "$NEW" "$OLD" || manual "could not move $NEW back to $OLD"
+  rename_dir "$NEW" "$OLD" || manual "could not move $NEW back to $OLD"
   damage=""
   repoint "$NEW" "$OLD" || damage="repointing back failed"
   verified "$NEW" "$OLD" || damage="${damage:+$damage; }the old checkout still names $NEW somewhere"
@@ -182,7 +186,7 @@ launchctl bootout "$DOMAIN/$LABEL" || { PHASE=check; die "could not stop $LABEL"
 wait_down "$OLD" || { restart_old; die "runner did not stop"; }
 busy=$(others "$OLD") && { restart_old; die "processes still use $OLD: $busy"; }
 PHASE=moving
-mv "$OLD" "$NEW" || { PHASE=stopped; restart_old; die "mv failed; nothing changed"; }
+rename_dir "$OLD" "$NEW" || { PHASE=stopped; restart_old; die "rename failed; nothing changed"; }
 PHASE=moved
 say "moved to $NEW"
 repoint "$OLD" "$NEW" || rollback "repoint failed"

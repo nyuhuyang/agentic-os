@@ -50,8 +50,11 @@ fi
 exec "$REAL_GIT" "$@"''',
     "sed": '''if [ -n "${SHIM_SED_FAIL:-}" ] && echo "$*" | grep -qF "$SHIM_SED_FAIL"; then exit 1; fi
 exec "$REAL_SED" "$@"''',
-    "mv": '''"$REAL_MV" "$@" || exit $?
-if [ -n "${SHIM_KILL_AFTER_MV:-}" ] && [ ! -e "$SHIM_LOG.mvkill" ]; then touch "$SHIM_LOG.mvkill"; kill -TERM $PPID; fi''',
+    # python3: the real one; after the first directory rename it can TERM the script
+    "python3": '''/usr/bin/python3 "$@" || exit $?
+case "$*" in *os.rename*)
+  if [ -n "${SHIM_KILL_AFTER_MV:-}" ] && [ ! -e "$SHIM_LOG.mvkill" ]; then touch "$SHIM_LOG.mvkill"; kill -TERM $PPID; fi ;;
+esac''',
 }
 
 
@@ -82,6 +85,7 @@ def env(tmp_path):
     import shutil
     real = {f"REAL_{t.upper()}": shutil.which(t) for t in ("git", "sed", "mv", "pgrep")}
     e = {**os.environ, **real, "PATH": f"{bin_}:{os.environ['PATH']}", "AOS_PLIST": str(plist), "AOS_WAIT": "3",
+         "AOS_PYTHON": str(bin_ / "python3"),
          "SHIM_LOG": str(tmp_path / "calls"), "SHIM_UP": str(up)}
     return old, new, plist, up, e
 
@@ -401,3 +405,18 @@ def test_lock_helper_never_recreates_a_checkout_moved_before_it_starts(tmp_path)
     out = subprocess.run(["/usr/bin/python3", str(SCRIPT.parent / "maintenance_lock.py"), str(old), str(inode),
                           str(os.getpid())], capture_output=True, text=True)
     assert out.stdout.strip() == "busy" and not (old / "outputs").exists()
+
+
+def test_a_destination_created_before_the_rename_is_never_nested_into(env, monkeypatch):
+    old, new, plist, up, e = env
+    # the destination appears (non-empty) right as the runner stops, i.e. after the preflight
+    shim = Path(e["PATH"].split(":")[0]) / "launchctl"
+    shim.write_text(shim.read_text().replace('  bootout) rm -f "$SHIM_UP" ;;',
+                                             f'  bootout) rm -f "$SHIM_UP"; mkdir -p "{new}/squatter" ;;'))
+    before = plist.read_text()
+    r = run(old, new, e)
+    assert r.returncode == 1 and "rename failed" in r.stdout
+    assert (old / "runner" / "app.py").exists() and not (new / "agentic-os").exists()  # never nested
+    assert plist.read_text() == before and up.read_text().strip() == str(old)
+
+

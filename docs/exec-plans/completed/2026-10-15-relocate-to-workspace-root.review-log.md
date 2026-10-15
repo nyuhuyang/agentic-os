@@ -610,3 +610,66 @@
 - BUILD-015: `_write_run_progress_json` holds a `file_lock` around read-merge-replace. Test: 12 concurrent writers each keep their key.
 - pytest 408 passed.
 - User decision (2026-10-15): one more inspection round, then stop. Any remaining findings go to a separate "runner write-safety hardening" plan and this plan is archived.
+
+## Build inspection 7 (2026-10-15, final by user decision)
+- Fresh Codex session 01a14149-06ee-7da0-96fe-868327ecc62f, base d91c3d9, cross-provider, 210 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/move/i7/claudex-lwb3fnym/result.json`.
+- Verdict: **REVISE**, 4 findings (BUILD-011/013/015 confirmed; BUILD-014 counting confirmed).
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "BUILD-011, BUILD-013 and BUILD-015 address their reported scenarios. BUILD-014 now counts readers correctly, but timeout cleanup remains incomplete. Additional cache, relocation and reservation defects remain, ranked below.",
+ "findings": [
+  {
+   "id": "BUILD-016",
+   "severity": "medium",
+   "path": "runner/app.py:285",
+   "evidence": "The separate execution-registry cache still uses write_text on a shared content-derived filename. Two concurrent dispatches with the same agent and registry overwrite the same file. After dispatch A publishes the path, dispatch B can truncate it while A's run_skill subprocess reads it. runner/run_skill.py:65 then raises JSONDecodeError on empty or partial JSON. Maintenance counting does not serialize these concurrent writers. This pre-existing path is separate from the repaired Claude registry cache.",
+   "fix": "Publish execution-registry caches atomically and avoid truncating published files. Add an interleaving check where one subprocess reads while another dispatch republishes the same cache."
+  },
+  {
+   "id": "BUILD-014",
+   "severity": "medium",
+   "path": "runner/app.py:744",
+   "evidence": "Reader reservations prevent premature shutdown, but timeout handling kills only the direct subprocess and leaves readers running. If an agent starts a background descendant that retains stdout, the reader can block indefinitely after the parent times out and removes its job/process entries. Its new reservation keeps inflight positive, permanently refusing relocation until that descendant exits or the runner restarts. The Claude and DSH readers have the same gap. The new test checks successful reader startup, not timeout cleanup.",
+   "fix": "Give these subprocesses owned process groups and bounded timeout cleanup that terminates descendants, reaps processes and stops pipe readers. Retain reservations until persistence finishes. Cover a descendant retaining stdout after the direct process is killed."
+  },
+  {
+   "id": "BUILD-017",
+   "severity": "medium",
+   "path": "scripts/relocate_checkout.sh:185",
+   "evidence": "NEW is checked for existence only at line 42. If another process creates NEW before line 185, mv OLD NEW succeeds by nesting the checkout inside that directory. Repointing then fails because NEW/.venv is absent. Rollback moves the entire destination directory back to OLD, leaving the checkout nested there, so restart_old cannot start OLD/runner/app.py. The exclusive maintenance lock protects the source checkout, not the destination namespace.",
+   "fix": "Use a rename operation that atomically refuses an existing destination instead of nesting. Verify the relocated directory's identity before repointing or rollback, and cover destination creation between preflight and rename."
+  },
+  {
+   "id": "BUILD-009",
+   "severity": "low",
+   "path": "runner/app.py:2642",
+   "evidence": "This revision moves threading.Thread construction outside the exception handler, after reserving an inflight slot. If construction raises, such as MemoryError while allocating its synchronization objects, no worker exists to release the slot and the exception handler is skipped. After resource recovery, maintenance still reports phantom work. Previously both construction and startup were protected.",
+   "fix": "Place thread construction and startup inside the same reservation-release exception handler. Extend failure coverage to a constructor exception."
+  }
+ ],
+ "coverage": [
+  "Verified all seven manifested file hashes, the supplied plan SHA256 and the tracked diff SHA256 against the supplied base.",
+  "Read every manifested file, the complete relocation script, maintenance helper and relocation tests.",
+  "Reinspected terminal admission, registry publication, progress read-merge-replace locking and all three counted stream implementations.",
+  "Traced related run/retry/project/Linear callers, CLI registry reads and maintenance locks, tracker persistence, stall cleanup and shutdown.",
+  "Checked relevant SPEC.md requirements for dispatch records, atomic state, concurrency and crash integrity."
+ ],
+ "limitations": [
+  "No files were edited, tests executed, services changed or work delegated.",
+  "Findings rely on static source and interleaving analysis; failure scenarios were not reproduced.",
+  "The reported successful relocation and 408 passing tests were not independently verified.",
+  "Live launchd state, external configuration, historical runtime records and every repository writer were not exhaustively audited."
+ ]
+}
+```
+
+### Host dispositions (build inspection 7, the last round by user decision)
+- BUILD-009 (my regression): thread construction moved back inside the release-on-failure handler. Test: a `Thread` constructor that raises leaves inflight at 0. Fixed after this inspection, so not independently reviewed; carried to the follow-up plan for review.
+- BUILD-017: the script renames with `os.rename` (`rename_dir`) instead of `mv`. A destination that appears after the preflight makes the rename fail (non-empty dir) rather than nesting the checkout; the runner restarts on OLD. Test: a destination created at bootout gives "rename failed", nothing nested, OLD running. Fixed after this inspection, so not independently reviewed; carried to the follow-up plan.
+- BUILD-016 (pre-existing execution-registry cache race) and the BUILD-014 remainder (timeout cleanup of process groups and readers): moved to `docs/exec-plans/active/2026-10-15-runner-write-safety.md`. The BUILD-014 remainder can only make the script refuse (in-flight stays above 0); it does not lose data.
+- pytest 410 passed. Inspection rounds used: 7 of 20. Assurance: cross_provider throughout.
+
+### Summary
+- Plan review: 5 rounds (9 → 4 → 2 → 1 → 0). Build inspections: 7 (3 → 3 → 5 → 4 → 3 → 4 → 4), all cross-provider. The relocation itself ran once, successfully, and was verified from the new path. Remaining items live in the follow-up plan.

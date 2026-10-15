@@ -2639,8 +2639,8 @@ def _start_counted(target, *args, **kwargs) -> threading.Thread:
         finally:
             _TL.admitted = False
             _release()
-    t = threading.Thread(target=run, daemon=True)
-    try:
+    try:  # construction and start both inside: either can fail after the slot was taken (BUILD-009)
+        t = threading.Thread(target=run, daemon=True)
         t.start()
     except BaseException:
         _release()
