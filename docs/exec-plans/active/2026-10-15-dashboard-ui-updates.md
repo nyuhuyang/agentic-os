@@ -9,8 +9,9 @@ Two dashboard changes requested on 2026-10-15, kept in one plan (user: "these ar
 - A. Rename and remove sessions from the Projects panel
 - B. Pick a project when creating a task (default `agentic-os`)
 - C. Live terminal view of a card's session from any board column
+- D. Rename the project panel's "Baseline" button to "Run tests"
 
-Each part has its own goal, criteria and checklist; one Codex plan review and one build inspection cover all three.
+Each part has its own goal, criteria and checklist; one Codex plan review and one build inspection cover all parts.
 
 ## A. Rename and remove sessions
 
@@ -179,6 +180,20 @@ A headless run that ends by asking the user something lands in In review. The us
 - [ ] Test: closing the interactive terminal records `interactive session ended` and applies the chosen next state
 - [ ] Implement the Terminal tab, pinned message, quick reply, embedded interactive terminal, close prompt and badge
 - [ ] Manual check: a `/claudex-loop` run stopped for sign-off is answered once by quick reply and once interactively
+
+## D. "Baseline" becomes "Run tests"
+
+### Goal
+"Baseline" runs the project's own `verify` command (its existing tests) in a fresh worktree of HEAD with seeds, so a project's tests are known to pass in the runner's environment before agents change anything. The label does not say that. User question, 2026-10-15.
+
+### Acceptance criteria
+- [ ] The project-head button reads "Run tests"; its tooltip shows the exact command and "on a clean copy of HEAD"
+- [ ] The inline result line reads "tests: pass / fail · exit N · T s" instead of "baseline: …"
+- [ ] Projects without `verify` still show no button; the API route and its behaviour are unchanged
+
+### Progress Checklist
+- [ ] Implement the label, tooltip and result wording in `index.html`
+- [ ] Manual check: the button and result on a project with `verify`, absent on one without
 
 ## Shared checklist
 - [ ] Codex plan review returns APPROVED
