@@ -304,3 +304,55 @@
 - BUILD-002 accepted (narrowed): OLD and NEW may contain only `A-Za-z0-9_./-`; anything else is refused up front (tests: `&`, `|`, space). Detection uses `grep -F`, and the one remaining pattern character, `.`, is escaped in the sed patterns. Test: a dotted destination leaves a look-alike path (`agenticXos`) untouched.
 - BUILD-001 rejected for this plan, recorded as a follow-up: a non-project dashboard job removes itself from `_running_jobs` before writing its record, and shutdown waits only for project jobs. Any runner restart (`launchctl kickstart -k`, a crash, a reboot) can therefore lose such a record; relocation only adds one more restart. A proper fix changes runner shutdown (drain every job through its record write and refuse new admissions on SIGTERM), which is runner work outside this move. The relocation already refuses while any job is listed as running. Follow-up for the user: "runner shutdown drains all jobs".
 - pytest: relocate suite 19, full suite below.
+
+## Build inspection 2 (2026-10-15)
+- Fresh Codex session 01a14106-9dec-7381-a810-12625caa176b, base e10c1cd, cross-provider, 111 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/move/i2/claudex-p1etqcxn/result.json`.
+- Verdict: **REVISE**, 3 findings (BUILD-001 rejection not accepted by the inspector; host reversed it).
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "The sed fixes address the reported substitution corruption. BUILD-002 and BUILD-003 remain partially unresolved, and the BUILD-001 deferral leaves a concrete data-loss path during relocation.",
+ "findings": [
+  {
+   "id": "BUILD-001",
+   "severity": "high",
+   "path": "scripts/relocate_checkout.sh:36",
+   "evidence": "The running-jobs snapshot and CLI maintenance lock still do not establish dashboard quiescence. A Linear worker can pause after removing its job at runner/modules/linear/__init__.py:677 but before _write_run_log at line 680. Relocation then observes [], acquires maintenance and stops the runner; runner/app.py:2572 drains only project jobs. The completion record and subsequent tracker update can be lost. POST /run similarly removes jobs before logging at app.py:2841 and 2917. Although the shutdown weakness predates relocation, this script deliberately invokes that unsafe shutdown, so documenting it as a follow-up does not resolve the integration defect or satisfy SPEC FR-14.",
+   "fix": "Coordinate dashboard and Linear admission and completion with maintenance protection, held through final record/state writes. Acquire exclusive protection before stopping the runner and prevent further admissions. Cover a worker paused before its completion write and a dispatch attempted after preflight."
+  },
+  {
+   "id": "BUILD-002",
+   "severity": "medium",
+   "path": "scripts/relocate_checkout.sh:87",
+   "evidence": "Process matching remains regex-based: runner_from and others pass unescaped paths to pgrep. For NEW=/tmp/agentic.os, an unrelated runner at /tmp/agenticXos/runner/app.py on another port matches. If the NEW runner fails startup, rollback's wait_down(NEW) mistakes that unrelated process for the relocated runner, exits 2 and leaves the service unrecovered at NEW. The allowed-character restriction explicitly permits dots. The pgrep test shim uses literal equality for runner paths, hiding this behavior; the dotted-path test also leaves OLD undotted, so it does not exercise dotted search-pattern replacement.",
+   "fix": "Escape the complete pgrep pattern, including the dot in app.py, or compare process arguments literally. Add rollback coverage with a dotted destination and an unrelated look-alike runner, plus replacement coverage with a dotted OLD."
+  },
+  {
+   "id": "BUILD-003",
+   "severity": "medium",
+   "path": "scripts/relocate_checkout.sh:32",
+   "evidence": "The filesystem check can be bypassed by a symlinked destination parent. macOS stat defaults to lstat, as documented in /usr/share/man/man1/stat.1:79; following the target requires -L. If /tmp/external is a symlink on OLD's filesystem pointing to another mounted filesystem, NEW=/tmp/external/agentic-os passes this comparison. mv traverses the parent symlink and performs a cross-filesystem copy/delete. An interruption can consequently leave partial trees, while the moving-phase handler assumes an atomic rename. The added devfs test does not cover this case.",
+   "fix": "Resolve and validate physical source and destination-parent paths before comparing devices, or reject symlinked locations. Use a rename operation that fails on EXDEV instead of falling back to copying. Add coverage for a destination-parent symlink targeting another filesystem."
+  }
+ ],
+ "coverage": [
+  "Verified all four manifest file hashes, including the supplied plan SHA256.",
+  "Read every manifested file and inspected the tracked code/test changes against the supplied base.",
+  "Traced CLI maintenance locking through completion writes; dashboard and Linear admission, completion logging and shutdown; shared JSON locking; project finalization and PTY cleanup.",
+  "Checked relevant specification requirements and local macOS stat/pgrep documentation."
+ ],
+ "limitations": [
+  "No files were edited, tests run, services changed or work delegated.",
+  "Failure scenarios were established statically and were not reproduced.",
+  "Reported relocation success and test results were not independently verified.",
+  "This reinspection did not repeat the live launchd, external-configuration or historical-runtime-path audit."
+ ]
+}
+```
+
+### Host dispositions (build inspection 2, all accepted)
+- BUILD-001 (reversed, now fixed): the runner has a maintenance gate. `_inflight_work()` counts every run from admission until its worker returns, which is after the record write, so the gap between leaving `_running_jobs` and writing the record is covered. It refuses new work while maintenance is on. Turning the gate on and admitting work take the same lock, so a run is either counted or refused. Counted: the `/run` route, the project launch helper, retry/rework workers, Linear `_dispatch_issue`, and baseline. `POST /api/maintenance {on}` returns `{maintenance, inflight}`. The script closes the gate first and aborts unless `inflight` is 0, then also requires no running jobs. On any abort before the stop, including a signal, it reopens the gate; once the runner is stopped, a restart starts with the gate open. Tests: in-flight work counted, `/run` 409, a project dispatch refused before any job or worktree, Linear dispatch refused and then admitted, and the script refuses and reopens the gate when runs are in flight.
+- BUILD-002: every pgrep pattern is escaped (`lit`, including the dot in `app.py`). Tests: rollback with a dotted NEW and a look-alike runner (shim pgrep now applies the real regex); a dotted OLD is replaced literally while a look-alike path survives.
+- BUILD-003: devices are compared on physical paths (`cd -P` + `stat -f %d .`). Test: a destination parent that is a symlink to /dev is refused.
+- pytest 393 passed (relocate suite 23).

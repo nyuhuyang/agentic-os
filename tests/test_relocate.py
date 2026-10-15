@@ -24,14 +24,19 @@ case "$1" in
     [ "$at" = "${SHIM_FAIL_AT:-}" ] || echo "$at" > "$SHIM_UP" ;;
 esac''',
     "curl": '''case "$*" in
+  *api/maintenance*) echo "curl maintenance $*" >> "$SHIM_LOG"; echo "{\\"inflight\\":${SHIM_INFLIGHT:-0},\\"maintenance\\":true}" ;;
   *api/runs*) echo "${SHIM_JOBS:-[]}" ;;
   *%{http_code}*) [ -s "$SHIM_UP" ] && echo 200 || echo 000 ;;
   *) [ -s "$SHIM_UP" ] && echo '<meta name="agentic-os-token" content="tok">' ;;
 esac''',
+    # runner patterns are matched as the regexes they are, against the "up" runner and an
+    # optional look-alike runner (BUILD-002); everything else uses the real process table
     "pgrep": '''pat=$2
 case "$pat" in
-  */runner/app.py) [ -s "$SHIM_UP" ] && [ "$pat" = "$(cat "$SHIM_UP")/runner/app.py" ] || exit 1
-                   [ "$1" = -fl ] && echo "1 python $pat"; exit 0 ;;
+  */runner/app*py) for c in "$(cat "$SHIM_UP" 2>/dev/null)" "${SHIM_LOOKALIKE:-}"; do
+                     [ -n "$c" ] && printf '%s/runner/app.py' "$c" | grep -qE "$pat" && exit 0
+                   done
+                   exit 1 ;;
   *) exec "$REAL_PGREP" "$@" ;;  # the real process table for everything but the runner (REL-010)
 esac''',
     "plutil": "exit 0",
@@ -296,3 +301,47 @@ def test_another_filesystem_is_refused(env, monkeypatch):
     r = run(old, Path("/dev/fd/agentic-os"), e)  # devfs: never the checkout's filesystem
     assert r.returncode == 1 and ("another filesystem" in r.stdout or "parent of" in r.stdout)
     assert old.exists()
+
+
+def test_runs_in_flight_refuse_the_move_and_reopen_admission(env):
+    old, new, plist, up, e = env
+    r = run(old, new, {**e, "SHIM_INFLIGHT": "1"})
+    assert r.returncode == 1 and "runs are in flight" in r.stdout
+    calls = Path(e["SHIM_LOG"]).read_text()
+    assert '{"on": true}' in calls and '{"on": false}' in calls and "bootout" not in calls
+    assert old.exists()
+
+
+def test_rollback_ignores_a_look_alike_runner(env, tmp_path):
+    old, new, plist, up, e = env
+    dotted = new.parent / "agentic.os"
+    look = str(dotted).replace("agentic.os", "agenticXos")  # what an unescaped pattern would match
+    before = plist.read_text()
+    r = run(old, dotted, {**e, "SHIM_FAIL_AT": str(dotted), "SHIM_LOOKALIKE": look})
+    assert r.returncode == 1 and "rolled back; runner up on" in r.stdout, r.stdout
+    assert old.exists() and plist.read_text() == before
+
+
+def test_dotted_old_is_replaced_literally(env, tmp_path):
+    old, new, plist, up, e = env
+    dotted_old = old.parent / "agentic.os"
+    old.rename(dotted_old)
+    subprocess.run(["git", "-C", str(dotted_old), "worktree", "repair", str(dotted_old / ".claude" / "worktrees" / "w1")], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(dotted_old), "config", "--local", "core.hooksPath", f"{dotted_old}/.git/hooks"], check=True)
+    pip = dotted_old / ".venv" / "bin" / "pip"
+    look = str(dotted_old).replace("agentic.os", "agenticXos")
+    pip.write_text(f"#!{dotted_old}/.venv/bin/python3\n# keep {look}\n")
+    (dotted_old / ".venv" / "pyvenv.cfg").write_text(f"command = python3 -m venv {dotted_old}/.venv\n")
+    plist.write_text(plist.read_text().replace(str(old), str(dotted_old)))
+    up.write_text(str(dotted_old))
+    r = run(dotted_old, new, e)
+    assert r.returncode == 0, r.stdout + r.stderr
+    text = (new / ".venv" / "bin" / "pip").read_text()
+    assert f"#!{new}/.venv/bin/python3" in text and f"keep {look}" in text
+
+
+def test_a_symlinked_parent_on_another_filesystem_is_refused(env, tmp_path):
+    old, new, plist, up, e = env
+    (tmp_path / "ext").symlink_to("/dev")  # looks local, resolves to devfs
+    r = run(old, tmp_path / "ext" / "agentic-os", e)
+    assert r.returncode == 1 and "another filesystem" in r.stdout and old.exists()

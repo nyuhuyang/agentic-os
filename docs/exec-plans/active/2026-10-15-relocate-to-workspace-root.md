@@ -76,5 +76,7 @@ The Claude Code shell here cannot read the workspace root (macOS privacy), so th
 - [x] Give the user the commands for `~/.claude/settings.json`, `~/.codex/config.toml` and the Claude project folder — given in the session reply (2026-10-15): one `sed` per file and a non-clobbering copy of the Claude project folder
 - [x] Fix: refuse a destination on another filesystem; refuse paths outside `A-Za-z0-9_./-`; literal matching (BUILD-003, BUILD-002)
 - [x] Test: pattern characters and another filesystem refused up front; a dotted path replaced literally
-- [x] Runner shutdown that drains non-project jobs through their record write — N/A for this plan: pre-existing for every runner restart, recorded as a follow-up for the user (BUILD-001 disposition)
-- [ ] Fresh cross-provider (Codex) build inspection of the script and tests returns no unresolved material findings — inspection 1 REVISE (2 fixed, 1 rejected with reasons); inspection 2 pending
+- [x] Fix: maintenance gate — every run counted in flight until its record is written; new runs refused while the gate is closed; the script closes it and requires zero in flight before stopping the runner (BUILD-001, first deferred, then fixed after inspection 2)
+- [x] Fix: escaped pgrep patterns; device check on physical paths (BUILD-002, BUILD-003 remainders)
+- [x] Test: gate counts and refuses (/run, project dispatch, Linear dispatch); script refuses and reopens the gate with runs in flight; look-alike runner ignored on rollback; dotted OLD replaced literally; symlinked parent on another filesystem refused
+- [ ] Fresh cross-provider (Codex) build inspection of the script and tests returns no unresolved material findings — inspection 1 REVISE (2 fixed, 1 deferred); inspection 2 REVISE (3 fixed, deferral reversed); inspection 3 pending

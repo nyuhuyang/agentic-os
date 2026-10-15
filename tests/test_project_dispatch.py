@@ -1073,3 +1073,42 @@ def test_saved_stream_paths_follow_the_moved_checkout(tmp_path, monkeypatch):
     (tmp_path / "outputs" / "logs" / "r.stream").write_text("x")
     assert app_mod._checkout_path("/old/prototypes/agentic-os/outputs/logs/r.stream") == tmp_path / "outputs" / "logs" / "r.stream"
     assert app_mod._checkout_path("/elsewhere/file.log") == Path("/elsewhere/file.log")
+
+
+def test_maintenance_gate_counts_in_flight_work_and_refuses_new_runs(helper, monkeypatch):
+    app_mod, run, records, *_ = helper
+    c = api(app_mod)
+    started, release = threading.Event(), threading.Event()
+
+    def busy():
+        with app_mod._inflight_work():
+            started.set(); release.wait(10)
+    t = threading.Thread(target=busy); t.start(); started.wait(5)
+    try:
+        assert c.post("/api/maintenance", json={"on": True}).get_json() == {"maintenance": True, "inflight": 1}
+        r = c.post("/run", json={"prompt": "hi", "agent": "claude"})
+        assert r.status_code == 409 and "maintenance" in r.get_json()["error"]
+        out = run()  # a project dispatch is refused before it registers a job or a worktree
+        assert out["status"] == "error" and "maintenance" in out["error"] and not app_mod._running_jobs
+        assert not (pj.WORKTREE_ROOT / "demo" / "T-1").exists()
+    finally:
+        release.set(); t.join(5)
+        c.post("/api/maintenance", json={"on": False})
+    assert c.get("/api/maintenance").get_json() == {"maintenance": False, "inflight": 0}
+    assert run()["status"] == "review"  # admission open again
+
+
+def test_linear_dispatch_is_refused_under_maintenance(helper, monkeypatch):
+    app_mod, *_ = helper
+    from runner.modules.linear import LinearModule
+    mod = LinearModule()
+    called = []
+    monkeypatch.setattr(mod, "_dispatch_issue_counted", lambda *a, **k: called.append(1))
+    app_mod._MAINTENANCE.set()
+    try:
+        mod._dispatch_issue({"id": "i1"}, {}, None)
+        assert called == []
+    finally:
+        app_mod._MAINTENANCE.clear()
+    mod._dispatch_issue({"id": "i1"}, {}, None)
+    assert called == [1]

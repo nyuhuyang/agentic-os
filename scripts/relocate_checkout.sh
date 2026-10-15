@@ -18,7 +18,16 @@ WAIT=${AOS_WAIT:-40}  # seconds to wait for the runner to answer (tests shorten 
 PHASE=check
 
 say() { echo "[relocate] $*"; }
-die() { say "ABORT: $*"; exit 1; }
+lit() { printf '%s' "$1" | sed 's/[.]/\\./g'; }  # a path as a regex (only "." can occur besides literals)
+MAINT=off
+maint() {  # switch the runner's maintenance gate; prints its JSON answer
+  http -X POST -H "X-AgenticOS-Token: $token" -H "Origin: $URL" -H 'Content-Type: application/json' \
+    -d "{\"on\": $1}" "$URL/api/maintenance"
+}
+die() {  # before the runner is stopped, give the old runner its gate back
+  [ "$MAINT" = on ] && [ "$PHASE" = check ] && maint false >/dev/null
+  say "ABORT: $*"; exit 1
+}
 manual() { say "NEEDS A HUMAN: $*"; exit 2; }
 http() { curl -s --connect-timeout 2 -m 5 "$@"; }
 
@@ -28,11 +37,19 @@ case "$OLD$NEW" in *[!A-Za-z0-9_./-]*) die "paths may only use A-Z a-z 0-9 _ . /
 [ -d "$(dirname "$NEW")" ] || die "parent of $NEW does not exist"
 [ -f "$PLIST" ] || die "no launchd agent at $PLIST"
 case "$NEW/" in "$OLD"/*) die "$NEW is inside $OLD" ;; esac
-# One filesystem, so mv is an atomic rename (a copy-and-delete could leave two partial trees, BUILD-003).
-[ "$(stat -f %d "$OLD")" = "$(stat -f %d "$(dirname "$NEW")")" ] || die "$NEW is on another filesystem"
+# One filesystem, so mv is an atomic rename (a copy-and-delete could leave two partial trees,
+# BUILD-003). Physical paths: a symlinked parent must not hide another volume.
+old_dev=$(cd -P "$OLD" && stat -f %d .) || die "cannot resolve $OLD"
+new_dev=$(cd -P "$(dirname "$NEW")" && stat -f %d .) || die "cannot resolve the parent of $NEW"
+[ "$old_dev" = "$new_dev" ] || die "$NEW is on another filesystem"
 
 token=$(http "$URL/" | sed -n 's/.*name="agentic-os-token" content="\([^"]*\)".*/\1/p')
 [ -n "$token" ] || die "runner not reachable; start it first so running jobs can be checked"
+# Close admission first, then require nothing in flight: no dashboard or Linear run is working
+# or still writing its record, and none can start before the runner stops (BUILD-001).
+gate=$(maint true) || die "could not close the runner's admission"
+MAINT=on
+case "$gate" in *'"inflight": 0'*|*'"inflight":0'*) ;; *) die "runs are in flight: $gate" ;; esac
 jobs=$(http -H "X-AgenticOS-Token: $token" "$URL/api/runs?state=running")
 [ "$jobs" = "[]" ] || die "jobs are running (or the check failed): $jobs"
 LOCKER=none
@@ -40,7 +57,7 @@ LOCKER=none
 # Succeeds (busy) and prints them when any remain; matched by PID, so multi-line argv is fine.
 others() {
   busy_pids=""
-  for p in $(pgrep -f "$1/"); do
+  for p in $(pgrep -f "$(lit "$1")/"); do
     [ "$p" = "$LOCKER" ] || [ "$p" = "$$" ] && continue
     cmd=$(ps -o command= -p "$p" 2>/dev/null) || continue
     case "$cmd" in *"$1/runner/app.py"*|*relocate_checkout.sh*) continue ;; esac
@@ -84,7 +101,7 @@ BACKUP=$(mktemp -t agenticos-plist) || die "cannot create a plist backup"
 cp "$PLIST" "$BACKUP" && cmp -s "$PLIST" "$BACKUP" || die "plist backup did not verify"
 say "plist backup: $BACKUP"
 
-runner_from() { pgrep -f "$1/runner/app.py" >/dev/null; }
+runner_from() { pgrep -f "$(lit "$1/runner/app.py")" >/dev/null; }
 wait_down() {
   i=0
   while runner_from "$1"; do i=$((i + 1)); [ $i -gt 30 ] && return 1; sleep 0.5; done
@@ -99,7 +116,6 @@ restart_old() {
   cp "$BACKUP" "$PLIST" && launchctl bootstrap "$DOMAIN" "$PLIST" && wait_up "$OLD" \
     && say "runner restarted on $OLD" || manual "runner did not restart on $OLD; plist backup at $BACKUP"
 }
-lit() { printf '%s' "$1" | sed 's/[.]/\\./g'; }  # a path as a sed/grep pattern (only "." needs escaping here)
 repoint() {  # rewrite $1 -> $2 for the checkout now at $2
   pat=$(lit "$1")
   grep -rlIF --null "$1" "$2/.venv/bin" | xargs -0 sed -i '' "s|$pat|$2|g" || return 1
@@ -157,7 +173,7 @@ on_signal() {
       say "interrupted before the move"; restart_old; exit 1 ;;
     stopped) say "interrupted before the move"; restart_old; exit 1 ;;
     moved) rollback "interrupted" ;;
-    *) exit 1 ;;
+    *) [ "$MAINT" = on ] && maint false >/dev/null; exit 1 ;;  # still before the stop
   esac
 }
 trap on_signal HUP INT TERM

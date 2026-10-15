@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import contextlib
+import functools
 import hashlib
 import hmac
 import json
@@ -2568,6 +2569,54 @@ def _records_unsafe() -> str | None:
 
 _SHUTTING_DOWN = threading.Event()
 
+# Maintenance (scripts/relocate_checkout.sh): while set, no new run starts. Every run counts
+# itself in-flight from admission until it returns, i.e. after its record is written, so the
+# count also covers the gap between leaving _running_jobs and writing the record (BUILD-001).
+_MAINTENANCE = threading.Event()
+_INFLIGHT = 0
+_INFLIGHT_LOCK = threading.Lock()
+
+
+class MaintenanceRefused(RuntimeError):
+    pass
+
+
+@contextlib.contextmanager
+def _inflight_work():
+    global _INFLIGHT
+    with _INFLIGHT_LOCK:  # same lock as switching maintenance on: either counted or refused
+        if _MAINTENANCE.is_set():
+            raise MaintenanceRefused("maintenance in progress (the checkout is being moved); try again shortly")
+        _INFLIGHT += 1
+    try:
+        yield
+    finally:
+        with _INFLIGHT_LOCK:
+            _INFLIGHT -= 1
+
+
+def _counted(fn):
+    """A background run: counted while it works; refused (logged, nothing started) under maintenance."""
+    @functools.wraps(fn)
+    def wrapper(*a, **kw):
+        try:
+            with _inflight_work():
+                return fn(*a, **kw)
+        except MaintenanceRefused as exc:
+            logger.warning("%s refused: %s", fn.__name__, exc)
+            return {"status": "error", "error": str(exc)}
+    return wrapper
+
+
+@app.route("/api/maintenance", methods=["GET", "POST"])
+def api_maintenance():
+    if request.method == "POST":
+        on = bool((request.get_json(silent=True) or {}).get("on"))
+        with _INFLIGHT_LOCK:
+            _MAINTENANCE.set() if on else _MAINTENANCE.clear()
+    with _INFLIGHT_LOCK:
+        return jsonify({"maintenance": _MAINTENANCE.is_set(), "inflight": _INFLIGHT})
+
 
 def _stop_project_runs() -> None:
     """Shutdown (SIGTERM/atexit): refuse new project processes, kill and reap every live one
@@ -2617,6 +2666,7 @@ def _signal_project_run(run_id: str, why: str) -> str | None:
     return "ok"
 
 
+@_counted
 def _run_project_ticket(**kw) -> dict:
     """Holds the project's shared lifecycle lock for the whole launch, through its comment and
     running-job removal, so remove and lifecycle edits wait for it (REGUI-004, REGUI-006). An
@@ -2803,6 +2853,14 @@ def _extract_skill_name(raw: str, registry: dict) -> str:
 
 @app.route("/run", methods=["POST"])
 def run():
+    try:
+        with _inflight_work():
+            return _run_route()
+    except MaintenanceRefused as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 409
+
+
+def _run_route():
     data = request.get_json(silent=True) or {}
     skill  = data.get("skill")
     prompt = data.get("prompt", "").strip()
@@ -3095,6 +3153,7 @@ _BASELINES: dict[str, dict] = {}  # key -> last baseline (memory only; the tail 
 _BASELINE_LOCK = threading.Lock()
 
 
+@_counted
 def _run_baseline(key: str) -> None:
     result: dict = {"state": "done", "finished_at": None}
     try:
@@ -3484,6 +3543,7 @@ def api_run_retry(run_id: str):
     }
     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "running", "skill": skill})
 
+    @_counted
     def _do_retry():
             nonlocal agent
             # Claude / Codex / dsh — subprocess dispatch with streaming + resume

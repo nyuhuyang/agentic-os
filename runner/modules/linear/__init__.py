@@ -571,6 +571,14 @@ class LinearModule(AgenticModule):
             self.push_state(issue_id, "review", gen=gen)
 
     def _dispatch_issue(self, issue: dict, cfg: dict, socketio, previous_board_status: str | None = None) -> None:
+        from app import _inflight_work, MaintenanceRefused
+        try:
+            with _inflight_work():  # counted until its record is written (BUILD-001)
+                self._dispatch_issue_counted(issue, cfg, socketio, previous_board_status)
+        except MaintenanceRefused as exc:
+            logger.warning("dispatch of %s refused: %s", issue.get("id"), exc)
+
+    def _dispatch_issue_counted(self, issue: dict, cfg: dict, socketio, previous_board_status: str | None = None) -> None:
         import subprocess
         from app import _running_jobs, _running_procs, _python_path, RUNNER, ROOT, _load_registry, _ai_command, _agent_model, _parse_agent_output, _extract_skill_name, _write_run_log, AI_RUN_TIMEOUT_S, _extract_real_errors, _registry_exec_env, _stream_dsh_run, _dsh_ok
         issue_id = issue["id"]
