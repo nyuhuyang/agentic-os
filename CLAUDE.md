@@ -25,6 +25,7 @@ This is the top-level contract for `/AI_Workspace`. It governs the workspace as 
 
 | Directory | Purpose |
 | --- | --- |
+| `agentic-os/` | Operations + Interface layers: runner, dashboard, project dispatch (this repo; moved from `prototypes/` on 2026-10-15) |
 | `obsidian/knowledge_base/` | Primary memory layer — see its own `CLAUDE.md` |
 | `obsidian/knowledge_base/.codex/skills/` | Skill library (Capability layer) |
 | `obsidian/knowledge_base/outputs/` | Knowledge-base todos only. The runner never writes here: run logs and state stay in `state/` and `outputs/` (both gitignored). Lessons distilled from agentic-os enter the KB only after explicit user approval. |

@@ -9,17 +9,17 @@ created: 2026-10-15
 Move this repository from `~/Documents/AI_Workspace/prototypes/agentic-os` to `~/Documents/AI_Workspace/agentic-os` (user decision 2026-10-15: no longer a prototype; it is the workspace's runtime, a peer of `obsidian/`, not a `tools/` utility). The runner keeps working without a manual fix-up on the AgenticOS side; everything outside the repo that mentions the old path is listed for the user.
 
 ## Acceptance criteria
-- [ ] The old path no longer exists; the new path holds the full checkout (tracked files, `.venv`, `state/`, `outputs/`, `projects.yaml`, `.env`, `.claude/`)
-- [ ] launchd runs `com.agenticos.runner` from the new path (`launchctl print` program arguments name the new path) and the dashboard answers 200
-- [ ] `.venv` works from the new path: no file under `.venv` mentions the old path; `.venv/bin/python -m pytest tests/` passes from the new path
-- [ ] Every nested worktree under `.claude/worktrees/` resolves (`git worktree list` shows new paths; `git status` works in each)
-- [ ] The dashboard lists the registered projects with their sessions after the move
-- [ ] The runner resolves the workspace root to `~/Documents/AI_Workspace` from the new path (knowledge base and registry lookups unchanged; nothing written under `~/Documents/.claude`) — `WORKSPACE_ROOT` is the nearest ancestor holding `obsidian/` (REL-001)
-- [ ] Saved progress records that name the old checkout's `outputs/` still show their stream events (reader follows the moved checkout, REL-007)
-- [ ] `.git/config` `core.hooksPath` points into the new checkout (REL-009)
-- [ ] If the runner does not come back on the new path, the script restores the old path, the venv, the worktrees and the plist, and restarts the runner there
-- [ ] The workspace map names `agentic-os/` at the root (repo `CLAUDE.md`, and the workspace-level `CLAUDE.md` if it is a separate file)
-- [ ] The user has the exact commands for what lives outside the repo and stays read-only to the agent: two hooks in `~/.claude/settings.json`, the trust entry in `~/.codex/config.toml`, and copying the Claude project folder (auto memory + session history) to the new path's slug
+- [x] The old path no longer exists; the new path holds the full checkout (tracked files, `.venv`, `state/`, `outputs/`, `projects.yaml`, `.env`, `.claude/`)
+- [x] launchd runs `com.agenticos.runner` from the new path (`launchctl print` program arguments name the new path) and the dashboard answers 200
+- [x] `.venv` works from the new path: no file under `.venv` mentions the old path; `.venv/bin/python -m pytest tests/` passes from the new path
+- [x] Every nested worktree under `.claude/worktrees/` resolves (`git worktree list` shows new paths; `git status` works in each)
+- [x] The dashboard lists the registered projects with their sessions after the move
+- [x] The runner resolves the workspace root to `~/Documents/AI_Workspace` from the new path (knowledge base and registry lookups unchanged; nothing written under `~/Documents/.claude`) — `WORKSPACE_ROOT` is the nearest ancestor holding `obsidian/` (REL-001)
+- [x] Saved progress records that name the old checkout's `outputs/` still show their stream events (reader follows the moved checkout, REL-007) — live check: `/api/runs/6b914c2d…/progress` (its record names the old `…/prototypes/agentic-os/outputs/logs/…_stream.jsonl`) returns its events from the moved file
+- [x] `.git/config` `core.hooksPath` points into the new checkout (REL-009)
+- [x] If the runner does not come back on the new path, the script restores the old path, the venv, the worktrees and the plist, and restarts the runner there
+- [x] The workspace map names `agentic-os/` at the root (repo `CLAUDE.md`, and the workspace-level `CLAUDE.md` if it is a separate file)
+- [x] The user has the exact commands for what lives outside the repo and stays read-only to the agent: two hooks in `~/.claude/settings.json`, the trust entry in `~/.codex/config.toml`, and copying the Claude project folder (auto memory + session history) to the new path's slug
 
 ## Approach
 `scripts/relocate_checkout.sh OLD NEW` (committed, reusable):
@@ -70,8 +70,8 @@ The Claude Code shell here cannot read the workspace root (macOS privacy), so th
 - [x] Test: `core.hooksPath` repointed on success and restored on rollback
 - [x] Test: workspace root found from both checkout locations; saved stream paths follow the moved checkout
 - [x] Codex plan review of this plan and the script returns APPROVED — round 5, 2026-10-15 (9 → 4 → 2 → 1 → 0)
-- [ ] Run the script against the real checkout from a dashboard terminal; log captured
-- [ ] Verify each acceptance criterion from the new path
-- [ ] Update the workspace map (repo `CLAUDE.md`, and the workspace-level one if separate)
-- [ ] Give the user the commands for `~/.claude/settings.json`, `~/.codex/config.toml` and the Claude project folder
+- [x] Run the script against the real checkout from a dashboard terminal; log captured — 2026-10-15: started detached from a dashboard terminal (runner context) after a 20 s delay; `EXIT=0`, "runner up from …/AI_Workspace/agentic-os"; log in the session scratchpad (`move.log`)
+- [x] Verify each acceptance criterion from the new path — `verify.log` (runner context, new path): old path gone; launchd arguments name the new path; 0 `.venv` files name the old path; `core.hooksPath` new; 6 worktrees listed under the new path and `git status` ok in each; `WORKSPACE_ROOT` = `~/Documents/AI_Workspace`, knowledge base found; no `~/Documents/.claude`; `/api/projects` lists the 3 projects with sessions (4, 5, 50); pytest 382 passed from the new path
+- [x] Update the workspace map (repo `CLAUDE.md`, and the workspace-level one if separate) — repo `CLAUDE.md` gains an `agentic-os/` row; there is no separate workspace-level `CLAUDE.md` (`~/Documents/AI_Workspace` has none)
+- [x] Give the user the commands for `~/.claude/settings.json`, `~/.codex/config.toml` and the Claude project folder — given in the session reply (2026-10-15): one `sed` per file and a non-clobbering copy of the Claude project folder
 - [ ] Fresh cross-provider (Codex) build inspection of the script and tests returns no unresolved material findings

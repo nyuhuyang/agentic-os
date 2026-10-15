@@ -249,3 +249,4 @@
 - Same Codex session (resumed), cross-provider, 32 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/move/r5/claudex-v33bh92u/result.json`.
 - Verdict: **APPROVED**, 0 findings; bound to plan sha256 `adb570909a6dc7aee46a2b5fe8dae97c00ec2d7c401ababcb45b17b34da41d80`. Plan review: 5 rounds (9 → 4 → 2 → 1 → 0).
 - After approval only checkbox state changed (word diff: 18 `[ ]`→`[x]` plus one evidence note); the strict sha check therefore reports a change. Plan text approved in round 5 is unchanged.
+- Run 2026-10-15: relocation EXIT=0 from a dashboard terminal (runner context); verify.log all green (see plan). Workspace map updated in the repo CLAUDE.md (no workspace-level CLAUDE.md exists). Outside-repo edits handed to the user.
