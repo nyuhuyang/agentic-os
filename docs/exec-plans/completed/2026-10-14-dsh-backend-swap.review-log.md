@@ -180,3 +180,18 @@
   - The plan keeps the existing reset semantics for all agents (Decision 4; Round 4 DSH-13 precedent).
   - The fix needs a tracker-route reset boundary that changes semantics for every agent. At the user's request it was moved to `2026-10-13-multi-project-dispatch.md`, Phase 2 checklist.
 - Inspections used: 4/20. The code is unchanged since Inspection 4, so it covers the final diff. Assurance: cross_provider.
+
+### Merge, deploy, dogfood — 2026-10-14
+- Merge:
+  - `3647fec` was fast-forwarded into main. The other session's uncommitted `runner/app.py` RUN_LOG change was set aside as a patch during the merge and re-applied afterwards.
+  - Follow-up commits: `8167cfa` (RUN_LOG → `state/`, CLAUDE.md) and `479bc7f` (dispatch plan, DSH-30).
+- Deploy:
+  - `com.agenticos.runner` was restarted. Capabilities report `dsh, claude, codex`.
+  - The DeepSeek balance poll first returned 401: `.env` held a truncated 29-char `DEEPSEEK_API_KEY`, and the env-first resolver picked it up.
+  - On the user's instruction the line was removed (backup kept in the session scratchpad). The valid key in `config.toml` (`…bc0d`) is now used, and the row shows `¥43.89 left` and is not stale.
+- Dogfood (user): details are in the plan checklist.
+  - A legacy `deepseek-tui` task was retried and started a fresh dsh session; a second retry resumed it with context.
+  - An image attachment was read.
+  - Tokens were stored with cost null; the key is absent from the logs; the 5h window moved.
+- Every checkbox is `[x]`. The confidential-refusal criterion is N/A here; it moves with the dispatch plan's Decision 9.
+- The plan is archived to `completed/`.

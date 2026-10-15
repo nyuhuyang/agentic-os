@@ -3,7 +3,7 @@ status: deferred
 created: 2026-05-20
 deferred: 2026-10-13
 reason: focus on multi-project dispatch
-superseded_by: docs/exec-plans/active/2026-10-14-dsh-backend-swap.md (DS TUI retired; DeepSeek runs via official dsh)
+superseded_by: docs/exec-plans/completed/2026-10-14-dsh-backend-swap.md (DS TUI retired; DeepSeek runs via official dsh)
 resume_from: 3 unchecked upstream-sync items in acceptance list
 ---
 

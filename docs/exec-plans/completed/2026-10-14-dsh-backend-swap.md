@@ -1,11 +1,12 @@
 ---
-status: in-progress
+status: completed
 created: 2026-10-14
+completed: 2026-10-14
 ---
 
 # Task: Replace DS TUI with DeepSeek Harness (`dsh`), retire the direct-API DeepSeek backend
 
-> Under claudex-loop review (Codex). Rounds 1–3 approved the rc.7 version. Revised the same day for `dsh` 0.2.0-rc.2 after the user approved the upgrade; needs re-review. See the review log.
+> Completed 2026-10-14. Codex approved the plan in round 8; the build passed four fresh Codex inspections (DSH-30 was moved to the multi-project dispatch plan) and was dogfooded by the user. Merged as `3647fec`. See the review log.
 
 ## Goal
 The dashboard offers two DeepSeek agents. Both predate DeepSeek's official harness:
@@ -161,7 +162,14 @@ This plan replaces both with **one** agent, `dsh`, backed by the official DeepSe
   - a missing binary or old version gives a clear error and no launch;
   - `tests/modules/test_backend_modules.py` updated for the monitoring-only module.
 - [x] Docs (Decision 8).
-- [ ] Dogfood: one real non-confidential ticket dispatched with DeepSeek from the dashboard, end to end, including one retry that resumes; record the outcome here.
+- [x] Dogfood: one real non-confidential ticket dispatched with DeepSeek from the dashboard, end to end, including one retry that resumes; record the outcome here.
+  - **2026-10-14, user, after the runner restart on `3647fec`+, task `1c6ca6ef`.**
+    - The task's latest record was a historical `deepseek-tui` run (Rust session `…d04c2f5e`). Its DeepSeek retry started a fresh dsh session (`session-…055601244894`), so the Rust id was not reused.
+    - A second retry resumed the same dsh session, and the answer referred back to the previous turn.
+    - Both records show `agent: dsh`, `status: review`, tokens (10601/456 and 1279/442) and `token_cost_usd: null`.
+    - The user also attached an image and the agent read it (`read_image`; the default model `deepseek-flash` takes image input).
+    - The API key does not appear in `state/run_log.jsonl` or `state/runs.jsonl`.
+    - The DeepSeek 5h window moved from ¥0.00 to ¥0.01 (balance 43.89 → 43.88).
 - [x] Definition of Done: `.venv/bin/python3 -m py_compile runner/*.py` and `.venv/bin/python -m pytest tests/` pass; `git grep -n "deepseek_agent\|deepseek-tui\|_stream_deepseek_tui_run" -- runner/` returns nothing apart from the alias map.
   - **Build notes (2026-10-14, worktree `feat/dsh-backend-swap`, base `aa9cf13`).**
     - DoD: `py_compile` is clean and `pytest tests/` gives 103 passed. The grep hits only the alias maps (`linear/__init__.py:158` marker regex, `index.html` `_AGENT_ALIASES`) plus `ask_deepseek.py:55` (`.deepseek_agentic_session`, a substring match in an out-of-scope file).
@@ -175,15 +183,15 @@ This plan replaces both with **one** agent, `dsh`, backed by the official DeepSe
     - Linear errors still push "In Review" to Linear, which has no error state; the board record is `status: error`.
 
 ## Acceptance Criteria
-- [ ] The dashboard shows exactly one DeepSeek agent. Dispatch runs `dsh --profile headless --json` in the run's cwd, streams progress into the run tab, and stores the `final` text, the session id and the tokens.
-- [ ] Retry of a completed dsh run resumes the same session (`--session-id`), and the agent recalls context from the earlier run. A `todo`/`rework` reset starts fresh.
-- [ ] A dsh run that ends in a runtime error is recorded as `status: error` with the `dsh:` message visible.
-- [ ] Old run records and tickets that name `deepseek` or `deepseek-tui` still display, and re-dispatching them uses `dsh`.
-- [ ] The API key never appears in argv (`ps`), `RUN_LOG` or run records.
-- [ ] The permission mode chosen in the spike is the one used, and the plan records the spike evidence for it.
-- [ ] The DeepSeek balance and usage row still updates, and a dsh-only run moves the 5h cost window.
-- [ ] A historical `deepseek`/`deepseek-tui` run card shows retry buttons, with DeepSeek mapped to `dsh`.
-- [ ] `dsh` is refused for a confidential project.
+- [x] The dashboard shows exactly one DeepSeek agent. Dispatch runs `dsh --profile headless --json` in the run's cwd, streams progress into the run tab, and stores the `final` text, the session id and the tokens.
+- [x] Retry of a completed dsh run resumes the same session (`--session-id`), and the agent recalls context from the earlier run. A `todo`/`rework` reset starts fresh.
+- [x] A dsh run that ends in a runtime error is recorded as `status: error` with the `dsh:` message visible. (Verified by fixture tests at `/run`, retry and Linear, plus a launch-failure test; the live failure shape is spike (f).)
+- [x] Old run records and tickets that name `deepseek` or `deepseek-tui` still display, and re-dispatching them uses `dsh`.
+- [x] The API key never appears in argv (`ps`), `RUN_LOG` or run records. (Argv was checked in the live smoke and by a test; the logs were checked after the dogfood.)
+- [x] The permission mode chosen in the spike is the one used, and the plan records the spike evidence for it.
+- [x] The DeepSeek balance and usage row still updates, and a dsh-only run moves the 5h cost window.
+- [x] A historical `deepseek`/`deepseek-tui` run card shows retry buttons, with DeepSeek mapped to `dsh`.
+- [x] `dsh` is refused for a confidential project. — N/A here: the confidential-project concept and its backend gate arrive with `2026-10-13-multi-project-dispatch.md` (Decision 9 and the Phase 2 "Confidential sandbox" item, which already rejects `dsh`).
 
 ## Constraints
 - Do not modify `~/.deepseek/` config and sessions, `~/.dsh/` or `~/.claude/skills/deepseek/`. The one exception is the monitor's existing runner-owned cache `~/.deepseek/usage.json`, which it keeps writing.
