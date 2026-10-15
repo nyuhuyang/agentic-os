@@ -3005,6 +3005,9 @@ def api_projects():
 
 
 def _project_error(exc: Exception):
+    if getattr(exc, "initialized", None):  # the new folder was created and kept (REGUI-B006)
+        status = 409 if isinstance(exc, (_projects.RegistryConflict, _projects.ProjectBusy)) else 400
+        return jsonify({"error": str(exc), "initialized": exc.initialized}), status
     if isinstance(exc, _projects.WorktreesRemain):
         return jsonify({"error": str(exc), "worktrees": exc.worktrees}), 409
     if isinstance(exc, (_projects.RegistryConflict, _projects.ProjectBusy, _projects.TicketLocked)):

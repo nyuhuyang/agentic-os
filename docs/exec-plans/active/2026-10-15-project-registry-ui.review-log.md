@@ -297,3 +297,39 @@
 - REGUI-B004: `.projects.yaml.*.tmp` is gitignored. Test checks that all three registry file patterns are ignored.
 - REGUI-B005: `init` moved into `save_project`, after the key, hash and duplicate checks and under the locks. A later failure removes the folder this call created. Tests cover stale hash (nothing created), duplicate (nothing created), invalid entry (rolled back) and success.
 - pytest 343 passed.
+
+## Build inspection 2 (2026-10-15)
+- Fresh Codex session 01a14081-e99f-7dc1-8682-dff5c010096f, base 6aed761, cross-provider, 124 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/reg/i2/claudex-16u3inaf/result.json`.
+- Verdict: **REVISE**, 1 finding (B001-B004 confirmed fixed).
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "REGUI-B001 through B004 are addressed. B005 fixes initialization ordering but introduces an unsafe rollback on later failures.",
+ "findings": [
+  {
+   "id": "REGUI-B006",
+   "severity": "medium",
+   "path": "runner/projects.py:447",
+   "evidence": "After initialization, any validation or write exception recursively deletes the new repository without checking its current contents or references. For example, a hand edit during validation can register the newly created path; the final hash check then raises RegistryConflict, preserves that edited registry, and deletes the repository it now references. Files or commits added to the folder during this interval are also deleted. The registry lock excludes neither hand edits nor filesystem writers.",
+   "fix": "Preserve the initialized repository on subsequent failures and return its initialization status so the form can retry registration with init disabled. If retaining automatic rollback, restrict deletion to resources whose ownership and unchanged state can be established, and preserve/report the folder whenever concurrent use or registry references are detected."
+  }
+ ],
+ "coverage": [
+  "Verified the plan, all seven manifested file hashes, and the tracked diff hash against the supplied values.",
+  "Reviewed every manifested change and the complete registry regression-test source.",
+  "Checked form snapshot hashes, conflict retries, JSON environment serialization, seed serialization, and registry temporary-file ignore rules.",
+  "Traced save/init validation, atomic registry writes, lifecycle locks, worktree ownership and sidecar binding readers/writers.",
+  "Inspected related dispatch, durable issue-binding persistence, baseline, CLI, PTY and state_io callers."
+ ],
+ "limitations": [
+  "Static review only; no files were edited, tests or browser checks run, or work delegated. Builder-reported results were not independently verified.",
+  "Reinspection was limited to REGUI-B001 through B005 and their interactions.",
+  "Live registry contents, personal session stores and browser artifacts were not inspected.",
+  "Spec fidelity was assessed against the supplied plan and inspected code contracts; broader specification documents were not inspected."
+ ]
+}
+```
+
+### Host disposition (build inspection 2, accepted)
+- REGUI-B006: no automatic rollback. After `init`, any later `ProjectError` keeps the folder. The error text names it, and the exception carries `initialized`. The API returns `initialized` with the original status (409 for conflict/busy, else 400), and the form unchecks "create new folder" so a retry registers the existing repo. Tests: an invalid entry keeps the folder and a retry without init succeeds; a hand edit during validation → RegistryConflict with the folder kept; API 400 carries `initialized`. pytest 344 passed.

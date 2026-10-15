@@ -952,6 +952,10 @@ def test_project_api_token_validation_and_conflicts(helper):
     assert r.status_code == 400 and "must match" in r.get_json()["error"]
     r = c.put("/api/projects/demo", json={"entry": {"path": "x"}, "registry_hash": "stale"})
     assert r.status_code == 409
+    fresh = pj.REGISTRY_PATH.parent / "fresh-repo"
+    r = c.post("/api/projects", json={"key": "fresh", "init": True, "registry_hash": snap,
+                                      "entry": {"path": str(fresh), "verify": "true", "env": {"A": 1}}})
+    assert r.status_code == 400 and r.get_json()["initialized"] == str(fresh) and (fresh / ".git").exists()
     run()  # leaves worktree T-1
     r = c.delete("/api/projects/demo", json={"registry_hash": c.get("/api/projects").get_json()["registry_hash"]})
     assert r.status_code == 409 and r.get_json()["worktrees"] == ["T-1"]

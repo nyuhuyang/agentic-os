@@ -1166,6 +1166,7 @@ document.getElementById('project-form')?.addEventListener('submit', async (event
     ? await _projectApi('PUT', `/api/projects/${encodeURIComponent(key)}`, { entry, registry_hash: hash })
     : await _projectApi('POST', '/api/projects', { key, entry, registry_hash: hash, init: f.init.checked });
   save.disabled = false;
+  if (!r.ok && r.data.initialized) f.init.checked = false;  // the folder exists now (REGUI-B006)
   if (!r.ok) {
     // A conflict keeps the stale hash: saving again keeps failing until the form is reopened
     // from the current registry, so a hand edit is never overwritten (REGUI-B001).

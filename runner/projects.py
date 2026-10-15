@@ -416,8 +416,9 @@ def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = Fa
                  path: Path | None = None) -> dict:
     """Create or edit one registry entry from the dashboard, validated like dispatch.
     The key is immutable: worktrees, sidecars and bindings are keyed by it. `init` (create
-    only) makes the folder a new repo after the key/hash/duplicate checks, and removes it
-    again if the save then fails (REGUI-B005)."""
+    only) makes the folder a new repo after the key/hash/duplicate checks (REGUI-B005). If the
+    save then fails the folder is kept, never deleted (it may already be referenced or hold
+    new files, B006), and the error carries `initialized` so the form retries without init."""
     path = Path(path or REGISTRY_PATH)
     _check_key(key)
     entry = _clean_entry(entry)
@@ -444,9 +445,11 @@ def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = Fa
             project = _validate_for_save(key, entry, old, create)
             projects[key] = entry
             _write_registry(path, doc, expected_hash)
-        except BaseException:
-            if created:  # made by this call and never registered: nothing else refers to it
-                shutil.rmtree(created, ignore_errors=True)
+        except ProjectError as exc:
+            if created:
+                exc.args = (f"{exc} — the new repo {created} was created and kept; save again without "
+                            "'create new folder'",)
+                exc.initialized = str(created)
             raise
     return {"key": key, "confidential": project.confidential}
 

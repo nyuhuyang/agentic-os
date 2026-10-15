@@ -213,11 +213,26 @@ def test_init_runs_after_the_checks_and_is_rolled_back_on_failure(reg, tmp_path)
     with pytest.raises(pj.ProjectError, match="already exists"):
         pj.save_project("alpha", entry(fresh, verify="true"), h(path), create=True, init=True)
     assert not fresh.exists()
-    with pytest.raises(pj.ProjectError, match="'env' must map"):
+    with pytest.raises(pj.ProjectError, match="'env' must map.*created and kept") as exc:
         pj.save_project("gamma", entry(fresh, verify="true", env={"A": 1}), h(path), create=True, init=True)
-    assert not fresh.exists()  # created by this call, removed when the save failed
-    pj.save_project("gamma", entry(fresh, verify="true"), h(path), create=True, init=True)
-    assert (fresh / ".git").exists() and "gamma" in pj.load_registry()
+    assert exc.value.initialized == str(fresh) and (fresh / ".git").exists()  # never deleted (B006)
+    pj.save_project("gamma", entry(fresh, verify="true"), h(path), create=True)  # retry without init
+    assert "gamma" in pj.load_registry()
+
+
+def test_init_folder_kept_when_a_hand_edit_lands_during_validation(reg, tmp_path, monkeypatch):
+    path, a, b = reg
+    fresh = tmp_path / "fresh"
+    real = pj._validate_for_save
+
+    def editing(*args):
+        out = real(*args)
+        path.write_text(path.read_text() + f"# hand edit naming {fresh}\n")
+        return out
+    monkeypatch.setattr(pj, "_validate_for_save", editing)
+    with pytest.raises(pj.RegistryConflict) as exc:
+        pj.save_project("gamma", entry(fresh, verify="true"), h(path), create=True, init=True)
+    assert exc.value.initialized == str(fresh) and (fresh / ".git").exists()
 
 
 def test_env_values_round_trip_verbatim(reg):

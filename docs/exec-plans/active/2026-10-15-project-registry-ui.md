@@ -128,6 +128,8 @@ The user adds, edits and removes AgenticOS projects from the dashboard's Project
 - [x] Fix: path edits refused while any worktree exists; re-adding needs leftovers bound to the exact path (REGUI-B002)
 - [x] Fix: env edited as JSON, seed lines verbatim, invalid input refused (REGUI-B003)
 - [x] Fix: `.projects.yaml.*.tmp` gitignored (REGUI-B004)
-- [x] Fix: new-folder init runs inside `save_project` after key/hash/duplicate checks and is rolled back on failure (REGUI-B005)
-- [x] Test: symlink-alias path edit and alias re-add refused; init with stale hash / duplicate / invalid entry leaves no folder; env values round-trip verbatim; registry temp patterns ignored
-- [ ] Fresh cross-provider (Codex) build inspection returns no unresolved material findings — inspection 1 REVISE (5, fixed); inspection 2 pending
+- [x] Fix: new-folder init runs inside `save_project` after key/hash/duplicate checks (REGUI-B005; its rollback was replaced by keep-and-report, B006)
+- [x] Test: symlink-alias path edit and alias re-add refused; init with stale hash / duplicate creates no folder; env values round-trip verbatim; registry temp patterns ignored
+- [x] Fix: after `init`, a failed save keeps the new folder and reports `initialized`; the form retries without init (REGUI-B006)
+- [x] Test: invalid entry and mid-validation hand edit both keep the initialized folder; API returns `initialized`; retry without init registers it
+- [ ] Fresh cross-provider (Codex) build inspection returns no unresolved material findings — inspection 1 REVISE (5, fixed); inspection 2 REVISE (1, fixed); inspection 3 pending
