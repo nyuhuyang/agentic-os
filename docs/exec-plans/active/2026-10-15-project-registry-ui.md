@@ -124,4 +124,10 @@ The user adds, edits and removes AgenticOS projects from the dashboard's Project
 - [x] Fix (user request, 2026-10-15): `_playStartSound`, defined after `</html>` since 551d36d6 and shown as page text (its call threw ReferenceError), moved into the page script
 - [x] Fix: the form dialog is centred with padding (the global `* { margin: 0; padding: 0 }` reset had pinned it top-left)
 - [x] Manual browser check: add from history, add typed path, add new folder, edit, baseline, remove on a throwaway repo; screenshots captured — 2026-10-15, headless Chrome against the live runner: 13 history suggestions, a pick pre-fills path + key; typed-path (confidential, seed) and new-folder (git init, one commit) saves close the dialog; the note edit shows; baseline `pass · exit 0`; both removed; registry back to its 3 entries; no page errors; screenshots `ui_reg_1_history.png` … `ui_reg_4_dialog.png` in the session scratchpad
-- [ ] Fresh cross-provider (Codex) build inspection returns no unresolved material findings
+- [x] Fix: the form submits the hash it was opened with; a 409 keeps it stale until reopened (REGUI-B001) — browser check: hand edit + refresh → save refused twice, edit kept
+- [x] Fix: path edits refused while any worktree exists; re-adding needs leftovers bound to the exact path (REGUI-B002)
+- [x] Fix: env edited as JSON, seed lines verbatim, invalid input refused (REGUI-B003)
+- [x] Fix: `.projects.yaml.*.tmp` gitignored (REGUI-B004)
+- [x] Fix: new-folder init runs inside `save_project` after key/hash/duplicate checks and is rolled back on failure (REGUI-B005)
+- [x] Test: symlink-alias path edit and alias re-add refused; init with stale hash / duplicate / invalid entry leaves no folder; env values round-trip verbatim; registry temp patterns ignored
+- [ ] Fresh cross-provider (Codex) build inspection returns no unresolved material findings — inspection 1 REVISE (5, fixed); inspection 2 pending

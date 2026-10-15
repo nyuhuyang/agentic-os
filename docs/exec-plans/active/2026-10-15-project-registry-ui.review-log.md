@@ -228,3 +228,72 @@
 ```
 - Plan review: 4 of 20 rounds; findings 8 → 5 → 1 → 0.
 - Build (Claude, 2026-10-15): base 18a104f. 339 tests pass; headless-browser check of add/edit/baseline/remove passed. User request mid-build: also fix the stray `_playStartSound` after `</html>` (done).
+
+## Build inspection 1 (2026-10-15)
+- Fresh Codex session 01a14076-e55f-7b30-9920-8298ae6f7c5e, base 18a104f, cross-provider, 207 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/reg/i1/claudex-4asiomxq/result.json`.
+- Verdict: **REVISE**, 5 findings.
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "The build has unresolved conflict-protection, worktree-binding, form round-trip, privacy, and failed-creation defects.",
+ "findings": [
+  {
+   "id": "REGUI-B001",
+   "severity": "high",
+   "path": "runner/templates/index.html:1160",
+   "evidence": "The form submits the current global registry_hash rather than the hash captured when its fields were loaded. loadProjects refreshes that global every 60 seconds (1243), without refreshing the open form. A hand edit followed by this refresh is therefore overwritten by stale form values without a 409. This can also silently undo a confidentiality promotion. After a 409, loadProjects similarly enables a second Save to overwrite the conflicting changes.",
+   "fix": "Capture the registry hash when opening the form and retain it through submission. After a conflict, require an explicit reload or reconciliation of the form before accepting a newer hash."
+  },
+  {
+   "id": "REGUI-B002",
+   "severity": "medium",
+   "path": "runner/projects.py:441",
+   "evidence": "Path changes reject only worktrees belonging to another repository, contrary to the requirement to refuse while any worktree exists. Changing a project path from its real directory to a symlink alias passes _is_worktree_of because it resolves paths (718), and the save succeeds. Existing sidecars retain the original project_path, which load_binding compares literally (739). Subsequent dispatch, verify, terminal opening and dashboard cleanup reject those worktrees as belonging to another project.",
+   "fix": "Reject path changes whenever _worktree_dirs(key) is nonempty, while holding the exclusive lifecycle lock. Cover a symlink alias of the same repository."
+  },
+  {
+   "id": "REGUI-B003",
+   "severity": "medium",
+   "path": "runner/templates/index.html:1143",
+   "evidence": "Opening and saving an existing entry does not preserve valid environment values. Values are flattened into newline-separated text at 1129, then split and trimmed at 1143–1145. A valid multiline value is truncated, and leading or trailing spaces are removed. Even editing only the note silently changes the environment used by later dispatch and verification.",
+   "fix": "Use an editor that preserves arbitrary string values, including whitespace and newlines. Reject malformed input instead of silently dropping lines."
+  },
+  {
+   "id": "REGUI-B004",
+   "severity": "medium",
+   "path": "runner/projects.py:382",
+   "evidence": "_write_registry writes the complete private registry into .projects.yaml.<random>.tmp in the public repository root. The changed .gitignore ignores projects.yaml and projects.yaml.lock, but not these temporary files. A process termination before replacement leaves an unignored file containing project names, paths, notes and environment values; a subsequent git add -A can publish it. Concurrent staging can also capture it during a successful save.",
+   "fix": "Ignore the registry temporary-file pattern in the tracked .gitignore, or place temporary files in an ignored directory on the same filesystem while retaining atomic replacement."
+  },
+  {
+   "id": "REGUI-B005",
+   "severity": "medium",
+   "path": "runner/app.py:3026",
+   "evidence": "New-folder initialization happens before save_project checks the registry hash, duplicate key or remaining entry validation. A stale-hash request creates and commits the folder, then returns 409 while leaving it unregistered. The form retains its checked initialization option, so retrying after refresh fails with 'already exists'. Validation failures produce the same abandoned-folder workflow.",
+   "fix": "Check the key, duplicate and expected hash before initialization under the appropriate locks. Handle subsequent save failures explicitly: either safely roll back resources created by this request, or report successful initialization and switch the form to registering the existing repository."
+  }
+ ],
+ "coverage": [
+  "Verified the plan SHA256 and all manifested file hashes against the supplied values.",
+  "Reviewed every manifested file's changes, including the plan, review log, example registry, ignore rules and added regression-test source.",
+  "Inspected registry parsing, atomic writes, lifecycle and ticket locks, worktree ownership, sidecars, cleanup, baseline, history suggestions and CLI entry points.",
+  "Traced dispatch, retry, durable issue-binding writers, confidentiality, final logging and tracker publication through app.py, project_runs.py and the Linear module.",
+  "Inspected PTY acquisition and release, state_io.py, form serialization, token protection, escaping, dialog CSS and the start-sound relocation."
+ ],
+ "limitations": [
+  "Static review only; no files were edited, tests or browser checks run, or work delegated. Builder-reported test results were not independently verified.",
+  "Live projects.yaml, personal session stores, screenshot artifacts and launchd/TCC behavior were not inspected.",
+  "Spec fidelity was assessed against the supplied plan and inspected repository contracts; broader specification documents were not inspected.",
+  "The existing graph was stale and used only for navigation; findings are grounded in current source."
+ ]
+}
+```
+
+### Host dispositions (build inspection 1, all accepted; fixes in 4b15b3f)
+- REGUI-B001: the form keeps the hash it was opened with (`f.dataset.hash`) and submits that. A 409 leaves the hash stale, so saving again keeps failing until the form is reopened. Browser check: with the form open, a hand edit plus a list refresh → the save is refused twice and the edit is kept.
+- REGUI-B002: a path edit is refused whenever any worktree of the key exists. Re-adding a key with leftover worktrees requires every one to `load_binding` against the exact new path, so a symlink alias is refused. Tests cover alias edit and alias re-add.
+- REGUI-B003: env is edited as a JSON object, and invalid JSON is refused in the form. Seed lines are kept verbatim (no trimming). Test: multiline and padded env values round-trip unchanged.
+- REGUI-B004: `.projects.yaml.*.tmp` is gitignored. Test checks that all three registry file patterns are ignored.
+- REGUI-B005: `init` moved into `save_project`, after the key, hash and duplicate checks and under the locks. A later failure removes the folder this call created. Tests cover stale hash (nothing created), duplicate (nothing created), invalid entry (rolled back) and success.
+- pytest 343 passed.
