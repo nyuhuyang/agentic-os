@@ -96,15 +96,22 @@ def _maintenance_shared() -> "IO | None":
     under a running or prompting skill and no skill starts during one (REL-002). None when
     maintenance holds it, or when this process's checkout has moved away (it must not recreate
     the old folder)."""
-    if not _HAVE_FCNTL or not _SELF.exists():
+    if not _HAVE_FCNTL:
         return None
-    LOCKS_DIR.mkdir(parents=True, exist_ok=True)  # safe: the checkout was just seen in place
-    path = LOCKS_DIR / "maintenance.lock"
-    fh: IO = path.open("a", encoding="utf-8")
+    try:
+        home = os.stat(_SELF.parent.parent).st_ino  # this checkout, by identity
+        # One level at a time, never parents=True: if the checkout moved away meanwhile these
+        # fail instead of recreating the old folder (REL-002).
+        OUTPUTS_DIR.mkdir(exist_ok=True)
+        LOCKS_DIR.mkdir(exist_ok=True)
+        path = LOCKS_DIR / "maintenance.lock"
+        fh: IO = path.open("a", encoding="utf-8")
+    except OSError:
+        return None
     try:
         fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        if os.fstat(fh.fileno()).st_ino != path.stat().st_ino:  # the file moved under us
-            raise OSError("maintenance lock moved")
+        if os.fstat(fh.fileno()).st_ino != path.stat().st_ino or os.stat(_SELF.parent.parent).st_ino != home:
+            raise OSError("checkout or lock moved")
         return fh
     except OSError:
         fh.close()

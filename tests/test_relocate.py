@@ -244,3 +244,28 @@ def test_run_skill_takes_the_lock_before_prompting_and_never_recreates_a_moved_c
     monkeypatch.setattr(run_skill, "OUTPUTS_DIR", gone / "outputs")
     monkeypatch.setattr(run_skill, "LOCKS_DIR", gone / "outputs" / "locks")
     assert run_skill._maintenance_shared() is None and not gone.exists()
+
+
+def test_run_skill_never_recreates_a_checkout_moved_mid_acquire(tmp_path, monkeypatch):
+    """The checkout is renamed after run_skill saw it but before it creates the lock folder."""
+    import pathlib
+    import sys
+    sys.path.insert(0, str(SCRIPT.parents[1] / "runner"))
+    import run_skill
+    old = tmp_path / "old"
+    (old / "runner").mkdir(parents=True)
+    (old / "runner" / "run_skill.py").write_text("")
+    monkeypatch.setattr(run_skill, "_SELF", old / "runner" / "run_skill.py")
+    monkeypatch.setattr(run_skill, "OUTPUTS_DIR", old / "outputs")
+    monkeypatch.setattr(run_skill, "LOCKS_DIR", old / "outputs" / "locks")
+    real_mkdir = pathlib.Path.mkdir
+    moved = []
+
+    def mkdir(self, *a, **k):
+        if not moved:
+            moved.append(1)
+            old.rename(tmp_path / "new")  # the relocation lands right here
+        return real_mkdir(self, *a, **k)
+    monkeypatch.setattr(pathlib.Path, "mkdir", mkdir)
+    assert run_skill._maintenance_shared() is None
+    assert not old.exists() and (tmp_path / "new" / "runner").is_dir()

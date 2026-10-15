@@ -209,3 +209,38 @@
 - REL-010: `others()` now takes PIDs from `pgrep -f`, skips the lock helper (`$LOCKER`), the script (`$$`) and the runner/script by `ps -o command=`, and reports the remaining PIDs. Matching by PID also fixes multi-line argv: the real pgrep printed the helper's multi-line `-c` code as extra lines. The shim now delegates every non-runner pattern to the real `pgrep`. The success test therefore runs against the real process table with the helper alive. The refusal test uses a real process whose argv names OLD.
 - REL-002: `cmd_run` takes the maintenance lock before the registry load and any prompt (the body moved to `_cmd_run`). `_maintenance_shared` refuses when this process's own file no longer exists, so a stale CLI never recreates OLD, and checks that the locked file is still the one at its path. Rollback stops with exit 2 when OLD was recreated, so the checkout is never nested. Tests: the lock is held during the confirmation prompt; a moved checkout is not recreated; the rollback guard works.
 - pytest 381 passed (relocate suite 13 tests).
+
+## Plan review round 4 (2026-10-15)
+- Same Codex session (resumed), cross-provider, 83 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/move/r4/claudex-zqu0wkj4/result.json`.
+- Verdict: **REVISE**, 1 finding.
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "The helper-PID exclusion and early lock acquisition address the previous scenarios. One race remains in the stale-checkout guard.",
+ "findings": [
+  {
+   "id": "REL-002",
+   "severity": "medium",
+   "path": "runner/run_skill.py:101",
+   "evidence": "The existence check and recursive mkdir are not atomic. A relative CLI can pause after _SELF.exists() succeeds at line 99; relocation then acquires the exclusive lock and renames OLD. When the CLI resumes, mkdir(parents=True) recreates OLD/outputs/locks. It opens a fresh maintenance.lock, whose inode matches its own pathname, so the check at line 106 passes despite the original lock remaining held inside NEW. This violates the old-path-absence criterion and can force rollback to stop at the recreated-OLD guard. The added test covers a checkout already missing before the existence check, not this interleaving.",
+   "fix": "Prevent lock initialization from recreating checkout ancestors: create runtime directories only beneath an existing checkout, handle disappearance as refusal, and validate checkout identity after acquiring the shared lock. Consider directory-descriptor-based operations or a stable external lock. Add coverage that renames the checkout between the existence check and directory creation."
+  }
+ ],
+ "coverage": [
+  "Verified the supplied plan SHA256 and inspected commit 9c43fa4, the complete relocation script, revised CLI locking, and all relocation tests.",
+  "Confirmed helper exclusion by PID, maintenance protection before confirmation and registry loading, and the rollback destination guard.",
+  "Rechecked CLI completion writes, dashboard completion bookkeeping and shutdown, shared-state helpers, and relevant specification requirements.",
+  "Previously resolved rollback, verification, signal-handling, and path-resolution findings were not reopened."
+ ],
+ "limitations": [
+  "No files were edited, tests run, services changed, or work delegated.",
+  "The host-reported 381 passing tests were not independently verified.",
+  "The remaining race was established by source-level interleaving analysis; it was not reproduced.",
+  "This follow-up did not repeat the external-path audit."
+ ]
+}
+```
+
+### Host disposition (round 4, accepted)
+- REL-002 (remaining race): `_maintenance_shared` reads the checkout directory's inode first. It then creates `outputs/` and `outputs/locks/` one level at a time, with no `parents=True`, so a checkout renamed in between makes `mkdir` fail and run_skill refuses without recreating anything. After `flock` it also requires that the lock file and the checkout directory still have the same inodes. Test: the checkout is renamed inside the first `mkdir` call; `_maintenance_shared()` returns None, the old path stays absent, and the moved checkout is intact. pytest 382 passed (relocate suite 14).

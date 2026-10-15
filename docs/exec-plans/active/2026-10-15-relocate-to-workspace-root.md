@@ -24,7 +24,7 @@ Move this repository from `~/Documents/AI_Workspace/prototypes/agentic-os` to `~
 ## Approach
 `scripts/relocate_checkout.sh OLD NEW` (committed, reusable):
 1. Refuse unless OLD is an AgenticOS checkout, NEW does not exist and its parent does, NEW is not inside OLD, the plist exists, the runner answers, `/api/runs?state=running` is empty, and no process other than the runner has OLD in its command line (CLI `run_skill.py`, scripts; REL-002). Every curl call has a 2 s connect / 5 s total timeout and readiness waits are bounded (REL-003).
-2. Refuse if any `.claude/worktrees/*` is already broken (its own toplevel + `git status`). Take the maintenance lock exclusively through a helper that lives until the script ends (excluded from the busy scan by PID): `run_skill.py` takes `outputs/locks/maintenance.lock` shared first thing (before the registry and any prompt), refuses if held exclusively or if its own checkout has moved (never recreating it), and checks the lock file is still the one at its path, so no CLI skill is mid-run and none can start during the move, whatever its command line (REL-002 round 2).
+2. Refuse if any `.claude/worktrees/*` is already broken (its own toplevel + `git status`). Take the maintenance lock exclusively through a helper that lives until the script ends (excluded from the busy scan by PID): `run_skill.py` takes `outputs/locks/maintenance.lock` shared first thing (before the registry and any prompt), refuses if held exclusively or if its own checkout has moved: it creates `outputs/` and `outputs/locks/` one level at a time (never `parents=True`, so a moved checkout makes that fail rather than recreating it) and, after locking, checks that the lock file and the checkout directory are still the same inodes, so no CLI skill is mid-run and none can start during the move, whatever its command line (REL-002 round 2).
 2a. Back up the plist to a `mktemp` file and verify it with `cmp`; abort before touching anything if that fails (REL-005).
 3. Install HUP/INT/TERM traps by phase: before the move a signal restarts the runner on OLD; during `mv` (phase `moving`) the handler looks where the checkout actually is and rolls back or restarts accordingly; after it, a full rollback (REL-008).
 4. `launchctl bootout`; wait until no `OLD/runner/app.py` remains; re-check that no other process uses OLD; `mv OLD NEW` (on any failure here: restart on OLD, nothing changed).
@@ -66,6 +66,7 @@ The Claude Code shell here cannot read the workspace root (macOS privacy), so th
 - [ ] Test: with the real process table, the script's own lock helper is not counted as busy; a real process naming OLD is (REL-010)
 - [ ] Test: `run_skill` holds the maintenance lock before its confirmation prompt, and a stale `run_skill` whose checkout moved never recreates it (REL-002 round 3)
 - [ ] Test: rollback stops (exit 2) when OLD was recreated meanwhile, never nesting the checkout
+- [ ] Test: a checkout renamed between run_skill's identity read and its lock-folder creation is not recreated (REL-002 round 4)
 - [ ] Test: `core.hooksPath` repointed on success and restored on rollback
 - [ ] Test: workspace root found from both checkout locations; saved stream paths follow the moved checkout
 - [ ] Codex plan review of this plan and the script returns APPROVED
