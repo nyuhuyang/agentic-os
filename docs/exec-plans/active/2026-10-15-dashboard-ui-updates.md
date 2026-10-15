@@ -156,6 +156,30 @@ The terminal panel at the bottom stays as it is. Any card in Backlog, Todo, In p
 - [ ] Implement renderer, reader hooks, replay, card/detail action and attempt picker
 - [ ] Manual check: live view for a running job, replay + "Resume here" for a finished one, from cards in different columns
 
+### C2. Answering a session that stopped for review (e.g. `/claudex-loop` asking for sign-off)
+A headless run that ends by asking the user something lands in In review. The user needs to read what it asked, with context, and continue the same session. User idea: an openable terminal inside the card's tab; refined as below.
+
+#### Acceptance criteria
+- [ ] The card detail view gains a fourth tab, "Terminal", next to Output / Log / Error; it opens by default when the card is In review or has a running job
+- [ ] The Terminal tab shows the C view (live or replayed events) with the run's last assistant message pinned at the top
+- [ ] "Quick reply": a text box under the view; sending it continues the same session headless through the existing reply/retry path (`/api/runs/<id>/retry` with `reply`), so the card goes back to In progress and the attempt is logged
+- [ ] "Open interactive": starts the interactive `claude --resume` / `codex resume` inside the Terminal tab, in the run's folder (worktree or runner root), as a regular terminal that also appears in the bottom panel's tab strip
+- [ ] While the interactive terminal is open it holds the ticket lock (existing worktree-tab rule), so quick reply, retry and auto-dispatch for that card are refused with a clear message
+- [ ] Closing the interactive terminal asks what next — Mark done / Send back to Todo / Leave in review — and records a run-log entry `interactive session ended` with the session id, so the card history shows it
+- [ ] In review cards whose last assistant message is a question show a "Waiting for you" badge with the first line of that message
+
+#### Decisions
+- Quick reply stays headless and reuses retry-with-feedback, so pipelines like `/claudex-loop` keep their recorded attempts; the interactive terminal is for longer back-and-forth or hands-on work.
+- The embedded terminal is the same PTY terminal object as the bottom panel's (attach a second xterm to the same `term_id`, existing replay-on-attach), not a second process.
+- "Waiting for you" uses the last assistant text: it ends with a question mark (ASCII or full-width) or matches an approval phrasing list kept in one place (ponytail: a heuristic; a structured "needs-input" marker from the agent can replace it).
+
+#### Progress Checklist
+- [ ] Test: Terminal tab defaults (In review / running), pinned last message, "Waiting for you" detection on sample messages (EN/ZH, question vs statement)
+- [ ] Test: quick reply calls the retry path with the reply and the same session; refused while an interactive tab holds the ticket lock
+- [ ] Test: closing the interactive terminal records `interactive session ended` and applies the chosen next state
+- [ ] Implement the Terminal tab, pinned message, quick reply, embedded interactive terminal, close prompt and badge
+- [ ] Manual check: a `/claudex-loop` run stopped for sign-off is answered once by quick reply and once interactively
+
 ## Shared checklist
 - [ ] Codex plan review returns APPROVED
 - [ ] Proof: `.venv/bin/python -m pytest tests/` passes
