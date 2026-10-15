@@ -511,3 +511,36 @@ def test_locate_folder(home):
     for bad in ("a/b", "..", ".", ""):
         with pytest.raises(pj.ProjectError, match="single path component"):
             pj.locate_folder(bad, [])
+
+
+def test_set_confidential_does_not_leak_through_a_yaml_alias(reg):
+    path, a, b = reg
+    path.write_text(f"projects:\n  alpha: &shared\n    path: {a}\n    confidential: true\n  beta: *shared\n")
+    pj.set_confidential("alpha", False, h(path))
+    raw = pj.raw_entries(path.read_bytes())
+    assert raw["alpha"]["confidential"] is False and raw["beta"]["confidential"] is True
+
+
+def test_locate_applies_one_eligibility_rule_to_history_too(home, tmp_path, monkeypatch):
+    hidden = mk(home / ".archive" / "proj", "a.txt")
+    nm = mk(home / "code" / "app" / "node_modules" / "proj", "a.txt")
+    real_root = mk(tmp_path / "elsewhere" / "proj", "a.txt")
+    os.symlink(real_root.parent, home / "Documents")  # a symlinked scan root is not traversed
+    claude = tmp_path / "claude"
+    (claude / "x").mkdir(parents=True)
+    for i, cwd in enumerate((hidden, nm, home / "Documents" / "proj")):
+        (claude / "x" / f"s{i}.jsonl").write_text(json.dumps({"type": "user", "cwd": str(cwd)}) + "\n")
+    monkeypatch.setattr(pj, "CLAUDE_PROJECTS", claude)
+    assert pj.locate_folder("proj", ["a.txt"]) == {"matches": [], "complete": True}
+
+
+def test_locate_history_phase_honours_the_deadline(home, tmp_path, monkeypatch):
+    claude = tmp_path / "claude"
+    (claude / "x").mkdir(parents=True)
+    for i in range(40):
+        (claude / "x" / f"s{i}.jsonl").write_text(json.dumps({"type": "user", "cwd": f"/nowhere/{i}"}) + "\n")
+    monkeypatch.setattr(pj, "CLAUDE_PROJECTS", claude)
+    monkeypatch.setattr(pj, "_first_cwd", lambda f: time.sleep(0.05) or "/nowhere")
+    t0 = time.monotonic()
+    out = pj.locate_folder("proj", ["a"], budget_s=0.3)
+    assert out["complete"] is False and time.monotonic() - t0 < 1.5

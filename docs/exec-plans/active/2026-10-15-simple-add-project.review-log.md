@@ -133,3 +133,63 @@
 - Same Codex session (resumed), cross-provider, 36 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/simple/r3/claudex-chmk8q18/result.json`.
 - Verdict: **APPROVED**, 0 findings; bound to plan sha256 `891572e4d6a0057b3802c176e6508385ca7de500eedcf24a4b942eeaaba4074d`. Plan review: 3 rounds (7 → 2 → 0).
 - Build (Claude, 2026-10-15): base 52da675. 360 tests pass; headless-browser check passed (see plan). Key derivation lives in `projects.derive_key` (the server also derives it when the POST has no key); the form mirrors it for the preview.
+
+## Build inspection 1 (2026-10-15)
+- Fresh Codex session 01a140bc-e138-7743-84d3-403d574a7e35, base 52da675, cross-provider, 181 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/simple/i1/claudex-94c45xuq/result.json`.
+- Verdict: **REVISE**, 4 findings.
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "Four defects remain: confidentiality edits can affect another project, folder lookup does not enforce its bounds or exclusions consistently, and stale lookup responses can overwrite the selected path.",
+ "findings": [
+  {
+   "id": "SAP-B001",
+   "severity": "medium",
+   "path": "runner/projects.py:650",
+   "evidence": "set_confidential mutates the mapping returned by yaml.safe_load in place. A valid registry containing `alpha: &shared {path: /repo, confidential: true}` and `beta: *shared` gives both keys the same mapping. PATCHing alpha to false also changes beta, despite holding only alpha's lifecycle lock. Future unbound beta tickets then lose sandbox and tracker-comment protection through _ticket_confidential.",
+   "fix": "Copy the selected entry and replace only doc['projects'][key] before changing confidential. Preserve all other entries and add coverage for YAML aliases."
+  },
+  {
+   "id": "SAP-B002",
+   "severity": "medium",
+   "path": "runner/projects.py:688",
+   "evidence": "The three-second budget and 20-result cap do not cover the whole locator. The Codex SELECT and every history-candidate consideration run without deadline or result-limit checks. SQLite uses its default lock timeout, which alone can exceed three seconds. Directory scans also materialize all children before checking time again. Large or locked history and large directories therefore keep the locate request running beyond the promised budget.",
+   "fix": "Propagate the remaining budget through history reads and SQL execution, check time and match limits while processing candidates and directory entries, and stop all phases when either bound is reached. Return complete=false whenever bounded work is abandoned."
+  },
+  {
+   "id": "SAP-B003",
+   "severity": "medium",
+   "path": "runner/projects.py:677",
+   "evidence": "History candidates bypass the scan's hidden-directory and node_modules exclusions: consider() checks only skip_real and whether the final component is a symlink. A recorded cwd such as ~/.archive/demo or ~/code/app/node_modules/demo can therefore be returned and automatically selected as a complete singleton. Symlinked ancestors and symlinked initial scan roots are also traversed, contrary to the plan's exclusions.",
+   "fix": "Apply one eligibility check to history candidates, initial roots, and traversal children. Check excluded ancestors and reject symlink traversal consistently before enumerating a candidate."
+  },
+  {
+   "id": "SAP-B004",
+   "severity": "medium",
+   "path": "runner/templates/index.html:1213",
+   "evidence": "_projectHandleDrop applies its asynchronous result to the shared form without checking whether the selection or dialog changed. Drop A, then paste or drop B while A's lookup is pending: a later response for A overwrites B. The same response can populate a newly reopened Add dialog after cancellation, allowing Save to register the wrong repository.",
+   "fix": "Associate lookup requests with a form generation and selection version. Invalidate pending results on another drop, manual path input, dialog close, or reopen; apply responses only while their originating selection remains current."
+  }
+ ],
+ "coverage": [
+  "Verified all nine manifest file hashes, including the supplied plan SHA256.",
+  "Inspected every changed file and the diff against base 52da6751087c953169eb741293799dfa10ae80ae.",
+  "Traced registry parsing and writes, automatic initialization, worktree validation, optional verification, prompts, post-run checks, baseline state, CLI guards, and dashboard form behavior.",
+  "Traced related locking, confidentiality, bindings, and tracker consumers in runner/state_io.py, runner/modules/pty/__init__.py, runner/modules/linear/__init__.py, runner/modules/linear/local_tracker.py, and runner/reset_gen.py.",
+  "Read affected test source, relevant SPEC.md sections, and projects.example.yaml."
+ ],
+ "limitations": [
+  "Static review only. No files were edited, tests or browser checks run, or work delegated.",
+  "The plan's reported test and browser results were not independently verified.",
+  "The graphify snapshot is stale and its query was truncated; findings rely on current source."
+ ]
+}
+```
+
+### Host dispositions (build inspection 1, all accepted)
+- SAP-B001: `set_confidential` replaces `doc["projects"][key]` with a copy, so a YAML alias shared with another project keeps that project's value. Alias test added.
+- SAP-B002: one deadline and one result cap now cover every locate phase: each JSONL file, the Codex query (sqlite `timeout` set to the remaining budget, plus a progress handler that aborts at the deadline), each history candidate, and each scandir entry. Any abandoned work returns `complete: false`. A test with slow history reads checks it stops within the budget.
+- SAP-B003: one `eligible()` rule (no hidden or skipped component, no symlink anywhere on the path, not under a skipped root) applies to history candidates, scan roots and scan children. Test: a hidden history cwd, a node_modules cwd and a symlinked scan root all yield no match.
+- SAP-B004: `_projectSelectionGen` is bumped on open, close, typed path, history pick and every drop; a locate result applies only while its generation is current and the dialog is open. Browser check with a delayed stub locate: a typed path survives a stale result, a reopened dialog stays empty, and the current drop applies.
+- pytest 363 passed.

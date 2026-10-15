@@ -650,7 +650,8 @@ def set_confidential(key: str, value: bool, expected_hash: str, path: Path | Non
         entry = doc["projects"].get(key)
         if not isinstance(entry, dict):
             raise ProjectError(f"unknown project {key!r}")
-        entry["confidential"] = value
+        # A copy: a YAML alias may share this mapping with another project (SAP-B001).
+        entry = doc["projects"][key] = {**entry, "confidential": value}
         project = _parse_project(key, entry)
         _write_registry(path, doc, expected_hash)
     return {"key": key, "confidential": project.confidential}
@@ -663,83 +664,114 @@ _SCAN_SKIP_NAMES = {"Library", "Desktop", "Downloads", "node_modules", ".venv", 
 
 def locate_folder(name: str, entries: list, budget_s: float = 3.0, limit: int = 20) -> dict:
     """Where a dropped folder lives: the browser gives only its name and entry names. No git
-    calls; one deadline over session-history cwds and a shallow scan of the home folder."""
+    calls; one deadline and one result cap over every phase (SAP-B002), and one eligibility
+    rule for history candidates, scan roots and scan children (SAP-B003)."""
     if not isinstance(name, str) or not name or "/" in name or name in (".", "..") or "\0" in name:
         raise ProjectError("folder name must be a single path component")
     want = {e for e in (entries or [])[:50] if isinstance(e, str)}
     deadline = time.monotonic() + budget_s
+    late = lambda: time.monotonic() > deadline
     home = Path.home()
     skip_real = {str(p.resolve()) for p in (WORKTREE_ROOT, *(Path(t) for t in _TEMP_ROOTS)) if p.exists()}
     skip_real |= {str((home / n).resolve()) for n in ("Library", "Desktop", "Downloads")}
     found: dict[str, float] = {}
-    complete = True
+    state = {"complete": True}
+
+    def eligible(p: Path) -> bool:
+        """No hidden or skipped component, no symlink anywhere on the path, not under a skipped root."""
+        if any(part.startswith(".") or part in _SCAN_SKIP_NAMES for part in p.parts[1:]):
+            return False
+        cur = Path(p.parts[0])
+        for part in p.parts[1:]:
+            cur = cur / part
+            if cur.is_symlink():
+                return False
+        try:
+            real = str(p.resolve())
+        except OSError:
+            return False
+        return not any(real == s_ or real.startswith(s_ + "/") for s_ in skip_real)
 
     def consider(d: Path) -> None:
+        if not eligible(d):
+            return
         try:
-            real = d.resolve()
-            if any(str(real) == s or str(real).startswith(s + "/") for s in skip_real) or d.is_symlink():
-                return
             names = set(os.listdir(d))
+            mtime = d.stat().st_mtime
         except OSError:
             return
         if (want <= names) if want else not names:
-            found[str(real)] = d.stat().st_mtime
+            found[str(d.resolve())] = mtime
 
-    # (a) session-history cwds and their ancestors: string ops only
+    def stop() -> bool:
+        if late() or len(found) >= limit:
+            state["complete"] = False
+            return True
+        return False
+
+    # (a) session-history cwds and their ancestors: string ops only, under the same deadline
     cwds: set[str] = set()
     with contextlib.suppress(OSError):
         for proj in CLAUDE_PROJECTS.iterdir() if CLAUDE_PROJECTS.is_dir() else []:
+            if stop():
+                break
             for f in proj.glob("*.jsonl") if proj.is_dir() else []:
-                if time.monotonic() > deadline:
-                    complete = False
+                if stop():
                     break
                 with contextlib.suppress(Exception):
                     from usage_reader import _cached_by_stat
                     cwd = _cached_by_stat("session_cwd", f, f.stat(), _first_cwd)
                     if cwd:
                         cwds.add(cwd)
-    if CODEX_DB.exists():
+    if CODEX_DB.exists() and not stop():
         import sqlite3
-        with contextlib.suppress(sqlite3.Error):
-            db = sqlite3.connect(f"file:{CODEX_DB}?mode=ro", uri=True)
+        try:
+            db = sqlite3.connect(f"file:{CODEX_DB}?mode=ro", uri=True, timeout=max(0.01, deadline - time.monotonic()))
+            db.set_progress_handler(lambda: 1 if late() else 0, 1000)  # aborts a long query at the deadline
             try:
                 cwds |= {c for (c,) in db.execute("SELECT DISTINCT cwd FROM threads") if isinstance(c, str)}
             finally:
                 db.close()
+        except sqlite3.Error:
+            state["complete"] = state["complete"] and not late()
     for cwd in cwds:
+        if stop():
+            break
         parts = Path(cwd).parts
         if name in parts:
             consider(Path(*parts[:len(parts) - parts[::-1].index(name)]))
-    # (b) breadth-first scan, at most 4 levels under each root, symlinked dirs not followed
-    queue = [(home / r, 0) for r in _SCAN_ROOTS if (home / r).is_dir()]
+    # (b) breadth-first scan, at most 4 levels under each root, checked entry by entry
+    queue = [(home / r if r else home, 0) for r in _SCAN_ROOTS]
+    queue = [(d, n) for d, n in queue if d.is_dir() and eligible(d)]
     seen: set[str] = set()
-    while queue and len(found) < limit:
-        if time.monotonic() > deadline:
-            complete = False
-            break
+    while queue and not stop():
         d, depth = queue.pop(0)
+        real = str(d.resolve())
+        if real in seen:
+            continue
+        seen.add(real)
         try:
-            real = str(d.resolve())
-            if real in seen or any(real == s or real.startswith(s + "/") for s in skip_real):
-                continue
-            seen.add(real)
-            children = [c for c in os.scandir(d) if c.is_dir(follow_symlinks=False)]
+            it = os.scandir(d)
         except OSError:
             continue
-        for c in children:
-            if c.name.startswith(".") or c.name in _SCAN_SKIP_NAMES:
-                continue
-            if c.name == name:
-                consider(Path(c.path))
-            if depth < 3 and not (d == home and depth == 0 and c.name in _SCAN_ROOTS):
-                queue.append((Path(c.path), depth + 1))
-    if len(found) >= limit:
-        complete = False
+        with it:
+            for c in it:
+                if stop():
+                    break
+                try:
+                    if not c.is_dir(follow_symlinks=False) or c.name.startswith(".") or c.name in _SCAN_SKIP_NAMES:
+                        continue
+                except OSError:
+                    continue
+                child = Path(c.path)
+                if c.name == name:
+                    consider(child)
+                if depth < 3 and not (d == home and c.name in _SCAN_ROOTS) and eligible(child):
+                    queue.append((child, depth + 1))
     home_s = str(home)
     ordered = sorted(found, key=lambda p: found[p], reverse=True)[:limit]
     return {"matches": ["~" + p[len(home_s):] if p.startswith(home_s + "/") else p for p in ordered],
-            "complete": complete}
-
+            "complete": state["complete"]}
 
 def get_project(key: str, registry: dict[str, Project] | None = None) -> Project:
     registry = load_registry() if registry is None else registry

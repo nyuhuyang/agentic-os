@@ -88,4 +88,9 @@ Adding a project takes one folder and at most one choice. The user picks a folde
 - [x] Proof: `.venv/bin/python -m pytest tests/` passes — 360 passed (2026-10-15)
 - [x] Manual browser check as above; screenshots captured — 2026-10-15 headless Chrome on the live runner, throwaway folders under `~/aos-uitest` (deleted after): 0 notes shown; "+ PROJECT" in agent-button style; stubbed drop of `drop-repo` → locate filled the path, key preview `drop-repo`; empty folder auto-init (one commit); non-empty plain folder refused ("not empty; run git init"); Edit shows path (read-only) + Confidential only and saves via PATCH; Baseline hidden for the two verify-less projects; both removed; registry byte-identical to before; no page errors. Screenshots `simple_1_panel.png`…`simple_3_added.png` in the session scratchpad
 - [x] Fix: after a successful save the form awaits the list refresh before closing, so the next form opens with the new registry hash (found by the browser check: a fast second add hit 409)
-- [ ] Fresh cross-provider (Codex) build inspection returns no unresolved material findings
+- [x] Fix: `set_confidential` writes a copy of the entry, so YAML aliases never leak (SAP-B001)
+- [x] Fix: one deadline and result cap across every locate phase, sqlite timeout + progress handler (SAP-B002)
+- [x] Fix: one eligibility rule for history candidates, scan roots and children (SAP-B003)
+- [x] Fix: drop results apply only while their selection is current (SAP-B004) — browser check with a delayed stub: typed path survives, reopened dialog stays empty, current drop applies
+- [x] Test: YAML alias, history eligibility + symlinked root, history-phase deadline
+- [ ] Fresh cross-provider (Codex) build inspection returns no unresolved material findings — inspection 1 REVISE (4, fixed); inspection 2 pending
