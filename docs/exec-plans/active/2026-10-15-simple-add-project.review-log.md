@@ -193,3 +193,47 @@
 - SAP-B003: one `eligible()` rule (no hidden or skipped component, no symlink anywhere on the path, not under a skipped root) applies to history candidates, scan roots and scan children. Test: a hidden history cwd, a node_modules cwd and a symlinked scan root all yield no match.
 - SAP-B004: `_projectSelectionGen` is bumped on open, close, typed path, history pick and every drop; a locate result applies only while its generation is current and the dialog is open. Browser check with a delayed stub locate: a typed path survives a stale result, a reopened dialog stays empty, and the current drop applies.
 - pytest 363 passed.
+
+## Build inspection 2 (2026-10-15)
+- Fresh Codex session 01a140c3-9efe-7193-8095-74224ea2c686, base 1798e62, cross-provider, 100 s. Result `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-prototypes-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/claudex/simple/i2/claudex-kta6__eb/result.json`.
+- Verdict: **REVISE**, 2 findings (B001, B003 confirmed fixed; B002 partial).
+
+```json
+{
+ "verdict": "REVISE",
+ "summary": "SAP-B001 and SAP-B003 are fixed. SAP-B002 remains partially unresolved. SAP-B004 protects path selection, but a stale callback can still overwrite dialog status.",
+ "findings": [
+  {
+   "id": "SAP-B002",
+   "severity": "medium",
+   "path": "runner/projects.py:695",
+   "evidence": "Candidate matching still materializes every entry with set(os.listdir(d)), without deadline checks. History reading likewise calls _first_cwd, which reads up to 200 arbitrarily long JSONL lines without observing the deadline. A large candidate directory or session file can therefore exceed the three-second budget. If the final depth-limited scan entry overruns inside consider(), the loops can finish without another stop() call and return complete=true.",
+   "fix": "Make candidate enumeration and history parsing deadline-aware, using incremental reads and bounded parsing. Do not cache incomplete history reads as completed results. Check the deadline before returning and report complete=false whenever bounded work remains."
+  },
+  {
+   "id": "SAP-B005",
+   "severity": "low",
+   "path": "runner/templates/index.html:1228",
+   "evidence": "After awaiting readEntries(), the handler writes 'Looking for…' before checking current(). Drop A, cancel, and reopen the dialog before A's directory callback finishes: A overwrites the reopened dialog's status, then returns without starting a lookup. It can similarly replace a newer validation error with a permanent misleading search message.",
+   "fix": "Move the current() check immediately after the readEntries() await, before any DOM mutation."
+  }
+ ],
+ "coverage": [
+  "Verified all five manifest file hashes, including the supplied plan SHA256, and inspected the diff against 1798e6220e2433c0b48f803fc76bf6e31d47d97c.",
+  "Read the plan, review log, changed implementation sections, and affected test source.",
+  "Traced registry parsing, alias handling, lifecycle locks, atomic writes, save/remove writers, history readers, shared caches, locate routes, and dialog selection handling.",
+  "Checked related confidentiality consumers and locking in app.py, project_runs.py, state_io.py, the PTY module, and the Linear module."
+ ],
+ "limitations": [
+  "Static review only; no files edited, tests or browser checks run, or work delegated.",
+  "Reported test and browser results were not independently verified.",
+  "Review covered the four requested fixes and their interactions, rather than repeating the full implementation audit.",
+  "The graphify snapshot predates these changes and its query was truncated; conclusions rely on current source."
+ ]
+}
+```
+
+### Host dispositions (build inspection 2, both accepted)
+- SAP-B002: `consider()` reads entries one at a time and stops once every wanted name is seen, checking the deadline per entry. An empty drop stops at the first entry. `_first_cwd` reads at most 256 KB, a fixed rule, so caching stays deterministic. `locate_folder` checks the deadline again before returning. Tests cover a slow candidate listing (stops within budget, complete=false) and the bounded head read.
+- SAP-B005: the `current()` check moved to directly after the `readEntries` await, before any DOM change.
+- pytest 365 passed.

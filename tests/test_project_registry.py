@@ -544,3 +544,29 @@ def test_locate_history_phase_honours_the_deadline(home, tmp_path, monkeypatch):
     t0 = time.monotonic()
     out = pj.locate_folder("proj", ["a"], budget_s=0.3)
     assert out["complete"] is False and time.monotonic() - t0 < 1.5
+
+
+def test_locate_candidate_listing_honours_the_deadline(home, monkeypatch):
+    big = mk(home / "Documents" / "proj", *[f"f{i}" for i in range(30)])
+    real = pj.os.scandir
+
+    class Slow:
+        def __init__(self, d): self.it = real(d)
+        def __enter__(self): return self
+        def __exit__(self, *a): self.it.close()
+        def __iter__(self):
+            for e in self.it:
+                time.sleep(0.05)
+                yield e
+    monkeypatch.setattr(pj.os, "scandir", lambda d: Slow(d) if Path(d) == big else real(d))
+    t0 = time.monotonic()
+    out = pj.locate_folder("proj", ["not-there"], budget_s=0.3)
+    assert out["complete"] is False and time.monotonic() - t0 < 1.5
+
+
+def test_first_cwd_reads_a_bounded_head(tmp_path):
+    f = tmp_path / "s.jsonl"
+    f.write_text("x" * 300000 + "\n" + json.dumps({"type": "user", "cwd": "/late"}) + "\n")
+    assert pj._first_cwd(f) is None
+    f.write_text(json.dumps({"type": "user", "cwd": "/early"}) + "\n" + "x" * 300000)
+    assert pj._first_cwd(f) == "/early"

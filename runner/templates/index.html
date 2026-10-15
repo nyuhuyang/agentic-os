@@ -1225,8 +1225,8 @@ async function _projectHandleDrop(entry) {
   const current = () => gen === _projectSelectionGen && document.getElementById('project-dialog').open;
   if (!entry || !entry.isDirectory) { errEl.textContent = 'Drop a folder, not a file.'; return; }
   const names = await new Promise(resolve => entry.createReader().readEntries(es => resolve(es.slice(0, 50).map(x => x.name)), () => resolve([])));
+  if (!current()) return;  // before any DOM change (SAP-B005)
   errEl.textContent = `Looking for "${entry.name}"…`;
-  if (!current()) return;
   const r = await _projectApi('POST', '/api/projects/locate', { name: entry.name, entries: names });
   if (!current()) return;  // another drop, a typed path, or the dialog closed meanwhile
   if (!r.ok) { errEl.textContent = r.data.error || `HTTP ${r.status}`; return; }

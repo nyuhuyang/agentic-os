@@ -693,15 +693,27 @@ def locate_folder(name: str, entries: list, budget_s: float = 3.0, limit: int = 
         return not any(real == s_ or real.startswith(s_ + "/") for s_ in skip_real)
 
     def consider(d: Path) -> None:
+        """Entries are read one at a time until every wanted name is seen (or, for an empty
+        drop, until any entry appears), checking the deadline as it goes (SAP-B002)."""
         if not eligible(d):
             return
+        missing = set(want)
         try:
-            names = set(os.listdir(d))
-            mtime = d.stat().st_mtime
+            with os.scandir(d) as it:
+                for e in it:
+                    if late():
+                        state["complete"] = False
+                        return
+                    if not want:
+                        return  # an empty drop matches only an empty folder
+                    missing.discard(e.name)
+                    if not missing:
+                        break
+            if missing:
+                return
+            found[str(d.resolve())] = d.stat().st_mtime
         except OSError:
             return
-        if (want <= names) if want else not names:
-            found[str(d.resolve())] = mtime
 
     def stop() -> bool:
         if late() or len(found) >= limit:
@@ -768,6 +780,8 @@ def locate_folder(name: str, entries: list, budget_s: float = 3.0, limit: int = 
                     consider(child)
                 if depth < 3 and not (d == home and c.name in _SCAN_ROOTS) and eligible(child):
                     queue.append((child, depth + 1))
+    if late():  # work that overran inside the last step still counts as cut short
+        state["complete"] = False
     home_s = str(home)
     ordered = sorted(found, key=lambda p: found[p], reverse=True)[:limit]
     return {"matches": ["~" + p[len(home_s):] if p.startswith(home_s + "/") else p for p in ordered],
@@ -1414,9 +1428,11 @@ def codex_sessions(project: Project) -> list[dict]:
 
 
 def _first_cwd(path: Path) -> str | None:
-    """The cwd of a Claude session: the first line that carries one (ponytail: 200 lines max)."""
+    """The cwd of a Claude session: the first line that carries one. Bounded: only the first
+    256 KB are read (ponytail: a session whose cwd appears later is simply not suggested)."""
     with open(path, encoding="utf-8", errors="replace") as f:
-        for _, line in zip(range(200), f):
+        head = f.read(262144)
+        for line in head.splitlines()[:200]:
             if '"cwd"' not in line:
                 continue
             try:

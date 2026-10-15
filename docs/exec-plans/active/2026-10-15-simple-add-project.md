@@ -93,4 +93,6 @@ Adding a project takes one folder and at most one choice. The user picks a folde
 - [x] Fix: one eligibility rule for history candidates, scan roots and children (SAP-B003)
 - [x] Fix: drop results apply only while their selection is current (SAP-B004) — browser check with a delayed stub: typed path survives, reopened dialog stays empty, current drop applies
 - [x] Test: YAML alias, history eligibility + symlinked root, history-phase deadline
-- [ ] Fresh cross-provider (Codex) build inspection returns no unresolved material findings — inspection 1 REVISE (4, fixed); inspection 2 pending
+- [x] Fix: candidate listing incremental and deadline-aware, bounded session head read, final deadline check (SAP-B002 remainder); stale-drop check before any DOM change (SAP-B005)
+- [x] Test: slow candidate listing stops within budget; bounded head read
+- [ ] Fresh cross-provider (Codex) build inspection returns no unresolved material findings — inspection 1 REVISE (4, fixed); inspection 2 REVISE (2, fixed); inspection 3 pending
