@@ -399,3 +399,18 @@ def test_renderer_covers_every_codex_tool_item():
     assert r({"type": "item.completed", "item": fc}) == ["  ↳ edit update a.py (completed)"]
     assert r({"type": "item.started", "item": {"type": "web_search", "query": "codex events"}}) == ["[tool] web_search codex events"]
     assert r({"type": "item.completed", "item": {"type": "error", "message": "stream lost"}}) == ["[error] stream lost"]  # UI28-01
+
+
+def test_codex_tool_results_from_every_payload_field():
+    r = lambda ev: pr.render_event("codex", json.dumps(ev))
+    mcp = {"type": "mcp_tool_call", "server": "s", "tool": "t", "status": "completed",
+           "result": {"content": [], "structured_content": {"rows": 2}}}
+    assert plain(r({"type": "item.completed", "item": mcp})) == ['  ↳ {"rows": 2}']
+    web = {"type": "web_search", "query": "q", "results": [{"title": "Codex docs"}]}
+    assert "Codex docs" in plain(r({"type": "item.completed", "item": web}))[0]
+    collab = {"type": "collab_tool_call", "tool": "wait", "status": "completed",
+              "agents_states": {"a1": {"status": "completed", "message": "ok"}, "a2": {"status": "errored", "error": "boom"}}}
+    out = r({"type": "item.completed", "item": collab})
+    assert plain(out) == ["  ↳ failed: boom"] and out[0].startswith("\x1b[31m")  # REVIEW-01
+    collab_ok = {**collab, "agents_states": {"a1": {"status": "completed", "message": "all green"}}}
+    assert plain(r({"type": "item.completed", "item": collab_ok})) == ["  ↳ all green"]

@@ -270,7 +270,11 @@ TOOL_RESULT_CHARS = 200
 
 def _tool_result_text(content) -> str:
     if isinstance(content, list):
-        content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+        content = " ".join(b.get("text", "") if isinstance(b, dict) and "text" in b
+                           else json.dumps(b, ensure_ascii=False) if isinstance(b, (dict, list)) else str(b)
+                           for b in content)
+    elif isinstance(content, dict):
+        content = json.dumps(content, ensure_ascii=False)
     return " ".join(str(content or "").split())[:TOOL_RESULT_CHARS]
 
 
@@ -302,16 +306,26 @@ def _codex_tool_lines(t: str, item: dict) -> list[str]:
     if t == "item.started":
         return [f"{_CYAN}[tool] {call.strip()}{_RESET}"]
     err = item.get("error")
-    failed = item.get("status") == "failed" or bool(err)
-    if failed:
+    states = item.get("agents_states")  # collab: one state per child agent (REVIEW-01)
+    state_list = list(states.values()) if isinstance(states, dict) else states if isinstance(states, list) else []
+    bad_states = [st for st in state_list if isinstance(st, dict)
+                  and (st.get("error") or str(st.get("status", "")).lower() in ("failed", "errored", "error"))]
+    if item.get("status") == "failed" or err or bad_states:
         msg = err.get("message") if isinstance(err, dict) else err
+        if not msg and bad_states:
+            msg = "; ".join(str(st.get("error") or st.get("message") or st.get("status")) for st in bad_states)
         return [f"{_RED}  ↳ failed: {_tool_result_text(msg or item.get('status'))}{_RESET}"]
     result = item.get("result")
-    if isinstance(result, dict):
-        result = result.get("content") if result.get("content") is not None else result.get("structured_content")
-    shown = _tool_result_text(result if result is not None else item.get("status") or "done")
-    if kind == "file_change" and not result:
-        shown = f"{call.strip()} ({item.get('status') or 'done'})"
+    if isinstance(result, dict):  # MCP: text content, or the structured payload when there is no text
+        content = result.get("content")
+        result = content if content else result.get("structured_content")
+    if not result and state_list:
+        result = [st.get("message") or st.get("status") for st in state_list if isinstance(st, dict)]
+    if not result and item.get("results") is not None:  # web_search hits
+        result = item.get("results")
+    if not result and kind == "file_change":
+        return [f"{_DIM}  ↳ {call.strip()} ({item.get('status') or 'done'}){_RESET}"]
+    shown = _tool_result_text(result if result else (item.get("status") or "done"))
     return [f"{_DIM}  ↳ {shown}{_RESET}"]
 
 

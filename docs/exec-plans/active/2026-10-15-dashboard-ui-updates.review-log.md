@@ -1965,3 +1965,40 @@ Lesson from runner-write-safety (10 inspections): later rounds drift into inject
 ### Disposition (host Claude; fixed)
 - UI28-01 fixed: the shared renderer shows every Codex tool item of the exec event schema — mcp_tool_call (server.tool + arguments, then result or failure), file_change (kind + path), web_search (query), collab_tool_call (and any future tool item generically) — plus item-level error events, live and in replay. Test `test_renderer_covers_every_codex_tool_item`.
 - Proof: 580 passed.
+
+## Inspection 29 (fresh Codex, on commit 390b96f) — REVISE (1 medium)
+- Result: /private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/43734fe6-827b-4456-8612-0540ddad69af/scratchpad/claudex/i29/claudex-1ox0mjzb/result.json (assurance cross_provider)
+```json
+{
+ "verdict": "REVISE",
+ "summary": "One material defect remains: the Codex renderer still discards supported tool results and failure details.",
+ "findings": [
+  {
+   "id": "REVIEW-01",
+   "severity": "medium",
+   "path": "runner/project_runs.py:309",
+   "evidence": "_codex_tool_lines reads only item.result. A completed collaboration wait containing agents_states with an errored child and its failure message therefore renders only '↳ completed', hiding both the result and failure. Web-search results similarly become '↳ done'. MCP results with empty content and populated structured_content also lose their payload. These fields are defined in the installed version’s [Codex 0.162.0 schema](https://github.com/openai/codex/blob/rust-v0.162.0/codex-rs/exec/src/exec_events.rs). Both live output and replay use this renderer, so Part C’s tool-result and error visibility remains incomplete.",
+   "fix": "Extract results by item type: render bounded collaboration agent states/messages and web-search results, and fall back to structured_content when MCP text content is empty. Preserve failure styling for errored child states. Add representative completion-event coverage for these payloads."
+  }
+ ],
+ "coverage": [
+  "Verified the plan, all 21 manifest file hashes, and tracked-diff SHA256 against disk.",
+  "Reviewed the complete supplied diff, plan, review log, added test sources, and affected surrounding implementation.",
+  "Traced session mutations, confinement, live-session checks, admission claims, PTY ownership, locks, finalization, and closure audits.",
+  "Traced project labels through creation, synchronization, normalization, backups, dispatch, and lock handoff.",
+  "Inspected process-engine callers, retry/fallback, interruption records, streaming, replay, history, terminal callbacks, project selection, and file browsing.",
+  "Followed related state and watchdog code beyond the plan’s file list, including state_io.py and stall_detection.",
+  "Checked installed Codex package metadata and its corresponding official event schema."
+ ],
+ "limitations": [
+  "Static inspection only: no files edited, tests run, work delegated, or browser/native CLI operations performed.",
+  "Historical test-pass and manual-validation claims were not independently verified.",
+  "Native resume-picker behavior and live Linear API behavior remain unverified.",
+  "SPEC.md and broader architecture documents were not inspected; fidelity was assessed against the supplied plan and inspected implementation contracts."
+ ]
+}
+```
+
+### Disposition (host Claude; fixed)
+- REVIEW-01 fixed: completed Codex tool items render their payload per type — MCP text content or else `structured_content`, collab `agents_states` (an errored child state turns the line red with its error), web_search `results` — and dict/list payloads print as bounded JSON. Test `test_codex_tool_results_from_every_payload_field`.
+- Proof: 581 passed.
