@@ -265,4 +265,4 @@ Opening a project in the Projects panel should let the user look at its folder t
 ## Shared checklist
 - [x] Codex plan review returns APPROVED (round 5 after the post-approval C0 change, plan sha256 04f33a95…; see review log)
 - [x] Proof: `.venv/bin/python -m pytest tests/` passes (575 passed, 2026-10-16)
-- [ ] Fresh cross-provider (Codex) build inspection returns no unresolved material findings — OPEN: 25 rounds used; last Codex verdict (24) fixed; final state approved by DeepSeek (third-party, read-only) and reviewed by a Claude fallback; one Codex pass on the final state still needed (see review log "Status after the extension")
+- [x] Fresh cross-provider (Codex) build inspection returns no unresolved material findings — Codex inspection 37 on `8095cc2`: APPROVED, no findings, assurance cross_provider (`/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/43734fe6-827b-4456-8612-0540ddad69af/scratchpad/claudex/i37/claudex-wuobz0i5/result.json`); full suite 588 passed

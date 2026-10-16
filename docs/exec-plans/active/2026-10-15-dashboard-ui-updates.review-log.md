@@ -2181,3 +2181,8 @@ Lesson from runner-write-safety (10 inspections): later rounds drift into inject
   - `endedTermId` is reset with the card binding and restored when a save fails.
 - UI36-02: End session's ack goes through `_offerCardNext`.
 - Proof: `node --check` passes; card-terminal and terminal tests pass.
+
+## Inspection 37 — Codex (cross_provider), APPROVED (2026-10-16)
+- Result: `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/43734fe6-827b-4456-8612-0540ddad69af/scratchpad/claudex/i37/claudex-wuobz0i5/result.json`, status completed, 215 s, on HEAD `8095cc2`. Verdict APPROVED, no findings.
+- Proof: full suite 588 passed. Plan item 268 ticked.
+- Still open (manual or external, not code): 23/24/25/74 (native `claude --resume` / `codex resume` pickers) and 125 (live Linear label). The plan stays active until those are checked.
