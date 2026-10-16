@@ -1422,6 +1422,10 @@ def _headless_ok(agent: str, sid: str, board_ids) -> bool:
 
 def _with_label(row: dict, labels) -> dict:
     label = (labels or {}).get((row["agent"], row["id"]))
+    if isinstance(label, dict):  # {"label": identifier, "title": the card's title}
+        if label.get("title"):
+            row["card_title"] = label["title"]  # a headless run's first message is the runner's preamble
+        label = label.get("label")
     if label:
         row["label"] = label  # the card identifier, shown before the title (§9)
     return row

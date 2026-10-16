@@ -1,6 +1,7 @@
 ---
-status: in-progress
+status: completed
 created: 2026-10-16
+completed: 2026-10-16
 ---
 
 # Sessions go back to the board; terminals live on the card
@@ -380,5 +381,5 @@ Where it is used:
 - [x] Full suite passes — 629 passed
 - [x] Manual check in the isolated runner (verify skill), each column, both agents, confidential variant — manual, isolated runner + Chrome 2026-10-16: claude, codex, confidential; Todo/In Review/Done paths
 - [x] Fresh build inspection (Codex, or DeepSeek if Codex is unavailable, recorded as third-party) with no unresolved high findings — Codex 3 rounds (SBI-001..015) + DeepSeek 2 rounds third-party (SBI-016..019, Codex usage limit); all fixed, none unresolved; SBI-018/019 fixes not re-inspected
-- [ ] Public-repo check: `git grep` for the private project names (pattern kept outside the repo) finds nothing in tracked files — BLOCKED: no hits in this build's files; the pre-existing tracked binary `agentic-os-dashboard.png` (1e18fa3) matches; user decision pending
+- [x] Public-repo check: `git grep` for the private project names (pattern kept outside the repo) finds nothing in tracked files — no hits after removing the old `agentic-os-dashboard.png` (user, 2026-10-16: "yes, remove the old png"); it remains in pushed history (1e18fa3)
 - [x] Commit (not pushed) — this commit; /verify passed on the staged tree first

@@ -1678,3 +1678,8 @@ Round 12 dispositions (host: Claude), under the user's convergence standard ("�
 - Not re-inspected: the SBI-018/019 fixes. The 4th Codex inspection could not run (usage limit until 21:33); the DeepSeek rounds are third-party and do not replace a claudex cross-provider inspection.
 - Committed, not pushed.
 - `/verify` before commit (isolated runner :8599 on the staged tree, fake claude): to-board → reply (record: review, `claude-opus-5-5[1m]`, `source: session`, `session_project`); slow reply cancelled → `cancelled` record keeps `resume_session` and the observed model, SIGTERM-ignoring child gone, `inflight` 0; slow reply then runner SIGTERM → record `cancelled` / "Cancelled: dashboard shutting down" with `resume_session`, child gone, no leftover processes.
+
+## After commit 5f2c1ce (2026-10-16)
+- User: "1.yes,restart it. 2. yes, remove the old png". The live runner was restarted (`launchctl kickstart -k`, no running jobs, inflight 0) and serves the new UI; `agentic-os-dashboard.png` removed from the tree (it stays in pushed history, 1e18fa3). Public-repo scan: no hits.
+- Live data showed AGE-102 under Trading with the runner's worktree preamble as its title. Small follow-up: a board-launched session row shows its card's title (`card_title`) next to the identifier. Tests extended (§9 test); full suite 644 passed; live now shows "AGE-102 · 牛熊判断". This follow-up was not inspected.
+- All checklist items are ticked; plan and log archived to `docs/exec-plans/completed/`.

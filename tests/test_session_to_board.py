@@ -398,6 +398,11 @@ def test_board_launched_headless_sessions_are_listed_with_their_card(stb):
     write_log(log, {"run_id": "b", "agent": "claude", "agent_session_id": "sdk1", "issue_identifier": "AGE-9"})
     (demo,) = [p for p in client.get("/api/projects").get_json()["projects"] if p["key"] == "demo"]
     assert {s["id"]: s.get("label") for s in demo["sessions"]}["sdk1"] == "AGE-9"
+    mod.issues_cache[ISSUE] = {"id": ISSUE, "identifier": "AGE-9", "title": "牛熊判断"}
+    write_log(log, {"run_id": "c", "agent": "claude", "agent_session_id": "sdk1"})  # label from the card itself
+    (demo,) = [p for p in client.get("/api/projects").get_json()["projects"] if p["key"] == "demo"]
+    row = {s["id"]: s for s in demo["sessions"]}["sdk1"]
+    assert row["label"] == "AGE-9" and row["card_title"] == "牛熊判断"
 
 
 def test_codex_exec_threads_only_when_the_board_ran_them(stb):

@@ -3686,9 +3686,10 @@ def _board_sessions() -> tuple[set, dict]:
         if not agent or not sid:
             continue
         ids.add((agent, sid))
-        ident = r.get("issue_identifier") or (cache.get(r.get("linear_issue_id") or "") or {}).get("identifier")
+        issue = cache.get(r.get("linear_issue_id") or "") or {}
+        ident = r.get("issue_identifier") or issue.get("identifier")
         if ident:
-            labels[(agent, sid)] = ident
+            labels[(agent, sid)] = {"label": ident, "title": issue.get("title")}
     ids |= {(canonical_agent(a) or a, s) for a, s in _live_session_ids() if a and s}
     return ids, labels
 

@@ -1173,7 +1173,7 @@ function _sessionRow(key, s) {
   const ids = `data-key="${_esc(key)}" data-sagent="${_esc(s.agent)}" data-sid="${_esc(s.id)}"`;
   const err = ed && ed.error ? `<span class="session-meta" style="color:var(--red)">${_esc(ed.error)}</span>` : '';
   // A board-launched session shows its card identifier first, e.g. "AGE-102 · title" (§9).
-  let title = `<span class="session-title" title="${_esc(s.cwd)}">${s.label ? `<b>${_esc(s.label)}</b> · ` : ''}${_esc(s.title)}</span>`;
+  let title = `<span class="session-title" title="${_esc(s.cwd)}">${s.label ? `<b>${_esc(s.label)}</b> · ` : ''}${_esc(s.card_title || s.title)}</span>`;
   // One Resume (§6): the session's card goes back to Todo and its reply opens.
   let actions = `<button class="session-copy" data-resume-agent="${_esc(s.agent)}" data-resume-id="${_esc(s.id)}" data-project="${_esc(key)}"
           title="Put this session's card in Todo and write the next reply (${_esc(s.resume)})">Resume</button>
