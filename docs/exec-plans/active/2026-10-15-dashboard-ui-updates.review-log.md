@@ -2083,3 +2083,40 @@ Lesson from runner-write-safety (10 inspections): later rounds drift into inject
 - REV31-01 fixed: previews and folder listings open the target with O_NOFOLLOW and prove the opened descriptor is inside the checkout (`_open_confined`: path read back with macOS F_GETPATH, regular-file check by fstat); the read/scandir happens on that descriptor. A file or ancestor swapped for an escaping symlink after the check is refused. Tests `test_a_path_swapped_after_the_check_is_refused` (file, ancestor), `test_a_folder_swapped_after_the_check_is_not_listed`.
 - REV31-02 fixed: `/api/runs/latest-by-issue` includes `waiting` (same detector as /api/runs), so an older In Review card keeps its badge. Test `test_older_review_card_keeps_its_waiting_badge`.
 - Proof: 586 passed.
+
+## Inspection 32 (fresh Codex, on commit 4f829e7) — REVISE (1 medium)
+- Result: /private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/43734fe6-827b-4456-8612-0540ddad69af/scratchpad/claudex/i32/claudex-ns__l1qf/result.json (assurance cross_provider)
+```json
+{
+ "verdict": "REVISE",
+ "summary": "The file browser retains directory entries after closing the descriptor they require for metadata lookup.",
+ "findings": [
+  {
+   "id": "REV32-01",
+   "severity": "medium",
+   "path": "runner/projects.py:1884",
+   "evidence": "list_dir closes dfd before calling the retained entries’ stat/is_dir methods. CPython stores the original directory descriptor in each DirEntry, so file-size lookup subsequently fails with EBADF and silently returns size=null. On filesystems returning DT_UNKNOWN, type lookup also requires stat; those exceptions escape the handler and make the tree request fail. See [CPython 3.12.6 implementation](https://github.com/python/cpython/blob/v3.12.6/Modules/posixmodule.c#L14148).",
+   "fix": "Keep dfd open until all entry metadata has been collected, or materialize names, types and sizes while it remains open. Cover file sizes and entries requiring stat-based type detection."
+  }
+ ],
+ "coverage": [
+  "Verified the plan digest, all 21 manifest file hashes and the tracked-diff digest.",
+  "Reviewed every manifest file’s supplied changes, added test sources and relevant surrounding repository code.",
+  "Traced session mutations, confinement, live-session checks, claims, PTY ownership, lock handoff and closure audits.",
+  "Traced project labels through creation, synchronization, local backups and dispatch.",
+  "Inspected process-engine callers, interruption records, streaming, replay, history and terminal callbacks.",
+  "Inspected project selection, file browsing, Run tests wording, usage accounting and quota snapshots.",
+  "Followed related callers and shared-state writers in state_io.py, run_skill.py, stall detection and relocation."
+ ],
+ "limitations": [
+  "Static inspection only: no edits, tests, delegation, browser operations or native CLI execution.",
+  "Historical validation claims were not independently verified.",
+  "Native resume-picker behavior and live Linear API behavior remain unverified.",
+  "SPEC.md and broader architecture documents were not inspected; fidelity was assessed against the supplied plan and inspected implementation contracts."
+ ]
+}
+```
+
+### Disposition (host Claude; fixed — a regression from the REV31-01 fix)
+- REV32-01 fixed: entry type and size are captured (`_Entry`) while the directory descriptor is still open; nothing touches a DirEntry after the descriptor closes. Test `test_listing_reports_file_sizes`.
+- Proof: 587 passed.

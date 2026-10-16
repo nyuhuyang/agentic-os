@@ -215,3 +215,9 @@ def test_a_folder_swapped_after_the_check_is_not_listed(repo, tmp_path, monkeypa
     monkeypatch.setattr(pj, "_browse_path", check_then_swap)
     with pytest.raises(pj.ProjectError):
         pj.list_dir(project, "main", "src/deep")
+
+
+def test_listing_reports_file_sizes(repo):
+    project, root = repo
+    sizes = {e["name"]: e["size"] for e in pj.list_dir(project, "main", "")["entries"]}
+    assert sizes["apple.md"] == 2 and sizes["Zeta.txt"] == 2 and sizes["src"] is None  # REV32-01

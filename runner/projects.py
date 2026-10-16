@@ -1836,6 +1836,33 @@ def _browse_git(root: Path, confine: list[Path] | None, *args: str) -> subproces
     return _git(root, *args, check=False, confine=confine, timeout=30, env=_browse_env())
 
 
+class _Entry:
+    """A directory entry's type and size, captured while its directory descriptor is open: a
+    DirEntry from scandir(fd) needs that descriptor for any later stat (REV32-01)."""
+    __slots__ = ("name", "_dir", "_link", "_size")
+
+    def __init__(self, e: os.DirEntry):
+        self.name = e.name
+        try:
+            self._link = e.is_symlink()
+            self._dir = e.is_dir(follow_symlinks=False)
+        except OSError:
+            self._link, self._dir = False, False
+        try:
+            self._size = e.stat(follow_symlinks=False).st_size
+        except OSError:
+            self._size = None
+
+    def is_dir(self, follow_symlinks: bool = True) -> bool:
+        return self._dir
+
+    def is_symlink(self) -> bool:
+        return self._link
+
+    def size(self) -> int | None:
+        return self._size
+
+
 def list_dir(project: Project, wt: str | None, rel: str | None) -> dict:
     """One level of the checkout: {entries: [{name, kind, size, status, ignored}], more}."""
     root, confine = _browse_root(project, wt)
@@ -1878,8 +1905,8 @@ def list_dir(project: Project, wt: str | None, rel: str | None) -> dict:
     try:
         dfd = _open_confined(root, target, directory=True)  # list what was actually opened (REV31-01)
         try:
-            with os.scandir(dfd) as it:
-                on_disk = {e.name: e for e in it}
+            with os.scandir(dfd) as it:  # metadata read while the descriptor is open (REV32-01)
+                on_disk = {e.name: _Entry(e) for e in it}
         finally:
             os.close(dfd)
     except OSError as exc:
@@ -1907,11 +1934,7 @@ def list_dir(project: Project, wt: str | None, rel: str | None) -> dict:
         elif e.is_dir():
             kind, size = "dir", None
         else:
-            kind = "file"
-            try:
-                size = e.stat(follow_symlinks=False).st_size
-            except OSError:
-                size = None
+            kind, size = "file", e.size()
         entries.append({"name": name, "kind": kind, "size": size, "status": status.get(name, ""), "ignored": is_ign})
     entries.sort(key=lambda x: (x["kind"] != "dir", x["name"].lower()))
     return {"path": rel, "entries": entries[:BROWSE_CAP], "more": max(0, len(entries) - BROWSE_CAP)}
