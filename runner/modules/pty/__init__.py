@@ -78,15 +78,47 @@ class Terminal:
     input_buffer: str = ""
     pending_handoff: dict | None = None
     confidential: bool = False
+    agent: str | None = None       # resume tabs: the session they hold (rename/remove live check)
+    session_id: str | None = None
+    in_panel: bool = True          # shown in the bottom panel; card-only terminals are not (C2)
+    card_key: str | None = None    # runner-root card lock held while open (C2)
+    finalized: bool = False        # locks released and closure audited (once)
+    closing: bool = False          # close_terminal owns the end: the reader leaves finalizing to it
 
     def info(self) -> dict:
         return {"term_id": self.term_id, "kind": self.kind, "project_key": self.project_key,
                 "run_id": self.run_id, "cwd": self.cwd, "label": self.label, "alive": self.alive,
-                "exit_code": self.exit_code, "cleanup_failed": self.cleanup_failed}
+                "exit_code": self.exit_code, "cleanup_failed": self.cleanup_failed,
+                "agent": self.agent, "session_id": self.session_id, "in_panel": self.in_panel,
+                "card_key": self.card_key}
 
 
 TERMINALS: dict[str, Terminal] = {}
 _registry_lock = threading.Lock()
+
+
+_finalize_lock = threading.Lock()
+
+
+def _finalize(t: Terminal) -> bool:
+    """Once per terminal, from close or a natural exit (UI3-03): release its locks (ticket, card,
+    project) and audit a card session's end. The audit is admitted like any write, so under
+    maintenance it is skipped with a warning instead of writing behind the gate (UI3-08)."""
+    with _finalize_lock:
+        if t.finalized:
+            return False
+        t.finalized = True
+    t.holds.close()
+    if t.kind == "resume" and t.run_id:
+        from app import record_interactive_ended, _inflight_work, MaintenanceRefused
+        try:
+            with _inflight_work():
+                record_interactive_ended(t.run_id, t.session_id)
+        except MaintenanceRefused as exc:
+            logger.warning("closure of %s not recorded: %s", t.term_id, exc)
+        except Exception:
+            logger.exception("closure audit for %s failed", t.term_id)
+    return True
 
 
 def _room(term_id: str) -> str:
@@ -148,6 +180,8 @@ def _reader(t: Terminal, socketio) -> None:
                 pid, status = os.waitpid(t.pid, os.WNOHANG)
                 if pid:
                     t.exit_code = os.waitstatus_to_exitcode(status)
+    if t.kind == "resume" and not t.closing:  # exited by itself: free its card before the next-state choice
+        _finalize(t)
     socketio.emit("term_exit", {"term_id": t.term_id, "exit_code": t.exit_code}, to=_room(t.term_id))
 
 
@@ -196,16 +230,22 @@ def close_terminal(term_id: str) -> dict:
     t = TERMINALS.get(term_id)
     if t is None:
         return {"error": "unknown terminal"}
+    # Who prompts is decided by who closed a live session, not by who won _finalize: killing the
+    # shell also wakes the reader, which would otherwise finalize first (FB2-01).
+    with _finalize_lock:
+        prompt = t.alive and not t.finalized
+        t.closing = True
     try:
         _kill_session(t)
     except Exception as exc:  # enumeration failed: keep the tab, flagged, so nothing is lost silently
         t.cleanup_failed = True
         logger.error("terminal %s cleanup failed: %s", term_id, exc)
         return {"error": f"cleanup failed: {exc}", **t.info()}
-    t.holds.close()  # releases a bound-worktree ticket lock
+    _finalize(t)  # releases its locks; a card session's end is audited once, from any entry point
     with _registry_lock:
         TERMINALS.pop(term_id, None)
-    return {"ok": True, "term_id": term_id}
+    # run_id only when this close ended a live session: an already-exited one was offered its choice (FB-05)
+    return {"ok": True, "term_id": term_id, "run_id": t.run_id if t.kind == "resume" and prompt else None}
 
 
 def close_all() -> None:
@@ -273,6 +313,7 @@ def open_terminal(data: dict, socketio) -> dict:
     kind = (data or {}).get("kind") or "shell"
     cols, rows = int(data.get("cols") or 120), int(data.get("rows") or 24)
     t = Terminal(term_id=uuid.uuid4().hex[:12], kind=kind)
+    t.in_panel = data.get("in_panel", True) is not False  # a card's terminal stays out of the panel (C2)
     if kind == "run":
         t.run_id = str(data.get("run_id") or "")
         t.project_key = data.get("project_key")
@@ -282,8 +323,28 @@ def open_terminal(data: dict, socketio) -> dict:
         return t.info()
     if live_count() >= MAX_TERMINALS:
         return {"error": f"terminal limit reached ({MAX_TERMINALS} live); close one first"}
+    rec = None
+    if kind == "resume":
+        # A resume tied to a run (card Terminal tab, run tab, or a Projects-panel session that a run
+        # recorded) is described by that run's record, never by the request: project, ticket and
+        # agent come from the record, the session must be the run's, a conflicting project is
+        # refused (UI8-01). So the project policy and the card's lock always apply.
+        from app import card_run_for_session, _latest_record
+        run_id = data.get("run_id") or card_run_for_session(str(data.get("agent")), str(data.get("session_id") or ""))
+        if run_id:
+            rec = _latest_record(str(run_id))
+            if not rec:
+                return {"error": f"unknown run {run_id}"}
+            if not rec.get("agent_session_id") or rec["agent_session_id"] != str(data.get("session_id") or ""):
+                return {"error": "that session does not belong to this run"}  # recorded and matching (REV-04, IR9-01)
+            if rec.get("project_key") and data.get("project_key") not in (None, rec["project_key"]):
+                return {"error": "this session belongs to another project's run"}
+            data = {**data, "run_id": str(run_id), "agent": rec.get("agent") or data.get("agent"),
+                    "project_key": rec.get("project_key"),
+                    "ticket": rec.get("issue_identifier") if rec.get("project_key") else None}
     project = None
     key = data.get("project_key")
+    admission = contextlib.ExitStack()  # held only until the tab is registered
     try:
         if key:
             # A project tab holds the project's shared lifecycle lock while open, so remove and
@@ -310,6 +371,14 @@ def open_terminal(data: dict, socketio) -> dict:
             t.ticket, t.cwd = ticket, str(projects.worktree_path(project, ticket))
         else:
             t.cwd = str(project.path if project else ROOT or _PROTO)
+        if rec is not None:
+            # The run's card: a runner-root card's session holds the card lock while open, so quick
+            # reply, retry and dispatch of it are refused (C2, UI-03); a project card is held by its
+            # ticket lock above (UI2-01, UI8-01).
+            t.card_key = str(rec.get("linear_issue_id") or rec.get("task_id") or data["run_id"])
+            t.run_id = str(data["run_id"])
+            if not rec.get("project_key"):
+                t.holds.enter_context(projects.card_lock(t.card_key))
         if project and project.confidential:
             from app import _records_unsafe
             problem = _records_unsafe()  # handoffs from this tab land in the run records (I6-04)
@@ -318,6 +387,13 @@ def open_terminal(data: dict, socketio) -> dict:
             t.confidential = True
         argv = [os.environ.get("SHELL", "/bin/zsh"), "-l"]
         if kind == "resume":
+            t.agent, t.session_id = str(data.get("agent")), str(data.get("session_id"))
+            # Admission under the session lock: a rename/remove holding it refuses this open,
+            # and once registered below the tab is in the live set (A, R02).
+            admission.enter_context(projects.session_lock(t.agent, t.session_id))
+            from app import _live_session_ids
+            if (t.agent, t.session_id) in _live_session_ids():  # a headless run (or another tab) is in it (UI14-01)
+                raise projects.ProjectError("this session is running right now; open it when the run has ended")
             resume = interactive_resume_argv(str(data.get("agent")), str(data.get("session_id")), project)
             if not resume:
                 t.holds.close()
@@ -329,10 +405,12 @@ def open_terminal(data: dict, socketio) -> dict:
         short = (t.ticket or Path(t.cwd).name)[:16]
         t.label = f"{key or 'runner'} · {kind} · {short}"
         _spawn(t, argv, _shell_env(project), cols, rows, socketio)
+        TERMINALS[t.term_id] = t
     except Exception as exc:
         t.holds.close()
         return {"error": str(exc)}
-    TERMINALS[t.term_id] = t
+    finally:
+        admission.close()
     return t.info()
 
 
@@ -468,6 +546,15 @@ class PTYModule(AgenticModule):
         @socketio.on("term_close")
         def term_close(data):
             return close_terminal((data or {}).get("term_id"))
+
+        @socketio.on("term_show")
+        def term_show(data):
+            """'Show in panel': from now on a reload/reconnect attaches it to the panel (C2)."""
+            t = TERMINALS.get((data or {}).get("term_id"))
+            if t is None:
+                return {"error": "unknown terminal"}
+            t.in_panel = True
+            return t.info()
 
         # A browser disconnect only detaches (Socket.IO drops the sid from its rooms).
 

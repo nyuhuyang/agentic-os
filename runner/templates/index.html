@@ -379,6 +379,21 @@
   .session-copy { background: none; border: 1px solid var(--border); color: var(--text-dim); border-radius: 3px; cursor: pointer; font-family: inherit; font-size: calc(10px * var(--fs)); }
   .session-copy:hover { color: var(--accent); border-color: var(--accent); }
   .session-empty { color: var(--text-dim); font-size: calc(12px * var(--fs)); padding: 4px 0; }
+  .proj-tabs { display: flex; gap: 6px; padding: 0 4px 6px 20px; }
+  .proj-tabs button.active { color: var(--accent); border-color: var(--accent); }
+  .files-view { padding: 0 4px 8px 20px; font-size: calc(12px * var(--fs)); }
+  .files-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
+  .files-bar select { background: var(--surface); color: var(--text); border: 1px solid var(--border); font: inherit; }
+  .files-split { display: flex; gap: 10px; align-items: flex-start; }
+  .files-tree { flex: 0 0 45%; max-height: 420px; overflow: auto; }
+  .files-row { display: flex; gap: 6px; cursor: pointer; padding: 1px 0; white-space: nowrap; }
+  .files-row:hover { background: var(--surface); }
+  .files-row.ignored { color: var(--text-dim); opacity: .6; cursor: default; }
+  .files-row.selected { color: var(--accent); }
+  .files-mark { width: 1.2em; color: var(--yellow, #d29922); font-family: monospace; }
+  .files-preview { flex: 1; min-width: 0; max-height: 420px; overflow: auto; background: var(--surface); padding: 6px; }
+  .files-preview pre { margin: 0; white-space: pre; font-size: calc(11px * var(--fs)); }
+  .files-preview .ln { color: var(--text-dim); user-select: none; display: inline-block; min-width: 3.5em; text-align: right; padding-right: 8px; }
   .project-toolbar { display: flex; justify-content: flex-end; padding: 6px 4px; }
   .project-btn { border-radius: 4px !important; }
   #project-dialog .drop-zone { margin-top: 10px; border: 2px dashed var(--border); border-radius: 6px; padding: 18px; text-align: center; color: var(--text-dim); font-size: calc(12px * var(--fs)); }
@@ -532,6 +547,13 @@
   .detail-output-tab-content.active { display:block; }
   .detail-output-tab-content .detail-section-body { max-height:260px; }
   .detail-output-tab-content .detail-section-body.error-panel { color:var(--red); }
+  .detail-term-pinned { max-height:110px; overflow:auto; white-space:pre-wrap; border-left:2px solid var(--accent); padding:4px 8px; margin-bottom:6px; font-size:calc(11px * var(--fs)); }
+  .detail-term-bar { display:flex; gap:6px; align-items:center; margin-bottom:6px; flex-wrap:wrap; }
+  .detail-term-bar select, .detail-term-reply input { background:var(--surface); color:var(--text); border:1px solid var(--border); font:inherit; font-size:calc(11px * var(--fs)); }
+  .detail-term-view { height:300px; background:#0d0d0d; }
+  .detail-term-reply { display:flex; gap:6px; margin-top:6px; }
+  .detail-term-reply input { flex:1; padding:4px 6px; }
+  .waiting-badge { color:#111; background:var(--yellow, #d29922); border-radius:3px; padding:0 4px; font-size:calc(10px * var(--fs)); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; }
   .detail-footer { padding: 12px 20px; display: flex; gap: 8px; justify-content: flex-end; border-top: 1px solid var(--border); }
   .attach-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
   .attach-btn { cursor: pointer; padding: 3px 10px; border-radius: 4px; font-size: calc(11px * var(--fs)); border: 1px dashed var(--border); color: var(--text-dim); background: transparent; user-select: none; transition: border-color .15s, color .15s; font-family: inherit; }
@@ -792,6 +814,8 @@
         <span class="term-title">◈ Terminal</span>
         <div class="term-tabs" id="term-tabs"></div>
         <button class="term-clear-btn" onclick="openShellTab()" title="New shell at the runner root">+ SHELL</button>
+        <button class="term-clear-btn" onclick="showRunningTerminals()" title="Running terminals not shown here (e.g. a card's interactive session)">RUNNING ▾</button>
+        <span id="term-running-menu" style="display:none;gap:4px"></span>
         <button class="term-clear-btn" onclick="clearTerm()">CLEAR</button>
         <button class="term-clear-btn" id="term-collapse" onclick="toggleTermPanel()" title="Hide the panel; terminals keep running">HIDE</button>
       </div>
@@ -858,6 +882,7 @@
         <button class="detail-output-tab active" data-tab="output" onclick="switchOutputTab('output')">Output</button>
         <button class="detail-output-tab" data-tab="log" onclick="switchOutputTab('log')">Log</button>
         <button class="detail-output-tab" data-tab="error" onclick="switchOutputTab('error')">Error</button>
+        <button class="detail-output-tab" data-tab="terminal" onclick="switchOutputTab('terminal');_cardTermOpen()">Terminal</button>
       </div>
       <div class="detail-output-tab-content active" id="detail-output-content">
         <div class="detail-section-body" id="detail-output"></div>
@@ -867,6 +892,27 @@
       </div>
       <div class="detail-output-tab-content" id="detail-error-content">
         <div class="detail-section-body error-panel" id="detail-error"></div>
+      </div>
+      <div class="detail-output-tab-content" id="detail-terminal-content">
+        <div class="detail-term-pinned" id="detail-term-pinned"></div>
+        <div class="detail-term-bar">
+          <select id="detail-term-attempt" title="Attempt" onchange="_cardTermLoad(this.value)"></select>
+          <button class="session-copy" id="detail-term-interactive" onclick="_cardTermInteractive()" style="display:none">Open interactive</button>
+          <button class="session-copy" id="detail-term-end" onclick="_cardTermEnd()" style="display:none">End session</button>
+          <button class="session-copy" id="detail-term-show" onclick="_cardTermShowInPanel()">Show in panel</button>
+          <span class="session-meta" id="detail-term-status"></span>
+        </div>
+        <div class="detail-term-view" id="detail-term-view"></div>
+        <div class="detail-term-bar" id="detail-term-next" style="display:none;margin-top:6px">
+          <span>Interactive session ended. Next:</span>
+          <button class="session-copy" onclick="_cardTermNext('done')">Mark done</button>
+          <button class="session-copy" onclick="_cardTermNext('todo')">Send back to Todo</button>
+          <button class="session-copy" onclick="_cardTermNext('review')">Leave in review</button>
+        </div>
+        <div class="detail-term-reply">
+          <input id="detail-term-reply" placeholder="Quick reply: continues this same session headless" onkeydown="if(event.key==='Enter'){event.preventDefault();_cardTermQuickReply();}">
+          <button class="session-copy" onclick="_cardTermQuickReply()">Send</button>
+        </div>
       </div>
     </div>
     <div class="detail-section" id="detail-path-section" style="display:none">
@@ -1034,6 +1080,8 @@ function initPaceMarkers() {
 // ── Projects (Phase 1: read-only session view) ─────────────────────────────
 const _openProjects = new Set();
 let _projectData = { projects: [] };
+let _projectsLoaded = false;  // the new-task form waits on it for its default project (UI2-07)
+let _newIssuePendingProject = null;  // a saved draft project while the list is still loading (UI3-06)
 
 function _ago(ts) {
   const s = Math.max(0, Date.now() / 1000 - (ts || 0));
@@ -1045,6 +1093,16 @@ function _ago(ts) {
 function _renderProjects() {
   const el = document.getElementById('project-panel-content');
   if (!el) return;
+  const typing = el.querySelector('.session-rename');  // a refresh never loses a title being typed
+  const typed = typing ? { sid: typing.dataset.sid, value: typing.value, focus: document.activeElement === typing } : null;
+  _renderProjectsInto(el);
+  if (typed) {
+    const again = el.querySelector(`.session-rename[data-sid="${CSS.escape(typed.sid)}"]`);
+    if (again) { again.value = typed.value; if (typed.focus) again.focus(); }
+  }
+}
+
+function _renderProjectsInto(el) {
   const ps = _projectData.projects || [];
   const toolbar = '<div class="project-toolbar"><button class="agent-btn active project-btn" data-proj-action="add">+ Project</button></div>';
   if (_projectData.error) { el.innerHTML = toolbar + `<div class="job-board-empty">Registry error: ${_esc(_projectData.error)}</div>`; return; }
@@ -1055,48 +1113,162 @@ function _renderProjects() {
     const open = _openProjects.has(p.key);
     const badges = (p.confidential ? '<span class="badge risk-destructive">confidential</span>' : '')
       + (p.no_push ? '<span class="badge">no push</span>' : '') + (p.kind ? `<span class="badge">${_esc(p.kind)}</span>` : '');
-    const rows = (p.sessions || []).map(s => `
-      <div class="session-row">
-        <span class="session-agent ${s.agent}">${s.agent === 'codex' ? 'CX' : 'CC'}</span>
-        <span class="session-title" title="${_esc(s.cwd)}">${_esc(s.title)}</span>
-        <span class="session-meta">${_esc(s.branch || '')} · ${_ago(s.updated)}</span>
-        <button class="session-copy" data-cmd="${_esc(s.resume)}" title="${_esc(s.resume)}">copy resume</button>
-        <button class="session-copy" data-resume-agent="${_esc(s.agent)}" data-resume-id="${_esc(s.id)}" data-resume-cwd="${_esc(s.cwd)}" data-project="${_esc(p.key)}">Resume in tab</button>
-      </div>`).join('') || '<div class="session-empty">No sessions in this project yet.</div>';
+    const rows = (p.sessions || []).map(s => _sessionRow(p.key, s)).join('') || '<div class="session-empty">No sessions in this project yet.</div>';
     return `<div class="project-section">
       <div class="project-head" data-key="${_esc(p.key)}">${open ? '▾' : '▸'} <b>${_esc(p.key)}</b> ${badges}
         <span class="session-meta">${(p.sessions || []).length} sessions</span>
         <button class="session-copy" data-open-terminal="${_esc(p.key)}">Open terminal</button>
-        ${(p.entry || {}).verify ? `<button class="session-copy" data-proj-action="baseline" data-key="${_esc(p.key)}">Baseline</button>` : ''}
+        ${(p.entry || {}).verify ? `<button class="session-copy" data-proj-action="baseline" data-key="${_esc(p.key)}" title="${_esc(p.entry.verify)} — on a clean copy of HEAD">Run tests</button>` : ''}
         <button class="session-copy" data-proj-action="edit" data-key="${_esc(p.key)}">Edit</button>
         ${removeBtn(p)}</div>
       ${_baselineHtml(p.baseline)}
-      ${open ? `<div class="session-list">${rows}</div>` : ''}</div>`;
+      ${open ? _projectBody(p, rows) : ''}</div>`;
   }).join('');
+}
+
+// Rename / Remove on a session row (A): inline, never a modal dialog.
+let _sessionEdit = null;  // {key, agent, id, mode: 'rename' | 'remove', error, busy}
+function _sessionRow(key, s) {
+  const ed = _sessionEdit && _sessionEdit.key === key && _sessionEdit.agent === s.agent && _sessionEdit.id === s.id ? _sessionEdit : null;
+  const ids = `data-key="${_esc(key)}" data-sagent="${_esc(s.agent)}" data-sid="${_esc(s.id)}"`;
+  const err = ed && ed.error ? `<span class="session-meta" style="color:var(--red)">${_esc(ed.error)}</span>` : '';
+  let title = `<span class="session-title" title="${_esc(s.cwd)}">${_esc(s.title)}</span>`;
+  let actions = `<button class="session-copy" data-cmd="${_esc(s.resume)}" title="${_esc(s.resume)}">copy resume</button>
+        <button class="session-copy" data-resume-agent="${_esc(s.agent)}" data-resume-id="${_esc(s.id)}" data-resume-cwd="${_esc(s.cwd)}" data-project="${_esc(key)}">Resume in tab</button>
+        <button class="session-copy" data-saction="rename" ${ids}>Rename</button>
+        <button class="session-copy" data-saction="remove" ${ids}>Remove</button>`;
+  if (ed && ed.mode === 'rename') {
+    title = `<input class="session-rename" ${ids} value="${_esc(s.title)}" maxlength="200" style="flex:1;font:inherit">`;
+    actions = `<button class="session-copy" data-saction="save" ${ids}>Save</button><button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
+  } else if (ed && ed.mode === 'remove') {
+    const where = s.agent === 'codex' ? "it is archived the way Codex archives (its rollout moves to ~/.codex/archived_sessions); restore with Codex's unarchive"
+      : 'its transcript moves to ~/.agentic-os/session-trash; restore by moving it back';
+    title = `<span class="session-title" style="white-space:normal">Remove "${_esc(s.title)}"? It leaves this panel and ${s.agent === 'codex' ? 'codex resume' : 'claude --resume'} — ${where}.</span>`;
+    actions = `<button class="session-copy" data-saction="confirm" ${ids} style="color:var(--red)">Remove</button><button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
+  }
+  return `
+      <div class="session-row">
+        <span class="session-agent ${s.agent}">${s.agent === 'codex' ? 'CX' : 'CC'}</span>
+        ${title}
+        <span class="session-meta">${_esc(s.branch || '')} · ${_ago(s.updated)}</span>
+        ${err}${actions}
+      </div>`;
+}
+async function _sessionSubmit(el, mode) {
+  const { key, sagent, sid } = el.dataset;
+  const base = `/api/projects/${encodeURIComponent(key)}/sessions/${encodeURIComponent(sagent)}/${encodeURIComponent(sid)}`;
+  let body;
+  if (mode === 'rename') {
+    const input = document.querySelector(`.session-rename[data-sid="${CSS.escape(sid)}"]`);
+    body = { title: input ? input.value : '' };
+  }
+  const r = await _projectApi('POST', `${base}/${mode}`, body);
+  if (!r.ok) { _sessionEdit = { key, agent: sagent, id: sid, mode, error: r.data.error || `HTTP ${r.status}` }; _renderProjects(); return; }
+  _sessionEdit = null;
+  loadProjects();
+}
+
+// Sessions / Files tabs of an opened project; the tab is remembered per project.
+const _filesState = {};  // key -> {wt, open:Set, cache:{path: listing}, worktrees, sel, preview, error}
+function _projTab(key) { return _storageGet(`agenticos.projtab.${key}`, 'sessions'); }
+function _projectBody(p, rows) {
+  const tab = _projTab(p.key);
+  const tabs = `<div class="proj-tabs">
+    <button class="session-copy ${tab === 'sessions' ? 'active' : ''}" data-ftab="sessions" data-key="${_esc(p.key)}">Sessions</button>
+    <button class="session-copy ${tab === 'files' ? 'active' : ''}" data-ftab="files" data-key="${_esc(p.key)}">Files</button></div>`;
+  if (tab !== 'files') return tabs + `<div class="session-list">${rows}</div>`;
+  const st = _files(p.key);
+  if (!st.cache[''] && !st.loading.has('') && !st.failed.has('')) _filesLoad(p.key, '');  // no retry loop after a failure (UI-11)
+  const wts = st.worktrees.map(w => `<option value="${_esc(w)}" ${w === st.wt ? 'selected' : ''}>${w === 'main' ? 'main checkout' : `agent/${_esc(w)}`}</option>`).join('');
+  const k = _esc(p.key);
+  return tabs + `<div class="files-view">
+    <div class="files-bar"><select data-fwt="${k}">${wts}</select>
+      <button class="session-copy" data-freveal="${k}" data-path="${_esc(st.sel || '')}">Reveal in Finder</button>
+      ${st.error ? `<span style="color:var(--red)">${_esc(st.error)}</span> <button class="session-copy" data-fretry="${k}">Retry</button>` : ''}</div>
+    <div class="files-split"><div class="files-tree">${_filesTree(p.key, '', 0)}</div>
+      <div class="files-preview">${_filesPreview(st)}</div></div></div>`;
+}
+function _files(key) {
+  return _filesState[key] || (_filesState[key] = { wt: 'main', open: new Set(), cache: {}, loading: new Set(), failed: new Set(), worktrees: ['main'], sel: '', preview: null, error: '' });
+}
+function _filesTree(key, path, depth) {
+  const st = _files(key), list = st.cache[path];
+  if (!list) return `<div class="session-empty" style="padding-left:${depth}em">${st.loading.has(path) ? 'Loading…' : ''}</div>`;
+  const rows = list.entries.map(e => {
+    const full = path ? `${path}/${e.name}` : e.name;
+    const isDir = e.kind === 'dir' && !e.ignored;
+    const icon = e.kind === 'dir' ? (isDir && st.open.has(full) ? '▾' : '▸') : (e.kind === 'link' ? '↪' : ' ');
+    const attr = e.ignored ? '' : (isDir ? `data-fdir="${_esc(full)}"` : (e.kind === 'file' ? `data-ffile="${_esc(full)}"` : ''));
+    const row = `<div class="files-row ${e.ignored ? 'ignored' : ''} ${st.sel === full ? 'selected' : ''}" data-key="${_esc(key)}" ${attr} style="padding-left:${depth}em" title="${_esc(full)}">
+      <span class="files-mark">${_esc(e.status || '')}</span><span>${icon}</span><span>${_esc(e.name)}${e.kind === 'dir' ? '/' : ''}</span>
+      ${e.ignored ? '<span class="session-meta" style="margin-left:6px">ignored</span>' : ''}</div>`;
+    return row + (isDir && st.open.has(full) ? _filesTree(key, full, depth + 1) : '');
+  }).join('');
+  const more = list.more ? `<div class="session-empty" style="padding-left:${depth}em">… ${list.more} more</div>` : '';
+  return rows + more || `<div class="session-empty" style="padding-left:${depth}em">(empty)</div>`;
+}
+function _filesPreview(st) {
+  const f = st.preview;
+  if (!f) return '<span class="session-empty">Click a file to preview it (read-only).</span>';
+  if (f.error) return `<span style="color:var(--red)">${_esc(f.error)}</span>`;
+  const meta = `<div class="session-meta" style="margin:0 0 4px">${_esc(f.path)} · ${f.size} bytes${f.type ? ' · ' + _esc(f.type) : ''}</div>`;
+  if (f.text === null) return meta + `<span class="session-empty">${f.binary ? 'Binary file' : 'Larger than 200 KB'} — not shown.</span>`;
+  const lines = f.text.split('\n');
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  return meta + '<pre>' + lines.map((l, i) => `<span class="ln">${i + 1}</span>${_esc(l)}`).join('\n') + '</pre>';
+}
+async function _filesLoad(key, path) {
+  const st = _files(key);
+  st.loading.add(path);
+  const q = new URLSearchParams({ wt: st.wt, path });
+  const r = await _projectApi('GET', `/api/projects/${encodeURIComponent(key)}/tree?${q}`);
+  st.loading.delete(path);
+  if (r.ok) { st.cache[path] = r.data; st.worktrees = r.data.worktrees || st.worktrees; st.error = ''; st.failed.delete(path); }
+  else { st.error = r.data.error || `HTTP ${r.status}`; st.failed.add(path); }
+  _renderProjects();
+}
+async function _filesOpenFile(key, path) {
+  const st = _files(key);
+  st.sel = path;
+  const q = new URLSearchParams({ wt: st.wt, path });
+  const r = await _projectApi('GET', `/api/projects/${encodeURIComponent(key)}/file?${q}`);
+  if (st.sel !== path) return;  // another file was clicked meanwhile
+  st.preview = r.ok ? r.data : { error: r.data.error || `HTTP ${r.status}` };
+  _renderProjects();
 }
 
 async function loadProjects() {
   try {
     const res = await fetch('/api/projects');
     _projectData = res.ok ? await res.json() : { projects: [], error: `HTTP ${res.status}` };
+    _projectsLoaded = res.ok;
   } catch (err) {
     _projectData = { projects: [], error: String(err) };
   }
   _renderProjects();
+  const sel = document.getElementById('new-issue-project');  // an open form waiting on the list refills, keeping its choice
+  if (_projectsLoaded && sel && [...sel.options].some(o => o.value === '__default__')) {
+    _fillNewIssueProjects(sel.value === '__default__' ? _newIssuePendingProject : sel.value);
+  }
 }
 
 function _baselineHtml(b) {
   if (!b || b.state === 'none') return '';
-  if (b.state === 'running') return '<div class="project-baseline">baseline: running…</div>';
+  if (b.state === 'running') return '<div class="project-baseline">tests: running…</div>';
   const ok = b.status === 'pass';
-  const head = `<span class="${ok ? 'ok' : 'bad'}">baseline: ${_esc(b.status || 'error')}</span>`
+  const head = `<span class="${ok ? 'ok' : 'bad'}">tests: ${_esc(b.status || 'error')}</span>`
     + (b.exit !== undefined ? ` · exit ${_esc(b.exit)}` : '') + (b.duration_s !== undefined ? ` · ${_esc(b.duration_s)} s` : '')
     + (b.error ? ` · ${_esc(b.error)}` : '');
   return `<div class="project-baseline">${head}${b.tail ? `<details><summary>output tail</summary><pre>${_esc(b.tail)}</pre></details>` : ''}</div>`;
 }
 
 async function _projectApi(method, url, body) {
-  const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  let res;
+  try {
+    res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+  } catch (err) {  // a dropped connection is an error result like any other: callers clear their state (R24-02)
+    return { ok: false, status: 0, data: { error: `connection failed: ${err}` } };
+  }
   let data = {};
   try { data = await res.json(); } catch (_) {}
   return { ok: res.ok, status: res.status, data };
@@ -1262,6 +1434,39 @@ document.getElementById('project-panel-content')?.addEventListener('click', (eve
     else if (act.dataset.projAction === 'baseline') _projectBaseline(key);
     return;
   }
+  const sact = event.target.closest('[data-saction]');
+  if (sact) {
+    const { key, sagent, sid } = sact.dataset, a = sact.dataset.saction;
+    if (a === 'rename' || a === 'remove') _sessionEdit = { key, agent: sagent, id: sid, mode: a };
+    else if (a === 'cancel') _sessionEdit = null;
+    else if (a === 'save') { _sessionSubmit(sact, 'rename'); return; }
+    else if (a === 'confirm') { _sessionSubmit(sact, 'remove'); return; }
+    _renderProjects();
+    if (a === 'rename') document.querySelector(`.session-rename[data-sid="${CSS.escape(sid)}"]`)?.focus();
+    return;
+  }
+  if (event.target.closest('.session-rename')) return;
+  const ftab = event.target.closest('[data-ftab]');
+  if (ftab) { _storageSet(`agenticos.projtab.${ftab.dataset.key}`, ftab.dataset.ftab); _renderProjects(); return; }
+  const fretry = event.target.closest('[data-fretry]');
+  if (fretry) { const st = _files(fretry.dataset.fretry); st.failed.clear(); st.error = ''; _renderProjects(); return; }
+  const fdir = event.target.closest('[data-fdir]');
+  if (fdir) {
+    const st = _files(fdir.dataset.key), path = fdir.dataset.fdir;
+    if (st.open.has(path)) st.open.delete(path);
+    else { st.open.add(path); st.failed.delete(path); if (!st.cache[path]) _filesLoad(fdir.dataset.key, path); }
+    _renderProjects(); return;
+  }
+  const ffile = event.target.closest('[data-ffile]');
+  if (ffile) { _filesOpenFile(ffile.dataset.key, ffile.dataset.ffile); return; }
+  if (event.target.closest('.files-view select')) return;
+  const reveal = event.target.closest('[data-freveal]');
+  if (reveal) {
+    const st = _files(reveal.dataset.freveal);
+    _projectApi('POST', `/api/projects/${encodeURIComponent(reveal.dataset.freveal)}/reveal`, { wt: st.wt, path: st.sel || '' })
+      .then(r => { if (!r.ok) { st.error = r.data.error || `HTTP ${r.status}`; _renderProjects(); } });
+    return;
+  }
   const openTerm = event.target.closest('[data-open-terminal]');
   if (openTerm) { openShellTab(openTerm.dataset.openTerminal); return; }
   const resumeBtn = event.target.closest('[data-resume-id]');
@@ -1280,6 +1485,23 @@ document.getElementById('project-panel-content')?.addEventListener('click', (eve
   if (!head || !head.dataset.key) return;
   const key = head.dataset.key;
   _openProjects.has(key) ? _openProjects.delete(key) : _openProjects.add(key);
+  _renderProjects();
+});
+
+document.getElementById('project-panel-content')?.addEventListener('keydown', (event) => {
+  const input = event.target.closest('.session-rename');
+  if (!input) return;
+  if (event.key === 'Enter') { event.preventDefault(); _sessionSubmit(input, 'rename'); }
+  else if (event.key === 'Escape') { _sessionEdit = null; _renderProjects(); }
+});
+
+document.getElementById('project-panel-content')?.addEventListener('change', (event) => {
+  const sel = event.target.closest('[data-fwt]');
+  if (!sel) return;
+  const key = sel.dataset.fwt, worktrees = _files(key).worktrees;
+  _filesState[key] = null;  // a different checkout: drop the cached tree and preview
+  const st = _files(key);
+  st.wt = sel.value; st.worktrees = worktrees;
   _renderProjects();
 });
 
@@ -1786,6 +2008,8 @@ function _saveNewIssueDraft() {
   _saveDraft('agenticos.draft.new_issue.description', draft.description);
   _saveDraft('agenticos.draft.new_issue.agent', _newIssueAgent);
   _saveDraft('agenticos.draft.new_issue.attachments', JSON.stringify(_newTaskAttachments));
+  const proj = document.getElementById('new-issue-project');
+  if (proj && proj.options.length && proj.value !== '__default__') _storageSet('agenticos.draft.new_issue.project', proj.value);
 }
 
 function _restoreNewIssueDraft() {
@@ -1810,6 +2034,7 @@ function _clearNewIssueDraft() {
   _clearDraft('agenticos.draft.new_issue.description');
   _clearDraft('agenticos.draft.new_issue.agent');
   _clearDraft('agenticos.draft.new_issue.attachments');
+  _storageRemove('agenticos.draft.new_issue.project');
 }
 
 function _saveReplyDraft() {
@@ -2047,6 +2272,7 @@ function _latestLinearRuns(items) {
   const unlinked = [];
   const byIssue = new Map();
   items.forEach(run => {
+    if (run.interactive_ended) return;  // an audit entry, not an attempt: the card keeps its last real run (UI-08)
     const issueId = run.linear_issue_id;
     if (!issueId) {
       unlinked.push(run);
@@ -2230,7 +2456,7 @@ function _buildColCard(run) {
     ? `<span class="agent-badge ${_esc(paClass)}${agentLocked ? ' locked' : ''}" title="${_esc(badgeTitle)}" ${agentBadgeClick}>${_esc(paLabel)}</span>`
     : '';
   const hasAssignedAgent = AGENT_IDS.includes(preferredAgent);
-  const todoAgentToggle = run._is_linear_issue && state === 'todo' && hasAssignedAgent
+  const todoAgentToggle = run._is_linear_issue && state === 'todo' && hasAssignedAgent && !run.unsynced  // B: no dispatch button until synced
     ? `<div class="todo-agent-toggle" aria-label="Assign agent">
          <button type="button" class="todo-run-btn ${_esc(preferredAgent)} selected" title="Start with ${_esc(_agentLabel(preferredAgent))}" onclick="event.stopPropagation();triggerLinearIssueWithAgent('${_esc(run.linear_issue_id)}','${_esc(preferredAgent)}')">▶ ${_esc(_agentLabel(preferredAgent))}</button>
        </div>`
@@ -2242,16 +2468,21 @@ function _buildColCard(run) {
   // Decision 8: project runs end in review with a verify badge (pass / fail / timeout / seed committed / main checkout changed)
   const verifyHtml = (run.verify_badge
     ? `<span class="verify-badge ${run.verify_badge === 'pass' ? 'ok' : 'bad'}" title="project ${_esc(run.project_key || '')}">verify: ${_esc(run.verify_badge)}</span>`
-    : '') + (run.project_key && run.latest_run_id
-    ? `<span class="verify-badge" title="Open the run's live view in a terminal tab" onclick="event.stopPropagation();openRunTab('${_esc(run.latest_run_id)}','${_esc(run.project_key)}')">▤ run tab</span>`
+    : '') + (run.latest_run_id
+    ? `<span class="verify-badge" title="Open this card's live terminal view" onclick="event.stopPropagation();openCardTerminal('${_esc(run.latest_run_id)}')">▤ Terminal</span>`
     : '');
-  const metaHtml = metaModelHtml || metaAgentHtml || verifyHtml ? `<div class="job-card-meta">${metaModelHtml}${metaAgentHtml}${verifyHtml}</div>` : '';
+  const projectHtml = (run.issue_project || run.project_key)
+    ? `<span class="verify-badge" title="Runs in a worktree of this project">${_esc(run.issue_project || run.project_key)}</span>` : '';
+  const syncHtml = run.unsynced ? '<span class="verify-badge" title="Not synced to Linear yet; it can be dispatched once it has its Linear id">syncing…</span>' : '';
+  const metaHtml = metaModelHtml || metaAgentHtml || verifyHtml || projectHtml || syncHtml
+    ? `<div class="job-card-meta">${metaModelHtml}${metaAgentHtml}${projectHtml}${syncHtml}${verifyHtml}</div>` : '';
   const footerControlsHtml = run._is_linear_issue && state === 'todo' ? todoAgentToggle : '';
 
   card.innerHTML = `
     <div class="job-card-id">${attemptHtml}${_esc(issueLabel)}${isRunning ? ` ${modelBadge}` : ''}</div>
     ${metaHtml}
     <div class="job-card-title">${_esc(issueTitle)}</div>
+    ${state === 'in_review' && run.waiting ? `<div><span class="waiting-badge" title="${_esc(run.waiting)}">Waiting for you · ${_esc(run.waiting)}</span></div>` : ''}
     ${prompt ? `<div class="job-card-prompt">${_esc(prompt)}</div>` : ''}
     ${statusLineHtml}
     <div class="job-card-footer">
@@ -2440,11 +2671,13 @@ async function refreshJobBoard(force = false) {
   }
   try {
     const teamParam = _currentTeamId ? `?team_id=${encodeURIComponent(_currentTeamId)}` : '';
-    const fetches = [fetch('/api/runs?state=running'), fetch('/api/runs?limit=80'), fetch(`/api/linear/issues${teamParam}`)];
+    const fetches = [fetch('/api/runs?state=running'), fetch('/api/runs?limit=80'), fetch(`/api/linear/issues${teamParam}`),
+                     fetch('/api/runs/latest-by-issue')];
     const results = await Promise.all(fetches);
     const running = await results[0].json();
     const recent = await results[1].json();
     const linearIssues = results[2] ? await results[2].json() : [];
+    const olderLatest = results[3] && results[3].ok ? await results[3].json() : {};  // beyond the 80-run window (REV23-01)
 
     const latestRuns = _latestLinearRuns([
       ...running.map(r => ({ ...r, status: 'running' })),
@@ -2458,7 +2691,7 @@ async function refreshJobBoard(force = false) {
     let all = linearIssues.map(issue => {
       const optimistic = _readOptimisticLinearIssuePatch(issue.id);
       if (optimistic) issue = _applyOptimisticLinearIssuePatch(issue, optimistic);
-      const latest = latestRunByIssue.get(issue.id);
+      const latest = latestRunByIssue.get(issue.id) || olderLatest[issue.id];
       const isActivelyRunning = running.some(r => r.linear_issue_id === issue.id);
       let boardStatus = isActivelyRunning ? 'in_progress' : _linearStateToBoard(issue.state);
       if (!isActivelyRunning && latest?.status === 'review' && ['In Progress', 'In Review'].includes(issue.state)) boardStatus = 'in_review';
@@ -2489,12 +2722,23 @@ async function refreshJobBoard(force = false) {
         output_tokens: latest?.output_tokens || 0,
         verify_badge: latest?.verify_badge || '',
         project_key: latest?.project_key || '',
+        issue_project: _projectFromLabels(issue.labels),
+        waiting: latest?.waiting || '',
+        unsynced: String(issue.id || '').startsWith('local-') && _trackerType === 'linear',
         _is_linear_issue: true,
       };
     });
 
     _renderBoardItems(all);
   } catch (_) {}
+}
+
+function _projectFromLabels(labels) {
+  for (const l of labels || []) {
+    const name = typeof l === 'string' ? l : (l && l.name) || '';
+    if (name.toLowerCase().startsWith('project:')) return name.slice(8).trim();
+  }
+  return '';
 }
 
 function _verifyRank(run) {
@@ -2652,6 +2896,9 @@ async function openDetailModal(run_id) {
   _detailLinearUpdatedAt = '';
   document.getElementById('detail-modal').classList.add('open');
   switchOutputTab('output');
+  _cardTermBind(run_id.startsWith('linear-') ? null : run_id, null, boardItem);
+  const termTabBtn = document.querySelector('.detail-output-tab[data-tab="terminal"]');
+  if (termTabBtn) termTabBtn.style.display = run_id.startsWith('linear-') ? 'none' : '';  // no run yet: nothing to show
   document.getElementById('detail-skill').textContent = '…';
   document.getElementById('detail-meta').textContent = '';
   document.getElementById('detail-prompt').textContent = '';
@@ -2787,6 +3034,11 @@ async function openDetailModal(run_id) {
     document.getElementById('detail-dispatch-group').style.display = (isTodo && r.linear_issue_id) ? 'inline-flex' : 'none';
 
     const isReview = state === 'in_review';
+    _cardTermBind(run_id, r, boardItem);
+    if (isReview || r.status === 'running' || state === 'in_progress') {  // C2: Terminal opens by default
+      switchOutputTab('terminal');
+      _cardTermOpen();
+    }
     document.getElementById('detail-approve-btn').style.display = isReview ? '' : 'none';
     document.getElementById('detail-reply-section').style.display = r.linear_issue_id ? '' : 'none';
     document.getElementById('desc-stt-group').style.display = 'none';
@@ -2834,6 +3086,7 @@ function switchOutputTab(name) {
 }
 
 function closeDetailModal({ flush = true } = {}) {
+  _cardTermDetach();  // the session keeps running on the server (C2)
   _detailModalLoadSeq++;
   _detailLinearLoadSeq++;
   _stopDetailProgressPoll();
@@ -4009,8 +4262,10 @@ function _openTab(payload) {
   });
 }
 function openShellTab(projectKey, ticket) { _openTab({ kind: 'shell', project_key: projectKey || null, ticket: ticket || null }); }
-function openResumeTab(agent, sessionId, projectKey, cwd, ticket) {
-  _openTab({ kind: 'resume', agent, session_id: sessionId, project_key: projectKey || null, cwd: cwd || null, ticket: ticket || null });
+function openResumeTab(agent, sessionId, projectKey, cwd, ticket, runId) {
+  // run_id: the server resolves the card from it and takes the card's lock (C2, UI-03)
+  _openTab({ kind: 'resume', agent, session_id: sessionId, project_key: projectKey || null, cwd: cwd || null,
+             ticket: ticket || null, run_id: runId || null });
 }
 function openRunTab(runId, projectKey) {
   const existing = [..._tabs.values()].find(t => t.info.kind === 'run' && t.info.run_id === runId);
@@ -4024,6 +4279,7 @@ function closeTab(tid) {
   if (t.status === 'live' && t.info.kind !== 'run' && !confirm('Close this terminal and kill its processes?')) return;
   socket.emit('term_close', { term_id: tid }, res => {
     if (res && res.error && !/unknown/.test(res.error)) { t.status = 'failed'; _renderTabStrip(); alert(res.error); return; }
+    if (res && res.run_id) _promptCardNext(res.run_id);
     t.term.dispose(); t.el.remove(); _tabs.delete(tid);
     if (_activeTab === tid) { _activeTab = null; const next = _tabs.keys().next().value; if (next) activateTab(next); }
     _renderTabStrip();
@@ -4049,6 +4305,8 @@ document.getElementById('term-tabs')?.addEventListener('click', (e) => {
 
 // Run tabs: read-only view of a dispatched run's normalized events.
 async function _loadRunEvents(info) {
+  const t0 = _tabs.get(info.term_id);
+  if (t0) t0.pending = [];  // live events buffered until the snapshot lands (UI-13)
   try {
     const res = await fetch(`/api/runs/${encodeURIComponent(info.run_id)}/events`);
     const data = res.ok ? await res.json() : { lines: [] };
@@ -4056,8 +4314,13 @@ async function _loadRunEvents(info) {
     if (!t) return;
     t.term.reset();
     (data.lines || []).forEach(l => t.term.writeln(l.replace(/\n/g, '\r\n')));
+    _flushPendingRunLines(t, data.cursor || 0);
     if (data.finished) _markRunFinished(t, data);
   } catch (_) {}
+}
+function _flushPendingRunLines(holder, cursor) {
+  (holder.pending || []).filter(d => !(d.seq <= cursor)).forEach(d => holder.term.writeln(String(d.line).replace(/\n/g, '\r\n')));
+  holder.pending = null;
 }
 function _markRunFinished(t, data) {
   if (t.finished) return;
@@ -4071,17 +4334,21 @@ async function _resumeFromRunTab(tid) {
   const t = _tabs.get(tid);
   if (!t || !t.resume) return;
   const r = t.resume;
-  openResumeTab(r.agent, r.agent_session_id, r.project_key, null, r.issue_identifier);
+  openResumeTab(r.agent, r.agent_session_id, r.project_key, null, r.issue_identifier, t.info.run_id);
 }
 socket.on('run_event', (d) => {
-  _tabs.forEach(t => { if (t.info.kind === 'run' && t.info.run_id === d.run_id) t.term.writeln(String(d.line).replace(/\n/g, '\r\n')); });
+  _tabs.forEach(t => {
+    if (t.info.kind !== 'run' || t.info.run_id !== d.run_id) return;
+    if (t.pending) t.pending.push(d); else t.term.writeln(String(d.line).replace(/\n/g, '\r\n'));
+  });
 });
 
 socket.on('connect', () => {
   _sttLoadAliases();
   // A reload reattaches to the server's terminals; nothing new is opened automatically.
   socket.emit('term_list', {}, (list) => {
-    (list || []).forEach(info => _attachTab(info, false));
+    // Only terminals shown in the panel come back here; a card's terminal stays with its card (C2).
+    (list || []).filter(info => info.in_panel !== false).forEach(info => _attachTab(info, false));
     if (!list || !list.length) {
       terminalEl.dataset.empty = 'No terminals open. + SHELL opens one; project headers and sessions open more.';
     }
@@ -4100,6 +4367,281 @@ socket.on('term_exit', (d) => {
 });
 
 socket.on('run_logged', () => { refreshJobBoard(); });
+
+// ── Card Terminal tab (C / C2): live or replayed run view, quick reply, embedded interactive
+// session. Nothing here opens, expands or adds to the bottom panel unless the user asks.
+// Every async step captures the view generation it started in and drops its result if the user
+// has moved to another card or attempt meanwhile (UI-05). The interactive session of a card is
+// found on the server by its card key, so a reload never loses it (UI-07).
+let _cardTerm = { gen: 0, runId: null, run: null, item: null, data: null, xterm: null, fit: null, mode: null, termId: null, viewRunId: null, pending: null };
+
+function openCardTerminal(runId) {
+  openDetailModal(runId).then(() => { switchOutputTab('terminal'); _cardTermOpen(); });
+}
+function _cardTermBind(runId, run, item) {
+  _cardTermDetach();
+  Object.assign(_cardTerm, { gen: _cardTerm.gen + 1, runId, run, item, data: null, viewRunId: null, latestRunId: null, endedRunId: null });
+  document.getElementById('detail-term-pinned').textContent = '';
+  document.getElementById('detail-term-status').textContent = '';
+  document.getElementById('detail-term-reply').value = '';  // a reply typed for one card never goes to another (UI3-05)
+  document.getElementById('detail-term-next').style.display = 'none';
+  document.getElementById('detail-term-interactive').style.display = 'none';
+  document.getElementById('detail-term-end').style.display = 'none';
+}
+function _cardKey() {
+  const r = _cardTerm.run || {};
+  return r.linear_issue_id || r.task_id || _cardTerm.runId;
+}
+function _cardTermCurrent(gen) { return gen === _cardTerm.gen && _isModalOpen('detail-modal'); }
+function _cardTermXterm(mode) {
+  if (_cardTerm.xterm) { _cardTerm.xterm.dispose(); _cardTerm.xterm = null; }
+  const el = document.getElementById('detail-term-view');
+  el.innerHTML = '';
+  const term = new Terminal({ ...TERM_OPTS, disableStdin: mode === 'run' });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(el);
+  setTimeout(() => { try { fit.fit(); } catch (_) {} }, 0);
+  Object.assign(_cardTerm, { xterm: term, fit, mode, termId: null });
+  return term;
+}
+function _cardTermDetach() {
+  if (_cardTerm.xterm) _cardTerm.xterm.dispose();
+  Object.assign(_cardTerm, { xterm: null, fit: null, mode: null, termId: null, pending: null });
+}
+function _cardTermList() { return new Promise(resolve => socket.emit('term_list', {}, list => resolve(list || []))); }
+async function _cardTermOpen() {
+  const gen = _cardTerm.gen, key = _cardKey();
+  if (!_cardTerm.runId) return;
+  await _cardTermAttempts(gen);
+  const live = (await _cardTermList()).find(i => i.kind === 'resume' && i.alive !== false && i.card_key === key);
+  if (!_cardTermCurrent(gen)) return;
+  if (live) {  // the open interactive session wins, shown as the attempt it belongs to (IR13-02)
+    const owner = live.run_id || _cardTerm.runId;
+    // attach only if its attempt is still the one selected when its metadata lands (UI15-01)
+    if (await _cardTermUse(owner, gen) && _cardTerm.viewRunId === owner) _cardTermAttach(live.term_id, gen);
+    return;
+  }
+  await _cardTermLoad(document.getElementById('detail-term-attempt').value || _cardTerm.runId);
+}
+async function _cardTermAttempts(gen) {
+  let chain = [];
+  const issueId = (_cardTerm.run || {}).linear_issue_id;
+  const histKey = issueId ? `linear-${issueId}` : _cardTerm.runId;  // the issue chain exists before the running attempt's record (UI3-09)
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(histKey)}/history`);
+    if (res.ok) chain = await res.json();
+  } catch (_) {}
+  if (!_cardTermCurrent(gen)) return;
+  const sel = document.getElementById('detail-term-attempt');
+  const runs = chain.filter(r => r.run_id && !r.interactive_ended).map(r => r.run_id);
+  if (!runs.includes(_cardTerm.runId)) runs.push(_cardTerm.runId);
+  const latest = runs[runs.length - 1];  // from the server's history, not whichever run was opened (UI11-02)
+  sel.innerHTML = runs.map((id, i) => `<option value="${_esc(id)}">attempt ${i + 1}${id === latest ? ' (latest)' : ''}</option>`).join('');
+  sel.value = _cardTerm.runId;
+  _cardTerm.latestRunId = latest;
+  sel.style.display = runs.length > 1 ? '' : 'none';
+}
+async function _cardTermUse(runId, gen) {
+  // The attempt a view shows: selector, metadata, pinned message and reply eligibility follow it.
+  _cardTerm.viewRunId = runId;
+  const sel = document.getElementById('detail-term-attempt');
+  if ([...sel.options].some(o => o.value === runId)) sel.value = runId;
+  let data = {};
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/events`);
+    if (res.ok) data = await res.json();
+  } catch (_) {}
+  if (!_cardTermCurrent(gen) || _cardTerm.viewRunId !== runId) return false;
+  _cardTerm.data = data;
+  const pinned = (data.last_message || '').trim();
+  document.getElementById('detail-term-pinned').textContent = pinned ? pinned.split('\n').slice(-12).join('\n') : '';
+  const latest = runId === (_cardTerm.latestRunId || _cardTerm.runId), reply = document.getElementById('detail-term-reply');
+  reply.disabled = !latest;
+  reply.placeholder = latest ? 'Quick reply: continues this same session headless'
+    : 'Viewing an earlier attempt — switch to the latest to reply';
+  return true;
+}
+async function _cardTermLoad(runId) {
+  const gen = _cardTerm.gen;
+  const term = _cardTermXterm('run');
+  // A new attempt: the previous attempt's metadata and controls are void at once (REV-04).
+  Object.assign(_cardTerm, { viewRunId: runId, pending: [], data: null, attemptGen: (_cardTerm.attemptGen || 0) + 1 });
+  document.getElementById('detail-term-interactive').style.display = 'none';
+  document.getElementById('detail-term-next').style.display = _cardTerm.endedRunId === runId ? '' : 'none';  // UI12-03, UI14-02
+  // Quick reply continues the card's current session, so it is offered on the latest attempt only (UI10-02).
+  const latest = runId === (_cardTerm.latestRunId || _cardTerm.runId), reply = document.getElementById('detail-term-reply');
+  reply.disabled = !latest;
+  reply.placeholder = latest ? 'Quick reply: continues this same session headless'
+    : 'Viewing an earlier attempt — switch to the latest to reply';
+  let data = { lines: [] };
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/events`);
+    if (res.ok) data = await res.json();
+  } catch (_) {}
+  if (!_cardTermCurrent(gen) || _cardTerm.xterm !== term || _cardTerm.viewRunId !== runId) return;
+  _cardTerm.data = data;
+  term.reset();
+  (data.lines || []).forEach(l => term.writeln(String(l).replace(/\n/g, '\r\n')));
+  _flushPendingRunLines({ term, pending: _cardTerm.pending }, data.cursor || 0);
+  _cardTerm.pending = null;
+  const pinned = (data.last_message || '').trim();
+  document.getElementById('detail-term-pinned').textContent = pinned ? pinned.split('\n').slice(-12).join('\n') : (data.finished ? '' : 'running…');
+  if (data.finished) term.writeln(`\r\n[run ${data.status || 'finished'}${data.verify_badge ? ' · verify: ' + data.verify_badge : ''}]`);
+  document.getElementById('detail-term-interactive').style.display = data.finished && data.resume_eligible ? '' : 'none';
+  document.getElementById('detail-term-end').style.display = 'none';
+}
+function _cardTermInteractive() {
+  const gen = _cardTerm.gen, attemptGen = _cardTerm.attemptGen, d = _cardTerm.data || {};
+  const runId = _cardTerm.viewRunId || _cardTerm.runId;
+  if (!d.resume_eligible) return;
+  // run_id: the server resolves the card and takes its lock; the browser sends no card key (UI-03)
+  const payload = { kind: 'resume', agent: d.agent, session_id: d.agent_session_id, in_panel: false, run_id: runId,
+                    project_key: d.project_key || null, ticket: d.issue_identifier || null, cols: 120, rows: 24 };
+  socket.emit('term_open', payload, info => {
+    // the user moved to another card or attempt: the session lives on and is found by its card later
+    if (!_cardTermCurrent(gen) || attemptGen !== _cardTerm.attemptGen) return;
+    if (!info || info.error) { document.getElementById('detail-term-status').textContent = info ? info.error : 'no response'; return; }
+    _cardTermAttach(info.term_id, gen);
+  });
+}
+function _cardTermAttach(termId, gen) {
+  const term = _cardTermXterm('interactive');
+  _cardTerm.termId = termId;
+  term.onData(data => socket.emit('term_input', { term_id: termId, data }));
+  term.onResize(({ cols, rows }) => socket.emit('term_resize', { term_id: termId, cols, rows }));
+  socket.emit('term_attach', { term_id: termId }, info => {
+    if (!_cardTermCurrent(gen) || _cardTerm.termId !== termId) return;
+    if (!info || info.error) { _cardTermLoad(_cardTerm.runId); return; }
+    document.getElementById('detail-term-status').textContent = info.alive === false ? 'session ended' : 'interactive session (holds this card)';
+    if (info.alive === false) _cardTermEnded(_cardTerm.viewRunId);
+  });
+  document.getElementById('detail-term-interactive').style.display = 'none';
+  document.getElementById('detail-term-end').style.display = '';
+}
+function _cardTermEnd() {
+  const gen = _cardTerm.gen, termId = _cardTerm.termId, owner = _cardTerm.viewRunId || _cardTerm.runId;
+  if (!termId) return;
+  socket.emit('term_close', { term_id: termId }, res => {
+    const tab = _tabs.get(termId);  // also shown in the panel? drop that view too
+    if (tab && !(res && res.error && !/unknown/.test(res.error))) { tab.term.dispose(); tab.el.remove(); _tabs.delete(termId); _renderTabStrip(); }
+    if (!_cardTermCurrent(gen)) return;
+    if (res && res.error && !/unknown/.test(res.error)) { document.getElementById('detail-term-status').textContent = res.error; return; }
+    _cardTermEnded((res && res.run_id) || owner);  // the closed terminal's run, from the server (UI14-02)
+  });
+}
+function _cardTermEnded(runId) {
+  _cardTerm.endedRunId = runId || _cardTerm.viewRunId || _cardTerm.runId;  // the choice belongs to this run (UI12-03)
+  document.getElementById('detail-term-end').style.display = 'none';
+  // shown only while that run is the selected attempt (UI14-02)
+  if ((_cardTerm.viewRunId || _cardTerm.runId) === _cardTerm.endedRunId) document.getElementById('detail-term-next').style.display = '';
+}
+function _cardTermNext(next) {
+  // The server already recorded "interactive session ended" when the terminal closed (UI2-05/06);
+  // this only applies the user's choice through the board's usual move.
+  const runId = _cardTerm.endedRunId || _cardTerm.viewRunId || _cardTerm.runId, issueId = (_cardTerm.run || {}).linear_issue_id;
+  document.getElementById('detail-term-next').style.display = 'none';
+  _cardTerm.endedRunId = null;  // the choice is being applied; a reload must not offer it again
+  const status = document.getElementById('detail-term-status');
+  const label = next === 'done' ? 'marked done' : next === 'todo' ? 'sent back to Todo' : 'left in review';
+  // Success is shown only once the move is confirmed; on failure the choice stays (UI10-03).
+  const save = issueId
+    ? _projectApi('PATCH', `/api/linear/issues/${encodeURIComponent(issueId)}`,
+                  { state_name: next === 'done' ? _detailDoneStateName() : next === 'todo' ? 'Todo' : 'In Review' })
+    : _projectApi('PATCH', `/api/runs/${encodeURIComponent(runId)}/status`,  // a /run card: its run status (UI3-07)
+                  { status: next === 'done' ? 'success' : next === 'todo' ? 'todo' : 'review' });
+  status.textContent = 'saving…';
+  const gen = _cardTerm.gen;
+  save.then(r => {
+    refreshJobBoard(true);
+    if (!_cardTermCurrent(gen)) return;  // the user moved to another card meanwhile (UI11-04)
+    const sameAttempt = (_cardTerm.viewRunId || _cardTerm.runId) === runId;  // ... or to another attempt (UI12-03)
+    if (!r.ok || r.data.ok === false) {
+      if (!sameAttempt) return;
+      status.textContent = `could not save: ${r.data.error || 'HTTP ' + r.status} — choose again`;
+      _cardTerm.endedRunId = runId;
+      document.getElementById('detail-term-next').style.display = '';
+      return;
+    }
+    status.textContent = `session ended · ${label}`;
+  });
+  if (runId) _cardTermLoad(runId);
+}
+async function _promptCardNext(runId) {  // a card's session closed from the panel: same choice as in the card (UI2-05)
+  await openDetailModal(runId);
+  switchOutputTab('terminal');
+  await _cardTermOpen();
+  _cardTermEnded(runId);
+}
+function _cardTermShowInPanel() {
+  const shell = document.getElementById('term-shell');
+  if (shell.style.display === 'none') toggleTermPanel();
+  if (_cardTerm.termId) {
+    socket.emit('term_show', { term_id: _cardTerm.termId }, info => { if (info && !info.error) _attachTab(info, true); });
+  } else if (_cardTerm.viewRunId || _cardTerm.runId) {
+    openRunTab(_cardTerm.viewRunId || _cardTerm.runId, (_cardTerm.data || {}).project_key);
+  }
+}
+async function _cardTermQuickReply() {
+  const gen = _cardTerm.gen, input = document.getElementById('detail-term-reply'), status = document.getElementById('detail-term-status');
+  const reply = input.value.trim(), runId = _cardTerm.runId;
+  const latestId = _cardTerm.latestRunId || runId;
+  if (!reply || !runId || (_cardTerm.viewRunId || runId) !== latestId) return;  // latest attempt only (UI10-02, UI11-02)
+  status.textContent = 'sending…';
+  const r = await _projectApi('POST', `/api/runs/${encodeURIComponent(latestId)}/retry`, { reply, strict: true });
+  refreshJobBoard(true);
+  if (!_cardTermCurrent(gen)) return;
+  if (!r.ok || r.data.ok === false) { status.textContent = r.data.error || `HTTP ${r.status}`; return; }
+  input.value = '';
+  status.textContent = 'continuing the same session…';
+  _cardTerm.runId = r.data.run_id;
+  await _cardTermAttempts(gen);
+  if (_cardTermCurrent(gen)) _cardTermLoad(r.data.run_id);
+}
+socket.on('run_event', (d) => {
+  if (_cardTerm.mode !== 'run' || !_cardTerm.xterm || d.run_id !== _cardTerm.viewRunId) return;
+  if (_cardTerm.pending) _cardTerm.pending.push(d);
+  else _cardTerm.xterm.writeln(String(d.line).replace(/\n/g, '\r\n'));
+});
+socket.on('run_state_change', (d) => {
+  const gen = _cardTerm.gen;
+  if (_cardTerm.mode === 'run' && d.run_id === _cardTerm.viewRunId && d.state && d.state !== 'running') {
+    setTimeout(() => { if (_cardTermCurrent(gen) && _cardTerm.mode === 'run' && _cardTerm.viewRunId === d.run_id) _cardTermLoad(d.run_id); }, 500);
+  }
+});
+socket.on('term_output', (d) => {
+  if (_cardTerm.mode !== 'interactive' || _cardTerm.termId !== d.term_id || !_cardTerm.xterm) return;
+  if (d.replay) _cardTerm.xterm.reset();
+  _cardTerm.xterm.write(d.data);
+});
+socket.on('term_exit', (d) => {
+  if (_cardTerm.termId === d.term_id) {
+    if (_cardTerm.xterm) _cardTerm.xterm.writeln('\r\n[session exited]');
+    _cardTermEnded(_cardTerm.viewRunId);
+  }
+});
+socket.on('connect', () => {  // a reconnect rejoins the embedded session (UI-07) or reloads the run view (UI11-03)
+  if (_cardTerm.mode === 'interactive' && _cardTerm.termId) socket.emit('term_attach', { term_id: _cardTerm.termId });
+  else if (_cardTerm.mode === 'run' && _cardTerm.viewRunId && _isModalOpen('detail-modal')) _cardTermLoad(_cardTerm.viewRunId);
+});
+
+// Card-only terminals stay out of the strip; this lists every live terminal not shown there.
+function showRunningTerminals() {
+  socket.emit('term_list', {}, (list) => {
+    const hidden = (list || []).filter(info => !_tabs.has(info.term_id));
+    const menu = document.getElementById('term-running-menu');
+    menu.innerHTML = hidden.length
+      ? hidden.map(i => `<button class="term-clear-btn" data-show-term="${_esc(i.term_id)}">${_esc(i.label || i.kind)}</button>`).join('')
+      : '<span class="session-meta">no other terminals</span>';
+    menu.style.display = menu.style.display === 'none' ? 'flex' : 'none';
+  });
+}
+document.getElementById('term-running-menu')?.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-show-term]');
+  if (!b) return;
+  socket.emit('term_show', { term_id: b.dataset.showTerm }, info => { if (info && !info.error) _attachTab(info, true); });
+  e.currentTarget.style.display = 'none';
+});
 
 
 
@@ -4257,6 +4799,13 @@ terminalEl.addEventListener('drop', async (e) => {
       </div>
     </div>
     <div class="new-issue-field">
+      <div class="new-issue-label">Project</div>
+      <div class="new-issue-agent-row">
+        <select class="new-issue-input" id="new-issue-project" onchange="_saveNewIssueDraft();_newIssueProjectHint()" style="flex:1"></select>
+        <span class="new-issue-agent-hint" id="new-issue-project-hint"></span>
+      </div>
+    </div>
+    <div class="new-issue-field">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px">
         <div class="new-issue-label" style="margin-bottom:0">Description (optional)</div>
         <div style="display:flex;align-items:center;gap:4px">
@@ -4294,9 +4843,42 @@ function setNewIssueAgent(agent) {
   _saveDraft('agenticos.draft.new_issue.agent', _newIssueAgent);
 }
 
+// B: the project decides where the task runs (a worktree of it); default agentic-os.
+const DEFAULT_PROJECT_KEY = 'agentic-os';
+function _fillNewIssueProjects(saved) {
+  const sel = document.getElementById('new-issue-project');
+  if (!sel) return;
+  if (!_projectsLoaded) {  // the server applies the default when no project is sent (UI2-07)
+    _newIssuePendingProject = saved;  // restored once the list arrives (UI3-06)
+    const pending = saved ? `<option value="${_esc(saved)}">${_esc(saved)} (checking…)</option>` : '';
+    sel.innerHTML = pending + '<option value="__default__">Default project (loading…)</option><option value="">No project (runner root)</option>';
+    sel.value = saved === '' ? '' : (saved || '__default__');
+    _newIssueProjectHint();
+    return;
+  }
+  const keys = (_projectData.projects || []).filter(p => !p.error).map(p => p.key);
+  const fallback = keys.includes(DEFAULT_PROJECT_KEY) ? DEFAULT_PROJECT_KEY : '';
+  const pick = saved !== null && saved !== undefined && (saved === '' || keys.includes(saved)) ? saved : fallback;
+  sel.innerHTML = keys.map(k => `<option value="${_esc(k)}">${_esc(k)}</option>`).join('')
+    + '<option value="">No project (runner root)</option>';
+  sel.value = pick;
+  _newIssueProjectHint();
+}
+function _newIssueProjectField() {
+  const v = document.getElementById('new-issue-project')?.value;
+  return v === '__default__' || v === undefined ? {} : { project: v };  // omitted = server default
+}
+function _newIssueProjectHint() {
+  const sel = document.getElementById('new-issue-project'), hint = document.getElementById('new-issue-project-hint');
+  if (!sel || !hint) return;
+  hint.textContent = sel.value === '__default__' ? `Runs in ${DEFAULT_PROJECT_KEY} when registered`
+    : sel.value ? `Runs in a worktree of ${sel.value}` : 'Runs at the runner root';
+}
+
 function openNewIssueModal(event) {
   if (event) event.preventDefault();
   _restoreNewIssueDraft();
+  _fillNewIssueProjects(_storageGet('agenticos.draft.new_issue.project', null));
   document.getElementById('new-issue-status').textContent = '';
   document.getElementById('new-issue-submit').disabled = false;
   document.getElementById('new-issue-modal').classList.add('open');
@@ -4429,7 +5011,8 @@ async function submitNewIssue() {
     const res = await fetch('/api/linear/issues', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, description: desc, team_id: _currentTeamId, attachments: _newTaskAttachments, agent: _newIssueAgent }),
+      body: JSON.stringify({ title, description: desc, team_id: _currentTeamId, attachments: _newTaskAttachments, agent: _newIssueAgent,
+                             ..._newIssueProjectField() }),
     });
     const data = await res.json();
     if (data.ok) {

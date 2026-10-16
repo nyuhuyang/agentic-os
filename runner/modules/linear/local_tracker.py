@@ -95,6 +95,14 @@ def _next_identifier(tasks: dict) -> str:
     return f"LOC-{max_n + 1}"
 
 
+def _with_labels(issue: dict) -> dict:
+    """A copy with `labels` always a list: task files written before labels existed read as []."""
+    out = dict(issue)
+    if not isinstance(out.get("labels"), list):
+        out["labels"] = []
+    return out
+
+
 class LocalTracker:
     """Local task tracker — file-based alternative to Linear.
 
@@ -122,12 +130,13 @@ class LocalTracker:
             results = [t for t in results if _state_key(t.get("state")) in state_set]
         if team_id:
             results = [t for t in results if t.get("team_id") == team_id]
-        return results
+        return [_with_labels(t) for t in results]
 
     def fetch_issue(self, issue_id: str) -> dict | None:
         """Return a single task by id."""
         tasks = _load_state(self._state_dir)
-        return tasks.get(issue_id)
+        issue = tasks.get(issue_id)
+        return _with_labels(issue) if issue else None
 
     def create_issue(
         self,
@@ -138,11 +147,13 @@ class LocalTracker:
         team_id: str = "",
         team_key: str = "",
         team_name: str = "",
+        labels: list[str] | None = None,
     ) -> dict:
         """Create a new task, return normalized issue dict."""
         with _tasks_txn(self._state_dir) as tasks:
             issue = self._new_issue(tasks, title, description, state_name, preferred_agent,
                                     team_id, team_key, team_name)
+            issue["labels"] = list(labels or [])
         logger.info("Local task created: %s — %s", issue["identifier"], title)
         return dict(issue)
 
@@ -186,6 +197,7 @@ class LocalTracker:
         description: str | None = None,
         state_name: str | None = None,
         preferred_agent: str | None = None,
+        labels: list[str] | None = None,
     ) -> dict | None:
         """Update task fields, return updated issue or None."""
         with _tasks_txn(self._state_dir) as tasks:
@@ -200,8 +212,10 @@ class LocalTracker:
                 issue["state"] = state_name
             if preferred_agent is not None:
                 issue["preferred_agent"] = preferred_agent
+            if labels is not None:
+                issue["labels"] = list(labels)
             issue["updated_at"] = _now_iso()
-            return dict(issue)
+            return _with_labels(issue)
 
     def delete_issue(self, issue_id: str) -> bool:
         """Delete a task, return True on success."""

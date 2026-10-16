@@ -9,6 +9,7 @@ template, the bounded live-event ring and the checks that run after the agent.
 from __future__ import annotations
 
 import collections
+import contextlib
 import json
 import os
 import subprocess
@@ -137,6 +138,30 @@ def tracker_comment(binding: dict | None, kind: str, *, run_id: str, status: str
     return "\n".join(lines)
 
 
+# ── waiting for the user (C2) ────────────────────────────────────────────────
+# ponytail: a heuristic over the last assistant text; a structured "needs-input" marker from
+# the agent can replace it. The phrase list lives here only.
+# Whole request phrases, not bare words: "Codex returned APPROVED." or "Let me know if you need
+# anything else." are statements, not questions (FB-02). Questions also count by their "?".
+_ASKING = ("please approve", "do you approve", "awaiting your approval", "waiting for your approval",
+           "needs your approval", "awaiting your sign-off", "waiting for your sign-off", "need your sign-off",
+           "shall i ", "should i ", "do you want", "would you like", "please confirm", "confirm whether",
+           "let me know whether", "let me know which", "which option",
+           "请确认", "请批准", "等待你的确认", "等你确认", "需要你确认", "需要你决定", "你希望", "选哪个", "要不要")
+
+
+def waiting_question(text: str | None) -> str | None:
+    """The first line of an assistant message that asks the user something, else None."""
+    lines = [ln.strip() for ln in (text or "").strip().splitlines() if ln.strip()]  # `text` is the last message (R20-03)
+    if not lines:
+        return None
+    last = lines[-1].rstrip("*_` )）")
+    tail = " ".join(lines[-3:]).lower()
+    if last.endswith(("?", "？")) or any(p in tail for p in _ASKING):
+        return lines[0][:200]
+    return None
+
+
 # ── live run events (MPD-31) ─────────────────────────────────────────────────
 
 class EventRing:
@@ -146,20 +171,48 @@ class EventRing:
         self._lines: collections.deque = collections.deque()
         self._bytes, self._max = 0, max_bytes
         self._lock = threading.Lock()
+        self.total = 0  # lines ever appended: the sequence number of the newest line
 
-    def append(self, line: str) -> None:
+    def append(self, line: str) -> int:
+        """Append; returns the line's sequence number (1-based, never reused)."""
         with self._lock:
             self._lines.append(line)
             self._bytes += len(line)
+            self.total += 1
             while self._bytes > self._max and self._lines:
                 self._bytes -= len(self._lines.popleft())
+            return self.total
 
     def snapshot(self) -> list[str]:
         with self._lock:
             return list(self._lines)
 
+    def snapshot_with_cursor(self) -> tuple[list[str], int]:
+        """The lines plus the sequence number of the last one, so a viewer can apply only live
+        events newer than its snapshot (UI-13)."""
+        with self._lock:
+            return list(self._lines), self.total
+
 
 RUN_EVENTS: dict[str, EventRing] = {}
+MAX_RINGS = 64
+is_active: Callable[[str], bool] = lambda run_id: False  # set by the runner: is this run still going?
+
+
+def ring_for(run_id: str) -> EventRing:
+    """The run's ring, created on first use. ponytail: only the newest MAX_RINGS runs stay in
+    memory; older runs replay from their stream log on disk instead."""
+    ring = RUN_EVENTS.get(run_id)
+    if ring is None:
+        ring = RUN_EVENTS.setdefault(run_id, EventRing())  # atomic: two readers starting together share one (FB4-01)
+        extra = len(RUN_EVENTS) - MAX_RINGS
+        for old in list(RUN_EVENTS):  # oldest finished runs go first; a running one keeps its ring (IR19-04)
+            if extra <= 0:
+                break
+            if old != run_id and not is_active(old):
+                RUN_EVENTS.pop(old, None)
+                extra -= 1
+    return ring
 
 
 def normalize_event(agent: str, line: str) -> str | None:
@@ -203,15 +256,115 @@ def normalize_event(agent: str, line: str) -> str | None:
     return None
 
 
+_DIM, _RED, _CYAN, _RESET = "\x1b[2m", "\x1b[31m", "\x1b[36m", "\x1b[0m"
+TOOL_RESULT_CHARS = 200
+
+
+def _tool_result_text(content) -> str:
+    if isinstance(content, list):
+        content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return " ".join(str(content or "").split())[:TOOL_RESULT_CHARS]
+
+
+TOOL_ARGS_CHARS = 300
+
+
+def _args(value) -> str:
+    """Tool arguments for the run view, cut visibly (…) past TOOL_ARGS_CHARS (UI-12)."""
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return text if len(text) <= TOOL_ARGS_CHARS else text[:TOOL_ARGS_CHARS] + "…"
+
+
+def render_event(fmt: str, line: str) -> list[str]:
+    """One raw stdout line -> terminal lines for the live/replay run view (shared by both).
+    fmt: claude (stream-json), codex (exec --json), dsh (--json) or text (plain output).
+    Tool calls cyan, tool results dim and truncated, errors red."""
+    if fmt not in ("claude", "codex", "dsh"):
+        return [line] if line.strip() else []
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        return [line] if fmt == "dsh" and line.strip() else []
+    if not isinstance(ev, dict):
+        return []
+    t = ev.get("type")
+    extra: list[str] = []
+    if fmt == "claude" and t == "user":  # tool results come back as user turns
+        for block in (ev.get("message") or {}).get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                color = _RED if block.get("is_error") else _DIM
+                extra.append(f"{color}  ↳ {_tool_result_text(block.get('content'))}{_RESET}")
+        return extra
+    item = ev.get("item") or {}
+    if fmt == "codex" and item.get("type") == "command_execution":
+        if t == "item.started":  # the call shows when it starts, not only when it ends (UI-12)
+            return [f"{_CYAN}[tool] shell {_args(item.get('command'))}{_RESET}"]
+        if t == "item.completed":
+            out = _tool_result_text(item.get("aggregated_output"))
+            failed = item.get("exit_code") not in (None, 0)
+            return [f"{_RED if failed else _DIM}  ↳ {out or ('exit ' + str(item.get('exit_code')))}{_RESET}"]
+    if fmt == "dsh" and t == "tool_result":
+        res = _tool_result_text(ev.get("result") if ev.get("result") is not None else ev.get("output"))
+        color = _DIM if ev.get("status") in (None, "ok", "success") else _RED
+        return [f"{color}  ↳ [{ev.get('status', '')}] {res}{_RESET}"]
+    if fmt == "dsh" and t == "tool_call":
+        return [f"{_CYAN}[tool] {ev.get('tool')} {_args(ev.get('input'))}{_RESET}"]
+    if fmt == "claude" and t == "assistant":
+        lines = []
+        for block in (ev.get("message") or {}).get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
+                lines.extend(block["text"].split("\n"))
+            elif isinstance(block, dict) and block.get("type") == "tool_use":
+                lines.append(f"{_CYAN}[tool] {block.get('name')} {_args(block.get('input'))}{_RESET}")
+        return lines
+    if fmt in ("codex", "dsh") and t == "error":  # errors are always visible, live and in replay (UI2-09)
+        return [f"{_RED}[error] {_tool_result_text(ev.get('message') or 'error')}{_RESET}"]
+    shown = normalize_event(fmt, line)
+    if not shown:
+        return extra
+    lines = []
+    for ln in shown.split("\n"):
+        if ln.startswith("[tool]"):
+            ln = f"{_CYAN}{ln}{_RESET}"
+        elif ln.startswith("[result] error") or ln.startswith("[result] failed"):
+            ln = f"{_RED}{ln}{_RESET}"
+        elif ln.startswith("[result]"):
+            ln = f"{_DIM}{ln}{_RESET}"
+        lines.append(ln)
+    return lines + extra
+
+
+def session_id_of(fmt: str, line: str) -> str | None:
+    """The agent session id announced by a stdout line, if any (Claude init/result, Codex
+    thread.started, dsh events)."""
+    if fmt not in ("claude", "codex", "dsh") or "ession" not in line and "thread" not in line:
+        return None
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(ev, dict):
+        return None
+    if fmt == "codex":
+        sid = ev.get("thread_id") if ev.get("type") == "thread.started" else ev.get("session_id")
+    elif fmt == "dsh":  # dsh announces {"type": "session", "sessionId": …} (dsh_cli.DshRun, UI10-01)
+        sid = ev.get("sessionId") if ev.get("type") == "session" else ev.get("session_id")
+    else:
+        sid = ev.get("session_id")
+    return sid if isinstance(sid, str) and sid else None
+
+
 def run_agent(argv: list[str], cwd: str, env: dict, run_id: str, agent: str, timeout: float,
-              emit: Callable[[str, dict], None], on_start: Callable[[subprocess.Popen], None] | None = None
+              emit: Callable[[str, dict], None], on_start: Callable[[subprocess.Popen], None] | None = None,
+              on_session: Callable[[str], None] | None = None, log_path: Path | None = None,
+              on_stderr: Callable[[bytes], None] | None = None
               ) -> tuple[list[str], str, int | None, bool]:
     """Run one agent in its own process group, streaming stdout line by line.
 
     Every stdout line is kept for completion parsing; each structured event also goes to
     the run's EventRing and out as `run_event`. The whole process group is killed and
     reaped on every exit path. Returns (stdout_lines, stderr, returncode, timed_out)."""
-    ring = RUN_EVENTS.setdefault(run_id, EventRing())
+    ring = ring_for(run_id)
     proc = projects.spawn(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           stdin=subprocess.DEVNULL)
     if on_start:
@@ -220,18 +373,29 @@ def run_agent(argv: list[str], cwd: str, env: dict, run_id: str, agent: str, tim
     err: list[bytes] = []
 
     def read_out():
-        for raw in proc.stdout:
-            line = raw.decode("utf-8", "replace").rstrip("\n")
-            if not line:
-                continue
-            lines.append(line)
-            shown = normalize_event(agent, line)
-            if shown:
-                ring.append(shown)
-                emit("run_event", {"run_id": run_id, "line": shown})
+        log = open(log_path, "w", encoding="utf-8") if log_path else contextlib.nullcontext()
+        with log as lf:
+            for raw in proc.stdout:
+                line = raw.decode("utf-8", "replace").rstrip("\n")
+                if not line:
+                    continue
+                lines.append(line)
+                if lf:  # the durable log the run view replays after the ring is gone (C)
+                    lf.write(line + "\n")
+                    lf.flush()
+                sid = on_session and session_id_of(agent, line)
+                if sid:
+                    on_session(sid)
+                for shown in render_event(agent, line):
+                    emit("run_event", {"run_id": run_id, "line": shown, "seq": ring.append(shown)})
 
-    readers = [threading.Thread(target=read_out, daemon=True),
-               threading.Thread(target=lambda: err.append(proc.stderr.read() or b""), daemon=True)]
+    def read_err():
+        for raw in proc.stderr:  # line by line, so diagnostics show while the agent runs (IR9-02)
+            err.append(raw)
+            if on_stderr:
+                on_stderr(raw)
+
+    readers = [threading.Thread(target=read_out, daemon=True), threading.Thread(target=read_err, daemon=True)]
     for r in readers:
         r.start()
     timed_out = False

@@ -1253,7 +1253,7 @@ def test_stream_readers_are_counted(helper, monkeypatch):
     monkeypatch.setattr(app_mod, "_start_counted", lambda fn, *a, **k: started.append(fn.__name__) or real(fn, *a, **k))
     proc = subprocess.Popen(["/bin/sh", "-c", "echo hello"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     out, _ = app_mod._stream_text_run(proc, "r3", timeout=10)
-    assert "hello" in out and started == ["_reader"]  # BUILD-014
+    assert "hello" in out and started == ["_reader", "_drain_stderr"]  # BUILD-014; stderr drained alongside (UI-04)
 
 
 def test_registry_cache_write_is_atomic(tmp_path, monkeypatch):

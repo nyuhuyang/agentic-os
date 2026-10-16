@@ -34,6 +34,8 @@ def env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(reset_gen, "GEN_PATH", tmp_path / "reset_generations.json")
     monkeypatch.setattr(lin, "STATE_DIR", tmp_path)
+    import projects
+    monkeypatch.setattr(projects, "CARD_LOCK_DIR", tmp_path / "card-locks")  # never the real home dir
     log = tmp_path / "run_log.jsonl"
     for name in ("RUN_LOG", "STATE_RUN_LOG"):
         monkeypatch.setattr(app_mod, name, log if name == "RUN_LOG" else tmp_path / "runs.jsonl")
@@ -210,7 +212,8 @@ class FakeLinearClient:
     calls: list = []
 
     def __init__(self, *a, **k): pass
-    def create_issue(self, team, title, desc): return {"id": "real-1", "title": title, "description": desc}
+    def ensure_label(self, team, name): return f"label-{name}"
+    def create_issue(self, team, title, desc, label_ids=None): return {"id": "real-1", "title": title, "description": desc}
     def fetch_issue(self, i): return {"id": i, "title": "t", "description": "", "state": "Todo"}
     def update_issue(self, i, **kw): self.calls.append(("update", kw))
     def update_issue_state(self, i, s): self.calls.append(("state", s))

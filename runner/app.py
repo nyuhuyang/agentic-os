@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import collections
 import contextlib
 import functools
 import sys
@@ -783,10 +784,113 @@ def _timeout_cleanup(proc, stop: threading.Event, readers: list[threading.Thread
         r.join(timeout=2)
 
 
+STDERR_LIVE_LINES = 200
+
+
+class _StderrSink:
+    """stderr lines as they arrive: shown live in the run view (bounded) and their tail kept for
+    replay on every exit, a timeout included (UI8-03)."""
+
+    def __init__(self, run_id: str | None):
+        self.run_id, self.buf, self.shown = run_id, b"", 0
+        self.tail: collections.deque = collections.deque(maxlen=STDERR_TAIL_LINES)
+
+    def feed(self, chunk: bytes) -> None:
+        self.buf += chunk
+        *lines, self.buf = self.buf.split(b"\n")
+        for raw in lines:
+            self._line(raw.decode("utf-8", errors="replace"))
+
+    def _line(self, ln: str) -> None:
+        if not ln.strip():
+            return
+        ln = ln[:300]
+        self.tail.append(ln)
+        if self.run_id and self.shown < STDERR_LIVE_LINES:
+            self.shown += 1
+            shown = f"\x1b[31m[stderr] {ln}\x1b[0m"
+            socketio.emit("run_event", {"run_id": self.run_id, "line": shown,
+                                        "seq": project_runs.ring_for(self.run_id).append(shown)})
+
+    def close(self) -> None:
+        if self.buf:
+            self._line(self.buf.decode("utf-8", errors="replace"))
+            self.buf = b""
+        if self.run_id and self.tail:
+            with contextlib.suppress(OSError):
+                meta_path = _stream_meta_path(self.run_id)
+                meta = read_json(meta_path) or {}
+                meta["stderr_tail"] = ((meta.get("stderr_tail") or []) + list(self.tail))[-STDERR_TAIL_LINES * 2:]
+                write_json_atomic(meta_path, meta)
+
+
+def _read_both(proc, stdout_reader, stop: threading.Event, timeout: float, run_id: str | None = None) -> str:
+    """Run the stdout reader and a stderr drain side by side under one deadline (WS-001), so a
+    chatty stderr can never block the child before it closes stdout (UI-04). Any failure or
+    timeout stops both, kills and reaps the group (RWS-004/019). Returns the stderr text."""
+    stderr_chunks: list[bytes] = []
+    sink = _StderrSink(run_id)
+
+    def _drain_stderr() -> None:
+        if proc.stderr is not None:
+            for chunk in _iter_pipe_chunks(proc.stderr, stop):
+                stderr_chunks.append(chunk)
+                sink.feed(chunk)
+
+    deadline = time.monotonic() + timeout
+    readers: list[threading.Thread] = []
+    errors: list[BaseException] = []
+    try:
+        for fn in (stdout_reader, _drain_stderr):  # counted until they stop writing, even past a timeout (BUILD-014)
+            readers.append(_start_counted(_guarded(fn, errors), _thread=_REAL_THREAD))
+        while not errors and any(r.is_alive() for r in readers) and time.monotonic() < deadline:
+            for r in readers:
+                r.join(timeout=min(0.25, max(0.0, deadline - time.monotonic())))
+        if errors:  # a reader failed: same cleanup, then the error reaches the worker (RWS-019)
+            raise errors[0]
+        if any(r.is_alive() for r in readers):
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+        proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        _timeout_cleanup(proc, stop, readers)
+        raise subprocess.TimeoutExpired(proc.args, timeout)
+    except BaseException:  # a reader could not start: never leave the child running (RWS-004)
+        _timeout_cleanup(proc, stop, readers)
+        raise
+    finally:
+        sink.close()  # the tail is kept for replay on every exit, a timeout included
+    return b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
+
+
+project_runs.is_active = lambda run_id: run_id in _running_jobs  # ring eviction spares live runs (IR19-04)
+
+
+def _publish_run_line(run_id: str, fmt: str, line: str) -> None:
+    """Every streamed stdout line of every run feeds the live terminal view (ring + socket)
+    and, once announced, the job's agent session id (C, A/R02)."""
+    for shown in project_runs.render_event(fmt, line):
+        seq = project_runs.ring_for(run_id).append(shown)
+        socketio.emit("run_event", {"run_id": run_id, "line": shown, "seq": seq})
+    job = _running_jobs.get(run_id)
+    if job is not None:
+        job["last_progress_at"] = time.monotonic()  # a streaming agent is making progress (stall pass, UI2-03)
+        sid = project_runs.session_id_of(fmt, line)
+        if sid:  # the latest announced session wins: a fallback's fresh session replaces the failed resume's (FB2-03)
+            job["agent_session_id"] = sid
+
+
+def _stream_meta_path(run_id: str) -> Path:
+    return _claude_stream_log_path(run_id).with_suffix(".meta.json")
+
+
+STDERR_TAIL_LINES = 20
+
+
 def _stream_text_run(
     proc: "subprocess.Popen[bytes]",
     run_id: str,
     timeout: float = 600,
+    fmt: str = "text",
 ) -> tuple[str, str]:
     """Stream proc stdout line-by-line to a live log file. Returns (stdout_str, stderr_str).
 
@@ -799,37 +903,22 @@ def _stream_text_run(
     stop = threading.Event()
 
     def _reader() -> None:
-        with stream_path.open("w", encoding="utf-8") as sf:
+        with stream_path.open("a", encoding="utf-8") as sf:  # append: a fallback attempt keeps the first (UI-10)
             for raw in _iter_pipe_lines(proc.stdout, stop):
                 line = raw.decode("utf-8", errors="replace").rstrip("\n")
                 if line:
                     collected.append(line)
                     sf.write(line + "\n")
                     sf.flush()
+                    _publish_run_line(run_id, fmt, line)
                     _write_run_progress_json(run_id, {
                         "state": "running",
                         "stream_log": str(stream_path),
                         "last_event_type": "text",
                     })
 
-    deadline = time.monotonic() + timeout  # one deadline: reader, then the leader (WS-001)
-    t, errors = None, []
-    try:
-        t = _start_counted(_guarded(_reader, errors))  # counted until it stops writing, even past a timeout (BUILD-014)
-        t.join(timeout=timeout)
-        if t.is_alive():
-            raise subprocess.TimeoutExpired(proc.args, timeout)
-        if errors:  # the reader failed: same cleanup, then the error reaches the worker (RWS-019)
-            raise errors[0]
-        proc.wait(timeout=max(0.0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        _timeout_cleanup(proc, stop, [t] if t else [])
-        raise subprocess.TimeoutExpired(proc.args, timeout)
-    except BaseException:  # the reader could not start: never leave the child running (RWS-004)
-        _timeout_cleanup(proc, stop, [t] if t else [])
-        raise
-    stderr_b = (proc.stderr.read() if proc.stderr else b"") or b""
-    return "\n".join(collected), stderr_b.decode("utf-8", errors="replace").strip()
+    stderr_s = _read_both(proc, _reader, stop, timeout, run_id)
+    return "\n".join(collected), stderr_s
 
 
 def _tail_text_stream(path: Path, max_lines: int = 80) -> list[dict]:
@@ -2008,7 +2097,7 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
                    token_cost_usd: float | None = None,
                    agent_session_id: str | None = None,
                    reset_generation: int | None = None,
-                   extra: dict | None = None) -> str:
+                   extra: dict | None = None, audit: bool = False) -> str:
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if run_id is None:
@@ -2060,6 +2149,8 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
     with RUN_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     _runs_cache.clear()  # invalidate so next board refresh sees the new record
+    if audit:  # history only: no task/job state, it is not an execution (UI3-02)
+        return run_id
 
     # Update task state in state/task_state.json (operational truth), one locked
     # read-modify-write so parallel completions never drop each other's record (4b).
@@ -2302,7 +2393,7 @@ def _parse_agent_output(agent: str, stdout_s: str) -> tuple[str, int | None, int
                     output_tokens = usage.get("output_tokens")
             except Exception:
                 pass
-        output = "".join(content_parts) or stdout_s
+        output = "\n\n".join(p for p in content_parts if p) or stdout_s  # messages stay apart: the last one ends it (IR19-03)
         return output, input_tokens, output_tokens, None
     if agent != "claude" or not stdout_s:
         return stdout_s, None, None, None
@@ -2361,7 +2452,7 @@ def _stream_claude_run(
     stop = threading.Event()
 
     def _reader() -> None:
-        with stream_path.open("w", encoding="utf-8") as sf:
+        with stream_path.open("a", encoding="utf-8") as sf:  # append: a fallback attempt keeps the first (UI-10)
             for raw in _iter_pipe_lines(proc.stdout, stop):
                 line = raw.decode("utf-8", errors="replace").rstrip("\n")
                 if not line:
@@ -2369,6 +2460,7 @@ def _stream_claude_run(
                 lines.append(line)
                 sf.write(line + "\n")
                 sf.flush()
+                _publish_run_line(run_id, "claude", line)
                 try:
                     ev = json.loads(line)
                     if ev.get("type") == "result":
@@ -2383,24 +2475,7 @@ def _stream_claude_run(
                 except Exception:
                     pass
 
-    deadline = time.monotonic() + timeout  # one deadline: reader, then the leader (WS-001)
-    t, errors = None, []
-    try:
-        t = _start_counted(_guarded(_reader, errors))  # counted until it stops writing, even past a timeout (BUILD-014)
-        t.join(timeout=timeout)
-        if t.is_alive():
-            raise subprocess.TimeoutExpired(proc.args, timeout)
-        if errors:  # the reader failed: same cleanup, then the error reaches the worker (RWS-019)
-            raise errors[0]
-        proc.wait(timeout=max(0.0, deadline - time.monotonic()))
-    except subprocess.TimeoutExpired:
-        _timeout_cleanup(proc, stop, [t] if t else [])
-        raise subprocess.TimeoutExpired(proc.args, timeout)
-    except BaseException:  # the reader could not start: never leave the child running (RWS-004)
-        _timeout_cleanup(proc, stop, [t] if t else [])
-        raise
-
-    stderr_s = (proc.stderr.read() or b"").decode("utf-8", errors="replace").strip()  # type: ignore[union-attr]
+    stderr_s = _read_both(proc, _reader, stop, timeout, run_id)
 
     output = result_event.get("result", "")
     usage = result_event.get("usage") or {}
@@ -2431,13 +2506,14 @@ def _stream_dsh_run(
     stop = threading.Event()
 
     def _reader() -> None:
-        with stream_path.open("w", encoding="utf-8") as sf:
+        with stream_path.open("a", encoding="utf-8") as sf:  # append: a fallback attempt keeps the first (UI-10)
             for raw in _iter_pipe_lines(proc.stdout, stop):
                 line = raw.decode("utf-8", errors="replace").rstrip("\n")
                 if not line:
                     continue
                 sf.write(line + "\n")
                 sf.flush()
+                _publish_run_line(run_id, "dsh", line)
                 ev = events.feed_line(line)
                 if ev is None:
                     continue
@@ -2457,15 +2533,19 @@ def _stream_dsh_run(
 
     stderr_chunks: list[bytes] = []
 
+    sink = _StderrSink(run_id)  # live and kept for replay, a timeout included (IR9-02)
+
     def _drain_stderr() -> None:  # concurrently, so a chatty stderr can never block the child
-        stderr_chunks.extend(_iter_pipe_chunks(proc.stderr, stop))
+        for chunk in _iter_pipe_chunks(proc.stderr, stop):
+            stderr_chunks.append(chunk)
+            sink.feed(chunk)
 
     deadline = time.monotonic() + timeout
     readers: list[threading.Thread] = []
     errors: list[BaseException] = []
     try:
         for fn in (_reader, _drain_stderr):  # counted readers (BUILD-014), started inside the cleanup
-            readers.append(_start_counted(_guarded(fn, errors)))
+            readers.append(_start_counted(_guarded(fn, errors), _thread=_REAL_THREAD))
         # Short slices: a failed reader surfaces at once, not after the other one's deadline.
         while not errors and any(r.is_alive() for r in readers) and time.monotonic() < deadline:
             for r in readers:
@@ -2481,6 +2561,8 @@ def _stream_dsh_run(
     except BaseException:  # a reader could not start: stop the other, end the group (RWS-004)
         _timeout_cleanup(proc, stop, readers)
         raise
+    finally:
+        sink.close()
     stderr_s = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
     ok, error_s = events.outcome(proc.returncode, stderr_s)
     input_tokens, output_tokens = events.tokens()
@@ -2491,6 +2573,57 @@ def _stream_dsh_run(
 def _dsh_ok(proc: "subprocess.Popen[bytes]", output: str | None) -> bool:
     """dsh succeeded only with exit 0 AND a final event (it still prints final on a failed turn)."""
     return proc.returncode == 0 and output is not None
+
+
+def _stream_for(agent: str | None) -> str:
+    """The stdout format of a headless agent command built by _ai_command / _build_resume_cmd."""
+    return agent if agent in ("claude", "codex", "dsh") else "text"
+
+
+def _agent_output_format(agent: str) -> str:
+    """Claude streams stream-json (live events); the others take json."""
+    return "stream-json" if agent == "claude" else "json"
+
+
+def run_agent_process(run_id: str, cmd: list[str], *, stream: str, timeout: float | None = None,
+                      cwd: Path | str | None = None, env: dict | None = None, on_proc=None
+                      ) -> tuple[str | None, int | None, int | None, str | None, str | None, str, bool]:
+    """C0: the process engine for every non-project launch (/run entrypoint and agent, retry
+    attempts, Linear dispatch). Runs exactly one process: Popen in its own session, the
+    _register_proc handshake (raises _RunEnded when the run already ended), the streaming
+    reader for `stream` (claude | codex | dsh | text), one deadline, and the group killed and
+    reaped on any failure after launch. Feeds the live view and the durable stream log.
+    It never claims, records or pushes the tracker: run completion stays with the caller.
+    Returns (output, input_tokens, output_tokens, model, session_id, stderr, ok)."""
+    timeout = AI_RUN_TIMEOUT_S if timeout is None else timeout
+    proc = subprocess.Popen(cmd, cwd=str(cwd or ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            start_new_session=True)  # its own group, so a timeout or cancel ends descendants too
+    if not _register_proc(run_id, proc):  # cancelled/stalled meanwhile: proc is already dead
+        raise _RunEnded(run_id)
+    try:
+        if on_proc is not None:
+            on_proc(proc)  # the caller keeps the handle for cleanup after a later failure
+        RUN_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
+        meta = read_json(_stream_meta_path(run_id)) or {}  # merged: an earlier attempt's diagnostics stay (UI8-04)
+        write_json_atomic(_stream_meta_path(run_id), {**meta, "format": stream})  # replay reads it (C, R16)
+        if stream == "claude":
+            out, it, ot, pm, sid, err = _stream_claude_run(proc, run_id, timeout=timeout)
+            ok = proc.returncode == 0
+        elif stream == "dsh":
+            out, it, ot, pm, sid, err = _stream_dsh_run(proc, run_id, timeout=timeout)
+            ok = _dsh_ok(proc, out)
+        else:
+            stdout_s, err = _stream_text_run(proc, run_id, timeout=timeout, fmt=stream)
+            ok = proc.returncode == 0
+            if stream == "codex":
+                out, it, ot, pm = _parse_agent_output("codex", stdout_s)
+                sid = _extract_codex_thread_id(stdout_s)
+            else:
+                out, it, ot, pm, sid = stdout_s, None, None, None, None
+    except BaseException:  # any failure after launch ends this process's group (RWS-008)
+        _kill_and_reap(proc)
+        raise
+    return out, it, ot, pm, sid, err, ok
 
 
 def _get_task_agent_lock(task_id: str) -> dict | None:
@@ -2510,8 +2643,8 @@ def _get_task_agent_lock(task_id: str) -> dict | None:
             r = json.loads(line)
         except Exception:
             continue
-        if isinstance(r, dict) and r.get("task_id") == task_id:
-            records.append(r)  # newest first
+        if isinstance(r, dict) and r.get("task_id") == task_id and not r.get("interactive_ended"):
+            records.append(r)  # newest first; closure audits are history, never a session source (UI3-02)
     # Decision 11: only records of the issue's current reset generation may lock or resume.
     # A completion or restore from before a tracker reset is history, nothing more.
     gen_key = _reset_key(records, task_id)
@@ -2721,12 +2854,16 @@ def _inflight_work():
         _release()
 
 
+_REAL_THREAD = threading.Thread  # pipe readers always need a real thread to be able to time out
+
+
 def _start_counted(target, *args, **kwargs) -> threading.Thread:
     """Every background writer starts here. Spawned from admitted work (a request, a counted
     worker) it takes its own slot even after admission closed, because its parent is still
     counted at that moment; spawned from anywhere else it must be admitted (BUILD-008). The
     slot is released when the thread ends, or at once if it cannot start (BUILD-009)."""
     global _INFLIGHT
+    thread_cls = kwargs.pop("_thread", None) or threading.Thread
     if getattr(_TL, "admitted", False):
         with _INFLIGHT_LOCK:
             _INFLIGHT += 1
@@ -2741,7 +2878,7 @@ def _start_counted(target, *args, **kwargs) -> threading.Thread:
             _TL.admitted = False
             _release()
     try:  # construction and start both inside: either can fail after the slot was taken (BUILD-009)
-        t = threading.Thread(target=run, daemon=True)
+        t = thread_cls(target=run, daemon=True)
         t.start()
     except BaseException:
         _release()
@@ -2758,6 +2895,10 @@ def _counted(fn):
                 return fn(*a, **kw)
         except MaintenanceRefused as exc:
             logger.warning("%s refused: %s", fn.__name__, exc)
+            if kw.get("ticket_hold") is not None:  # a lock reserved for a launch that never ran
+                kw["ticket_hold"].close()
+            if kw.get("run_id"):
+                _release_session(kw["run_id"])  # and its session claim (FB2-02)
             return {"status": "error", "error": str(exc)}
     return wrapper
 
@@ -2914,6 +3055,9 @@ def _write_owner_record(run_id: str, job: dict, status: str, error: str) -> None
     metadata (job["record"]), so a retry of it keeps its task, ancestry and agent (RWS-002).
     Tried twice: the displaced worker writes nothing, so a lost record loses the run (RWS-003)."""
     meta = {"linear_issue_id": job.get("linear_issue_id"), **job.get("record", {})}
+    sid = job.get("agent_session_id") or (_SESSION_CLAIMS.get(run_id) or (None, None))[1]
+    if sid:  # a cancelled/stalled run stays resumable (UI2-04)
+        meta.setdefault("agent_session_id", sid)
     _write_run_log_retrying(job.get("skill", "unknown"), status, job.get("started_at", ""), 0.0,
                             prompt=job.get("prompt", ""), error=error, run_id=run_id, **meta)
 
@@ -2925,9 +3069,12 @@ class _RunClaim:
     def __init__(self, run_id: str):
         self.run_id = run_id
         self.owner: bool | None = None
+        self.session: str | None = None  # the job's last announced/claimed session, kept for its record (REV-02)
 
     def __call__(self) -> bool:
         if self.owner is None:
+            job = _running_jobs.get(self.run_id) or {}
+            self.session = job.get("agent_session_id") or (_SESSION_CLAIMS.get(self.run_id) or (None, None))[1]
             self.owner = _end_job(self.run_id)
         return self.owner
 
@@ -2956,6 +3103,9 @@ def _run_project_ticket(**kw) -> dict:
     running-job removal, so remove and lifecycle edits wait for it (REGUI-004, REGUI-006). An
     invalid key takes no lock; the helper's registry lookup then records the error."""
     with contextlib.ExitStack() as stack:
+        stack.callback(_release_session, kw.get("run_id"))  # a resume claimed by the route ends here
+        if kw.get("ticket_hold") is not None:
+            stack.callback(kw["ticket_hold"].close)  # the card lock reserved by the retry route
         with contextlib.suppress(_projects.ProjectError):
             stack.enter_context(_projects.project_lock(kw["project_key"]))
         return _run_project_ticket_locked(**kw)
@@ -2965,7 +3115,8 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
                                run_id: str, linear_issue_id: str | None, task_id: str, launch_gen: int,
                                attempt: int = 0, parent_run_id: str | None = None,
                                resume_session: str | None = None, reuse_only: bool = False,
-                               skill: str = "_prompt", confidential: bool | None = None) -> dict:
+                               skill: str = "_prompt", confidential: bool | None = None,
+                               ticket_hold: contextlib.ExitStack | None = None) -> dict:
     """The one launch helper for every project-bound launch (dispatch and retry/rework).
 
     Holds the ticket lock across worktree -> agent -> runner commit -> verify -> seed check
@@ -3017,7 +3168,8 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
         keys = _binding_keys(linear_issue_id, task_id, project.key, ident)
         _persist_binding(keys, {"project_key": project.key, "issue_identifier": ident,
                                 "confidential": binding["confidential"]})
-        with _projects.ticket_lock(project.key, ident):
+        # A retry route already holds this ticket (reserved before its tracker changes, C2).
+        with contextlib.nullcontext() if ticket_hold is not None else _projects.ticket_lock(project.key, ident):
             if reuse_only and not _projects.worktree_path(project, ident).exists():
                 raise _projects.ProjectError(
                     f"{project.key}/{ident}: bound worktree is missing; refusing to fall back "
@@ -3036,9 +3188,22 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
             tab_open = _main_path_tab_open(project.key)
             cmd = _project_cmd(agent, project, project_runs.project_prompt(prompt, project, binding, agent),
                                resume_session)
-            lines, stderr_s, code, timed_out = project_runs.run_agent(
-                cmd, binding["worktree"], _project_exec_env(agent, project), run_id, agent,
-                AI_RUN_TIMEOUT_S, _emit, on_start=_track)
+            if resume_session:
+                job["agent_session_id"] = resume_session  # in the live set before launch (A, R02)
+            # Durable log for the run view's replay: a confidential run's log is written only
+            # where its run records may go (already checked above), never elsewhere (C, R06).
+            log_path = _claude_stream_log_path(run_id)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            write_json_atomic(_stream_meta_path(run_id), {"format": agent})
+            sink = _StderrSink(run_id)  # written only where this run's log may be (checked above)
+            try:
+                lines, stderr_s, code, timed_out = project_runs.run_agent(
+                    cmd, binding["worktree"], _project_exec_env(agent, project), run_id, agent,
+                    AI_RUN_TIMEOUT_S, _emit, on_start=_track,
+                    on_session=lambda sid: job.update(agent_session_id=sid), log_path=log_path,
+                    on_stderr=sink.feed)  # stderr live as it arrives (IR9-02)
+            finally:
+                sink.close()
             _running_procs.pop(run_id, None)
             output, it, ot, model, sid, ok, error = _parse_project_output(agent, lines, stderr_s, code)
             if timed_out:
@@ -3163,21 +3328,12 @@ def run():
             socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill})
             end = _RunClaim(run_id)
             ended = {"ok": False, "run_id": run_id, "error": "cancelled"}  # cancel/stall wrote the record
-            proc = None
+            procs: list = []  # the launched process, for cleanup after a later failure
             try:
-                proc = subprocess.Popen(
-                    [_python_path(), str(RUNNER), skill],
-                    cwd=str(ROOT),
-                    env=_registry_exec_env(agent, registry),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    start_new_session=True,  # its own group, so a timeout or cancel ends descendants too
-                )
-                if not _register_proc(run_id, proc):
-                    raise _RunEnded(run_id)
-                output, stderr_s = _stream_text_run(proc, run_id, timeout=AI_RUN_TIMEOUT_S)
+                output, _it, _ot, _pm, _sid, stderr_s, ok = run_agent_process(
+                    run_id, [_python_path(), str(RUNNER), skill], stream="text",
+                    env=_registry_exec_env(agent, registry), on_proc=procs.append)
                 dur = time.monotonic() - t0
-                ok = proc.returncode == 0
                 if not end():
                     return jsonify(ended)
                 final_state = "review"
@@ -3199,18 +3355,20 @@ def run():
                 })
             except subprocess.TimeoutExpired:
                 dur = time.monotonic() - t0
-                _kill_and_reap(proc)
+                _kill_and_reap(procs[0] if procs else None)
                 if not end():
                     return jsonify(ended)
-                _write_run_log_retrying(skill, "timeout", started_at, dur, prompt=prompt, error="Timed out after 300s", run_id=run_id)
+                _write_run_log_retrying(skill, "timeout", started_at, dur, prompt=prompt, error="Timed out after 300s", run_id=run_id,
+                                        agent=agent, agent_session_id=end.session)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": "timeout", "skill": skill})
                 return jsonify({"ok": False, "error": "Timed out after 300s."})
             except Exception as e:
                 dur = time.monotonic() - t0
-                _kill_and_reap(proc)  # a failure after launch never leaves the agent running (RWS-008/010)
+                _kill_and_reap(procs[0] if procs else None)  # a failure after launch never leaves the agent running (RWS-008/010)
                 if not end():
                     return jsonify(ended)
-                _write_run_log_retrying(skill, "error", started_at, dur, prompt=prompt, error=str(e), run_id=run_id)
+                _write_run_log_retrying(skill, "error", started_at, dur, prompt=prompt, error=str(e), run_id=run_id,
+                                        agent=agent, agent_session_id=end.session)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill})
                 return jsonify({"ok": False, "error": str(e)})
 
@@ -3225,39 +3383,16 @@ def run():
     # Claude: stream-json; Codex: json; dsh: --json NDJSON
     end = _RunClaim(run_id)
     ended = {"ok": False, "run_id": run_id, "error": "cancelled"}  # cancel/stall wrote the record
-    proc = None
+    procs: list = []  # the launched process, for cleanup after a later failure
+    _timeout = AI_RUN_TIMEOUT_S
     try:
-        if agent == "claude":
-            fmt, _timeout = "stream-json", AI_RUN_TIMEOUT_S
-        else:
-            fmt, _timeout = "json", AI_RUN_TIMEOUT_S
         _run_registry = _load_registry(agent)
-        proc = subprocess.Popen(
-            _ai_command(agent, prompt, output_format=fmt,
+        output, input_tokens, output_tokens, parsed_model, _agent_session_id, stderr_s, ok = run_agent_process(
+            run_id,
+            _ai_command(agent, prompt, output_format=_agent_output_format(agent),
                         skill_name=skill_name, registry=_run_registry),
-            cwd=str(ROOT),
-            env=_registry_exec_env(agent, _run_registry),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,  # its own group, so a timeout or cancel ends descendants too
-        )
-        if not _register_proc(run_id, proc):
-            raise _RunEnded(run_id)
-        _agent_session_id: str | None = None
-        if agent == "claude":
-            output, input_tokens, output_tokens, parsed_model, _agent_session_id, stderr_s = \
-                _stream_claude_run(proc, run_id, timeout=_timeout)
-            ok = proc.returncode == 0
-        elif agent == "dsh":
-            output, input_tokens, output_tokens, parsed_model, _agent_session_id, stderr_s = \
-                _stream_dsh_run(proc, run_id, timeout=_timeout)
-            ok = _dsh_ok(proc, output)
-        else:
-            stdout_s, stderr_s = _stream_text_run(proc, run_id, timeout=_timeout)
-            ok = proc.returncode == 0
-            output, input_tokens, output_tokens, parsed_model = _parse_agent_output(agent, stdout_s)
-            if agent == "codex":
-                _agent_session_id = _extract_codex_thread_id(stdout_s)
+            stream=_stream_for(agent), timeout=_timeout,
+            env=_registry_exec_env(agent, _run_registry), on_proc=procs.append)
         if not output:
             output = stderr_s
         dur = time.monotonic() - t0
@@ -3284,26 +3419,29 @@ def run():
         })
     except FileNotFoundError:
         dur = time.monotonic() - t0
-        _kill_and_reap(proc)  # None when the CLI itself was missing (RWS-010)
+        _kill_and_reap(procs[0] if procs else None)  # None when the CLI itself was missing (RWS-010)
         if not end():
             return jsonify(ended)
-        _write_run_log_retrying(skill_name, "error", started_at, dur, prompt=prompt, error=f"{agent} CLI not found", run_id=run_id)
+        _write_run_log_retrying(skill_name, "error", started_at, dur, prompt=prompt, error=f"{agent} CLI not found", run_id=run_id,
+                                agent=agent, task_id=run_id)
         socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill_name})
         return jsonify({"ok": False, "error": f"{agent} CLI not found."})
     except subprocess.TimeoutExpired:
         dur = time.monotonic() - t0
-        _kill_and_reap(proc)
+        _kill_and_reap(procs[0] if procs else None)
         if not end():
             return jsonify(ended)
-        _write_run_log_retrying(skill_name, "timeout", started_at, dur, prompt=prompt, error=f"Timed out after {_timeout}s", run_id=run_id)
+        _write_run_log_retrying(skill_name, "timeout", started_at, dur, prompt=prompt, error=f"Timed out after {_timeout}s", run_id=run_id,
+                                agent=agent, task_id=run_id, agent_session_id=end.session)
         socketio.emit("run_state_change", {"run_id": run_id, "state": "timeout", "skill": skill_name})
         return jsonify({"ok": False, "error": f"Timed out after {_timeout}s."})
     except Exception as e:
         dur = time.monotonic() - t0
-        _kill_and_reap(proc)  # a failure after launch never leaves the agent running (RWS-008/010)
+        _kill_and_reap(procs[0] if procs else None)  # a failure after launch never leaves the agent running (RWS-008/010)
         if not end():
             return jsonify(ended)
-        _write_run_log_retrying(skill_name, "error", started_at, dur, prompt=prompt, error=str(e), run_id=run_id)
+        _write_run_log_retrying(skill_name, "error", started_at, dur, prompt=prompt, error=str(e), run_id=run_id,
+                                agent=agent, task_id=run_id, agent_session_id=end.session)
         socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill_name})
         return jsonify({"ok": False, "error": str(e)})
 
@@ -3316,24 +3454,108 @@ def api_state():
     })
 
 
+REPLAY_BYTES = 1024 * 1024
+_VERIFY_TAIL = "\n\n[verify tail]\n"
+
+
+def _assistant_text(rec: dict) -> str:
+    """The agent's own final message. A Codex run records all its messages as one output, so its
+    last message is read from the run's stream log (R20-03); otherwise the recorded output
+    without the runner's verify tail (UI-09)."""
+    run_id = rec.get("run_id")
+    if run_id and _stream_for(rec.get("agent")) == "codex":
+        last = _last_codex_message(run_id)
+        if last:
+            return last
+    return (rec.get("output") or "").split(_VERIFY_TAIL, 1)[0]
+
+
+def _last_codex_message(run_id: str) -> str | None:
+    log = _claude_stream_log_path(run_id)
+    try:
+        with log.open("rb") as f:
+            f.seek(max(0, log.stat().st_size - 256 * 1024))  # ponytail: the tail holds the last message
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        item = ev.get("item") or {}
+        if ev.get("type") == "item.completed" and item.get("type") == "agent_message" and item.get("text"):
+            return item["text"]
+    return None
+
+
+def _replay_lines(run_id: str, agent: str | None) -> list[str]:
+    """The run view after the ring is gone (finished long ago, or a runner restart): the tail of
+    the run's durable stream log, through the same renderer as the live view (C)."""
+    log = _claude_stream_log_path(run_id)
+    if not log.is_file():
+        return []
+    meta = read_json(_stream_meta_path(run_id)) or {}
+    fmt = meta.get("format") or _stream_for(agent)
+    with log.open("rb") as f:
+        f.seek(max(0, log.stat().st_size - REPLAY_BYTES))  # ponytail: tail only; very long runs lose their start
+        raw = f.read().decode("utf-8", "replace").splitlines()
+    if log.stat().st_size > REPLAY_BYTES and raw:
+        raw = raw[1:]  # the first line may be cut in half
+    out: list[str] = []
+    for line in raw:
+        out.extend(project_runs.render_event(fmt, line))
+    return out + [f"\x1b[31m[stderr] {ln}\x1b[0m" for ln in meta.get("stderr_tail") or []]
+
+
+def card_run_for_session(agent: str, session_id: str) -> str | None:
+    """The newest run that recorded this agent session: a resume opened from the Projects panel
+    belongs to that run's card just like one opened from the card itself (UI2-01)."""
+    if not session_id or not RUN_LOG.exists():
+        return None
+    for line in reversed(RUN_LOG.read_text(encoding="utf-8").splitlines()):
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(r, dict) and r.get("agent_session_id") == session_id and r.get("agent") == agent \
+                and not r.get("interactive_ended") and r.get("run_id"):
+            return r["run_id"]
+    return None
+
+
+def _latest_record(run_id: str) -> dict:
+    if RUN_LOG.exists():  # newest record for this run
+        for line in reversed(RUN_LOG.read_text(encoding="utf-8").splitlines()):
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(r, dict) and r.get("run_id") == run_id:
+                return r
+    return {}
+
+
 @app.route("/api/runs/<run_id>/events")
 def api_run_events(run_id: str):
-    """A run tab's view: the in-memory event ring, plus resume data once the run is over."""
+    """A run tab's view: the in-memory event ring (or the replayed stream log once it is gone),
+    plus resume data once the run is over."""
     ring = project_runs.RUN_EVENTS.get(run_id)
-    out: dict = {"lines": ring.snapshot() if ring else [], "finished": run_id not in _running_jobs}
+    lines, cursor = ring.snapshot_with_cursor() if ring else ([], 0)
+    # cursor: live run_event lines with seq <= cursor are already in `lines` (UI-13)
+    out: dict = {"lines": lines, "cursor": cursor, "finished": run_id not in _running_jobs}
     if out["finished"]:
-        rec = {}
-        if RUN_LOG.exists():  # newest record for this run
-            for line in reversed(RUN_LOG.read_text(encoding="utf-8").splitlines()):
-                try:
-                    r = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(r, dict) and r.get("run_id") == run_id:
-                    rec = r
-                    break
-        for k in ("status", "verify_badge", "agent", "agent_session_id", "project_key", "issue_identifier"):
+        rec = _latest_record(run_id)
+        if not out["lines"]:
+            out["lines"] = _replay_lines(run_id, rec.get("agent"))
+        for k in ("status", "verify_badge", "agent", "agent_session_id", "project_key", "issue_identifier",
+                  "linear_issue_id", "task_id"):
             out[k] = rec.get(k)
+        out["last_message"] = _assistant_text(rec)[-4000:]  # pinned at the top of the Terminal tab (C2)
+        out["waiting"] = project_runs.waiting_question(_assistant_text(rec)) if rec.get("status") == "review" else None
+        out["card_key"] = rec.get("linear_issue_id") or rec.get("task_id") or run_id
         project = None
         if rec.get("project_key"):
             try:
@@ -3491,6 +3713,95 @@ def api_project_baseline_status(key: str):
     return jsonify(_BASELINES.get(key) or {"state": "none"})
 
 
+# Sessions a launch is about to resume, claimed synchronously under the session lock by the
+# route that starts it and released when its run ends: rename/remove see them before the
+# worker has published anything (A, R02).
+_SESSION_CLAIMS: dict[str, tuple[str, str]] = {}  # run_id -> (agent, session_id)
+
+
+def _claim_session(agent: str, sid: str | None, run_id: str) -> None:
+    if sid and agent in ("claude", "codex"):
+        with _projects.session_lock(agent, sid):
+            _SESSION_CLAIMS[run_id] = (agent, sid)
+
+
+def _release_session(run_id: str) -> None:
+    _SESSION_CLAIMS.pop(run_id, None)
+
+
+def _live_session_ids() -> set[tuple[str, str]]:
+    from runner.modules.pty import TERMINALS
+    live = {(t.agent, t.session_id) for t in list(TERMINALS.values()) if t.alive and t.session_id}
+    live |= {(j.get("agent"), j.get("agent_session_id")) for j in list(_running_jobs.values()) if j.get("agent_session_id")}
+    return live | set(_SESSION_CLAIMS.values())
+
+
+def _session_action(key: str, agent: str, sid: str, act):
+    try:
+        project = _projects.get_project(key, _projects.load_registry(errors={}))
+        with _projects.session_lock(agent, sid):
+            target = _projects.session_target(project, agent, sid)
+            _projects.check_session_idle(target, _live_session_ids())
+            result = act(target)
+    except _projects.SessionNotFound as exc:
+        return jsonify({"error": str(exc)}), 404
+    except _projects.SessionBusy as exc:
+        return jsonify({"error": str(exc)}), 409
+    except _projects.ProjectError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        return jsonify({"error": f"session write failed, nothing changed: {exc}"}), 500
+    return jsonify({"ok": True, **result})
+
+
+@app.route("/api/projects/<key>/sessions/<agent>/<sid>/rename", methods=["POST"])
+def api_session_rename(key: str, agent: str, sid: str):
+    title = (request.get_json(silent=True) or {}).get("title")
+    return _session_action(key, agent, sid, lambda t: {"title": _projects.rename_session(t, title)})
+
+
+@app.route("/api/projects/<key>/sessions/<agent>/<sid>/remove", methods=["POST"])
+def api_session_remove(key: str, agent: str, sid: str):
+    return _session_action(key, agent, sid, _projects.remove_session)
+
+
+@app.route("/api/projects/<key>/tree")
+def api_project_tree(key: str):
+    """One folder level of a checkout (main or an agent worktree). Read-only."""
+    try:
+        project = _projects.get_project(key, _projects.load_registry(errors={}))
+        out = _projects.list_dir(project, request.args.get("wt"), request.args.get("path"))
+        out["worktrees"] = _projects.browse_worktrees(project)
+    except _projects.ProjectError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(out)
+
+
+@app.route("/api/projects/<key>/file")
+def api_project_file(key: str):
+    """Read-only preview of one file; never logged, recorded or sent to Linear."""
+    try:
+        project = _projects.get_project(key, _projects.load_registry(errors={}))
+        return jsonify(_projects.read_file(project, request.args.get("wt"), request.args.get("path")))
+    except (_projects.ProjectError, OSError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/projects/<key>/reveal", methods=["POST"])
+def api_project_reveal(key: str):
+    body = request.get_json(silent=True) or {}
+    try:
+        project = _projects.get_project(key, _projects.load_registry(errors={}))
+        path = _projects.reveal_path(project, body.get("wt"), body.get("path"))
+    except _projects.ProjectError as exc:
+        return jsonify({"error": str(exc)}), 400
+    try:
+        subprocess.run(["open", "-R", str(path)], check=True, timeout=10, capture_output=True)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return jsonify({"error": f"open -R failed: {exc}"}), 500
+    return jsonify({"ok": True})
+
+
 @app.route("/api/registry")
 def api_registry():
     agent = (request.args.get("agent") or _load_workflow_config().get("agent", {}).get("backend", "claude")).strip().lower()
@@ -3529,7 +3840,26 @@ def api_runs():
         **r,
         "when": _fmt_dt(r.get("started_at")),
         "duration": _fmt_dur(r.get("duration_s")),
+        # "Waiting for you" (C2): the run ended by asking the user something
+        "waiting": project_runs.waiting_question(_assistant_text(r)) if r.get("status") == "review" else None,
     } for r in runs])
+
+
+@app.route("/api/runs/latest-by-issue")
+def api_runs_latest_by_issue():
+    """The newest execution record of every tracker issue, however old: a card keeps its
+    Terminal action after its last run leaves the recent-runs window (REV23-01)."""
+    latest: dict[str, dict] = {}
+    if RUN_LOG.exists():
+        for line in RUN_LOG.read_text(encoding="utf-8").splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(r, dict) and r.get("linear_issue_id") and r.get("run_id") and not r.get("interactive_ended"):
+                latest[r["linear_issue_id"]] = {k: r.get(k) for k in ("run_id", "status", "agent", "agent_session_id",
+                                                                       "project_key", "started_at")}
+    return jsonify(latest)
 
 
 @app.route("/api/runs/<run_id>")
@@ -3700,6 +4030,29 @@ def api_run_cancel(run_id: str):
     return jsonify({"ok": True, "run_id": run_id})
 
 
+def record_interactive_ended(run_id: str, session_id: str | None) -> str | None:
+    """A card's interactive terminal closed, from any entry point (card, panel, shutdown): one
+    run-log audit entry with the server-held session id (C2, UI2-05/06). The next state is the
+    user's later choice, applied by the board's usual move."""
+    rec = _latest_record(run_id)
+    if not rec:
+        return None
+    new_id = str(uuid.uuid4())
+    project_key = rec.get("project_key")
+    extra = {k: rec[k] for k in ("project_key", "issue_identifier", "worktree", "branch", "base_sha", "confidential")
+             if k in rec} if project_key else {}
+    # An audit entry, not an attempt: the board, replay and retry keep using the last real run (UI-08).
+    extra["interactive_ended"] = True
+    _write_run_log_retrying(rec.get("skill", "_prompt"), "review",
+                   datetime.now(timezone.utc).isoformat(), 0.0, prompt=rec.get("prompt", ""), output="interactive session ended",
+                   run_id=new_id, attempt=rec.get("attempt", 0), parent_run_id=run_id,
+                   linear_issue_id=rec.get("linear_issue_id"), agent=rec.get("agent"),
+                   task_id=rec.get("task_id") or run_id, agent_session_id=session_id or None,
+                   reset_generation=rec.get("reset_gen"), extra=extra, audit=True)
+    socketio.emit("run_logged", {"skill": rec.get("skill", ""), "run_id": new_id})
+    return new_id
+
+
 @app.route("/api/runs/<run_id>/retry", methods=["POST"])
 def api_run_retry(run_id: str):
     if not RUN_LOG.exists():
@@ -3727,10 +4080,15 @@ def api_run_retry(run_id: str):
     linear_issue_id = original.get("linear_issue_id")
     # task_id chains back to root so all attempts share a common ancestry key
     task_id = original.get("task_id") or run_id
+    from runner.modules.linear import unsynced_local_id
+    if unsynced_local_id(linear_issue_id):  # its Linear copy is not confirmed yet (B, R11)
+        return jsonify({"ok": False, "error": "not synced to Linear yet; try again in a moment"}), 409
 
     # Build conversation context: include previous output + human feedback
     req_data = request.get_json(silent=True) or {}
     reply = (req_data.get("reply") or "").strip()
+    # Quick reply (C2): continue exactly this session or fail; never a fresh session.
+    strict = bool(req_data.get("strict"))
     attachments = req_data.get("attachments") or []
     prev_output = (original.get("output") or "").strip()
     attach_note = _format_prompt_attachments(attachments)
@@ -3774,11 +4132,23 @@ def api_run_retry(run_id: str):
                 agent_override, task_id, locked_agent,
             )
         agent = locked_agent
+    if strict and not _lock_session_id:
+        return jsonify({"ok": False, "error": "no resumable session for this card; use Retry instead"}), 409
+    if strict and original.get("agent_session_id") and original["agent_session_id"] != _lock_session_id:
+        # the attempt answered is not the card's current session: continuing it would answer another one (UI11-02)
+        return jsonify({"ok": False, "error": "this attempt is not the card's latest session; reply from the latest attempt"}), 409
 
     registry = _load_registry(agent)
     entry = registry.get(skill, {})
     _gen_key = linear_issue_id or task_id
     _launch_gen = reset_gen.current(_gen_key)
+    try:  # before any tracker change: a session being renamed/removed/opened is refused (A, R02)
+        _claim_session(agent, _lock_session_id, new_run_id)
+    except _projects.SessionBusy as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 409
+    # The card's lock, reserved here before any tracker change, comment or scheduling and handed
+    # to the background launch, which keeps it until the attempt ends (C2, R07/R13).
+    card_hold = contextlib.ExitStack()
 
     # Bound task: same binding, never re-derived, even from a record that lacks it (I5-01).
     def _start_failed(exc: Exception, published: bool = False, binding: dict | None = None):
@@ -3786,6 +4156,8 @@ def api_run_retry(run_id: str):
         issue is not left In Progress with nothing running (RWS-015). A published job is finished
         only by its owner: a cancel or stall that already ended it keeps its record (RWS-018)."""
         logger.exception("[retry] %s could not start", new_run_id)
+        _release_session(new_run_id)
+        card_hold.close()
         if published and not _end_job(new_run_id):
             return jsonify({"ok": False, "run_id": new_run_id, "error": "cancelled"}), 409
         if linear_issue_id and _linear_dispatched.get(linear_issue_id) == new_run_id:
@@ -3807,6 +4179,16 @@ def api_run_retry(run_id: str):
         return jsonify({"ok": False, "run_id": new_run_id, "error": f"could not start: {exc}"}), 500
 
     bound = _durable_binding(linear_issue_id, task_id) or (original if original.get("project_key") else None)
+    try:
+        if bound and bound.get("issue_identifier"):
+            card_hold.enter_context(_projects.ticket_lock(bound["project_key"], bound["issue_identifier"]))
+        elif not bound:
+            card_hold.enter_context(_projects.card_lock(linear_issue_id or task_id))
+    except _projects.ProjectError as exc:  # TicketLocked: an interactive terminal holds the card
+        _release_session(new_run_id)
+        card_hold.close()
+        status = 409 if isinstance(exc, _projects.TicketLocked) else 400
+        return jsonify({"ok": False, "error": str(exc)}), status
     if bound:
         bound = {**bound, "confidential": _ticket_confidential(  # before any comment (I6-03, I9-02)
             bound["project_key"], bound.get("issue_identifier"), linear_issue_id, task_id,
@@ -3829,7 +4211,8 @@ def api_run_retry(run_id: str):
                 agent=agent, prompt=prompt, title=original.get("prompt", "")[:80], run_id=new_run_id,
                 linear_issue_id=linear_issue_id, task_id=task_id, launch_gen=_launch_gen,
                 attempt=prev_attempt + 1, parent_run_id=run_id, resume_session=_lock_session_id,
-                reuse_only=True, skill=skill, confidential=bound.get("confidential"))
+                reuse_only=True, skill=skill, confidential=bound.get("confidential"),
+                ticket_hold=card_hold if bound.get("issue_identifier") else None)
         except Exception as e:
             return _start_failed(e, binding=bound)
         return jsonify({"ok": True, "run_id": new_run_id, "skill": skill, "attempt": prev_attempt + 1, "agent": agent})
@@ -3871,6 +4254,13 @@ def api_run_retry(run_id: str):
     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "running", "skill": skill})
 
     def _do_retry():
+        try:
+            _do_retry_attempts()
+        finally:
+            _release_session(new_run_id)
+            card_hold.close()
+
+    def _do_retry_attempts():
             nonlocal agent
             attempt_proc: list = [None]  # the current attempt, kept past _end_job for error cleanup (RWS-021)
             # Claude / Codex / dsh — subprocess dispatch with streaming + resume
@@ -3878,59 +4268,27 @@ def api_run_retry(run_id: str):
             def _dispatch_cmd(
                 cmd: list[str], stream: str | None,
             ) -> tuple[str, int | None, int | None, str | None, str | None, str, bool]:
-                """Run cmd; return (output, input_tokens, output_tokens, model, session_id, stderr, ok).
-
-                stream names the agent output parser; None for a run_skill.py entrypoint.
-                """
-                p = subprocess.Popen(
-                    cmd,
-                    cwd=str(ROOT),
-                    env=_registry_exec_env(agent, registry),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    start_new_session=True,  # its own group, so a timeout or cancel ends descendants too
-                )
-                if not _register_proc(new_run_id, p):  # cancelled/stalled meanwhile: p is already dead
-                    raise _RunEnded(new_run_id)
-                attempt_proc[0] = p
-                try:
-                    if stream == "claude":
-                        _out, _it, _ot, _pm, _sid, _err = _stream_claude_run(p, new_run_id, timeout=AI_RUN_TIMEOUT_S)
-                        _ok = p.returncode == 0
-                    elif stream == "dsh":
-                        _out, _it, _ot, _pm, _sid, _err = _stream_dsh_run(p, new_run_id, timeout=AI_RUN_TIMEOUT_S)
-                        _ok = _dsh_ok(p, _out)
-                    else:
-                        try:
-                            _sb, _eb = p.communicate(timeout=AI_RUN_TIMEOUT_S)
-                        except subprocess.TimeoutExpired:
-                            _kill_and_reap(p)
-                            raise
-                        _ok = p.returncode == 0
-                        _ss = _sb.decode("utf-8", errors="replace").strip()
-                        _err = _eb.decode("utf-8", errors="replace").strip()
-                        _out, _it, _ot, _pm = _parse_agent_output(agent, _ss)
-                        _sid = _extract_codex_thread_id(_ss) if stream == "codex" else None
-                except BaseException:  # any failure after launch ends this attempt's group (RWS-008)
-                    _kill_and_reap(p)
-                    raise
-                # The handle stays registered until the run ends or the next attempt replaces it,
-                # so a cancel between attempts still reaches this group's leftovers (RWS-005).
-                return _out, _it, _ot, _pm, _sid, _err, _ok
+                """One attempt through the process engine (C0); return (output, input_tokens,
+                output_tokens, model, session_id, stderr, ok). stream names the agent output
+                parser; None for a run_skill.py entrypoint (plain text). The handle stays
+                registered until the run ends or the next attempt replaces it, so a cancel
+                between attempts still reaches this group's leftovers (RWS-005)."""
+                return run_agent_process(new_run_id, cmd, stream=_stream_for(stream),
+                                         env=_registry_exec_env(agent, registry),
+                                         on_proc=lambda p: attempt_proc.__setitem__(0, p))
 
             end = _RunClaim(new_run_id)
             try:
                 _stream = agent
-                if entry.get("schedule_eligible") and entry.get("entrypoint"):
+                if entry.get("schedule_eligible") and entry.get("entrypoint") and not strict:
                     cmd = [_python_path(), str(RUNNER), skill]
                     _used_resume = False
-                    if agent == "dsh":
-                        _stream = None  # run_skill.py prints no dsh events; other agents unchanged
+                    _stream = None  # run_skill.py prints plain lines for every agent (UI3-04)
                 elif _lock_session_id:
                     cmd = _build_resume_cmd(agent, _lock_session_id, prompt)
                     _used_resume = True
                 else:
-                    cmd = _ai_command(agent, prompt, output_format="json",
+                    cmd = _ai_command(agent, prompt, output_format=_agent_output_format(agent),
                                       skill_name=skill, registry=registry)
                     _used_resume = False
 
@@ -3940,12 +4298,12 @@ def api_run_retry(run_id: str):
                 # (adoption error, session/writer-held, or a runtime failure after work) is recorded
                 # as status error, and the user resets to todo to start fresh.
                 # Early out for a cancelled/stalled run; _register_proc is the guarantee (WS-004).
-                if _used_resume and not ok and agent != "dsh" and new_run_id in _running_jobs:
+                if _used_resume and not ok and agent != "dsh" and not strict and new_run_id in _running_jobs:
                     logger.warning(
                         "[retry] resume failed for %s session=%s; full retry without resume",
                         agent, _lock_session_id,
                     )
-                    fallback_cmd = _ai_command(agent, prompt, output_format="json",
+                    fallback_cmd = _ai_command(agent, prompt, output_format=_agent_output_format(agent),
                                                skill_name=skill, registry=registry)
                     output, input_tokens, output_tokens, parsed_model, new_sid, stderr_s, ok = _dispatch_cmd(fallback_cmd, _stream)
 
@@ -3955,7 +4313,10 @@ def api_run_retry(run_id: str):
                 dur = time.monotonic() - t0
                 if not end():
                     return  # cancel/stall ended the run and did its record and tracker push
-                final_state = "error" if _stream == "dsh" and not ok else "review"
+                # A failed strict continuation (quick reply) is an error, never a review (C2, UI-06).
+                final_state = "error" if not ok and (_stream == "dsh" or strict) else "review"
+                if strict and not ok and not error_s:
+                    error_s = f"resume of session {_lock_session_id} failed (exit {attempt_proc[0].returncode if attempt_proc[0] else '?'})"
                 _footer = _parse_run_footer(output)
                 _cost = _compute_token_cost(output_tokens, input_tokens, parsed_model or _agent_model(agent, cfg))
                 _write_run_log(skill, final_state, started_at, dur,
@@ -3983,7 +4344,7 @@ def api_run_retry(run_id: str):
                 _write_run_log_retrying(skill, "timeout", started_at, dur, prompt=prompt, error=msg,
                                run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
                                linear_issue_id=linear_issue_id, agent=agent,
-                               model=_agent_model(agent, cfg), task_id=task_id, reset_generation=_launch_gen)
+                               model=_agent_model(agent, cfg), task_id=task_id, reset_generation=_launch_gen, agent_session_id=end.session)
                 if linear_issue_id:
                     _comment_quietly(_post_linear_comment, linear_issue_id, _linear_comment_body(title="AgenticOS Retry Timeout", prompt=prompt))
                 _finish("review")
@@ -3996,7 +4357,7 @@ def api_run_retry(run_id: str):
                 _write_run_log_retrying(skill, "error", started_at, 0.0, prompt=prompt, error=str(e),
                                run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
                                linear_issue_id=linear_issue_id, agent=agent,
-                               model=_agent_model(agent, cfg), task_id=task_id, reset_generation=_launch_gen)
+                               model=_agent_model(agent, cfg), task_id=task_id, reset_generation=_launch_gen, agent_session_id=end.session)
                 if linear_issue_id:
                     _comment_quietly(
                         _post_linear_comment,
@@ -4030,6 +4391,14 @@ def api_run_history(run_id: str):
             lookup[rid] = r
         except Exception:
             continue
+    for rid, job in list(_running_jobs.items()):  # attempts still running, before their records (UI8-05, UI15-02)
+        if rid in lookup:
+            continue
+        rec = job.get("record") or {}
+        lookup[rid] = {"run_id": rid, "status": "running", "started_at": job.get("started_at", ""),
+                       "prompt": job.get("prompt", ""), "parent_run_id": rec.get("parent_run_id"),
+                       "linear_issue_id": job.get("linear_issue_id"), "task_id": rec.get("task_id") or rid,
+                       "attempt": rec.get("attempt", 0), "agent": job.get("agent")}
 
     # Virtual linear card: run_id is "linear-{issue_id}"
     if run_id.startswith("linear-"):
@@ -4052,6 +4421,16 @@ def api_run_history(run_id: str):
         ]
         issue_runs.sort(key=lambda r: r.get("started_at", ""))
         return jsonify(issue_runs)
+
+    if target and (target.get("task_id") or run_id):
+        # A dashboard task: every attempt sharing its root task id, descendants and a running one
+        # included, so the attempt picker always sees the latest (UI12-02).
+        root = target.get("task_id") or run_id
+        attempts = [r for r in lookup.values() if (r.get("task_id") or r.get("run_id")) == root
+                    and (r.get("status") != "archived" or r.get("run_id") == run_id)]
+        attempts.sort(key=lambda r: r.get("started_at", ""))
+        if len(attempts) > 1:
+            return jsonify(attempts)
 
     # Walk parent_run_id chain back to root
     chain: list[dict] = []

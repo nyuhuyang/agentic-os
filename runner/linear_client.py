@@ -96,10 +96,32 @@ mutation AgenticOSUpdateIssue($issueId: String!, $title: String, $description: S
 """
 
 _MUTATION_CREATE_ISSUE = """
-mutation AgenticOSCreateIssue($teamId: String!, $title: String!, $description: String, $stateId: String) {
-  issueCreate(input: {teamId: $teamId, title: $title, description: $description, stateId: $stateId}) {
+mutation AgenticOSCreateIssue($teamId: String!, $title: String!, $description: String, $stateId: String, $labelIds: [String!]) {
+  issueCreate(input: {teamId: $teamId, title: $title, description: $description, stateId: $stateId, labelIds: $labelIds}) {
     success
-    issue { id identifier title state { name } url }
+    issue {
+      id identifier title description priority url createdAt updatedAt
+      state { name }
+      labels { nodes { name } }
+      team { id key name }
+    }
+  }
+}
+"""
+
+_QUERY_LABEL = """
+query AgenticOSLabel($teamId: ID!, $name: String!) {
+  issueLabels(filter: {name: {eqIgnoreCase: $name}, or: [{team: {id: {eq: $teamId}}}, {team: {null: true}}]}, first: 1) {
+    nodes { id name }
+  }
+}
+"""
+
+_MUTATION_CREATE_LABEL = """
+mutation AgenticOSCreateLabel($teamId: String!, $name: String!) {
+  issueLabelCreate(input: {teamId: $teamId, name: $name}) {
+    success
+    issueLabel { id name }
   }
 }
 """
@@ -345,16 +367,35 @@ class LinearClient:
             self._state_cache[f"{team_id}:{s['name']}"] = s["id"]
         return self._state_cache.get(cache_key)
 
+    def ensure_label(self, team_id: str, name: str) -> str | None:
+        """The id of label `name` (team or workspace label, any case), created in the team when
+        missing (needs write scope). A failed create is looked up once more: another create, or
+        a label Linear refused to duplicate, may already exist (FB-01)."""
+        def lookup() -> str | None:
+            data = self._graphql(_QUERY_LABEL, {"teamId": team_id, "name": name})
+            nodes = ((data.get("issueLabels") or {}).get("nodes")) or []
+            return nodes[0].get("id") if nodes and nodes[0].get("id") else None
+        found = lookup()
+        if found:
+            return found
+        data = self._graphql(_MUTATION_CREATE_LABEL, {"teamId": team_id, "name": name})
+        result = data.get("issueLabelCreate") or {}
+        created = (result.get("issueLabel") or {}).get("id") if result.get("success") else None
+        return created or lookup()
+
     def create_issue(self, team_id: str, title: str, description: str = "",
-                     state_name: str = "Todo") -> dict | None:
+                     state_name: str = "Todo", label_ids: list[str] | None = None) -> dict | None:
+        """Create an issue; returns it normalized (labels as names), or None."""
         state_id = self.resolve_state_id_by_team(team_id, state_name)
         variables: dict = {"teamId": team_id, "title": title}
         if description:
             variables["description"] = description
         if state_id:
             variables["stateId"] = state_id
+        if label_ids:
+            variables["labelIds"] = list(label_ids)
         data = self._graphql(_MUTATION_CREATE_ISSUE, variables)
         result = (data.get("issueCreate") or {})
-        if result.get("success"):
-            return result.get("issue")
+        if result.get("success") and result.get("issue"):
+            return _normalize(result["issue"])
         return None

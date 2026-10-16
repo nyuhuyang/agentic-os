@@ -45,6 +45,13 @@ def bump(key: str) -> int:
         return gens[key]
 
 
+def restore(key: str, previous: int, bumped: int) -> None:
+    """Undo a bump whose transition was refused, unless something bumped again since."""
+    with json_transaction(GEN_PATH, indent=2) as gens:
+        if gens.get(key) == bumped:
+            gens[key] = previous
+
+
 def is_current(key: str | None, gen: int | None) -> bool:
     """True when `gen` (None = not generation-tracked) is still the issue's generation."""
     return gen is None or not key or current(key) == gen

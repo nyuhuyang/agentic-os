@@ -28,6 +28,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -787,6 +788,17 @@ def locate_folder(name: str, entries: list, budget_s: float = 3.0, limit: int = 
     return {"matches": ["~" + p[len(home_s):] if p.startswith(home_s + "/") else p for p in ordered],
             "complete": state["complete"]}
 
+def registered_key(key: str | None, registry: dict[str, Project] | None = None) -> str | None:
+    """A label's project key mapped onto the registry, ignoring case ("project:Agentic-OS" is
+    agentic-os); None when no registered project matches (FB3-01/03)."""
+    if not key:
+        return None
+    registry = load_registry(errors={}) if registry is None else registry
+    if key in registry:
+        return key
+    return next((k for k in registry if k.lower() == key.lower()), None)
+
+
 def get_project(key: str, registry: dict[str, Project] | None = None) -> Project:
     registry = load_registry() if registry is None else registry
     if key not in registry:
@@ -828,7 +840,7 @@ def _check_ident(ident: str) -> str:
 @contextlib.contextmanager
 def ticket_lock(key: str, ident: str):
     """Non-blocking per-ticket lock, shared by the dashboard and every CLI subcommand."""
-    lock_dir = WORKTREE_ROOT / key / ".meta"  # sidecars never share the ticket-dir namespace
+    lock_dir = WORKTREE_ROOT / _check_key(key) / ".meta"  # sidecars never share the ticket-dir namespace; no path in the key (FB3-01)
     lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(lock_dir / f"{_check_ident(ident)}.lock", os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -839,6 +851,42 @@ def ticket_lock(key: str, ident: str):
         yield
     finally:
         os.close(fd)
+
+
+CARD_LOCK_DIR = Path(os.environ.get("AGENTIC_OS_CARD_LOCKS", "~/.agentic-os/card-locks")).expanduser()
+
+
+@contextlib.contextmanager
+def card_lock(card_key: str):
+    """Non-blocking lock of a runner-root card (no project): held by its interactive terminal
+    while open and by a retry/quick reply until its attempt ends (C2). Same rule as ticket_lock."""
+    CARD_LOCK_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(CARD_LOCK_DIR / f"{_check_ident(card_key)}.lock", os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise TicketLocked(f"card {card_key} is busy (an interactive terminal or a running attempt holds it)")
+        yield
+    finally:
+        os.close(fd)
+
+
+def card_busy(project_key: str | None, ident: str | None, card_key: str | None) -> bool:
+    """Probe without keeping it: is this card's lock (ticket lock for a project card, card lock
+    otherwise) held right now?"""
+    try:
+        if project_key and ident:
+            with ticket_lock(project_key, ident):
+                return False
+        if card_key:
+            with card_lock(card_key):
+                return False
+    except TicketLocked:
+        return True
+    except ProjectError:
+        return False
+    return False
 
 
 # ── Worktrees ────────────────────────────────────────────────────────────────
@@ -1286,7 +1334,10 @@ def record_location_problem(paths: list[Path], checkout: Path) -> str | None:
 
 
 # ── Session readers (Phase 1: read-only) ─────────────────────────────────────
-# ~/.claude and ~/.codex are read-only to AgenticOS: nothing here writes or copies them.
+# ~/.claude and ~/.codex are read-only to AgenticOS, with two user-authorized exceptions
+# (2026-10-15), both in "Session rename / remove" below: renaming a session (a custom-title
+# record appended to a Claude transcript; threads.name for Codex) and removing one (the
+# Claude transcript moves to ~/.agentic-os/session-trash; Codex threads are archived).
 
 CLAUDE_PROJECTS = Path(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude")).expanduser() / "projects"
 CODEX_DB = Path(os.environ.get("CODEX_HOME", "~/.codex")).expanduser() / "state_5.sqlite"
@@ -1299,6 +1350,11 @@ def _slug(path: Path | str) -> str:
 
 def _under(cwd: str, roots: list[str]) -> bool:
     return any(cwd == r or cwd.startswith(r.rstrip("/") + "/") for r in roots)
+
+
+def _under_resolved(cwd: str, roots: list[str]) -> bool:
+    """_under on resolved paths: no `..` or escaping symlink passes (IR9-03)."""
+    return _under(os.path.realpath(cwd), [os.path.realpath(r) for r in roots])
 
 
 def _session_roots(project: Project) -> list[str]:
@@ -1518,6 +1574,380 @@ def project_sessions(project: Project) -> list[dict]:
     rows = claude_sessions(project) + codex_sessions(project)
     rows.sort(key=lambda r: r["updated"], reverse=True)
     return rows[:MAX_SESSIONS]
+
+
+# ── Session rename / remove (the only writes to ~/.claude and ~/.codex) ──────
+
+SESSION_TRASH = Path(os.environ.get("AGENTIC_OS_SESSION_TRASH", "~/.agentic-os/session-trash")).expanduser()
+SESSION_FRESH_S = 120
+_SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,127}$")
+_SESSION_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_SESSION_LOCKS_GUARD = threading.Lock()
+
+
+class SessionNotFound(ProjectError):
+    """No such session in this project."""
+
+
+class SessionBusy(ProjectError):
+    """The session is live (a tab, a running job, or written in the last 2 minutes)."""
+
+
+@contextlib.contextmanager
+def session_lock(agent: str, sid: str):
+    """Per-session admission lock: rename/remove hold it across check + write, and resume-tab
+    opening and retry/quick-reply launch take it for their own admission. Non-blocking."""
+    with _SESSION_LOCKS_GUARD:
+        lock = _SESSION_LOCKS.setdefault((agent, sid), threading.Lock())
+    if not lock.acquire(blocking=False):
+        raise SessionBusy(f"session {sid} is busy (being renamed, removed or opened)")
+    try:
+        yield
+    finally:
+        lock.release()
+
+
+def session_target(project: Project, agent: str, sid: str) -> dict:
+    """Resolve one session of this project: {agent, id, cwd, path} (path: transcript/rollout).
+    Refuses unknown ids, ids with path characters, cwd outside the project, files outside the stores."""
+    if agent not in ("claude", "codex"):
+        raise ProjectError(f"unknown agent {agent!r}")
+    if not isinstance(sid, str) or not _SESSION_ID.match(sid):
+        raise ProjectError(f"session id {sid!r} is not valid")
+    roots = _session_roots(project)
+    if agent == "claude":
+        store = CLAUDE_PROJECTS.resolve() if CLAUDE_PROJECTS.is_dir() else None
+        prefixes = [_slug(r) for r in roots]
+        for d in (CLAUDE_PROJECTS.iterdir() if store else []):
+            f = d / f"{sid}.jsonl"
+            if not d.is_dir() or not any(d.name.startswith(p) for p in prefixes) or not f.is_file() or f.is_symlink():
+                continue
+            if not f.resolve().is_relative_to(store):
+                continue
+            info = _claude_summary(f)
+            if (info and info["cwd"] and _under_resolved(info["cwd"], roots)
+                    and not (info["entrypoint"] or "").startswith("sdk-")):
+                return {"agent": agent, "id": sid, "cwd": info["cwd"], "path": f}
+        raise SessionNotFound(f"no Claude session {sid} in project {project.key}")
+    import sqlite3
+    db_path = _codex_db_checked()
+    try:
+        db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+        try:
+            row = db.execute("SELECT cwd, rollout_path FROM threads WHERE id = ? AND archived = 0 "
+                             "AND source IN ('cli', 'vscode')", (sid,)).fetchone()
+        finally:
+            db.close()
+    except sqlite3.Error as exc:
+        raise ProjectError(f"Codex session store unreadable: {exc}") from None
+    if not row or not isinstance(row[0], str) or not _under_resolved(row[0], roots):
+        raise SessionNotFound(f"no Codex session {sid} in project {project.key}")
+    rollout = Path(row[1]) if isinstance(row[1], str) and row[1] else None
+    store = Path(os.path.realpath(CODEX_DB.parent))
+    if rollout is None or not Path(os.path.realpath(rollout)).is_relative_to(store):
+        # its idleness cannot be checked inside the Codex store: refuse rather than guess (IR9-03)
+        raise ProjectError(f"Codex session {sid} has no rollout inside {store}; not touched")
+    return {"agent": agent, "id": sid, "cwd": row[0], "path": rollout}
+
+
+def check_session_idle(target: dict, live_ids: set[tuple[str, str]], now: float | None = None) -> None:
+    """Refuse a live session: held by a terminal or running job (`live_ids` of (agent, id)), or
+    its transcript/rollout written in the last SESSION_FRESH_S seconds."""
+    if (target["agent"], target["id"]) in live_ids:
+        raise SessionBusy(f"session {target['id']} is open in a terminal or a running job")
+    path = target.get("path")
+    with contextlib.suppress(OSError):
+        if path is not None and (now or time.time()) - path.stat().st_mtime < SESSION_FRESH_S:
+            raise SessionBusy(f"session {target['id']} was written in the last 2 minutes; try again when it is idle")
+
+
+def _clean_title(title: object) -> str:
+    if not isinstance(title, str):
+        raise ProjectError("title must be text")
+    title = title.strip()
+    if not 1 <= len(title) <= 200 or any(unicodedata.category(c) == "Cc" for c in title):
+        raise ProjectError("title must be 1-200 characters with no control characters")
+    return title
+
+
+def rename_session(target: dict, title: object) -> str:
+    """Claude: append one custom-title record (what /rename writes); a short or failed write is
+    truncated back so no partial record survives. Codex: threads.name in one transaction."""
+    title = _clean_title(title)
+    if target["agent"] == "claude":
+        path = target["path"]
+        line = (json.dumps({"type": "custom-title", "customTitle": title, "sessionId": target["id"]},
+                           ensure_ascii=False, separators=(",", ":")) + "\n").encode()
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+        try:
+            st = os.fstat(fd)
+            size = st.st_size
+            try:
+                written = os.write(fd, line)
+                if written != len(line):
+                    raise OSError(f"short write ({written} of {len(line)} bytes)")
+            except BaseException:
+                os.ftruncate(fd, size)  # safe: a live session is refused, nothing else appends
+                raise
+            # Keep the times: our own write must not make the session look live (2-minute rule)
+            # or jump to the top of claude --resume (FB-03).
+            os.utime(fd, ns=(st.st_atime_ns, st.st_mtime_ns))
+        finally:
+            os.close(fd)
+        return title
+    # Codex: threads.name in one database transaction — committed whole or not at all. The shared
+    # session_index.jsonl is never written: Codex appends to it concurrently and there is no way to
+    # coordinate with it, so a failure could corrupt other sessions' entries (R24-01).
+    with CODEX_STORE_LOCK:
+        _codex_update("UPDATE threads SET name = ? WHERE id = ? AND archived = 0", (title, target["id"]))
+    return title
+
+
+CODEX_STORE_LOCK = threading.Lock()  # serializes the dashboard's Codex renames and archives
+
+
+def _codex_store_child(name: str) -> Path:
+    """A path directly inside the resolved Codex store; refused if it is (or leads through) a
+    symlink out of it (CR-02)."""
+    store = Path(os.path.realpath(CODEX_DB.parent))
+    path = store / name
+    if path.is_symlink() or Path(os.path.realpath(path)).parent != store:
+        raise ProjectError(f"{path} leads outside the Codex store; not touched")
+    return path
+
+
+def _codex_db_checked() -> Path:
+    """The Codex database, resolved, only if it stays inside the Codex store: a symlink to a
+    database elsewhere is refused before anything is read or written (UI10-04)."""
+    store = Path(os.path.realpath(CODEX_DB.parent))
+    real = Path(os.path.realpath(CODEX_DB))
+    if real.parent != store:
+        raise ProjectError(f"{CODEX_DB} leads outside the Codex store ({real}); not touched")
+    return real
+
+
+def _codex_update(sql: str, args: tuple, require_row: bool = True) -> None:
+    import sqlite3
+    try:
+        db = sqlite3.connect(str(_codex_db_checked()), timeout=5)
+        try:
+            with db:  # one transaction: committed whole or rolled back
+                if db.execute(sql, args).rowcount != 1 and require_row:
+                    raise SessionNotFound("Codex session changed meanwhile (archived or gone)")
+        finally:
+            db.close()
+    except sqlite3.Error as exc:
+        raise ProjectError(f"Codex session store write failed: {exc}") from None
+
+
+def remove_session(target: dict) -> dict:
+    """Never a hard delete. Codex: archive the thread. Claude: move the transcript, then its
+    same-named sidecar folder, into SESSION_TRASH/<slug>/; a failed second move puts the
+    transcript back. A trash on another filesystem is refused before anything moves."""
+    if target["agent"] == "codex":
+        with CODEX_STORE_LOCK:
+            return _archive_codex(target)
+    return _trash_claude(target)
+
+
+def _archive_codex(target: dict) -> dict:
+    # What Codex's own archive does: the rollout moves into archived_sessions/ and the row is
+    # archived with its new path (FB4-02). The move is undone if the database update fails.
+    rollout = target["path"]
+    archived_dir = _codex_store_child("archived_sessions")  # never a symlink out of the store (CR-02)
+    dest = archived_dir / rollout.name
+    if dest.exists() or dest.is_symlink():
+        raise ProjectError(f"{dest} already exists; not touched")
+    archived_dir.mkdir(exist_ok=True)
+    os.rename(rollout, dest)
+    try:
+        _codex_update("UPDATE threads SET archived = 1, archived_at = ?, rollout_path = ? WHERE id = ? AND archived = 0",
+                      (int(time.time()), str(dest), target["id"]))
+    except BaseException:
+        os.rename(dest, rollout)
+        raise
+    return {"archived": True, "rollout": str(dest)}
+
+
+def _trash_claude(target: dict) -> dict:
+    src = target["path"]
+    sidecar = src.with_suffix("")
+    dest_dir = SESSION_TRASH / src.parent.name
+    dest, dest_side = dest_dir / src.name, dest_dir / sidecar.name
+    if dest.exists() or dest_side.exists():
+        raise ProjectError(f"{dest_dir} already holds a session named {target['id']}; move it away first")
+    dest_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.stat(dest_dir).st_dev != os.stat(src).st_dev:
+        raise ProjectError(f"{SESSION_TRASH} is on another filesystem than {src.parent}; refusing to copy")
+    os.rename(src, dest)
+    if sidecar.is_dir() and not sidecar.is_symlink():
+        try:
+            os.rename(sidecar, dest_side)
+        except OSError:
+            os.rename(dest, src)  # put the transcript back: the session stays exactly as it was
+            raise
+    return {"trash": str(dest)}
+
+
+# ── File browser (read-only) ─────────────────────────────────────────────────
+# Listing follows git, never a raw walk. Nothing here writes: GIT_OPTIONAL_LOCKS=0 keeps
+# `git status` from refreshing the index of a worktree an agent is using.
+
+BROWSE_CAP = 2000
+PREVIEW_LIMIT = 200_000
+
+
+def browse_worktrees(project: Project) -> list[str]:
+    """'main' plus the agent worktree ids of this project (plain dirs only)."""
+    root = WORKTREE_ROOT / project.key
+    return ["main", *[n for n in _worktree_dirs(project.key) if not (root / n).is_symlink() and _IDENT.match(n)]]
+
+
+def _browse_root(project: Project, wt: str | None) -> tuple[Path, list[Path] | None]:
+    if wt in (None, "", "main"):
+        return project.path.resolve(), ([] if project.confidential else None)
+    root = worktree_path(project, wt)
+    if root.is_symlink() or not _is_worktree_of(project, root):
+        raise ProjectError(f"{wt} is not a worktree of {project.key}")
+    confidential = project.confidential or sidecar_confidential(project.key, wt) is not False
+    return root.resolve(), ([] if confidential else None)
+
+
+def _browse_path(root: Path, rel: str | None) -> tuple[str, Path]:
+    """(clean rel, resolved path) inside root; refuses absolute, `..`, `.git` and escaping links."""
+    rel = rel or ""
+    if "\0" in rel or rel.startswith(("~", "/")):
+        raise ProjectError(f"path {rel!r} is not relative to the checkout")
+    parts = [p for p in rel.split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts) or (parts and parts[0] == ".git"):
+        raise ProjectError(f"path {rel!r} is outside the checkout")
+    real = (root / "/".join(parts)).resolve()
+    if real != root and not real.is_relative_to(root):
+        raise ProjectError(f"path {rel!r} leads outside the checkout")
+    return "/".join(parts), real
+
+
+def _browse_env() -> dict:
+    return {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
+
+
+def _browse_git(root: Path, confine: list[Path] | None, *args: str) -> subprocess.CompletedProcess:
+    return _git(root, *args, check=False, confine=confine, timeout=30, env=_browse_env())
+
+
+def list_dir(project: Project, wt: str | None, rel: str | None) -> dict:
+    """One level of the checkout: {entries: [{name, kind, size, status, ignored}], more}."""
+    root, confine = _browse_root(project, wt)
+    rel, target = _browse_path(root, rel)
+    if target != root and (target.is_symlink() or not target.is_dir()):
+        raise ProjectError(f"{rel!r} is not a folder")
+    prefix = rel + "/" if rel else ""
+    if rel and _check_ignored(root, confine, [rel + "/"]):
+        raise ProjectError(f"{rel!r} is ignored by git; its contents are not listed")
+    ls = _browse_git(root, confine, "ls-files", "--cached", "--others", "--exclude-standard",
+                     "--directory", "--no-empty-directory", "-z", "--", prefix or ".")
+    if ls.returncode != 0:
+        raise ProjectError(f"git ls-files failed in {root}: {ls.stderr.strip()}")
+    names: dict[str, bool] = {}  # child name -> is a folder
+    collapsed = False  # git folded this whole folder into one untracked entry (UI8-02)
+    for path in filter(None, ls.stdout.split("\0")):
+        if not path.startswith(prefix):
+            continue
+        if prefix and path == prefix:
+            collapsed = True
+            continue
+        head, sep, _rest = path[len(prefix):].partition("/")
+        if head and head != ".git":
+            names[head] = names.get(head, False) or bool(sep)
+    status: dict[str, str] = {}
+    st = _browse_git(root, confine, "status", "--porcelain", "-z", "--untracked-files=all", "--", prefix or ".")
+    tokens = st.stdout.split("\0") if st.returncode == 0 else []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        i += 1
+        if len(tok) < 4:
+            continue
+        xy, path = tok[:2], tok[3:]
+        if xy[0] in "RC":
+            i += 1  # the rename source follows
+        if path.startswith(prefix):
+            head = path[len(prefix):].split("/", 1)[0]
+            status.setdefault(head, "?" if xy == "??" else (xy.strip() or "M")[0])
+    try:
+        on_disk = {e.name: e for e in os.scandir(target)}
+    except OSError as exc:
+        raise ProjectError(f"cannot read {rel or '.'}: {exc}") from None
+    if collapsed:  # every child of a wholly untracked folder is untracked unless git ignores it
+        kids = {n: prefix + n + ("/" if e.is_dir(follow_symlinks=False) else "") for n, e in on_disk.items() if n != ".git"}
+        ignored_kids = _check_ignored(root, confine, list(kids.values()))
+        for n, rel_n in kids.items():
+            if rel_n not in ignored_kids:
+                names[n] = on_disk[n].is_dir(follow_symlinks=False)
+                status.setdefault(n, "?")
+    extra = [n for n in on_disk if n not in names and n != ".git"]
+    ignored = _check_ignored(root, confine, [prefix + n + ("/" if on_disk[n].is_dir(follow_symlinks=False) else "")
+                                             for n in extra])
+    entries = []
+    for name in [*names, *extra]:
+        e = on_disk.get(name)
+        is_ign = name not in names
+        if is_ign and (prefix + name + ("/" if e and e.is_dir(follow_symlinks=False) else "")) not in ignored:
+            continue  # neither listed by git nor ignored: an empty folder
+        if e is None:
+            kind, size = "file", None  # tracked but deleted on disk
+        elif e.is_symlink():
+            kind, size = "link", None  # listed, never followed
+        elif e.is_dir():
+            kind, size = "dir", None
+        else:
+            kind = "file"
+            try:
+                size = e.stat(follow_symlinks=False).st_size
+            except OSError:
+                size = None
+        entries.append({"name": name, "kind": kind, "size": size, "status": status.get(name, ""), "ignored": is_ign})
+    entries.sort(key=lambda x: (x["kind"] != "dir", x["name"].lower()))
+    return {"path": rel, "entries": entries[:BROWSE_CAP], "more": max(0, len(entries) - BROWSE_CAP)}
+
+
+def _check_ignored(root: Path, confine: list[Path] | None, rels: list[str]) -> set[str]:
+    """The subset of `rels` git ignores (a trailing / marks a folder)."""
+    if not rels:
+        return set()
+    proc = _git(root, "check-ignore", "-z", "--stdin", check=False, confine=confine, timeout=30,
+                env=_browse_env(), stdin="\0".join(rels).encode() + b"\0")
+    return set(filter(None, proc.stdout.split("\0"))) if proc.returncode in (0, 1) else set()
+
+
+def read_file(project: Project, wt: str | None, rel: str | None, limit: int = PREVIEW_LIMIT) -> dict:
+    """Read-only preview: text for a text file up to `limit` bytes; size and type otherwise."""
+    import mimetypes
+    root, _confine = _browse_root(project, wt)
+    rel, real = _browse_path(root, rel)
+    if not real.is_file():
+        raise ProjectError(f"{rel!r} is not a file")
+    size = real.stat().st_size
+    kind = mimetypes.guess_type(real.name)[0]
+    out = {"path": rel, "size": size, "type": kind, "text": None, "binary": False, "too_large": size > limit}
+    if out["too_large"]:
+        return out
+    with open(real, "rb") as f:
+        data = f.read(limit + 1)
+    if b"\0" in data[:8192]:
+        out["binary"] = True
+        return out
+    try:
+        out["text"] = data.decode("utf-8")
+    except UnicodeDecodeError:
+        out["binary"] = True
+    return out
+
+
+def reveal_path(project: Project, wt: str | None, rel: str | None) -> Path:
+    """The resolved path `open -R` should show; same checks as the browser."""
+    root, _confine = _browse_root(project, wt)
+    return _browse_path(root, rel)[1]
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────

@@ -243,11 +243,23 @@ def _cached_by_stat(kind: str, path: Path, st: os.stat_result, compute: Callable
     return value
 
 
+SESSION_TRASH_DIR = Path(os.environ.get("AGENTIC_OS_SESSION_TRASH", "~/.agentic-os/session-trash")).expanduser()
+
+
+def _codex_rollouts():
+    """Every Codex rollout: live sessions and archived ones (archived threads still consumed
+    tokens and may hold the newest quota snapshot, IR19-02/R21-02)."""
+    yield from CODEX_SESSIONS_DIR.rglob("*.jsonl")
+    archived = CODEX_SESSIONS_DIR.parent / "archived_sessions"
+    if archived.is_dir():
+        yield from archived.glob("*.jsonl")
+
+
 def _claude_jsonl_files():
-    """Yield (path, stat) for every Claude project session JSONL."""
-    if not PROJECTS_DIR.exists():
-        return
-    for project_dir in PROJECTS_DIR.iterdir():
+    """Yield (path, stat) for every Claude project session JSONL, including transcripts the
+    dashboard moved to its session trash: removing a session never un-counts its usage (IR19-02)."""
+    dirs = [d for root in (PROJECTS_DIR, SESSION_TRASH_DIR) if root.exists() for d in root.iterdir()]
+    for project_dir in dirs:
         if not project_dir.is_dir():
             continue
         for jsonl_path in project_dir.glob("*.jsonl"):
@@ -623,7 +635,7 @@ def load_latest_codex_rate_limits() -> dict[str, Any]:
         # Track the most recent "limit hit" signal: limit_id != "codex" with null primary
         limit_hit_ts: datetime | None = None
 
-        for path in CODEX_SESSIONS_DIR.rglob("*.jsonl"):
+        for path in _codex_rollouts():  # archived ones too: removing a session never hides its quota snapshot (R21-02)
             try:
                 st = path.stat()
             except OSError:
@@ -760,7 +772,7 @@ def _codex_window_range(since: datetime, until: datetime) -> dict[str, Any]:
 
     if CODEX_SESSIONS_DIR.exists():
         try:
-            for path in CODEX_SESSIONS_DIR.rglob("*.jsonl"):
+            for path in _codex_rollouts():
                 try:
                     st = path.stat()
                 except OSError:

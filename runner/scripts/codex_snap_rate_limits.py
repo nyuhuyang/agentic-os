@@ -38,7 +38,8 @@ def snap() -> dict | None:
     best_ts: datetime | None = None
     best: dict = {}
 
-    for path in SESSIONS_DIR.rglob("*.jsonl"):
+    archived = SESSIONS_DIR.parent / "archived_sessions"  # a removed (archived) session may hold the newest snapshot
+    for path in [*SESSIONS_DIR.rglob("*.jsonl"), *(archived.glob("*.jsonl") if archived.is_dir() else [])]:
         try:
             lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
         except Exception:

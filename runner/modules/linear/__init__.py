@@ -184,12 +184,114 @@ def _compose_issue_description(description: str, preferred_agent: str | None) ->
     return base
 
 
+def _label_names(labels) -> list[str]:
+    """Labels as a list of names, from names, {name} dicts or a GraphQL {nodes: [...]} block."""
+    if isinstance(labels, dict):
+        labels = labels.get("nodes") or []
+    out = []
+    for label in labels or []:
+        name = label.get("name") if isinstance(label, dict) else label
+        if isinstance(name, str) and name:
+            out.append(name)
+    return out
+
+
 def _normalize_linear_issue(issue: dict) -> dict:
     normalized = dict(issue or {})
+    normalized["labels"] = _label_names(normalized.get("labels"))
     raw = normalized.get("description", "") or ""
     normalized["preferred_agent"] = _extract_issue_agent(raw)
     normalized["description"] = _strip_issue_metadata(raw)
     return normalized
+
+
+DEFAULT_PROJECT_KEY = "agentic-os"
+
+
+def _project_labels(data: dict) -> list[str]:
+    """`project:<key>` label for a new task (B). `project` omitted: the default project when it
+    is registered, else none; "" = explicitly no project (runner root). An unknown or broken
+    key raises ValueError, so nothing is created."""
+    import projects
+    import project_runs
+    key = data.get("project")
+    if key is not None and not str(key).strip():
+        return []  # explicitly no project: the registry is not read at all (FB3-02)
+    errors: dict = {}
+    try:
+        registry = projects.load_registry(errors=errors)
+    except projects.ProjectError as exc:
+        if key is None:
+            return []  # broken registry: the default falls back to the runner root
+        raise ValueError(f"project registry unreadable: {exc}") from None
+    if key is None:
+        return [f"{project_runs.LABEL_PREFIX}{DEFAULT_PROJECT_KEY}"] if DEFAULT_PROJECT_KEY in registry else []
+    key = str(key).strip()
+    if not key:
+        return []
+    if key in errors:
+        raise ValueError(f"project {key!r} is broken: {errors[key]}")
+    if key not in registry:
+        raise ValueError(f"unknown project {key!r}")
+    return [f"{project_runs.LABEL_PREFIX}{key}"]
+
+
+def unsynced_local_id(issue_id: str | None) -> bool:
+    """A task still on its local-first id while the Linear tracker is active: its Linear copy
+    is not confirmed, so it is never dispatched or retried (B, R11)."""
+    from runner.core.module_registry import registry
+    mod = registry.get("linear")
+    return bool(issue_id and str(issue_id).startswith("local-") and mod is not None
+                and getattr(mod, "_capability", {}).get("type") == "linear")
+
+
+def reserve_card(issue: dict | None, issue_id: str) -> contextlib.ExitStack:
+    """Take this card's lock now (ticket lock for a project card, card lock otherwise) and return
+    it for the dispatch to keep until the run ends. Raises TicketLocked when it is held (UI3-01)."""
+    import projects
+    import project_runs
+    from app import _durable_binding
+    issue = issue or {}
+    bound = _durable_binding(linear_issue_id=issue_id) or {}
+    raw = bound.get("project_key") or project_runs.project_key_from_labels(issue.get("labels"))
+    key = projects.registered_key(raw) if raw else None  # a label is untrusted text: lock only registered keys (FB3-01)
+    if raw and not key:
+        raise projects.ProjectError(f"unknown project {raw!r} in this card's label")
+    hold = contextlib.ExitStack()
+    try:
+        if key:
+            ident = bound.get("issue_identifier") or issue.get("identifier") or issue_id
+            hold.enter_context(projects.ticket_lock(key, ident))
+            hold.identity = ("ticket", key, ident)  # what was locked: the dispatch checks it before handing on (REV-01)
+        else:
+            hold.enter_context(projects.card_lock(issue_id))
+            hold.identity = ("card", issue_id)
+    except BaseException:
+        hold.close()
+        raise
+    return hold
+
+
+def _state_committed() -> None:
+    """The tracker accepted this request's state change (read by _tracker_reset_route)."""
+    from flask import g
+    g.tracker_state_committed = True
+
+
+def card_locked(issue: dict | None, issue_id: str) -> bool:
+    """An interactive terminal (or a running attempt) holds this card's lock (C2)."""
+    import projects
+    import project_runs
+    from app import _durable_binding
+    issue = issue or {}
+    bound = _durable_binding(linear_issue_id=issue_id) or {}
+    raw = bound.get("project_key") or project_runs.project_key_from_labels(issue.get("labels"))
+    key = projects.registered_key(raw) if raw else None
+    if raw and not key:
+        return False  # unknown project: the dispatch records that error itself (FB3-01)
+    if key:
+        return projects.card_busy(key, bound.get("issue_identifier") or issue.get("identifier") or issue_id, None)
+    return projects.card_busy(None, None, issue_id)
 
 
 def _resolve_linear_state_name(issue: dict | None, target_state_key: str) -> str | None:
@@ -238,11 +340,20 @@ def _tracker_reset_route(fn):
     @functools.wraps(fn)
     def wrapper(issue_id: str, *args, **kwargs):
         import reset_gen
+        from flask import g, make_response
         state_name = (request.get_json(silent=True) or {}).get("state_name")
         with reset_gen.issue_lock(issue_id):
-            if state_name and _linear_state_to_board(state_name) == "todo":
-                reset_gen.bump(issue_id)
-            return fn(issue_id, *args, **kwargs)
+            if not (state_name and _linear_state_to_board(state_name) == "todo"):
+                return fn(issue_id, *args, **kwargs)
+            previous = reset_gen.current(issue_id)
+            bumped = reset_gen.bump(issue_id)
+            g.tracker_state_committed = False
+            resp = make_response(fn(issue_id, *args, **kwargs))
+            # Undo only a reset whose state change never committed; a refresh failing after a
+            # committed change keeps the new generation (IR13-01, UI14-03).
+            if resp.status_code >= 400 and not g.get("tracker_state_committed"):
+                reset_gen.restore(issue_id, previous, bumped)
+            return resp
     return wrapper
 
 
@@ -581,25 +692,49 @@ class LinearModule(AgenticModule):
                 self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
             self.push_state(issue_id, "review", gen=gen)
 
-    def _start_dispatch(self, issue: dict, cfg: dict, previous_board_status) -> None:
-        """Dispatch on a counted worker (the request that asked for it was admitted by the gate)."""
+    def _start_dispatch(self, issue: dict, cfg: dict, previous_board_status, card_hold=None) -> None:
+        """Dispatch on a counted worker (the request that asked for it was admitted by the gate).
+        `card_hold`: the card's lock, already reserved by the route; the dispatch keeps it."""
         from app import _start_counted
-        _start_counted(self._dispatch_issue, issue, cfg, self._socketio, previous_board_status)
+        try:
+            _start_counted(self._dispatch_issue, issue, cfg, self._socketio, previous_board_status, card_hold)
+        except BaseException:
+            if card_hold is not None:
+                card_hold.close()
+            raise
 
-    def _dispatch_issue(self, issue: dict, cfg: dict, socketio, previous_board_status: str | None = None) -> None:
+    def _dispatch_issue(self, issue: dict, cfg: dict, socketio, previous_board_status: str | None = None,
+                        card_hold=None) -> None:
         from app import _inflight_work, MaintenanceRefused
         try:
             with _inflight_work():  # counted until its record is written (BUILD-001)
-                self._dispatch_issue_counted(issue, cfg, socketio, previous_board_status)
+                self._dispatch_issue_counted(issue, cfg, socketio, previous_board_status, card_hold)
         except MaintenanceRefused as exc:
             logger.warning("dispatch of %s refused: %s", issue.get("id"), exc)
+            if card_hold is not None:
+                card_hold.close()
 
-    def _dispatch_issue_counted(self, issue: dict, cfg: dict, socketio, previous_board_status: str | None = None) -> None:
+    def _dispatch_issue_counted(self, issue: dict, cfg: dict, socketio, previous_board_status: str | None = None,
+                                card_hold=None) -> None:
+        held = card_hold if card_hold is not None else contextlib.ExitStack()
+        try:
+            self._dispatch_issue_held(issue, cfg, socketio, held, reserved=card_hold is not None)
+        finally:
+            held.close()  # every path, including early refusals, ends the card's reservation
+
+    def _dispatch_issue_held(self, issue: dict, cfg: dict, socketio, held: contextlib.ExitStack, reserved: bool) -> None:
         import subprocess
         from app import _running_jobs, _running_procs, _python_path, RUNNER, ROOT, _load_registry, _ai_command, _agent_model, _parse_agent_output, _extract_skill_name, _write_run_log, AI_RUN_TIMEOUT_S, _extract_real_errors, _registry_exec_env, _stream_dsh_run, _dsh_ok
-        from app import _register_proc, _RunEnded, _RunClaim, _kill_group, _kill_and_reap, _write_run_log_retrying, _comment_quietly, _run_grouped
+        from app import (_RunClaim, _kill_and_reap, _write_run_log_retrying, _comment_quietly, _run_grouped,
+                         run_agent_process, _stream_for, _agent_output_format)
         issue_id = issue["id"]
         if issue_id in self.dispatched:
+            return
+        if unsynced_local_id(issue_id):
+            logger.warning("dispatch of %s refused: not synced to Linear yet", issue_id)
+            return
+        if not reserved and card_locked(issue, issue_id):
+            logger.warning("dispatch of %s refused: an interactive terminal holds the card", issue_id)
             return
         import reset_gen
         launch_gen = reset_gen.current(issue_id)
@@ -609,12 +744,20 @@ class LinearModule(AgenticModule):
                    or canonical_agent(agent_cfg.get("backend")) or "claude")
 
         import project_runs
+        import projects as projects_mod
         from app import _durable_binding
         # An issue bound by an earlier run keeps that binding whatever its labels say now (I5-03).
         bound = _durable_binding(linear_issue_id=issue_id) or {}
         project_key = bound.get("project_key") or project_runs.project_key_from_labels(issue.get("labels"))
+        if project_key and not bound.get("project_key"):  # "project:Agentic-OS" runs in agentic-os (FB3-03)
+            with contextlib.suppress(Exception):
+                project_key = projects_mod.registered_key(project_key) or project_key
         if project_key:  # project ticket: own worktree, no skill routing, one launch helper (3a)
             from app import _run_project_ticket
+            ident = bound.get("issue_identifier") or issue.get("identifier") or issue_id
+            if reserved and getattr(held, "identity", None) != ("ticket", project_key, ident):
+                held.close()  # the route locked something else (e.g. a card before the label was known, REV-01)
+                reserved = False
             run_id = str(uuid.uuid4())
             self.dispatched[issue_id] = run_id
             self.push_state(issue_id, "running", gen=launch_gen)
@@ -626,11 +769,25 @@ class LinearModule(AgenticModule):
                     prompt=f"{issue.get('identifier', '')}: {issue.get('title', '')}\n\n"
                            f"{_strip_issue_metadata(issue.get('description') or '')}",
                     title=issue.get("title", ""), run_id=run_id, linear_issue_id=issue_id,
-                    task_id=run_id, launch_gen=launch_gen)
+                    task_id=run_id, launch_gen=launch_gen,
+                    # the route's reservation goes on only if it is this very ticket's lock; otherwise
+                    # the helper takes the ticket lock itself (REV-01)
+                    ticket_hold=held.pop_all() if reserved else None)
             finally:
                 self.dispatched.pop(issue_id, None)
             return
 
+        import projects
+        card_hold = held
+        if reserved and getattr(held, "identity", None) != ("card", issue_id):  # not this card's lock (REV-01)
+            held.close()
+            reserved = False
+        if not reserved:
+            try:  # held from here through the run, so an interactive terminal or retry cannot overlap (C2, UI-02)
+                card_hold.enter_context(projects.card_lock(issue_id))
+            except projects.ProjectError as exc:
+                logger.warning("dispatch of %s refused: %s", issue_id, exc)
+                return
         try:
             registry = _load_registry(backend)
             skill_list = "\n".join(f"- {n}: {e.get('purpose', '')[:100]}" for n, e in registry.items())
@@ -686,36 +843,20 @@ class LinearModule(AgenticModule):
             entry = registry.get(selected_skill, {})
             is_entrypoint = bool(entry.get("schedule_eligible") and entry.get("entrypoint"))
             end = _RunClaim(run_id)  # cancel/stall may end the run first; then they own its side effects
-            proc = None
+            procs: list = []  # the launched process, for cleanup after a later failure
             try:
                 # Built inside the try: a missing/old dsh fails this run cleanly (error record,
                 # running/dispatch entries cleared, ticket back to review) instead of hanging as running.
                 cmd = ([_python_path(), str(RUNNER), selected_skill] if is_entrypoint else
-                       _ai_command(backend, prompt, output_format="json", skill_name=selected_skill, registry=registry))
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=str(ROOT),
-                    env=_registry_exec_env(backend, registry),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    start_new_session=True,  # its own group, so a timeout or cancel ends descendants too
-                )
-                if not _register_proc(run_id, proc):
-                    raise _RunEnded(run_id)
-                session_id = None
+                       _ai_command(backend, prompt, output_format=_agent_output_format(backend),
+                                   skill_name=selected_skill, registry=registry))
+                # One process engine (C0): streamed live like every other launch, session id kept.
+                output, it, ot, pm, session_id, stderr_s, ok = run_agent_process(
+                    run_id, cmd, stream="text" if is_entrypoint else _stream_for(backend),
+                    env=_registry_exec_env(backend, registry), on_proc=procs.append)
                 if backend == "dsh" and not is_entrypoint:
-                    output, it, ot, pm, session_id, stderr_s = _stream_dsh_run(proc, run_id, timeout=AI_RUN_TIMEOUT_S)
-                    ok = _dsh_ok(proc, output)
                     output = output or ""
                 else:
-                    try:
-                        stdout_b, stderr_b = proc.communicate(timeout=AI_RUN_TIMEOUT_S)
-                    except subprocess.TimeoutExpired:
-                        _kill_and_reap(proc)
-                        raise
-                    stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
-                    stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
-                    output, it, ot, pm = _parse_agent_output(backend, stdout_s)
                     ok = True  # other agents keep the unconditional review status
                 dur = time.monotonic() - t0
                 error_s = _extract_real_errors(stderr_s)
@@ -748,22 +889,24 @@ class LinearModule(AgenticModule):
                 socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
             except subprocess.TimeoutExpired:
                 dur = time.monotonic() - t0
-                _kill_and_reap(proc)
+                _kill_and_reap(procs[0] if procs else None)
                 if not end():
                     return
                 msg = f"Timed out after {AI_RUN_TIMEOUT_S}s"
                 _write_run_log_retrying(selected_skill, "timeout", started_at, dur, prompt=prompt, error=msg, run_id=run_id,
-                               linear_issue_id=issue_id, agent=backend, reset_generation=launch_gen)
+                               linear_issue_id=issue_id, agent=backend, reset_generation=launch_gen, agent_session_id=end.session,
+                               task_id=run_id, model=_agent_model(backend, cfg))  # findable by retry/quick reply (FB5-01)
                 _comment_quietly(self.post_comment, issue_id, _linear_comment_body(title="AgenticOS Run Timeout", prompt=prompt, error=msg))
                 self._mark_issue_review(issue_id, gen=launch_gen)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": selected_skill})
                 socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
             except Exception as e:
-                _kill_and_reap(proc)  # a failure after launch never leaves the agent running (RWS-008/010)
+                _kill_and_reap(procs[0] if procs else None)  # a failure after launch never leaves the agent running (RWS-008/010)
                 if not end():
                     return
                 _write_run_log_retrying(selected_skill, "error", started_at, 0.0, prompt=prompt, error=str(e), run_id=run_id,
-                               linear_issue_id=issue_id, agent=backend, reset_generation=launch_gen)
+                               linear_issue_id=issue_id, agent=backend, reset_generation=launch_gen, agent_session_id=end.session,
+                               task_id=run_id, model=_agent_model(backend, cfg))  # findable by retry/quick reply (FB5-01)
                 _comment_quietly(self.post_comment, issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
                 self._mark_issue_review(issue_id, gen=launch_gen)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": selected_skill})
@@ -774,6 +917,8 @@ class LinearModule(AgenticModule):
                 socketio.emit("run_state_change", {"run_id": str(uuid.uuid4()), "state": "error", "skill": "unknown"})
             except Exception:
                 pass
+        finally:
+            card_hold.close()
 
     # ── Route registration ────────────────────────────────────────────────
 
@@ -842,13 +987,17 @@ class LinearModule(AgenticModule):
             desc = _append_attachments_to_text(desc, attachments)
             pa = (data.get("agent") or "").strip().lower()
             pa = canonical_agent(pa)
+            try:  # validated before anything is created (B)
+                labels = _project_labels(data)
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
             desc = _compose_issue_description(desc, pa)
             cfg = _load_workflow_config()
             tc = cfg.get("tracker", {})
             tid = (data.get("team_id") or "").strip() or tc.get("team_id", "")
             if self._capability.get("type") == "local":
                 t = self.get_local_tracker()
-                issue = t.create_issue(title, desc, preferred_agent=pa, team_id=tid)
+                issue = t.create_issue(title, desc, preferred_agent=pa, team_id=tid, labels=labels)
                 nd = dict(issue)
                 self.issues_cache[issue["id"]] = nd
                 if tid:
@@ -863,7 +1012,7 @@ class LinearModule(AgenticModule):
                 return jsonify({"error": "team_id required"}), 400
             # Local-first: write to local tracker immediately, return to client, sync Linear in background
             local = self.get_local_tracker()
-            local_issue = local.create_issue(title, desc, preferred_agent=pa, team_id=tid)
+            local_issue = local.create_issue(title, desc, preferred_agent=pa, team_id=tid, labels=labels)
             local_id = local_issue["id"]
             self.issues_cache[local_id] = dict(local_issue)
             self._issues_by_team.setdefault(tid, {})[local_id] = dict(local_issue)
@@ -873,11 +1022,20 @@ class LinearModule(AgenticModule):
             def _bg_sync_to_linear():
                 try:
                     from linear_client import LinearClient
-                    linear_issue = LinearClient(ak, tc.get("project_slug", "")).create_issue(tid, title, desc)
+                    client = LinearClient(ak, tc.get("project_slug", ""))
+                    label_ids = []
+                    for name in labels:  # every label or no issue: a task must never lose its project (UI-01)
+                        label_id = client.ensure_label(tid, name)
+                        if not label_id:
+                            raise RuntimeError(f"Linear label {name!r} could not be resolved; task stays local")
+                        label_ids.append(label_id)
+                    linear_issue = client.create_issue(tid, title, desc, label_ids=label_ids)
                     if not linear_issue:
                         logger.warning("Linear create returned nothing for local %s", local_id)
                         return
                     n = _normalize_linear_issue(linear_issue)
+                    # The project label decides where the task runs: never lose it in the swap (B, R03).
+                    n["labels"] = sorted(set(n["labels"]) | set(labels))
                     real_id = linear_issue["id"]
                     # Persist the alias before the local id disappears, so the dashboard can always recover it.
                     record_id_alias(local_id, real_id)
@@ -931,6 +1089,10 @@ class LinearModule(AgenticModule):
         def _issues_local_patch(issue_id: str):
             """Write-only local state update, no Linear API call."""
             data = request.get_json(silent=True) or {}
+            if data.get("state_name") and _is_linear_in_progress(data["state_name"]) and (
+                    unsynced_local_id(issue_id) or card_locked(self.issues_cache.get(issue_id), issue_id)):
+                # the board writes this before its dispatching PATCH: a refused dispatch changes nothing (UI2-08)
+                return jsonify({"error": "this card cannot start now (not synced to Linear, or held by a terminal)"}), 409
             local = self.get_local_tracker()
             preferred_agent = canonical_agent(data.get("preferred_agent"))
             self._remember_local_override(issue_id, data, preferred_agent)
@@ -967,6 +1129,29 @@ class LinearModule(AgenticModule):
             cfg = _load_workflow_config()
             tc = cfg.get("tracker", {})
             preferred_agent = canonical_agent(data.get("preferred_agent"))
+            box = {"hold": None}  # the card's lock, reserved before any change and handed to dispatch (UI3-01)
+            if data.get("state_name") and _is_linear_in_progress(data["state_name"]) \
+                    and not unsynced_local_id(issue_id) and not self._issue_is_running(issue_id):
+                import projects
+                current = self.issues_cache.get(issue_id)
+                if current is None and self._capability.get("type") == "local":
+                    current = self.get_local_tracker().fetch_issue(issue_id)  # persisted, labels included (REV-01)
+                try:
+                    box["hold"] = reserve_card(current, issue_id)
+                except projects.TicketLocked:
+                    return jsonify({"error": "an interactive terminal holds this card; close it first"}), 409
+                except projects.ProjectError as exc:  # e.g. an unknown project label: say so (FB3-01)
+                    return jsonify({"error": str(exc)}), 400
+            try:
+                return _issues_patch_reserved(issue_id, data, cfg, tc, preferred_agent, box)
+            finally:
+                if box["hold"] is not None:  # not handed to a dispatch
+                    box["hold"].close()
+
+        def _issues_patch_reserved(issue_id, data, cfg, tc, preferred_agent, box):
+            def _handoff():
+                hold, box["hold"] = box["hold"], None
+                return hold
             if self._capability.get("type") == "local":
                 previous_board_status = _linear_state_to_board(self.issues_cache.get(issue_id, {}).get("state"))
                 issue = self.get_local_tracker().update_issue(
@@ -977,17 +1162,21 @@ class LinearModule(AgenticModule):
                     preferred_agent=preferred_agent,
                 )
                 if issue:
+                    _state_committed()
                     self.issues_cache[issue_id] = issue
                     if self._socketio:
                         self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
                     if data.get("state_name") and _is_linear_in_progress(data["state_name"]) and not self._issue_is_running(issue_id):
                         self.dispatched.pop(issue_id, None)
-                        self._start_dispatch(issue, cfg, previous_board_status)
+                        self._start_dispatch(issue, cfg, previous_board_status, card_hold=_handoff())
                     return jsonify({"ok": True, "issue": issue})
                 return jsonify({"error": "not found"}), 404
             ak = _linear_api_key_from_cfg(tc)
             if not ak:
                 return jsonify({"error": "not configured"}), 400
+            if data.get("state_name") and _is_linear_in_progress(data["state_name"]) and unsynced_local_id(issue_id):
+                # refused before any override or cache change (B, UI2-08)
+                return jsonify({"error": "not synced to Linear yet; try again in a moment"}), 409
             self._remember_local_override(issue_id, data, preferred_agent)
 
             # ── Local-first: update local + dispatch immediately ──────────
@@ -1009,7 +1198,7 @@ class LinearModule(AgenticModule):
                     self._issues_by_team[tid][issue_id] = cached
                 if not self._issue_is_running(issue_id):
                     self.dispatched.pop(issue_id, None)
-                    self._start_dispatch(cached, cfg, previous_board_status)
+                    self._start_dispatch(cached, cfg, previous_board_status, card_hold=_handoff())
                 import reset_gen
                 from app import _start_counted
                 _start_counted(self._linear_sync_patch, issue_id, data, cfg, preferred_agent,
@@ -1035,7 +1224,11 @@ class LinearModule(AgenticModule):
                 if updates:
                     cl.update_issue(issue_id, **updates)  # type: ignore[arg-type]
                 if data.get("state_name"):
-                    cl.update_issue_state(issue_id, data["state_name"])
+                    if not cl.update_issue_state(issue_id, data["state_name"]):
+                        # Linear refused (or could not resolve) the state: say so, keep no masking override (UI11-01)
+                        self._local_overrides.pop(issue_id, None)
+                        return jsonify({"error": f"Linear did not accept state {data['state_name']!r}"}), 502
+                    _state_committed()
                 issue = cl.fetch_issue(issue_id)
                 if issue:
                     n = _normalize_linear_issue(issue)
@@ -1141,6 +1334,7 @@ class LinearModule(AgenticModule):
                     description=n.get("description"),
                     state_name=n.get("state"),
                     preferred_agent=n.get("preferred_agent"),
+                    labels=sorted(set(n.get("labels") or []) | set(existing.get("labels") or [])),
                 )
             else:
                 data = {
@@ -1151,6 +1345,7 @@ class LinearModule(AgenticModule):
                     "state": n.get("state", "Todo"),
                     "url": issue.get("url", ""),
                     "preferred_agent": n.get("preferred_agent"),
+                    "labels": n.get("labels") or [],
                     "team_id": issue.get("team_id", ""),
                     "team_key": issue.get("team_key", ""),
                     "team_name": issue.get("team_name", ""),
