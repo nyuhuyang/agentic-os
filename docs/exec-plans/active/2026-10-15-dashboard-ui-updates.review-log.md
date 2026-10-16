@@ -1840,3 +1840,47 @@ Lesson from runner-write-safety (10 inspections): later rounds drift into inject
 ## Status after the extension (2026-10-16)
 - 25 inspection rounds used (20 + 5 extension). Last Codex inspection with a verdict: 24 (2 medium, fixed). Fixes after it: R24-01/R24-02, FB5-01, the confirm text — reviewed by Claude fallback 25b (FB5-01 found, fixed) and by DeepSeek (APPROVED), not by Codex.
 - Open: one Codex cross-provider inspection of the final state (Codex quota returns 11:07); plan items 23/24/25/74 (native pickers), 125 (live Linear label).
+
+## Inspection 26 (fresh Codex, on commit 56244cd) — REVISE (2 medium)
+- Result: /private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/43734fe6-827b-4456-8612-0540ddad69af/scratchpad/claudex/i26/claudex-i527h8rt/result.json (assurance cross_provider)
+```json
+{
+ "verdict": "REVISE",
+ "summary": "Two concrete defects remain in stderr activity handling and durable terminal replay.",
+ "findings": [
+  {
+   "id": "FINAL-01",
+   "severity": "medium",
+   "path": "runner/app.py:804",
+   "evidence": "_StderrSink publishes live stderr lines without refreshing last_progress_at. Only stdout publication refreshes that timestamp. A command reporting progress on stderr while stdout remains quiet for five minutes is therefore killed by stall_detection.check_once, despite continuing to produce visible activity and having a default process deadline of 30 minutes. Project stderr also bypasses the heartbeat-updating _emit callback.",
+   "fix": "Refresh the running job's heartbeat when stderr activity arrives, independently of display truncation limits. Apply the same behavior to project runs and cover stderr-only activity against the stall check."
+  },
+  {
+   "id": "FINAL-02",
+   "severity": "medium",
+   "path": "runner/app.py:3494",
+   "evidence": "Live stdout and stderr share the event ring's sequence, but durable storage retains stdout separately from an unsequenced stderr tail. _replay_lines renders all stdout first and appends stderr afterward. Consequently, a live sequence of 'starting', stderr 'temporary failure', then 'recovered' replays as 'starting', 'recovered', 'temporary failure'. This occurs below every truncation limit and also places failed-resume diagnostics after successful fallback output, contradicting Part C's replay-consistency requirement.",
+   "fix": "Persist a combined ordered event stream, or retain ordering metadata sufficient to merge stdout and stderr during replay. Preserve the existing raw stdout contract separately and verify interleaved output and fallback replay."
+  }
+ ],
+ "coverage": [
+  "Verified the plan digest, all 21 manifest file hashes, and the tracked-diff digest.",
+  "Reviewed every manifest file's changes, all added test sources, and relevant surrounding implementation.",
+  "Traced session mutations, confinement, live-session checks, PTY ownership, locks, finalization, and closure audits.",
+  "Traced project labels through creation, synchronization, local backups, dispatch, and lock handoff.",
+  "Traced process-engine callers, retry/fallback, interruption records, streaming, replay, history, and terminal callbacks.",
+  "Inspected project selection, file browsing, Run tests wording, and related state callers in state_io.py, run_skill.py, dsh_cli.py, and stall_detection."
+ ],
+ "limitations": [
+  "Static inspection only: no edits, tests, delegation, browser operations, or native CLI operations.",
+  "Historical test-pass and manual-validation claims were not independently verified.",
+  "Native resume-picker behavior and live Linear API semantics remain unverified.",
+  "SPEC.md and broader architecture documents were not inspected; fidelity was assessed against the supplied plan and inspected implementation contracts."
+ ]
+}
+```
+
+### Dispositions (host Claude; both fixed)
+- FINAL-01 fixed: every stderr line (engine and project runs, before any display cap) refreshes the job's `last_progress_at`. Test `test_stderr_activity_is_progress`.
+- FINAL-02 fixed: each kept stderr line records the stdout log's size when it arrived; replay merges stderr back at that position (older plain-string entries go last). Test `test_replay_keeps_stdout_and_stderr_in_their_live_order`.
+- Proof: 577 passed.

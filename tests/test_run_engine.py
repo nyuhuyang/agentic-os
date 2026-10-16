@@ -34,6 +34,15 @@ FAKE_CLI = textwrap.dedent('''
         out({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 2}})
     elif agent == "slowerr":  # complains on stderr, then hangs past the deadline
         print("warning: retrying upstream", file=sys.stderr, flush=True); time.sleep(30)
+    elif agent == "interleaved":  # stdout, then a stderr warning, then more stdout
+        out({"type": "assistant", "message": {"content": [{"type": "text", "text": "starting"}]}})
+        time.sleep(0.3)
+        print("temporary failure", file=sys.stderr, flush=True)
+        time.sleep(0.3)
+        out({"type": "assistant", "message": {"content": [{"type": "text", "text": "recovered"}]}})
+    elif agent == "errquiet":  # only stderr activity for a while, stdout silent
+        for _ in range(4):
+            print("still working", file=sys.stderr, flush=True); time.sleep(0.3)
     elif agent == "failing":  # reports its failure on stderr only
         print("Error: not logged in", file=sys.stderr); sys.exit(1)
     elif agent == "noisy":  # a CLI that floods stderr before it closes stdout
@@ -269,7 +278,7 @@ def test_stderr_survives_a_timeout_and_a_later_attempt(eng, tmp_path):
     assert "[stderr] warning: retrying upstream" in plain(pr.RUN_EVENTS["st"].snapshot())  # live (UI8-03)
     app_mod.run_agent_process("st", [sys.executable, str(tmp_path / "fake_cli.py"), "claude", "ok"], stream="claude", timeout=20)
     meta = json.loads(app_mod._stream_meta_path("st").read_text())
-    assert meta["stderr_tail"] == ["warning: retrying upstream"] and meta["format"] == "claude"  # kept (UI8-04)
+    assert [e["line"] for e in meta["stderr_tail"]] == ["warning: retrying upstream"] and meta["format"] == "claude"  # kept (UI8-04)
     app_mod._running_jobs.pop("st")
     pr.RUN_EVENTS.clear()
     assert "[stderr] warning: retrying upstream" in plain(app_mod._replay_lines("st", "claude"))
@@ -319,3 +328,21 @@ def test_codex_last_message_comes_from_the_stream_log(eng):
     rec = {"run_id": "cx-last", "agent": "codex", "status": "review", "output": "Shall I start?\n\nDone.\n\nAll green."}
     assert app_mod._assistant_text(rec) == "Done.\n\nAll green."  # the real last message, paragraphs kept (R20-03)
     assert pr.waiting_question(app_mod._assistant_text(rec)) is None
+
+
+def test_replay_keeps_stdout_and_stderr_in_their_live_order(eng, tmp_path):
+    app_mod, *_ = eng
+    app_mod._running_jobs["il"] = {"run_id": "il"}
+    app_mod.run_agent_process("il", [sys.executable, str(tmp_path / "fake_cli.py"), "interleaved", "ok"], stream="claude", timeout=20)
+    live = plain(pr.RUN_EVENTS["il"].snapshot())
+    assert live == ["starting", "[stderr] temporary failure", "recovered"]
+    app_mod._running_jobs.pop("il")
+    pr.RUN_EVENTS.clear()
+    assert plain(app_mod._replay_lines("il", "claude")) == live  # FINAL-02
+
+
+def test_stderr_activity_is_progress(eng, tmp_path):
+    app_mod, *_ = eng
+    app_mod._running_jobs["eq"] = {"run_id": "eq", "last_progress_at": 0.0}
+    app_mod.run_agent_process("eq", [sys.executable, str(tmp_path / "fake_cli.py"), "errquiet", "ok"], stream="claude", timeout=20)
+    assert app_mod._running_jobs["eq"]["last_progress_at"] > 0  # the stall pass sees it working (FINAL-01)

@@ -805,7 +805,15 @@ class _StderrSink:
         if not ln.strip():
             return
         ln = ln[:300]
-        self.tail.append(ln)
+        job = _running_jobs.get(self.run_id) if self.run_id else None
+        if job is not None:
+            job["last_progress_at"] = time.monotonic()  # stderr activity is progress too (FINAL-01)
+        # Where it fell in stdout: the stream log's size now, so replay can put it back in order (FINAL-02).
+        try:
+            pos = _claude_stream_log_path(self.run_id).stat().st_size if self.run_id else 0
+        except OSError:
+            pos = 0
+        self.tail.append({"pos": pos, "line": ln})
         if self.run_id and self.shown < STDERR_LIVE_LINES:
             self.shown += 1
             shown = f"\x1b[31m[stderr] {ln}\x1b[0m"
@@ -3499,15 +3507,30 @@ def _replay_lines(run_id: str, agent: str | None) -> list[str]:
         return []
     meta = read_json(_stream_meta_path(run_id)) or {}
     fmt = meta.get("format") or _stream_for(agent)
+    size = log.stat().st_size
+    start = max(0, size - REPLAY_BYTES)
     with log.open("rb") as f:
-        f.seek(max(0, log.stat().st_size - REPLAY_BYTES))  # ponytail: tail only; very long runs lose their start
-        raw = f.read().decode("utf-8", "replace").splitlines()
-    if log.stat().st_size > REPLAY_BYTES and raw:
-        raw = raw[1:]  # the first line may be cut in half
+        f.seek(start)  # ponytail: tail only; very long runs lose their start
+        chunk = f.read()
+    if start and b"\n" in chunk:  # the first line may be cut in half
+        cut = chunk.index(b"\n") + 1
+        chunk, start = chunk[cut:], start + cut
+    raw = chunk.decode("utf-8", "replace").split("\n")
+    if raw and raw[-1] == "":
+        raw.pop()
+    # stderr lines go back where they arrived: each records the stdout log's size at that moment
+    # (FINAL-02); entries from an older format (plain strings) go last.
+    errs = [e if isinstance(e, dict) else {"pos": float("inf"), "line": e} for e in meta.get("stderr_tail") or []]
+    errs.sort(key=lambda e: e.get("pos", float("inf")))
+    shown_err = lambda e: f"\x1b[31m[stderr] {e.get('line', '')}\x1b[0m"
     out: list[str] = []
+    offset = start
     for line in raw:
+        while errs and errs[0].get("pos", float("inf")) <= offset:
+            out.append(shown_err(errs.pop(0)))
         out.extend(project_runs.render_event(fmt, line))
-    return out + [f"\x1b[31m[stderr] {ln}\x1b[0m" for ln in meta.get("stderr_tail") or []]
+        offset += len(line.encode("utf-8")) + 1
+    return out + [shown_err(e) for e in errs]
 
 
 def card_run_for_session(agent: str, session_id: str) -> str | None:
