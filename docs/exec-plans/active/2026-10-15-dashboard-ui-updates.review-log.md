@@ -2167,3 +2167,17 @@ Lesson from runner-write-safety (10 inspections): later rounds drift into inject
 - Ceiling: the dedup set is in-page, so a reload before the tab is closed offers the choice once more.
 - Proof: `node --check` on the inline scripts passes.
 - Card-terminal and terminal tests pass.
+
+## Inspection 36 — Codex (cross_provider), REVISE (2026-10-16)
+- Result: `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/43734fe6-827b-4456-8612-0540ddad69af/scratchpad/claudex/i36/claudex-ynwe461e/result.json`. Marked `failed` ("Code changed during inspection") only because of the other session's plan-file edits; the findings stand.
+- UI36-01 (medium): a card-only interactive session (not shown in the panel) that exits while the detail view is closed is never offered its choice. Neither `term_exit` handler knows it, and reopening the card looks only for live terminals.
+- UI36-02 (low): the card's End session acknowledgement called `_cardTermEnded` directly, bypassing the UI35 dedup.
+
+### Disposition (host Claude)
+- UI36-01:
+  - The pending choice is now kept on the server. An exited card terminal stays in `TERMINALS` until it is closed, and that terminal is the record that a choice is owed.
+  - `_cardTermOpen` attaches the card's exited terminal when there is no live one. The `alive=false` ack then shows the choice, with the scrollback.
+  - Once a choice is saved, `_cardTermForget` closes that exited terminal (re-checked `alive=false` first, never a live one) and drops its panel tab. So it is not offered again, and a reload no longer re-offers it.
+  - `endedTermId` is reset with the card binding and restored when a save fails.
+- UI36-02: End session's ack goes through `_offerCardNext`.
+- Proof: `node --check` passes; card-terminal and terminal tests pass.

@@ -4392,7 +4392,7 @@ function openCardTerminal(runId) {
 }
 function _cardTermBind(runId, run, item) {
   _cardTermDetach();
-  Object.assign(_cardTerm, { gen: _cardTerm.gen + 1, runId, run, item, data: null, viewRunId: null, latestRunId: null, endedRunId: null });
+  Object.assign(_cardTerm, { gen: _cardTerm.gen + 1, runId, run, item, data: null, viewRunId: null, latestRunId: null, endedRunId: null, endedTermId: null });
   document.getElementById('detail-term-pinned').textContent = '';
   document.getElementById('detail-term-status').textContent = '';
   document.getElementById('detail-term-reply').value = '';  // a reply typed for one card never goes to another (UI3-05)
@@ -4426,8 +4426,16 @@ async function _cardTermOpen() {
   const gen = _cardTerm.gen, key = _cardKey();
   if (!_cardTerm.runId) return;
   await _cardTermAttempts(gen);
-  const live = (await _cardTermList()).find(i => i.kind === 'resume' && i.alive !== false && i.card_key === key);
+  const terms = (await _cardTermList()).filter(i => i.kind === 'resume' && i.card_key === key);
+  const live = terms.find(i => i.alive !== false);
+  // an exited session stays on the server until its choice is applied: it is the pending choice (UI36-01)
+  const ended = terms.find(i => i.alive === false);
   if (!_cardTermCurrent(gen)) return;
+  if (!live && ended) {
+    const owner = ended.run_id || _cardTerm.runId;
+    if (await _cardTermUse(owner, gen) && _cardTerm.viewRunId === owner) _cardTermAttach(ended.term_id, gen);
+    return;
+  }
   if (live) {  // the open interactive session wins, shown as the attempt it belongs to (IR13-02)
     const owner = live.run_id || _cardTerm.runId;
     // attach only if its attempt is still the one selected when its metadata lands (UI15-01)
@@ -4539,11 +4547,12 @@ function _cardTermEnd() {
     if (tab && !(res && res.error && !/unknown/.test(res.error))) { tab.term.dispose(); tab.el.remove(); _tabs.delete(termId); _renderTabStrip(); }
     if (!_cardTermCurrent(gen)) return;
     if (res && res.error && !/unknown/.test(res.error)) { document.getElementById('detail-term-status').textContent = res.error; return; }
-    _cardTermEnded((res && res.run_id) || owner);  // the closed terminal's run, from the server (UI14-02)
+    _offerCardNext(termId, (res && res.run_id) || owner);  // the closed terminal's run, from the server (UI14-02); once (UI36-02)
   });
 }
 function _cardTermEnded(runId) {
   _cardTerm.endedRunId = runId || _cardTerm.viewRunId || _cardTerm.runId;  // the choice belongs to this run (UI12-03)
+  _cardTerm.endedTermId = _cardTerm.termId;  // ... and keeps this exited terminal until it is applied (UI36-01)
   document.getElementById('detail-term-end').style.display = 'none';
   // shown only while that run is the selected attempt (UI14-02)
   if ((_cardTerm.viewRunId || _cardTerm.runId) === _cardTerm.endedRunId) document.getElementById('detail-term-next').style.display = '';
@@ -4552,6 +4561,7 @@ function _cardTermNext(next) {
   // The server already recorded "interactive session ended" when the terminal closed (UI2-05/06);
   // this only applies the user's choice through the board's usual move.
   const runId = _cardTerm.endedRunId || _cardTerm.viewRunId || _cardTerm.runId, issueId = (_cardTerm.run || {}).linear_issue_id;
+  const endedTerm = _cardTerm.endedTermId;
   document.getElementById('detail-term-next').style.display = 'none';
   _cardTerm.endedRunId = null;  // the choice is being applied; a reload must not offer it again
   const status = document.getElementById('detail-term-status');
@@ -4566,12 +4576,13 @@ function _cardTermNext(next) {
   const gen = _cardTerm.gen;
   save.then(r => {
     refreshJobBoard(true);
+    if (r.ok && r.data.ok !== false) _cardTermForget(endedTerm);
     if (!_cardTermCurrent(gen)) return;  // the user moved to another card meanwhile (UI11-04)
     const sameAttempt = (_cardTerm.viewRunId || _cardTerm.runId) === runId;  // ... or to another attempt (UI12-03)
     if (!r.ok || r.data.ok === false) {
       if (!sameAttempt) return;
       status.textContent = `could not save: ${r.data.error || 'HTTP ' + r.status} — choose again`;
-      _cardTerm.endedRunId = runId;
+      _cardTerm.endedRunId = runId; _cardTerm.endedTermId = endedTerm;
       document.getElementById('detail-term-next').style.display = '';
       return;
     }
@@ -4589,6 +4600,16 @@ function _offerCardNext(termId, runId) {
   _offeredTerms.add(termId);  // before any async work: the close ack and term_exit race (UI35-02)
   if (_cardTerm.termId === termId) _cardTermEnded(_cardTerm.viewRunId);
   else _promptCardNext(runId);
+}
+function _cardTermForget(termId) {  // the choice is applied: drop the exited terminal that kept it pending (UI36-01)
+  if (!termId) return;
+  socket.emit('term_list', {}, list => {
+    if (!(list || []).some(i => i.term_id === termId && i.alive === false)) return;  // never close a live one
+    socket.emit('term_close', { term_id: termId }, () => {
+      const tab = _tabs.get(termId);
+      if (tab) { tab.term.dispose(); tab.el.remove(); _tabs.delete(termId); _renderTabStrip(); }
+    });
+  });
 }
 async function _promptCardNext(runId) {  // a card's session closed from the panel: same choice as in the card (UI2-05)
   await openDetailModal(runId);
