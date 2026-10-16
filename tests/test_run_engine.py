@@ -72,7 +72,11 @@ def test_renderer_turns_each_format_into_terminal_lines():
     assert out[0].startswith("\x1b[2m") and len(plain(out)[0]) < 220  # dim and truncated
     err_res = json.dumps({"type": "user", "message": {"content": [{"type": "tool_result", "is_error": True, "content": "boom"}]}})
     assert r("claude", err_res)[0].startswith("\x1b[31m")
-    assert plain(r("claude", json.dumps({"type": "result", "is_error": True}))) == ["[result] error"]
+    assert plain(r("claude", json.dumps({"type": "result", "is_error": True}))) == ["[result] error: error"]
+    assert plain(r("claude", json.dumps({"type": "result", "is_error": True, "result": "API overloaded"}))) \
+        == ["[result] error: API overloaded"]
+    failed = r("codex", json.dumps({"type": "turn.failed", "error": {"message": "context window exceeded"}}))
+    assert plain(failed) == ["[result] error: context window exceeded"] and failed[0].startswith("\x1b[31m")  # REV30-01
     cmd = {"type": "command_execution", "command": "ls", "aggregated_output": "a b", "exit_code": 0}
     assert plain(r("codex", json.dumps({"type": "item.started", "item": cmd}))) == ["[tool] shell ls"]  # while it runs
     assert plain(r("codex", json.dumps({"type": "item.completed", "item": cmd}))) == ["  ↳ a b"]  # no duplicate call line
@@ -414,3 +418,12 @@ def test_codex_tool_results_from_every_payload_field():
     assert plain(out) == ["  ↳ failed: boom"] and out[0].startswith("\x1b[31m")  # REVIEW-01
     collab_ok = {**collab, "agents_states": {"a1": {"status": "completed", "message": "all green"}}}
     assert plain(r({"type": "item.completed", "item": collab_ok})) == ["  ↳ all green"]
+
+
+def test_failed_codex_turn_reason_survives_replay(eng):
+    app_mod, *_ = eng
+    log = app_mod._claude_stream_log_path("tf")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text(json.dumps({"type": "turn.failed", "error": {"message": "context window exceeded"}}) + "\n")
+    app_mod._stream_meta_path("tf").write_text(json.dumps({"format": "codex"}))
+    assert plain(app_mod._replay_lines("tf", "codex")) == ["[result] error: context window exceeded"]

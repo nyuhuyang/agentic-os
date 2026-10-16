@@ -2002,3 +2002,40 @@ Lesson from runner-write-safety (10 inspections): later rounds drift into inject
 ### Disposition (host Claude; fixed)
 - REVIEW-01 fixed: completed Codex tool items render their payload per type — MCP text content or else `structured_content`, collab `agents_states` (an errored child state turns the line red with its error), web_search `results` — and dict/list payloads print as bounded JSON. Test `test_codex_tool_results_from_every_payload_field`.
 - Proof: 581 passed.
+
+## Inspection 30 (fresh Codex, on commit 0ad0517) — REVISE (1 medium)
+- Result: /private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/43734fe6-827b-4456-8612-0540ddad69af/scratchpad/claudex/i30/claudex-j9nxnn2g/result.json (assurance cross_provider)
+```json
+{
+ "verdict": "REVISE",
+ "summary": "One material gap remains in Codex terminal error reporting.",
+ "findings": [
+  {
+   "id": "REV30-01",
+   "severity": "medium",
+   "path": "runner/project_runs.py:255",
+   "evidence": "A supported event such as {\"type\":\"turn.failed\",\"error\":{\"message\":\"context window exceeded\"}} falls through render_event to normalize_event, which replaces its diagnostic with only '[result] error'. Both live output and replay therefore hide the failure reason. Codex can emit this diagnostic directly from turn completion without a preceding top-level error event. See the [official event producer](https://github.com/openai/codex/blob/rust-v0.162.0/codex-rs/exec/src/event_processor_with_jsonl_output.rs#L517). Existing renderer tests do not cover this nested error payload.",
+   "fix": "Handle turn.failed explicitly, rendering bounded error.message content with error styling. Add representative coverage for a failed turn without a preceding top-level error, including durable replay."
+  }
+ ],
+ "coverage": [
+  "Verified the plan SHA256, all 21 manifest file hashes, and tracked-diff SHA256 against disk.",
+  "Reviewed the supplied plan, review log, implementation changes, all added test sources, and affected existing test changes.",
+  "Traced session mutations, confinement, live-session admission, PTY ownership, locking, finalization, and closure audits.",
+  "Traced project labels through creation, synchronization, backups, dispatch, and lock handoff.",
+  "Inspected process-engine callers, interruption records, streaming, replay, history, terminal callbacks, project selection, and file browsing.",
+  "Followed related state writers and watchdog behavior in state_io.py, run_skill.py, and stall_detection.",
+  "Compared Codex rendering with its official versioned event schema and producer."
+ ],
+ "limitations": [
+  "Static inspection only: no edits, tests, delegation, browser operations, or native CLI operations.",
+  "Historical test-pass and manual-validation claims were not independently verified.",
+  "Native resume-picker behavior and live Linear API behavior remain unverified.",
+  "SPEC.md and broader architecture documents were not inspected; fidelity was assessed against the supplied plan and inspected implementation contracts."
+ ]
+}
+```
+
+### Disposition (host Claude; fixed)
+- REV30-01 fixed: a Codex `turn.failed` renders its `error.message` (red), live and in replay; the same for a failed Claude `result` event (its `result` text). Tests: renderer cases + `test_failed_codex_turn_reason_survives_replay`.
+- Proof: 582 passed.

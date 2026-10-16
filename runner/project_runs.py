@@ -377,6 +377,12 @@ def render_event(fmt: str, line: str) -> list[str]:
         return lines
     if fmt in ("codex", "dsh") and t == "error":  # errors are always visible, live and in replay (UI2-09)
         return [f"{_RED}[error] {_tool_result_text(ev.get('message') or 'error')}{_RESET}"]
+    if fmt == "codex" and t == "turn.failed":  # the reason, not just "error" (REV30-01)
+        err = ev.get("error")
+        msg = err.get("message") if isinstance(err, dict) else err
+        return [f"{_RED}[result] error: {_tool_result_text(msg or 'turn failed')}{_RESET}"]
+    if fmt == "claude" and t == "result" and ev.get("is_error"):  # likewise for a failed Claude turn
+        return [f"{_RED}[result] error: {_tool_result_text(ev.get('result') or ev.get('subtype') or 'error')}{_RESET}"]
     shown = normalize_event(fmt, line)
     if not shown:
         return extra
