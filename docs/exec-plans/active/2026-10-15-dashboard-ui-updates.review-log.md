@@ -2152,3 +2152,18 @@ Lesson from runner-write-safety (10 inspections): later rounds drift into inject
   - Ceiling: `offered` lives in the tab, so after a reload an already-offered choice is offered once more on close.
 - DR-02 fixed: Retry reloads every failed path that is the root or is still expanded.
 - Proof: `node --check` on the page's inline scripts passes; card-terminal, terminals and project-browser tests pass.
+
+## Inspection 35 — Codex (cross_provider), REVISE (2026-10-16)
+- Result: `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/43734fe6-827b-4456-8612-0540ddad69af/scratchpad/claudex/i35/claudex-il1vm4jd/result.json`. The runner marked it `failed` ("Code changed during inspection") only because another session edited its own plan files (`2026-10-16-session-to-board*`) while this ran. No file of this build changed, so the findings stand.
+- UI35-01 (medium): after a socket reconnect, an existing panel tab kept its stale `live` status, so a missed `term_exit` was never seen and closing the tab offered no choice. The embedded card view's reconnect `term_attach` likewise ignored `alive=false`.
+- UI35-02 (low): an explicit close of a live card session offered the choice twice, once from `term_exit` (the reader wakes during the kill) and once from the close acknowledgement.
+
+### Disposition (host Claude)
+- One handler, `_offerCardNext(termId, runId)`, now carries every path:
+  - panel `term_exit`, card `term_exit`, reconnect reconciliation, the card's reconnect `term_attach` ack, and tab close.
+  - It dedups by terminal id, recording the offer before any async work. It shows the choice in the card view when that view shows the terminal, and otherwise opens the card.
+- UI35-01: on reconnect, `_addTab` merges the server's info into an existing tab. A tab that was live and is now dead is marked exited and offered. The card view's reconnect `term_attach` checks `alive=false` the same way.
+- UI35-02: `term_exit` and the close ack both go through the dedup.
+- Ceiling: the dedup set is in-page, so a reload before the tab is closed offers the choice once more.
+- Proof: `node --check` on the inline scripts passes.
+- Card-terminal and terminal tests pass.

@@ -4213,7 +4213,12 @@ applyTerminalHeight(loadTerminalHeight());
 const socket = io({ auth: { token: window.AGENTIC_OS_TOKEN } });
 
 function _addTab(info) {
-  if (_tabs.has(info.term_id)) return _tabs.get(info.term_id);
+  if (_tabs.has(info.term_id)) {  // a reconnect: the server's view wins, a missed exit included (UI35-01)
+    const t = _tabs.get(info.term_id);
+    t.info = { ...t.info, ...info };
+    if (info.alive === false && t.status === 'live') { t.status = 'exited'; _renderTabStrip(); _tabEnded(t); }
+    return t;
+  }
   const el = document.createElement('div');
   el.className = 'term-pane';
   terminalEl.appendChild(el);
@@ -4284,9 +4289,8 @@ function closeTab(tid) {
   if (t.status === 'live' && t.info.kind !== 'run' && !confirm('Close this terminal and kill its processes?')) return;
   socket.emit('term_close', { term_id: tid }, res => {
     if (res && res.error && !/unknown/.test(res.error)) { t.status = 'failed'; _renderTabStrip(); alert(res.error); return; }
-    if (res && res.run_id) _promptCardNext(res.run_id);
-    // a card session that exited unseen (e.g. before a reload): its choice is still owed (DR-01)
-    else if (t.status === 'exited' && t.info.kind === 'resume' && t.info.run_id && !t.offered) _promptCardNext(t.info.run_id);
+    // closing a card session ends it: offer its choice unless its exit already did (DR-01, UI35-02)
+    if (t.info.kind === 'resume') _offerCardNext(tid, (res && res.run_id) || t.info.run_id);
     t.term.dispose(); t.el.remove(); _tabs.delete(tid);
     if (_activeTab === tid) { _activeTab = null; const next = _tabs.keys().next().value; if (next) activateTab(next); }
     _renderTabStrip();
@@ -4370,15 +4374,9 @@ socket.on('term_output', (d) => {
 });
 socket.on('term_exit', (d) => {
   const t = _tabs.get(d.term_id);
-  if (t) { t.status = 'exited'; t.term.writeln(`\r\n[process exited${d.exit_code != null ? ' ' + d.exit_code : ''}]`); _renderTabStrip(); }
-  // A card session that exited by itself is offered Mark done / Todo / Review once: by the card
-  // view when it shows this terminal, otherwise from here (DR-01).
-  // ponytail: "offered" lives in the tab, so a reload before the tab is closed offers it once more
-  if (t && t.info.kind === 'resume' && t.info.run_id && !t.offered) {
-    t.offered = true;
-    if (_cardTerm.termId !== d.term_id) _promptCardNext(t.info.run_id);
-  }
+  if (t) { t.status = 'exited'; t.term.writeln(`\r\n[process exited${d.exit_code != null ? ' ' + d.exit_code : ''}]`); _renderTabStrip(); _tabEnded(t); }
 });
+function _tabEnded(t) { if (t.info.kind === 'resume') _offerCardNext(t.info.term_id, t.info.run_id); }
 
 socket.on('run_logged', () => { refreshJobBoard(); });
 
@@ -4581,6 +4579,17 @@ function _cardTermNext(next) {
   });
   if (runId) _cardTermLoad(runId);
 }
+// A card session's end offers Mark done / Todo / Review once per terminal, whichever of its exit,
+// a reconnect or its close is seen first: in the card view when it shows that terminal,
+// otherwise by opening the card (DR-01, UI35-01/02).
+// ponytail: in-page only, so a reload before the tab is closed offers it once more
+const _offeredTerms = new Set();
+function _offerCardNext(termId, runId) {
+  if (!runId || _offeredTerms.has(termId)) return;
+  _offeredTerms.add(termId);  // before any async work: the close ack and term_exit race (UI35-02)
+  if (_cardTerm.termId === termId) _cardTermEnded(_cardTerm.viewRunId);
+  else _promptCardNext(runId);
+}
 async function _promptCardNext(runId) {  // a card's session closed from the panel: same choice as in the card (UI2-05)
   await openDetailModal(runId);
   switchOutputTab('terminal');
@@ -4631,11 +4640,18 @@ socket.on('term_output', (d) => {
 socket.on('term_exit', (d) => {
   if (_cardTerm.termId === d.term_id) {
     if (_cardTerm.xterm) _cardTerm.xterm.writeln('\r\n[session exited]');
-    _cardTermEnded(_cardTerm.viewRunId);
+    _offerCardNext(d.term_id, _cardTerm.viewRunId);
   }
 });
 socket.on('connect', () => {  // a reconnect rejoins the embedded session (UI-07) or reloads the run view (UI11-03)
-  if (_cardTerm.mode === 'interactive' && _cardTerm.termId) socket.emit('term_attach', { term_id: _cardTerm.termId });
+  if (_cardTerm.mode === 'interactive' && _cardTerm.termId) {
+    const tid = _cardTerm.termId;
+    socket.emit('term_attach', { term_id: tid }, info => {  // it may have exited while disconnected (UI35-01)
+      if (!info || info.alive !== false || _cardTerm.termId !== tid) return;
+      if (_cardTerm.xterm) _cardTerm.xterm.writeln('\r\n[session exited]');
+      _offerCardNext(tid, _cardTerm.viewRunId);
+    });
+  }
   else if (_cardTerm.mode === 'run' && _cardTerm.viewRunId && _isModalOpen('detail-modal')) _cardTermLoad(_cardTerm.viewRunId);
 });
 
