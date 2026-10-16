@@ -2138,3 +2138,17 @@ Lesson from runner-write-safety (10 inspections): later rounds drift into inject
 - DS-01 fixed: any non-empty stderr chunk refreshes the heartbeat. `test_stderr_without_newlines_is_progress` now also feeds `b"\r"`.
 - Fork-safety note accepted as is: no change.
 - Proof: 588 passed.
+
+## Inspection 34 — Codex (cross_provider), REVISE (2026-10-16)
+- Result: `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/43734fe6-827b-4456-8612-0540ddad69af/scratchpad/claudex/i34/claudex-bcem0v7o/result.json`, 148 s, after the user reset Codex usage.
+- DR-01 (medium, `runner/modules/pty/__init__.py:235`): suppose a card session is shown in the panel and the card view is closed, and the session then exits by itself. Only the panel tab is marked exited, and closing it later returns `run_id=null` (the session is already finalized). So the C2 Mark done / Todo / Review choice is never offered.
+- DR-02 (low, `runner/templates/index.html:1452`): Retry after a failed nested-folder load cleared the error but sent no request, which left the folder empty.
+
+### Disposition (host Claude)
+- DR-01 fixed in the client; the server contract is unchanged:
+  - When a resume tab with a `run_id` gets `term_exit` and the card view is not showing that terminal, the panel opens the card's choice (`_promptCardNext`). Otherwise the card view offers it.
+  - The tab is marked `offered`, so it is never offered twice.
+  - Closing an exited card tab that was never offered (e.g. it exited before a page reload) offers the choice then.
+  - Ceiling: `offered` lives in the tab, so after a reload an already-offered choice is offered once more on close.
+- DR-02 fixed: Retry reloads every failed path that is the root or is still expanded.
+- Proof: `node --check` on the page's inline scripts passes; card-terminal, terminals and project-browser tests pass.

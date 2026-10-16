@@ -1449,7 +1449,12 @@ document.getElementById('project-panel-content')?.addEventListener('click', (eve
   const ftab = event.target.closest('[data-ftab]');
   if (ftab) { _storageSet(`agenticos.projtab.${ftab.dataset.key}`, ftab.dataset.ftab); _renderProjects(); return; }
   const fretry = event.target.closest('[data-fretry]');
-  if (fretry) { const st = _files(fretry.dataset.fretry); st.failed.clear(); st.error = ''; _renderProjects(); return; }
+  if (fretry) {  // reload what failed: the root, and nested folders that are still expanded (DR-02)
+    const key = fretry.dataset.fretry, st = _files(key), failed = [...st.failed];
+    st.failed.clear(); st.error = '';
+    failed.filter(p => p === '' || st.open.has(p)).forEach(p => _filesLoad(key, p));
+    _renderProjects(); return;
+  }
   const fdir = event.target.closest('[data-fdir]');
   if (fdir) {
     const st = _files(fdir.dataset.key), path = fdir.dataset.fdir;
@@ -4280,6 +4285,8 @@ function closeTab(tid) {
   socket.emit('term_close', { term_id: tid }, res => {
     if (res && res.error && !/unknown/.test(res.error)) { t.status = 'failed'; _renderTabStrip(); alert(res.error); return; }
     if (res && res.run_id) _promptCardNext(res.run_id);
+    // a card session that exited unseen (e.g. before a reload): its choice is still owed (DR-01)
+    else if (t.status === 'exited' && t.info.kind === 'resume' && t.info.run_id && !t.offered) _promptCardNext(t.info.run_id);
     t.term.dispose(); t.el.remove(); _tabs.delete(tid);
     if (_activeTab === tid) { _activeTab = null; const next = _tabs.keys().next().value; if (next) activateTab(next); }
     _renderTabStrip();
@@ -4364,6 +4371,13 @@ socket.on('term_output', (d) => {
 socket.on('term_exit', (d) => {
   const t = _tabs.get(d.term_id);
   if (t) { t.status = 'exited'; t.term.writeln(`\r\n[process exited${d.exit_code != null ? ' ' + d.exit_code : ''}]`); _renderTabStrip(); }
+  // A card session that exited by itself is offered Mark done / Todo / Review once: by the card
+  // view when it shows this terminal, otherwise from here (DR-01).
+  // ponytail: "offered" lives in the tab, so a reload before the tab is closed offers it once more
+  if (t && t.info.kind === 'resume' && t.info.run_id && !t.offered) {
+    t.offered = true;
+    if (_cardTerm.termId !== d.term_id) _promptCardNext(t.info.run_id);
+  }
 });
 
 socket.on('run_logged', () => { refreshJobBoard(); });
