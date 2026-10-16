@@ -357,6 +357,9 @@ def test_stderr_without_newlines_is_progress(eng):
     app_mod._running_jobs["cr"] = {"run_id": "cr", "last_progress_at": 0.0}
     app_mod._StderrSink("cr").feed(b"\rdownloading 12%")  # no newline yet
     assert app_mod._running_jobs["cr"]["last_progress_at"] > 0  # UI27-01
+    app_mod._running_jobs["cr"]["last_progress_at"] = 0.0
+    app_mod._StderrSink("cr").feed(b"\r")  # a bare progress repaint
+    assert app_mod._running_jobs["cr"]["last_progress_at"] > 0  # DS-01
 
 
 def test_stderr_cannot_slip_between_a_stdout_write_and_its_publication(eng, tmp_path):

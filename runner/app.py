@@ -796,9 +796,9 @@ class _StderrSink:
         self.tail: collections.deque = collections.deque(maxlen=STDERR_TAIL_LINES)
 
     def feed(self, chunk: bytes) -> None:
-        job = _running_jobs.get(self.run_id) if self.run_id and chunk.strip() else None
+        job = _running_jobs.get(self.run_id) if self.run_id and chunk else None
         if job is not None:
-            job["last_progress_at"] = time.monotonic()  # any stderr activity is progress, newline or not (UI27-01)
+            job["last_progress_at"] = time.monotonic()  # any stderr byte is progress, newline or whitespace (UI27-01, DS-01)
         self.buf += chunk
         *lines, self.buf = self.buf.split(b"\n")
         for raw in lines:

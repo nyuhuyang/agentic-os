@@ -2126,3 +2126,15 @@ Lesson from runner-write-safety (10 inspections): later rounds drift into inject
 - Fix: before `chdir`/`exec`, the forked child closes every descriptor above 2 listed in `/dev/fd`. The first attempt used `os.closerange(3, SC_OPEN_MAX)`, which hung because SC_OPEN_MAX is huge on macOS.
 - Test: `test_terminal_shell_inherits_no_runner_descriptors` spawns a shell next to an inheritable listening socket and checks that lsof shows only the test process holding the port. It fails without the fix and passes with it.
 - Proof: 588 passed.
+
+## Inspection 33 — Codex unavailable; third-party DeepSeek review ds2 (2026-10-16)
+- Codex inspection 33 (`/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/43734fe6-827b-4456-8612-0540ddad69af/scratchpad/claudex/i33`) failed at once: `failure_kind=provider_unavailable`, "You've hit your usage limit … try again at Oct 22nd, 2026 3:49 AM."
+- Per the user's standing rule, DeepSeek reviewed HEAD `6f70dd0` against `995924c` read-only (`DSH_PERMISSION_MODE=read-only dsh --profile headless`). Checkout fingerprint before = after = `c4e4772a`. Recorded as a **third-party review, not a claudex cross_provider approval**; item 268 stays open until a Codex pass.
+- Verdict: APPROVED, with one low finding.
+  - DS-01 (low, `runner/app.py:799`): `_StderrSink.feed` refreshed the heartbeat only when `chunk.strip()` was non-empty, so a command that repaints its progress with bare `\r` on stderr while stdout stays quiet could be killed as stalled.
+- DeepSeek limitation noted: os.listdir/os.close run in the forked child of a threaded runner. No trigger was found. The child already ran Python (chdir/execvpe) before HOST-01, and macOS libmalloc has fork handlers.
+
+### Disposition (host Claude)
+- DS-01 fixed: any non-empty stderr chunk refreshes the heartbeat. `test_stderr_without_newlines_is_progress` now also feeds `b"\r"`.
+- Fork-safety note accepted as is: no change.
+- Proof: 588 passed.
