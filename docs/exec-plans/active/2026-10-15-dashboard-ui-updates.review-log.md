@@ -2039,3 +2039,47 @@ Lesson from runner-write-safety (10 inspections): later rounds drift into inject
 ### Disposition (host Claude; fixed)
 - REV30-01 fixed: a Codex `turn.failed` renders its `error.message` (red), live and in replay; the same for a failed Claude `result` event (its `result` text). Tests: renderer cases + `test_failed_codex_turn_reason_survives_replay`.
 - Proof: 582 passed.
+
+## Inspection 31 (fresh Codex, on commit 1bcbf85) — REVISE (2 medium)
+- Result: /private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/43734fe6-827b-4456-8612-0540ddad69af/scratchpad/claudex/i31/claudex-pqvrtzp1/result.json (assurance cross_provider)
+```json
+{
+ "verdict": "REVISE",
+ "summary": "Two concrete defects remain: file-preview confinement can be bypassed during concurrent filesystem changes, and older review cards lose their waiting badge.",
+ "findings": [
+  {
+   "id": "REV31-01",
+   "severity": "medium",
+   "path": "runner/projects.py:1935",
+   "evidence": "_browse_path validates a resolved pathname, but read_file subsequently checks, stats, and opens that pathname separately. While an agent is modifying the browsed worktree, it can replace the checked file or an ancestor with an escaping symlink before open(). The preview then reads outside the checkout. Confidential projects have the same exposure because the Python file read is unconfined.",
+   "fix": "Anchor reads to an opened checkout directory descriptor and traverse components without following unchecked symlinks. Validate the opened file with fstat and read from that descriptor. Cover replacement of both the file and an ancestor between validation and opening."
+  },
+  {
+   "id": "REV31-02",
+   "severity": "medium",
+   "path": "runner/app.py:3891",
+   "evidence": "latest-by-issue omits waiting. Once an In Review card's last execution leaves the newest 80 records, refreshJobBoard uses this endpoint's abbreviated record, then sets waiting to an empty string at index.html:2726. Its 'Waiting for you' badge disappears even though the saved final assistant message still asks for approval. The added older-card test checks session identity but misses this metadata loss.",
+   "fix": "Include waiting computed from the actual last assistant message in the older-run response, using the same presentation logic as /api/runs. Verify that an awaiting-review card retains its badge beyond the recent-run window."
+  }
+ ],
+ "coverage": [
+  "Verified the supplied plan digest, all 21 manifest file hashes, and tracked-diff digest.",
+  "Reviewed the supplied plan, review log, complete diff, added test sources, and affected existing test hunks.",
+  "Traced session mutations, confinement, live-session admission, PTY ownership, locking, finalization, and closure audits.",
+  "Traced project labels through creation, synchronization, local backups, dispatch, and lock handoff.",
+  "Inspected process-engine callers, interruption records, streaming, durable replay, history, and terminal callbacks.",
+  "Inspected project selection, file browsing, Run tests wording, and related state/watchdog code in state_io.py, run_skill.py, dsh_cli.py, and stall_detection."
+ ],
+ "limitations": [
+  "Static inspection only: no edits, tests, delegation, or browser/native CLI execution.",
+  "Historical test-pass and manual-validation claims were not independently verified.",
+  "Native resume-picker behavior and live Linear API behavior remain unverified.",
+  "SPEC.md and broader architecture documents were not inspected; fidelity was assessed against the supplied plan and implementation contracts."
+ ]
+}
+```
+
+### Dispositions (host Claude; both fixed)
+- REV31-01 fixed: previews and folder listings open the target with O_NOFOLLOW and prove the opened descriptor is inside the checkout (`_open_confined`: path read back with macOS F_GETPATH, regular-file check by fstat); the read/scandir happens on that descriptor. A file or ancestor swapped for an escaping symlink after the check is refused. Tests `test_a_path_swapped_after_the_check_is_refused` (file, ancestor), `test_a_folder_swapped_after_the_check_is_not_listed`.
+- REV31-02 fixed: `/api/runs/latest-by-issue` includes `waiting` (same detector as /api/runs), so an older In Review card keeps its badge. Test `test_older_review_card_keeps_its_waiting_badge`.
+- Proof: 586 passed.

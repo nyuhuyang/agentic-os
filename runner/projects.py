@@ -22,6 +22,7 @@ import os
 import re
 import shlex
 import shutil
+import stat as stat_module
 import signal
 import subprocess
 import sys
@@ -1875,7 +1876,12 @@ def list_dir(project: Project, wt: str | None, rel: str | None) -> dict:
             head = path[len(prefix):].split("/", 1)[0]
             status.setdefault(head, "?" if xy == "??" else (xy.strip() or "M")[0])
     try:
-        on_disk = {e.name: e for e in os.scandir(target)}
+        dfd = _open_confined(root, target, directory=True)  # list what was actually opened (REV31-01)
+        try:
+            with os.scandir(dfd) as it:
+                on_disk = {e.name: e for e in it}
+        finally:
+            os.close(dfd)
     except OSError as exc:
         raise ProjectError(f"cannot read {rel or '.'}: {exc}") from None
     if collapsed:  # every child of a wholly untracked folder is untracked unless git ignores it
@@ -1920,6 +1926,29 @@ def _check_ignored(root: Path, confine: list[Path] | None, rels: list[str]) -> s
     return set(filter(None, proc.stdout.split("\0"))) if proc.returncode in (0, 1) else set()
 
 
+def _open_confined(root: Path, real: Path, directory: bool = False) -> int:
+    """Open `real` and prove the *opened* object is inside `root`: its path is read back from the
+    descriptor (macOS F_GETPATH), so a file or ancestor swapped for an escaping symlink between
+    the check and the open is refused (REV31-01). The final component is never followed."""
+    import fcntl
+    flags = os.O_RDONLY | os.O_NOFOLLOW | (os.O_DIRECTORY if directory else 0)
+    try:
+        fd = os.open(real, flags)
+    except OSError as exc:
+        raise ProjectError(f"cannot open {real.name}: {exc.strerror}") from None
+    try:
+        opened = Path(os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).rstrip(b"\0")))
+        opened = Path(os.path.realpath(opened))
+        if opened != root and not opened.is_relative_to(root):
+            raise ProjectError("path leads outside the checkout")
+        if not directory and not stat_module.S_ISREG(os.fstat(fd).st_mode):
+            raise ProjectError(f"{real.name} is not a regular file")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def read_file(project: Project, wt: str | None, rel: str | None, limit: int = PREVIEW_LIMIT) -> dict:
     """Read-only preview: text for a text file up to `limit` bytes; size and type otherwise."""
     import mimetypes
@@ -1927,12 +1956,13 @@ def read_file(project: Project, wt: str | None, rel: str | None, limit: int = PR
     rel, real = _browse_path(root, rel)
     if not real.is_file():
         raise ProjectError(f"{rel!r} is not a file")
-    size = real.stat().st_size
-    kind = mimetypes.guess_type(real.name)[0]
-    out = {"path": rel, "size": size, "type": kind, "text": None, "binary": False, "too_large": size > limit}
-    if out["too_large"]:
-        return out
-    with open(real, "rb") as f:
+    fd = _open_confined(root, real)  # checked again on what was actually opened (REV31-01)
+    with os.fdopen(fd, "rb") as f:
+        size = os.fstat(f.fileno()).st_size
+        kind = mimetypes.guess_type(real.name)[0]
+        out = {"path": rel, "size": size, "type": kind, "text": None, "binary": False, "too_large": size > limit}
+        if out["too_large"]:
+            return out
         data = f.read(limit + 1)
     if b"\0" in data[:8192]:
         out["binary"] = True

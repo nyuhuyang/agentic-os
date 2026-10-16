@@ -3888,8 +3888,10 @@ def api_runs_latest_by_issue():
             except ValueError:
                 continue
             if isinstance(r, dict) and r.get("linear_issue_id") and r.get("run_id") and not r.get("interactive_ended"):
-                latest[r["linear_issue_id"]] = {k: r.get(k) for k in ("run_id", "status", "agent", "agent_session_id",
-                                                                       "project_key", "started_at")}
+                latest[r["linear_issue_id"]] = {
+                    **{k: r.get(k) for k in ("run_id", "status", "agent", "agent_session_id", "project_key", "started_at")},
+                    # the same badge as /api/runs: an older card that waits for the user keeps it (REV31-02)
+                    "waiting": project_runs.waiting_question(_assistant_text(r)) if r.get("status") == "review" else None}
     return jsonify(latest)
 
 

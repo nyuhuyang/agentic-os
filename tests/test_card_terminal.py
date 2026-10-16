@@ -468,3 +468,10 @@ def test_timed_out_linear_dispatch_stays_resumable(harness, monkeypatch):
     procs = stub_launches(app_mod, monkeypatch, [{}])
     assert client.post(f"/api/runs/{rec['run_id']}/retry", json={"reply": "go", "strict": True}).status_code == 200
     assert "--resume" in procs[0].args and "lin-sess" in procs[0].args
+
+
+def test_older_review_card_keeps_its_waiting_badge(harness):
+    app_mod, mod, client, log, events, tmp = harness
+    write_log(log, {"run_id": "old", "agent": "claude", "status": "review", "output": "Plan ready.\nShall I build it?"})
+    latest = client.get("/api/runs/latest-by-issue").get_json()
+    assert latest[ISSUE]["waiting"] == "Plan ready."  # REV31-02

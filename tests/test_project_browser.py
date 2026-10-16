@@ -174,3 +174,44 @@ def test_wholly_untracked_folder_expands(repo):
     inside = [(e["name"], e["kind"], e["status"], e["ignored"]) for e in pj.list_dir(project, "main", "newdir")["entries"]]
     assert inside == [("sub", "dir", "?", False), ("debug.log", "file", "", True), ("file.py", "file", "?", False)]  # UI8-02
     assert [e["name"] for e in pj.list_dir(project, "main", "newdir/sub")["entries"]] == ["deep.txt"]
+
+
+@pytest.mark.parametrize("swap", ["file", "ancestor"])
+def test_a_path_swapped_after_the_check_is_refused(repo, tmp_path, monkeypatch, swap):
+    project, root = repo
+    outside = tmp_path / "outside"
+    (outside / "deep").mkdir(parents=True)
+    (outside / "deep" / "x.py").write_text("SECRET")
+    real_check = pj._browse_path
+
+    def check_then_swap(r, rel):  # an agent swaps the path between the check and the open (REV31-01)
+        out = real_check(r, rel)
+        if swap == "file":
+            (root / "src" / "deep" / "x.py").unlink()
+            (root / "src" / "deep" / "x.py").symlink_to(outside / "deep" / "x.py")
+        else:
+            import shutil
+            shutil.rmtree(root / "src" / "deep")
+            (root / "src" / "deep").symlink_to(outside / "deep")
+        return out
+    monkeypatch.setattr(pj, "_browse_path", check_then_swap)
+    with pytest.raises(pj.ProjectError):
+        pj.read_file(project, "main", "src/deep/x.py")
+
+
+def test_a_folder_swapped_after_the_check_is_not_listed(repo, tmp_path, monkeypatch):
+    project, root = repo
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "private.txt").write_text("p")
+    real_check = pj._browse_path
+
+    def check_then_swap(r, rel):
+        out = real_check(r, rel)
+        import shutil
+        shutil.rmtree(root / "src" / "deep")
+        (root / "src" / "deep").symlink_to(outside)
+        return out
+    monkeypatch.setattr(pj, "_browse_path", check_then_swap)
+    with pytest.raises(pj.ProjectError):
+        pj.list_dir(project, "main", "src/deep")
