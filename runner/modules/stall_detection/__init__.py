@@ -71,25 +71,29 @@ def check_once(_app, socketio) -> None:
                 _app._signal_project_run(run_id, "stalled")
             continue
         if now - last > _app.STALL_TIMEOUT_S:
-            skill = job.get("skill", "unknown")
-            started_at = job.get("started_at", "")
-            _app._running_jobs.pop(run_id, None)
-            proc = _app._running_procs.pop(run_id, None)
-            if proc:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-            _app._write_run_log(
-                skill, "stalled", started_at, 0.0,
-                prompt=job.get("prompt", ""), error="stalled",
-                run_id=run_id,
-                linear_issue_id=job.get("linear_issue_id"),
-            )
-            socketio.emit("run_state_change", {
-                "run_id": run_id, "state": "stalled", "skill": skill,
-            })
+            try:
+                _stall(_app, socketio, run_id, job)
+            except Exception:  # one bad run never stops the watchdog (RWS-003)
+                logger.exception("stall handling failed for %s", run_id)
 
+
+def _stall(_app, socketio, run_id: str, job: dict) -> None:
+    # Ending the run = taking both entries under the lock; then the stall pass owns its
+    # record and tracker push, and the worker touches neither (WS-004/006/007).
+    with _app._JOB_LOCK:
+        if _app._running_jobs.pop(run_id, None) is None:
+            return  # the worker or a cancel ended it meanwhile
+        proc = _app._running_procs.pop(run_id, None)
+    if proc:
+        _app._kill_group(proc)
+    _app._write_owner_record(run_id, job, "stalled", "stalled")
+    socketio.emit("run_state_change", {"run_id": run_id, "state": "stalled", "skill": job.get("skill", "unknown")})
+    issue_id = job.get("linear_issue_id")
+    linear_mod = _app._module_registry.get("linear")
+    if issue_id and "launch_gen" in job and linear_mod:
+        # The displaced worker's own guarded completion: a reset since launch or a
+        # Done/Canceled issue stays as it is (WS-013).
+        linear_mod._mark_issue_review(issue_id, gen=job["launch_gen"])
 
 module = StallDetectionModule()
 registry.register(module)

@@ -25,6 +25,7 @@ import secrets
 import logging
 import re
 import select
+import selectors
 import shutil
 import signal
 import subprocess
@@ -47,7 +48,7 @@ import threading
 from flask import Flask, jsonify, render_template, request, g
 from flask_socketio import SocketIO, emit
 
-from state_io import file_lock, json_transaction, read_json, write_json_atomic
+from state_io import file_lock, json_transaction, read_json, write_json_atomic, write_text_atomic
 import reset_gen
 import projects as _projects
 import project_runs
@@ -282,7 +283,8 @@ def _registry_exec_env(agent: str, registry: dict[str, dict]) -> dict[str, str]:
     digest_src = json.dumps(payload["skills"], sort_keys=True, ensure_ascii=False).encode("utf-8")
     digest = hashlib.sha256(digest_src).hexdigest()[:12]
     path = REGISTRY_CACHE_DIR / f"{agent}-{digest}.json"
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    # Atomic: a run_skill.py that already opened this path keeps the complete old file (BUILD-016).
+    write_text_atomic(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
     env = os.environ.copy()
     env["REGISTRY_JSON"] = str(path)
     if agent == "dsh":
@@ -713,6 +715,74 @@ def _extract_text_from_codex_item(item: dict) -> str:
     return ""
 
 
+def _pipe_fd(pipe) -> int | None:
+    try:
+        return pipe.fileno()
+    except (AttributeError, OSError, ValueError):  # io.UnsupportedOperation is both
+        return None
+
+
+def _iter_pipe_chunks(pipe, stop: threading.Event):
+    """Raw chunks until EOF or `stop`. Polls `stop` every 0.25 s, so a descendant that escaped
+    the group and still holds the pipe cannot pin the reader past a timeout (BUILD-014).
+    A double without a descriptor yields its read() once (WS-008)."""
+    fd = _pipe_fd(pipe)
+    if fd is None:
+        data = pipe.read()
+        if data:
+            yield data
+        return
+    # selectors, not select(): no FD_SETSIZE ceiling on busy hosts with many open files (RWS-019)
+    with selectors.DefaultSelector() as sel:
+        sel.register(fd, selectors.EVENT_READ)
+        while not stop.is_set():
+            if not sel.select(0.25):
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                return
+            yield chunk
+
+
+def _iter_pipe_lines(pipe, stop: threading.Event):
+    """Lines (with their newline) until EOF or `stop`; the buffered pipe object is never read.
+    A double without a descriptor is iterated (WS-008)."""
+    if _pipe_fd(pipe) is None:
+        yield from pipe
+        return
+    buf = b""
+    for chunk in _iter_pipe_chunks(pipe, stop):
+        buf += chunk
+        *lines, buf = buf.split(b"\n")
+        for line in lines:
+            if stop.is_set():  # a big buffered chunk never outlives the stop (RWS-009)
+                return
+            yield line + b"\n"
+    if buf and not stop.is_set():
+        yield buf
+
+
+def _guarded(fn, errors: list):
+    """A reader whose exception is kept for its controller instead of dying silently in the
+    thread; the controller then cleans up and re-raises it (RWS-019)."""
+    @functools.wraps(fn)
+    def run():
+        try:
+            fn()
+        except BaseException as exc:
+            errors.append(exc)
+    return run
+
+
+def _timeout_cleanup(proc, stop: threading.Event, readers: list[threading.Thread]) -> None:
+    """Every streamed-run timeout: stop the readers, kill the whole group, reap, and give the
+    readers a moment to end so their in-flight slots return (BUILD-014, WS-001)."""
+    stop.set()
+    _kill_and_reap(proc)
+    for r in readers:
+        r.join(timeout=2)
+
+
 def _stream_text_run(
     proc: "subprocess.Popen[bytes]",
     run_id: str,
@@ -726,10 +796,11 @@ def _stream_text_run(
     stream_path = _claude_stream_log_path(run_id)
     RUN_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
     collected: list[str] = []
+    stop = threading.Event()
 
     def _reader() -> None:
         with stream_path.open("w", encoding="utf-8") as sf:
-            for raw in proc.stdout:  # type: ignore[union-attr]
+            for raw in _iter_pipe_lines(proc.stdout, stop):
                 line = raw.decode("utf-8", errors="replace").rstrip("\n")
                 if line:
                     collected.append(line)
@@ -741,12 +812,22 @@ def _stream_text_run(
                         "last_event_type": "text",
                     })
 
-    t = _start_counted(_reader)  # counted until it stops writing, even past a timeout (BUILD-014)
-    t.join(timeout=timeout)
-    if t.is_alive():
-        proc.kill()
+    deadline = time.monotonic() + timeout  # one deadline: reader, then the leader (WS-001)
+    t, errors = None, []
+    try:
+        t = _start_counted(_guarded(_reader, errors))  # counted until it stops writing, even past a timeout (BUILD-014)
+        t.join(timeout=timeout)
+        if t.is_alive():
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+        if errors:  # the reader failed: same cleanup, then the error reaches the worker (RWS-019)
+            raise errors[0]
+        proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        _timeout_cleanup(proc, stop, [t] if t else [])
         raise subprocess.TimeoutExpired(proc.args, timeout)
-    proc.wait()
+    except BaseException:  # the reader could not start: never leave the child running (RWS-004)
+        _timeout_cleanup(proc, stop, [t] if t else [])
+        raise
     stderr_b = (proc.stderr.read() if proc.stderr else b"") or b""
     return "\n".join(collected), stderr_b.decode("utf-8", errors="replace").strip()
 
@@ -2277,10 +2358,11 @@ def _stream_claude_run(
     lines: list[str] = []
     result_event: dict = {}
     session_id_holder: list[str | None] = [None]
+    stop = threading.Event()
 
     def _reader() -> None:
         with stream_path.open("w", encoding="utf-8") as sf:
-            for raw in proc.stdout:  # type: ignore[union-attr]
+            for raw in _iter_pipe_lines(proc.stdout, stop):
                 line = raw.decode("utf-8", errors="replace").rstrip("\n")
                 if not line:
                     continue
@@ -2301,14 +2383,23 @@ def _stream_claude_run(
                 except Exception:
                     pass
 
-    t = _start_counted(_reader)  # counted until it stops writing, even past a timeout (BUILD-014)
-    t.join(timeout=timeout)
-
-    if t.is_alive():
-        proc.kill()
+    deadline = time.monotonic() + timeout  # one deadline: reader, then the leader (WS-001)
+    t, errors = None, []
+    try:
+        t = _start_counted(_guarded(_reader, errors))  # counted until it stops writing, even past a timeout (BUILD-014)
+        t.join(timeout=timeout)
+        if t.is_alive():
+            raise subprocess.TimeoutExpired(proc.args, timeout)
+        if errors:  # the reader failed: same cleanup, then the error reaches the worker (RWS-019)
+            raise errors[0]
+        proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        _timeout_cleanup(proc, stop, [t] if t else [])
         raise subprocess.TimeoutExpired(proc.args, timeout)
+    except BaseException:  # the reader could not start: never leave the child running (RWS-004)
+        _timeout_cleanup(proc, stop, [t] if t else [])
+        raise
 
-    proc.wait()
     stderr_s = (proc.stderr.read() or b"").decode("utf-8", errors="replace").strip()  # type: ignore[union-attr]
 
     output = result_event.get("result", "")
@@ -2337,10 +2428,11 @@ def _stream_dsh_run(
     stream_path = _claude_stream_log_path(run_id)
     RUN_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
     events = dsh_cli.DshRun()
+    stop = threading.Event()
 
     def _reader() -> None:
         with stream_path.open("w", encoding="utf-8") as sf:
-            for raw in proc.stdout:  # type: ignore[union-attr]
+            for raw in _iter_pipe_lines(proc.stdout, stop):
                 line = raw.decode("utf-8", errors="replace").rstrip("\n")
                 if not line:
                     continue
@@ -2366,20 +2458,29 @@ def _stream_dsh_run(
     stderr_chunks: list[bytes] = []
 
     def _drain_stderr() -> None:  # concurrently, so a chatty stderr can never block the child
-        stderr_chunks.append(proc.stderr.read() or b"")  # type: ignore[union-attr]
+        stderr_chunks.extend(_iter_pipe_chunks(proc.stderr, stop))
 
     deadline = time.monotonic() + timeout
-    readers = [_start_counted(_reader), _start_counted(_drain_stderr)]  # counted readers (BUILD-014)
+    readers: list[threading.Thread] = []
+    errors: list[BaseException] = []
     try:
-        for r in readers:
-            r.join(timeout=max(0.0, deadline - time.monotonic()))
+        for fn in (_reader, _drain_stderr):  # counted readers (BUILD-014), started inside the cleanup
+            readers.append(_start_counted(_guarded(fn, errors)))
+        # Short slices: a failed reader surfaces at once, not after the other one's deadline.
+        while not errors and any(r.is_alive() for r in readers) and time.monotonic() < deadline:
+            for r in readers:
+                r.join(timeout=min(0.25, max(0.0, deadline - time.monotonic())))
+        if errors:  # a reader failed: same cleanup, then the error reaches the worker (RWS-019)
+            raise errors[0]
         if any(r.is_alive() for r in readers):
             raise subprocess.TimeoutExpired(proc.args, timeout)
         proc.wait(timeout=max(0.0, deadline - time.monotonic()))
     except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
+        _timeout_cleanup(proc, stop, readers)
         raise subprocess.TimeoutExpired(proc.args, timeout)
+    except BaseException:  # a reader could not start: stop the other, end the group (RWS-004)
+        _timeout_cleanup(proc, stop, readers)
+        raise
     stderr_s = b"".join(stderr_chunks).decode("utf-8", errors="replace").strip()
     ok, error_s = events.outcome(proc.returncode, stderr_s)
     input_tokens, output_tokens = events.tokens()
@@ -2724,6 +2825,113 @@ def _terminate_group(proc) -> None:
 _JOB_LOCK = threading.Lock()  # orders cancel/stall/shutdown against a run entering finalization
 
 
+def _kill_group(proc, sig: int = signal.SIGKILL) -> None:
+    """Signal a run's whole process group (started in its own session, so pgid == pid) so its
+    descendants go with it (BUILD-014). No pid or no such group: signal just the process."""
+    pid = getattr(proc, "pid", None)
+    if pid:
+        try:
+            os.killpg(pid, sig)
+            return
+        except OSError:
+            pass
+    with contextlib.suppress(Exception):
+        send = getattr(proc, "send_signal", None)
+        send(sig) if send else proc.kill()
+
+
+def _kill_and_reap(proc) -> None:
+    """Kill the group and wait (bounded) for the leader, so no zombie waits on a later Popen (RWS-010)."""
+    _kill_group(proc)
+    with contextlib.suppress(Exception):
+        proc.wait(timeout=5)
+
+
+def _run_grouped(cmd, timeout: float, **kw) -> subprocess.CompletedProcess:
+    """subprocess.run for an agent CLI call: its own process group, and on timeout or any failure
+    the whole group is killed and reaped, not just the leader (RWS-016)."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True, **kw)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except BaseException:
+        _kill_and_reap(proc)
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+class _RunEnded(Exception):
+    """The run was cancelled or stalled before its process could be registered (WS-004)."""
+
+
+def _register_proc(run_id: str, proc) -> bool:
+    """Launch handshake (WS-004): publish the process only while its run is live. A run ended
+    (cancel, stall) before or during Popen has its new process killed and reaped here."""
+    with _JOB_LOCK:
+        if run_id in _running_jobs:
+            old, _running_procs[run_id] = _running_procs.get(run_id), proc
+            live = True
+        else:
+            live = False
+    if live:
+        if old is not None and old is not proc:
+            _kill_group(old)  # the previous attempt's leftovers end with it (RWS-005)
+        return True
+    _kill_and_reap(proc)
+    return False
+
+
+def _end_job(run_id: str) -> bool:
+    """Retire a run's job and process entries together (WS-006). True when the caller ended
+    the run; False when cancel or stall already had, and so owns its terminal side effects."""
+    with _JOB_LOCK:
+        job = _running_jobs.pop(run_id, None)
+        _running_procs.pop(run_id, None)
+    return job is not None
+
+
+def _write_run_log_retrying(*args, **kwargs) -> None:
+    """A terminal record written from a timeout/error handler, or by cancel/stall: tried twice and
+    never raises, so the tracker completion after it still runs (RWS-003, RWS-006)."""
+    for attempt in (1, 2):
+        try:
+            _write_run_log(*args, **kwargs)
+            return
+        except Exception:
+            logger.exception("run record %s for %s failed (attempt %d)", args[1:2], kwargs.get("run_id"), attempt)
+
+
+def _comment_quietly(post, *args) -> None:
+    """A run's closing tracker comment is optional: its failure is logged and never skips the
+    tracker completion after it (RWS-013)."""
+    try:
+        post(*args)
+    except Exception:
+        logger.exception("closing tracker comment failed")
+
+
+def _write_owner_record(run_id: str, job: dict, status: str, error: str) -> None:
+    """Terminal record by the party that ended a run (cancel, stall). It carries the launch's
+    metadata (job["record"]), so a retry of it keeps its task, ancestry and agent (RWS-002).
+    Tried twice: the displaced worker writes nothing, so a lost record loses the run (RWS-003)."""
+    meta = {"linear_issue_id": job.get("linear_issue_id"), **job.get("record", {})}
+    _write_run_log_retrying(job.get("skill", "unknown"), status, job.get("started_at", ""), 0.0,
+                            prompt=job.get("prompt", ""), error=error, run_id=run_id, **meta)
+
+
+class _RunClaim:
+    """A worker's claim on its run's terminal side effects, taken once and kept through error
+    recovery, so a failed record write is not mistaken for someone else's claim (WS-009)."""
+
+    def __init__(self, run_id: str):
+        self.run_id = run_id
+        self.owner: bool | None = None
+
+    def __call__(self) -> bool:
+        if self.owner is None:
+            self.owner = _end_job(self.run_id)
+        return self.owner
+
+
 def _signal_project_run(run_id: str, why: str) -> str | None:
     """Cancel or stall a project run: flag it and stop its current phase's process group.
     The launch helper reaps the group and writes the record with the full binding (I5-01/09).
@@ -2950,8 +3158,12 @@ def run():
             run_id = str(uuid.uuid4())
             started_at = datetime.now(timezone.utc).isoformat()
             t0 = time.monotonic()
-            _running_jobs[run_id] = {"run_id": run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent)}
+            _running_jobs[run_id] = {"run_id": run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent),
+                                     "record": {"agent": agent}}  # for a cancel/stall record (RWS-002)
             socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill})
+            end = _RunClaim(run_id)
+            ended = {"ok": False, "run_id": run_id, "error": "cancelled"}  # cancel/stall wrote the record
+            proc = None
             try:
                 proc = subprocess.Popen(
                     [_python_path(), str(RUNNER), skill],
@@ -2959,13 +3171,15 @@ def run():
                     env=_registry_exec_env(agent, registry),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    start_new_session=True,  # its own group, so a timeout or cancel ends descendants too
                 )
-                _running_procs[run_id] = proc
+                if not _register_proc(run_id, proc):
+                    raise _RunEnded(run_id)
                 output, stderr_s = _stream_text_run(proc, run_id, timeout=AI_RUN_TIMEOUT_S)
                 dur = time.monotonic() - t0
                 ok = proc.returncode == 0
-                _running_jobs.pop(run_id, None)
-                _running_procs.pop(run_id, None)
+                if not end():
+                    return jsonify(ended)
                 final_state = "review"
                 _footer = _parse_run_footer(output)
                 _write_run_log(skill, final_state, started_at, dur,
@@ -2985,17 +3199,18 @@ def run():
                 })
             except subprocess.TimeoutExpired:
                 dur = time.monotonic() - t0
-                _running_procs.get(run_id) and _running_procs[run_id].kill()
-                _running_jobs.pop(run_id, None)
-                _running_procs.pop(run_id, None)
-                _write_run_log(skill, "timeout", started_at, dur, prompt=prompt, error="Timed out after 300s", run_id=run_id)
+                _kill_and_reap(proc)
+                if not end():
+                    return jsonify(ended)
+                _write_run_log_retrying(skill, "timeout", started_at, dur, prompt=prompt, error="Timed out after 300s", run_id=run_id)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": "timeout", "skill": skill})
                 return jsonify({"ok": False, "error": "Timed out after 300s."})
             except Exception as e:
                 dur = time.monotonic() - t0
-                _running_procs.pop(run_id, None)
-                _running_jobs.pop(run_id, None)
-                _write_run_log(skill, "error", started_at, dur, prompt=prompt, error=str(e), run_id=run_id)
+                _kill_and_reap(proc)  # a failure after launch never leaves the agent running (RWS-008/010)
+                if not end():
+                    return jsonify(ended)
+                _write_run_log_retrying(skill, "error", started_at, dur, prompt=prompt, error=str(e), run_id=run_id)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill})
                 return jsonify({"ok": False, "error": str(e)})
 
@@ -3004,9 +3219,13 @@ def run():
     run_id = str(uuid.uuid4())
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
-    _running_jobs[run_id] = {"run_id": run_id, "skill": skill_name, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent)}
+    _running_jobs[run_id] = {"run_id": run_id, "skill": skill_name, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent),
+                             "record": {"agent": agent, "model": _agent_model(agent), "task_id": run_id}}  # RWS-002
     socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill_name})
     # Claude: stream-json; Codex: json; dsh: --json NDJSON
+    end = _RunClaim(run_id)
+    ended = {"ok": False, "run_id": run_id, "error": "cancelled"}  # cancel/stall wrote the record
+    proc = None
     try:
         if agent == "claude":
             fmt, _timeout = "stream-json", AI_RUN_TIMEOUT_S
@@ -3020,8 +3239,10 @@ def run():
             env=_registry_exec_env(agent, _run_registry),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            start_new_session=True,  # its own group, so a timeout or cancel ends descendants too
         )
-        _running_procs[run_id] = proc
+        if not _register_proc(run_id, proc):
+            raise _RunEnded(run_id)
         _agent_session_id: str | None = None
         if agent == "claude":
             output, input_tokens, output_tokens, parsed_model, _agent_session_id, stderr_s = \
@@ -3040,8 +3261,8 @@ def run():
         if not output:
             output = stderr_s
         dur = time.monotonic() - t0
-        _running_jobs.pop(run_id, None)
-        _running_procs.pop(run_id, None)
+        if not end():
+            return jsonify(ended)
         final_state = "error" if agent == "dsh" and not ok else "review"
         _footer = _parse_run_footer(output)
         _cost = _compute_token_cost(output_tokens, input_tokens, parsed_model or _agent_model(agent))
@@ -3063,24 +3284,26 @@ def run():
         })
     except FileNotFoundError:
         dur = time.monotonic() - t0
-        _running_procs.pop(run_id, None)
-        _running_jobs.pop(run_id, None)
-        _write_run_log(skill_name, "error", started_at, dur, prompt=prompt, error=f"{agent} CLI not found", run_id=run_id)
+        _kill_and_reap(proc)  # None when the CLI itself was missing (RWS-010)
+        if not end():
+            return jsonify(ended)
+        _write_run_log_retrying(skill_name, "error", started_at, dur, prompt=prompt, error=f"{agent} CLI not found", run_id=run_id)
         socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill_name})
         return jsonify({"ok": False, "error": f"{agent} CLI not found."})
     except subprocess.TimeoutExpired:
         dur = time.monotonic() - t0
-        _running_procs.get(run_id) and _running_procs[run_id].kill()
-        _running_procs.pop(run_id, None)
-        _running_jobs.pop(run_id, None)
-        _write_run_log(skill_name, "timeout", started_at, dur, prompt=prompt, error=f"Timed out after {_timeout}s", run_id=run_id)
+        _kill_and_reap(proc)
+        if not end():
+            return jsonify(ended)
+        _write_run_log_retrying(skill_name, "timeout", started_at, dur, prompt=prompt, error=f"Timed out after {_timeout}s", run_id=run_id)
         socketio.emit("run_state_change", {"run_id": run_id, "state": "timeout", "skill": skill_name})
         return jsonify({"ok": False, "error": f"Timed out after {_timeout}s."})
     except Exception as e:
         dur = time.monotonic() - t0
-        _running_procs.pop(run_id, None)
-        _running_jobs.pop(run_id, None)
-        _write_run_log(skill_name, "error", started_at, dur, prompt=prompt, error=str(e), run_id=run_id)
+        _kill_and_reap(proc)  # a failure after launch never leaves the agent running (RWS-008/010)
+        if not end():
+            return jsonify(ended)
+        _write_run_log_retrying(skill_name, "error", started_at, dur, prompt=prompt, error=str(e), run_id=run_id)
         socketio.emit("run_state_change", {"run_id": run_id, "state": "error", "skill": skill_name})
         return jsonify({"ok": False, "error": str(e)})
 
@@ -3450,28 +3673,27 @@ def api_run_cancel(run_id: str):
         return jsonify({"error": "run is already finishing; its result stands"}), 409
     if signalled:
         return jsonify({"ok": True, "run_id": run_id})
-    proc = _running_procs.get(run_id)
-    # DeepSeek/async jobs have no proc entry — still cancel if in _running_jobs
-    if proc is None and run_id not in _running_jobs:
+    # Ending the run = taking both entries under the lock; whoever does owns its record and
+    # tracker push (WS-004/006). A job between processes (retry fallback) has no proc: still ours.
+    with _JOB_LOCK:
+        job = _running_jobs.pop(run_id, None)
+        proc = _running_procs.pop(run_id, None) if job is not None else None
+    if job is None:
         return jsonify({"error": "not running"}), 404
     if proc is not None:
-        try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        except Exception:
-            pass
-    job = _running_jobs.pop(run_id, {})
-    _running_procs.pop(run_id, None)
+        _kill_group(proc, signal.SIGTERM)
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5)
+        # Unconditional: a descendant ignoring SIGTERM outlives a leader that exited promptly (WS-002).
+        # ponytail: the group id could in theory be reused within the grace; same ceiling as _terminate_group.
+        _kill_group(proc)
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5)
     started_at = job.get("started_at", datetime.now(timezone.utc).isoformat())
     skill = job.get("skill", "unknown")
     linear_issue_id = job.get("linear_issue_id")
     dur = time.monotonic() - (time.monotonic() - 0)  # best effort
-    _write_run_log(skill, "cancelled", started_at, 0.0,
-                   prompt=job.get("prompt", ""), error="Cancelled by user", run_id=run_id,
-                   linear_issue_id=linear_issue_id)
+    _write_owner_record(run_id, job, "cancelled", "Cancelled by user")
     if linear_issue_id:
         _push_linear_state_async(linear_issue_id, "review")
     socketio.emit("run_state_change", {"run_id": run_id, "state": "cancelled", "skill": skill})
@@ -3559,6 +3781,31 @@ def api_run_retry(run_id: str):
     _launch_gen = reset_gen.current(_gen_key)
 
     # Bound task: same binding, never re-derived, even from a record that lacks it (I5-01).
+    def _start_failed(exc: Exception, published: bool = False, binding: dict | None = None):
+        """The retry never started (tracker push or worker start failed): finish it here, so the
+        issue is not left In Progress with nothing running (RWS-015). A published job is finished
+        only by its owner: a cancel or stall that already ended it keeps its record (RWS-018)."""
+        logger.exception("[retry] %s could not start", new_run_id)
+        if published and not _end_job(new_run_id):
+            return jsonify({"ok": False, "run_id": new_run_id, "error": "cancelled"}), 409
+        if linear_issue_id and _linear_dispatched.get(linear_issue_id) == new_run_id:
+            _linear_dispatched.pop(linear_issue_id, None)
+        prompt_rec, error = prompt, f"could not start: {exc}"
+        if binding is not None and _records_unsafe():
+            # No confidential text where records may leak (RWS-017). Any project-bound run counts:
+            # the snapshot taken at request start may be stale, the project promoted since (RWS-020).
+            prompt_rec = "[withheld: run-record location not allowed for confidential runs]"
+            error = "withheld (error): run records are outside this checkout's ignored state/ or outputs/"
+        _write_run_log_retrying(skill, "error", started_at, 0.0, prompt=prompt_rec, error=error,
+                                run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
+                                linear_issue_id=linear_issue_id, agent=agent, model=_agent_model(agent, cfg),
+                                task_id=task_id, reset_generation=_launch_gen,
+                                extra=dict(binding) if binding is not None else None)
+        if linear_issue_id:
+            with contextlib.suppress(Exception):
+                _push_linear_state_async(linear_issue_id, "review", gen=_launch_gen)
+        return jsonify({"ok": False, "run_id": new_run_id, "error": f"could not start: {exc}"}), 500
+
     bound = _durable_binding(linear_issue_id, task_id) or (original if original.get("project_key") else None)
     if bound:
         bound = {**bound, "confidential": _ticket_confidential(  # before any comment (I6-03, I9-02)
@@ -3566,19 +3813,25 @@ def api_run_retry(run_id: str):
             *([bound["confidential"]] if "confidential" in bound else []))}
         if linear_issue_id:
             _linear_dispatched[linear_issue_id] = new_run_id
-            _push_linear_state_async(linear_issue_id, "running", gen=_launch_gen)
+            try:
+                _push_linear_state_async(linear_issue_id, "running", gen=_launch_gen)
+            except Exception as e:
+                return _start_failed(e, binding=bound)
             if reply or attachments:
                 body = project_runs.tracker_comment(
                     bound, "feedback", run_id=new_run_id,
                     fallback=lambda: _linear_comment_body(title="Human Feedback", feedback=reply, attachments=attachments))
-                if body:
-                    _post_linear_comment(linear_issue_id, body)
-        _start_counted(_run_project_ticket,
-            project_key=bound["project_key"], ident=bound.get("issue_identifier") or "",
-            agent=agent, prompt=prompt, title=original.get("prompt", "")[:80], run_id=new_run_id,
-            linear_issue_id=linear_issue_id, task_id=task_id, launch_gen=_launch_gen,
-            attempt=prev_attempt + 1, parent_run_id=run_id, resume_session=_lock_session_id,
-            reuse_only=True, skill=skill, confidential=bound.get("confidential"))
+                if body:  # optional: a failed comment never aborts the launch (RWS-014)
+                    _comment_quietly(_post_linear_comment, linear_issue_id, body)
+        try:
+            _start_counted(_run_project_ticket,
+                project_key=bound["project_key"], ident=bound.get("issue_identifier") or "",
+                agent=agent, prompt=prompt, title=original.get("prompt", "")[:80], run_id=new_run_id,
+                linear_issue_id=linear_issue_id, task_id=task_id, launch_gen=_launch_gen,
+                attempt=prev_attempt + 1, parent_run_id=run_id, resume_session=_lock_session_id,
+                reuse_only=True, skill=skill, confidential=bound.get("confidential"))
+        except Exception as e:
+            return _start_failed(e, binding=bound)
         return jsonify({"ok": True, "run_id": new_run_id, "skill": skill, "attempt": prev_attempt + 1, "agent": agent})
 
     def _finish(final_state: str) -> None:
@@ -3592,9 +3845,13 @@ def api_run_retry(run_id: str):
 
     if linear_issue_id:
         _linear_dispatched[linear_issue_id] = new_run_id
-        _push_linear_state_async(linear_issue_id, "running", gen=_launch_gen)
-        if reply or attachments:
-            _post_linear_comment(
+        try:
+            _push_linear_state_async(linear_issue_id, "running", gen=_launch_gen)
+        except Exception as e:
+            return _start_failed(e)
+        if reply or attachments:  # optional: a failed comment never aborts the launch (RWS-014)
+            _comment_quietly(
+                _post_linear_comment,
                 linear_issue_id,
                 _linear_comment_body(
                     title="Human Feedback",
@@ -3605,7 +3862,9 @@ def api_run_retry(run_id: str):
     _running_jobs[new_run_id] = {
         "run_id": new_run_id, "skill": skill, "started_at": started_at,
         "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(),
-        "linear_issue_id": linear_issue_id,
+        "linear_issue_id": linear_issue_id, "launch_gen": _launch_gen,  # the stall pass's tracker guard (WS-013)
+        "record": {"attempt": prev_attempt + 1, "parent_run_id": run_id, "agent": agent,  # cancel/stall record (RWS-002)
+                   "model": _agent_model(agent, cfg), "task_id": task_id, "reset_generation": _launch_gen},
         "agent": agent,
         "model": _agent_model(agent, cfg),
     }
@@ -3613,6 +3872,7 @@ def api_run_retry(run_id: str):
 
     def _do_retry():
             nonlocal agent
+            attempt_proc: list = [None]  # the current attempt, kept past _end_job for error cleanup (RWS-021)
             # Claude / Codex / dsh — subprocess dispatch with streaming + resume
 
             def _dispatch_cmd(
@@ -3628,8 +3888,11 @@ def api_run_retry(run_id: str):
                     env=_registry_exec_env(agent, registry),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    start_new_session=True,  # its own group, so a timeout or cancel ends descendants too
                 )
-                _running_procs[new_run_id] = p
+                if not _register_proc(new_run_id, p):  # cancelled/stalled meanwhile: p is already dead
+                    raise _RunEnded(new_run_id)
+                attempt_proc[0] = p
                 try:
                     if stream == "claude":
                         _out, _it, _ot, _pm, _sid, _err = _stream_claude_run(p, new_run_id, timeout=AI_RUN_TIMEOUT_S)
@@ -3638,16 +3901,24 @@ def api_run_retry(run_id: str):
                         _out, _it, _ot, _pm, _sid, _err = _stream_dsh_run(p, new_run_id, timeout=AI_RUN_TIMEOUT_S)
                         _ok = _dsh_ok(p, _out)
                     else:
-                        _sb, _eb = p.communicate(timeout=AI_RUN_TIMEOUT_S)
+                        try:
+                            _sb, _eb = p.communicate(timeout=AI_RUN_TIMEOUT_S)
+                        except subprocess.TimeoutExpired:
+                            _kill_and_reap(p)
+                            raise
                         _ok = p.returncode == 0
                         _ss = _sb.decode("utf-8", errors="replace").strip()
                         _err = _eb.decode("utf-8", errors="replace").strip()
                         _out, _it, _ot, _pm = _parse_agent_output(agent, _ss)
                         _sid = _extract_codex_thread_id(_ss) if stream == "codex" else None
-                finally:
-                    _running_procs.pop(new_run_id, None)
+                except BaseException:  # any failure after launch ends this attempt's group (RWS-008)
+                    _kill_and_reap(p)
+                    raise
+                # The handle stays registered until the run ends or the next attempt replaces it,
+                # so a cancel between attempts still reaches this group's leftovers (RWS-005).
                 return _out, _it, _ot, _pm, _sid, _err, _ok
 
+            end = _RunClaim(new_run_id)
             try:
                 _stream = agent
                 if entry.get("schedule_eligible") and entry.get("entrypoint"):
@@ -3668,7 +3939,8 @@ def api_run_retry(run_id: str):
                 # Resume failure fallback: same agent, no --resume. Not for dsh: a failed dsh resume
                 # (adoption error, session/writer-held, or a runtime failure after work) is recorded
                 # as status error, and the user resets to todo to start fresh.
-                if _used_resume and not ok and agent != "dsh":
+                # Early out for a cancelled/stalled run; _register_proc is the guarantee (WS-004).
+                if _used_resume and not ok and agent != "dsh" and new_run_id in _running_jobs:
                     logger.warning(
                         "[retry] resume failed for %s session=%s; full retry without resume",
                         agent, _lock_session_id,
@@ -3681,7 +3953,8 @@ def api_run_retry(run_id: str):
                 if not output:
                     output = error_s or stderr_s
                 dur = time.monotonic() - t0
-                _running_jobs.pop(new_run_id, None)
+                if not end():
+                    return  # cancel/stall ended the run and did its record and tracker push
                 final_state = "error" if _stream == "dsh" and not ok else "review"
                 _footer = _parse_run_footer(output)
                 _cost = _compute_token_cost(output_tokens, input_tokens, parsed_model or _agent_model(agent, cfg))
@@ -3698,37 +3971,44 @@ def api_run_retry(run_id: str):
                                agent_session_id=new_sid,
                                reset_generation=_launch_gen)
                 if linear_issue_id:
-                    _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry", prompt=prompt, output=output))
+                    _comment_quietly(_post_linear_comment, linear_issue_id, _linear_comment_body(title="AgenticOS Retry", prompt=prompt, output=output))
                 _finish(final_state)
                 socketio.emit("run_logged", {"skill": skill, "run_id": new_run_id})
             except subprocess.TimeoutExpired:
                 dur = time.monotonic() - t0
-                proc = _running_procs.pop(new_run_id, None)
-                if proc: proc.kill()
-                _running_jobs.pop(new_run_id, None)
+                _kill_group(_running_procs.get(new_run_id))  # the reader already did; harmless twice
+                if not end():
+                    return
                 msg = f"Timed out after {AI_RUN_TIMEOUT_S}s"
-                _write_run_log(skill, "timeout", started_at, dur, prompt=prompt, error=msg,
+                _write_run_log_retrying(skill, "timeout", started_at, dur, prompt=prompt, error=msg,
                                run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
                                linear_issue_id=linear_issue_id, agent=agent,
                                model=_agent_model(agent, cfg), task_id=task_id, reset_generation=_launch_gen)
                 if linear_issue_id:
-                    _post_linear_comment(linear_issue_id, _linear_comment_body(title="AgenticOS Retry Timeout", prompt=prompt))
+                    _comment_quietly(_post_linear_comment, linear_issue_id, _linear_comment_body(title="AgenticOS Retry Timeout", prompt=prompt))
                 _finish("review")
             except Exception as e:
-                _running_procs.pop(new_run_id, None)
-                _running_jobs.pop(new_run_id, None)
-                _write_run_log(skill, "error", started_at, 0.0, prompt=prompt, error=str(e),
+                # A failure between attempts (fallback setup) or after the claim (a failed record
+                # write) still ends the current attempt's group (RWS-011, RWS-021).
+                _kill_and_reap(attempt_proc[0])
+                if not end():
+                    return
+                _write_run_log_retrying(skill, "error", started_at, 0.0, prompt=prompt, error=str(e),
                                run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
                                linear_issue_id=linear_issue_id, agent=agent,
                                model=_agent_model(agent, cfg), task_id=task_id, reset_generation=_launch_gen)
                 if linear_issue_id:
-                    _post_linear_comment(
+                    _comment_quietly(
+                        _post_linear_comment,
                         linear_issue_id,
                         _linear_comment_body(title="AgenticOS Retry Error", prompt=prompt),
                     )
                 _finish("review")
 
-    _start_counted(_do_retry)
+    try:
+        _start_counted(_do_retry)
+    except Exception as e:  # the job is published but no worker runs: finish it here (RWS-015)
+        return _start_failed(e, published=True)
     return jsonify({"ok": True, "run_id": new_run_id, "skill": skill, "attempt": prev_attempt + 1, "agent": agent})
 
 

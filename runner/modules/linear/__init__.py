@@ -597,6 +597,7 @@ class LinearModule(AgenticModule):
     def _dispatch_issue_counted(self, issue: dict, cfg: dict, socketio, previous_board_status: str | None = None) -> None:
         import subprocess
         from app import _running_jobs, _running_procs, _python_path, RUNNER, ROOT, _load_registry, _ai_command, _agent_model, _parse_agent_output, _extract_skill_name, _write_run_log, AI_RUN_TIMEOUT_S, _extract_real_errors, _registry_exec_env, _stream_dsh_run, _dsh_ok
+        from app import _register_proc, _RunEnded, _RunClaim, _kill_group, _kill_and_reap, _write_run_log_retrying, _comment_quietly, _run_grouped
         issue_id = issue["id"]
         if issue_id in self.dispatched:
             return
@@ -641,13 +642,12 @@ class LinearModule(AgenticModule):
                 "Return exactly one skill name, nothing else."
             )
             try:
-                result = subprocess.run(
+                result = _run_grouped(  # its own group: a routing timeout ends descendants too (RWS-016)
                     _ai_command(backend, routing_prompt, output_format="text"),
+                    60,
                     cwd=str(ROOT),
                     env=_registry_exec_env(backend, registry),
-                    capture_output=True,
                     text=True,
-                    timeout=60,
                 )
                 selected_skill = _extract_skill_name(result.stdout or "", registry)
             except Exception:
@@ -658,6 +658,19 @@ class LinearModule(AgenticModule):
             t0 = time.monotonic()
             prompt = f"{issue['identifier']}: {issue['title']}\n\n{_strip_issue_metadata(issue.get('description') or '')}"
             self.dispatched[issue_id] = run_id
+            # Running is pushed before the job is published: a cancel or stall can only end the
+            # run after it, so their review is never followed by this running (RWS-001).
+            try:
+                self.push_state(issue_id, "running", gen=launch_gen)
+                socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": selected_skill})
+            except Exception as e:  # the run never started: finish it here, not In Progress forever (RWS-007)
+                self.dispatched.pop(issue_id, None)
+                _write_run_log_retrying(selected_skill, "error", started_at, 0.0, prompt=prompt,
+                                        error=f"could not start: {e}", run_id=run_id, linear_issue_id=issue_id,
+                                        agent=backend, reset_generation=launch_gen)
+                with contextlib.suppress(Exception):
+                    self._mark_issue_review(issue_id, gen=launch_gen)
+                return
             _running_jobs[run_id] = {
                 "run_id": run_id,
                 "skill": selected_skill,
@@ -665,13 +678,15 @@ class LinearModule(AgenticModule):
                 "prompt": prompt,
                 "state": "running",
                 "last_progress_at": time.monotonic(),
-                "linear_issue_id": issue_id,
+                "linear_issue_id": issue_id, "launch_gen": launch_gen,  # the stall pass's tracker guard (WS-013)
+                "record": {"agent": backend, "model": _agent_model(backend, cfg), "task_id": run_id,  # RWS-002
+                           "selected_skill": selected_skill, "reset_generation": launch_gen},
                 "agent": backend,
             }
-            self.push_state(issue_id, "running", gen=launch_gen)
-            socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": selected_skill})
             entry = registry.get(selected_skill, {})
             is_entrypoint = bool(entry.get("schedule_eligible") and entry.get("entrypoint"))
+            end = _RunClaim(run_id)  # cancel/stall may end the run first; then they own its side effects
+            proc = None
             try:
                 # Built inside the try: a missing/old dsh fails this run cleanly (error record,
                 # running/dispatch entries cleared, ticket back to review) instead of hanging as running.
@@ -683,23 +698,29 @@ class LinearModule(AgenticModule):
                     env=_registry_exec_env(backend, registry),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    start_new_session=True,  # its own group, so a timeout or cancel ends descendants too
                 )
-                _running_procs[run_id] = proc
+                if not _register_proc(run_id, proc):
+                    raise _RunEnded(run_id)
                 session_id = None
                 if backend == "dsh" and not is_entrypoint:
                     output, it, ot, pm, session_id, stderr_s = _stream_dsh_run(proc, run_id, timeout=AI_RUN_TIMEOUT_S)
                     ok = _dsh_ok(proc, output)
                     output = output or ""
                 else:
-                    stdout_b, stderr_b = proc.communicate(timeout=AI_RUN_TIMEOUT_S)
+                    try:
+                        stdout_b, stderr_b = proc.communicate(timeout=AI_RUN_TIMEOUT_S)
+                    except subprocess.TimeoutExpired:
+                        _kill_and_reap(proc)
+                        raise
                     stdout_s = stdout_b.decode("utf-8", errors="replace").strip()
                     stderr_s = stderr_b.decode("utf-8", errors="replace").strip()
                     output, it, ot, pm = _parse_agent_output(backend, stdout_s)
                     ok = True  # other agents keep the unconditional review status
                 dur = time.monotonic() - t0
                 error_s = _extract_real_errors(stderr_s)
-                _running_jobs.pop(run_id, None)
-                _running_procs.pop(run_id, None)
+                if not end():
+                    return
                 final_state = "review" if ok else "error"
                 _write_run_log(
                     selected_skill,
@@ -720,30 +741,30 @@ class LinearModule(AgenticModule):
                     agent_session_id=session_id,
                     reset_generation=launch_gen,
                 )
-                self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output, error=error_s))
+                _comment_quietly(self.post_comment, issue_id, _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output, error=error_s))
                 self._mark_issue_review(issue_id, gen=launch_gen)
                 if reset_gen.is_current(issue_id, launch_gen):
                     socketio.emit("run_state_change", {"run_id": run_id, "state": final_state, "skill": selected_skill})
                 socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
             except subprocess.TimeoutExpired:
                 dur = time.monotonic() - t0
-                proc = _running_procs.pop(run_id, None)
-                if proc:
-                    proc.kill()
-                _running_jobs.pop(run_id, None)
+                _kill_and_reap(proc)
+                if not end():
+                    return
                 msg = f"Timed out after {AI_RUN_TIMEOUT_S}s"
-                _write_run_log(selected_skill, "timeout", started_at, dur, prompt=prompt, error=msg, run_id=run_id,
+                _write_run_log_retrying(selected_skill, "timeout", started_at, dur, prompt=prompt, error=msg, run_id=run_id,
                                linear_issue_id=issue_id, agent=backend, reset_generation=launch_gen)
-                self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Timeout", prompt=prompt, error=msg))
+                _comment_quietly(self.post_comment, issue_id, _linear_comment_body(title="AgenticOS Run Timeout", prompt=prompt, error=msg))
                 self._mark_issue_review(issue_id, gen=launch_gen)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": selected_skill})
                 socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
             except Exception as e:
-                _running_procs.pop(run_id, None)
-                _running_jobs.pop(run_id, None)
-                _write_run_log(selected_skill, "error", started_at, 0.0, prompt=prompt, error=str(e), run_id=run_id,
+                _kill_and_reap(proc)  # a failure after launch never leaves the agent running (RWS-008/010)
+                if not end():
+                    return
+                _write_run_log_retrying(selected_skill, "error", started_at, 0.0, prompt=prompt, error=str(e), run_id=run_id,
                                linear_issue_id=issue_id, agent=backend, reset_generation=launch_gen)
-                self.post_comment(issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
+                _comment_quietly(self.post_comment, issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
                 self._mark_issue_review(issue_id, gen=launch_gen)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": selected_skill})
                 socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})

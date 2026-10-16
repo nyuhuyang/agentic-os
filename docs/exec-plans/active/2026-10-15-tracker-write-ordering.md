@@ -12,7 +12,7 @@ For one issue, an older tracker state write must never land after a newer one. T
 - manual PATCH moves;
 - the async `_linear_sync_patch`.
 
-Origin: plan review rounds 4–6 of `docs/exec-plans/active/2026-10-15-runner-write-safety.md` (WS-010 owner-push ordering, WS-011, WS-012). It was split out on 2026-10-15 because the race predates that plan and spans every tracker writer. Not started; it needs its own plan review before building. Build after runner-write-safety lands, since it reuses that plan's owner-only side effects.
+Origin: plan review rounds 4–6 of `docs/exec-plans/completed/2026-10-15-runner-write-safety.md` (WS-010 owner-push ordering, WS-011, WS-012). It was split out on 2026-10-15 because the race predates that plan and spans every tracker writer. Not started; it needs its own plan review before building. Build after runner-write-safety lands, since it reuses that plan's owner-only side effects.
 
 ## Findings carried over (from the runner-write-safety review log)
 - WS-010: the owner's cancel/stall `review` push runs outside `_JOB_LOCK`, retry admission does not refuse (`app.py` ≈L3530 is `pass`), and each `push_state` write runs on its own `_push_sync` thread. As a result, A's `review` can overwrite retry B's `running`. `_mark_issue_review` changes `issues_cache` and `dispatched` and emits before any guard runs.

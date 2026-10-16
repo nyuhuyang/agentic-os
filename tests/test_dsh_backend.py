@@ -133,13 +133,13 @@ def test_routing_call_passes_env(app_mod, fake_prefix, monkeypatch):
     import runner.modules.linear as lin
     seen = {}
 
-    def fake_run(cmd, **kw):
+    def fake_run(cmd, timeout, **kw):
         seen["cmd"], seen["env"] = cmd, kw.get("env")
         raise RuntimeError("stop after routing")
     monkeypatch.setenv("DEEPSEEK_API_KEY", KEY)
     monkeypatch.setattr(app_mod, "_load_registry", lambda agent: {})
     monkeypatch.setattr(app_mod, "_registry_exec_env", lambda agent, reg: {"DEEPSEEK_API_KEY": KEY})
-    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr(app_mod, "_run_grouped", fake_run)
     monkeypatch.setattr(app_mod, "_write_run_log", lambda *a, **k: None)  # never touch real run logs
     mod = lin.LinearModule()
     for name in ("push_state", "post_comment", "_mark_issue_review"):
@@ -479,7 +479,7 @@ def test_linear_dispatch_sends_selected_skill_instructions(app_mod, fake_prefix,
     monkeypatch.setattr(app_mod, "_load_registry", lambda agent: registry)
     monkeypatch.setattr(app_mod, "_registry_exec_env", lambda agent, reg: {})
     monkeypatch.setattr(app_mod, "_write_run_log", lambda *a, **k: None)
-    monkeypatch.setattr("subprocess.run", lambda cmd, **kw: type("R", (), {"stdout": "myskill"})())
+    monkeypatch.setattr(app_mod, "_run_grouped", lambda cmd, timeout, **kw: type("R", (), {"stdout": "myskill"})())
     seen = []
 
     def popen(cmd, **kw):
