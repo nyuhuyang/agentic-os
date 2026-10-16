@@ -283,6 +283,38 @@ def _args(value) -> str:
     return text if len(text) <= TOOL_ARGS_CHARS else text[:TOOL_ARGS_CHARS] + "…"
 
 
+_CODEX_TOOL_ITEMS = {"mcp_tool_call", "file_change", "web_search", "collab_tool_call"}
+
+
+def _codex_tool_lines(t: str, item: dict) -> list[str]:
+    """A Codex tool item (Codex exec event schema): the call with its arguments when it starts,
+    its bounded result or failure when it completes."""
+    kind = item.get("type")
+    if kind == "mcp_tool_call":
+        call = f"mcp {item.get('server', '?')}.{item.get('tool', '?')} {_args(item.get('arguments'))}"
+    elif kind == "file_change":
+        changes = item.get("changes") or []
+        call = "edit " + ", ".join(f"{c.get('kind', '?')} {c.get('path', '?')}" for c in changes if isinstance(c, dict))
+    elif kind == "web_search":
+        call = f"web_search {_args(item.get('query'))}"
+    else:  # collab_tool_call and any future tool item
+        call = f"{item.get('tool') or kind} {_args(item.get('prompt') or item.get('arguments') or '')}"
+    if t == "item.started":
+        return [f"{_CYAN}[tool] {call.strip()}{_RESET}"]
+    err = item.get("error")
+    failed = item.get("status") == "failed" or bool(err)
+    if failed:
+        msg = err.get("message") if isinstance(err, dict) else err
+        return [f"{_RED}  ↳ failed: {_tool_result_text(msg or item.get('status'))}{_RESET}"]
+    result = item.get("result")
+    if isinstance(result, dict):
+        result = result.get("content") if result.get("content") is not None else result.get("structured_content")
+    shown = _tool_result_text(result if result is not None else item.get("status") or "done")
+    if kind == "file_change" and not result:
+        shown = f"{call.strip()} ({item.get('status') or 'done'})"
+    return [f"{_DIM}  ↳ {shown}{_RESET}"]
+
+
 def render_event(fmt: str, line: str) -> list[str]:
     """One raw stdout line -> terminal lines for the live/replay run view (shared by both).
     fmt: claude (stream-json), codex (exec --json), dsh (--json) or text (plain output).
@@ -304,6 +336,10 @@ def render_event(fmt: str, line: str) -> list[str]:
                 extra.append(f"{color}  ↳ {_tool_result_text(block.get('content'))}{_RESET}")
         return extra
     item = ev.get("item") or {}
+    if fmt == "codex" and t in ("item.started", "item.completed") and item.get("type") in _CODEX_TOOL_ITEMS:
+        return _codex_tool_lines(t, item)  # every tool kind of the Codex exec event schema (UI28-01)
+    if fmt == "codex" and t == "item.completed" and item.get("type") == "error":
+        return [f"{_RED}[error] {_tool_result_text(item.get('message') or 'error')}{_RESET}"]
     if fmt == "codex" and item.get("type") == "command_execution":
         if t == "item.started":  # the call shows when it starts, not only when it ends (UI-12)
             return [f"{_CYAN}[tool] shell {_args(item.get('command'))}{_RESET}"]

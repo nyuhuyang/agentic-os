@@ -385,3 +385,17 @@ def test_stderr_cannot_slip_between_a_stdout_write_and_its_publication(eng, tmp_
     app_mod._running_jobs.pop(rid)
     pr.RUN_EVENTS.clear()
     assert plain(app_mod._replay_lines(rid, "text")) == live
+
+
+def test_renderer_covers_every_codex_tool_item():
+    r = lambda ev: plain(pr.render_event("codex", json.dumps(ev)))
+    mcp = {"type": "mcp_tool_call", "server": "docs", "tool": "search", "arguments": {"q": "x"}, "status": "in_progress"}
+    assert r({"type": "item.started", "item": mcp}) == ['[tool] mcp docs.search {"q": "x"}']
+    assert r({"type": "item.completed", "item": {**mcp, "status": "completed", "result": {"content": [{"text": "3 hits"}]}}}) == ["  ↳ 3 hits"]
+    failed = pr.render_event("codex", json.dumps({"type": "item.completed", "item": {**mcp, "status": "failed", "error": {"message": "denied"}}}))
+    assert plain(failed) == ["  ↳ failed: denied"] and failed[0].startswith("\x1b[31m")
+    fc = {"type": "file_change", "changes": [{"path": "a.py", "kind": "update"}], "status": "completed"}
+    assert r({"type": "item.started", "item": fc}) == ["[tool] edit update a.py"]
+    assert r({"type": "item.completed", "item": fc}) == ["  ↳ edit update a.py (completed)"]
+    assert r({"type": "item.started", "item": {"type": "web_search", "query": "codex events"}}) == ["[tool] web_search codex events"]
+    assert r({"type": "item.completed", "item": {"type": "error", "message": "stream lost"}}) == ["[error] stream lost"]  # UI28-01

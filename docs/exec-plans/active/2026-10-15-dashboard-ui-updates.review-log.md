@@ -1928,3 +1928,40 @@ Lesson from runner-write-safety (10 inspections): later rounds drift into inject
 - UI27-01 fixed: any non-empty stderr chunk refreshes the heartbeat, newline or not; project runs drain stderr in chunks (`read1`). Test `test_stderr_without_newlines_is_progress`.
 - UI27-02 fixed: a per-run order lock (`project_runs.order_lock`) covers a stdout line's log write and its publication, and a stderr line's position capture and publication, on every reader (claude, text, dsh, project). Test `test_stderr_cannot_slip_between_a_stdout_write_and_its_publication`.
 - Proof: 579 passed.
+
+## Inspection 28 (fresh Codex, on commit 144ad0a) — REVISE (1 medium)
+- Result: /private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/43734fe6-827b-4456-8612-0540ddad69af/scratchpad/claudex/i28/claudex-0vmr484d/result.json (assurance cross_provider)
+```json
+{
+ "verdict": "REVISE",
+ "summary": "The Codex terminal renderer silently drops supported tool activity and errors, leaving Part C incomplete.",
+ "findings": [
+  {
+   "id": "UI28-01",
+   "severity": "medium",
+   "path": "runner/project_runs.py:306",
+   "evidence": "Codex rendering handles command_execution, agent_message and top-level errors, but drops mcp_tool_call, file_change, web_search, collab_tool_call and item-level error events. These fall through normalize_event to None. A Codex MCP invocation—including its arguments, result or failure—therefore disappears from both live output and replay. These event types are defined by the installed version’s [Codex 0.162.0 event schema](https://github.com/openai/codex/blob/rust-v0.162.0/codex-rs/exec/src/exec_events.rs). This violates Part C’s requirement to display each tool call, results and errors.",
+   "fix": "Extend the shared renderer to cover the supported Codex tool and error event types, showing bounded arguments, results and failure details. Add representative renderer coverage beyond shell commands."
+  }
+ ],
+ "coverage": [
+  "Verified the plan digest, all 21 manifest file hashes and the tracked-diff digest.",
+  "Reviewed all supplied changes, added test sources, modified test hunks and relevant surrounding implementation.",
+  "Traced session mutations, confinement, live-session admission, PTY ownership, locking and closure audits.",
+  "Traced project labels through creation, synchronization, backups, dispatch and lock handoff.",
+  "Inspected process-engine callers, interruption records, streaming, replay, history, terminal callbacks, project selection and file browsing.",
+  "Inspected related shared-state and watchdog code beyond the manifest, including state_io.py and stall_detection.",
+  "Checked the installed Codex package version against its upstream event schema."
+ ],
+ "limitations": [
+  "Static inspection only: no edits, tests, delegation or native CLI/browser operations.",
+  "Historical test-pass and manual-validation claims were not independently verified.",
+  "Native resume-picker behavior and live Linear API behavior remain unverified.",
+  "SPEC.md and broader architecture documents were not inspected; fidelity was assessed against the supplied plan and inspected implementation contracts."
+ ]
+}
+```
+
+### Disposition (host Claude; fixed)
+- UI28-01 fixed: the shared renderer shows every Codex tool item of the exec event schema — mcp_tool_call (server.tool + arguments, then result or failure), file_change (kind + path), web_search (query), collab_tool_call (and any future tool item generically) — plus item-level error events, live and in replay. Test `test_renderer_covers_every_codex_tool_item`.
+- Proof: 580 passed.
