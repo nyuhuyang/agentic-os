@@ -2120,3 +2120,9 @@ Lesson from runner-write-safety (10 inspections): later rounds drift into inject
 ### Disposition (host Claude; fixed — a regression from the REV31-01 fix)
 - REV32-01 fixed: entry type and size are captured (`_Entry`) while the directory descriptor is still open; nothing touches a DirEntry after the descriptor closes. Test `test_listing_reports_file_sizes`.
 - Proof: 587 passed.
+
+## Host finding HOST-01 — dashboard shells inherit the runner's descriptors (found during the pre-restart idle check, 2026-10-16)
+- Observed: the user's open dashboard terminal (zsh plus a Claude child) held the live runner's listening socket on :8510, so a restart could not bind the port again while any terminal stayed open. The cause predates this plan: `_spawn` exec'd the shell with every inheritable runner descriptor still open.
+- Fix: before `chdir`/`exec`, the forked child closes every descriptor above 2 listed in `/dev/fd`. The first attempt used `os.closerange(3, SC_OPEN_MAX)`, which hung because SC_OPEN_MAX is huge on macOS.
+- Test: `test_terminal_shell_inherits_no_runner_descriptors` spawns a shell next to an inheritable listening socket and checks that lsof shows only the test process holding the port. It fails without the fix and passes with it.
+- Proof: 588 passed.

@@ -258,6 +258,14 @@ def _spawn(t: Terminal, argv: list[str], env: dict, cols: int, rows: int, socket
     pid, fd = pty.fork()
     if pid == 0:  # child: a new session (pty.fork), so it is its own session leader
         try:
+            # Nothing of the runner leaks into the shell: without this the child inherits the
+            # runner's listening socket on :8510, and a runner restart cannot bind it again while
+            # any terminal (or a resumed agent in it) is still open.
+            for fd_ in [int(n) for n in os.listdir("/dev/fd") if n.isdigit() and int(n) > 2]:
+                try:  # only the descriptors that exist (SC_OPEN_MAX can be huge)
+                    os.close(fd_)
+                except OSError:
+                    pass
             os.chdir(t.cwd)
             os.execvpe(argv[0], argv, env)
         finally:

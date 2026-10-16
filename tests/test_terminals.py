@@ -314,3 +314,24 @@ def test_skill_handoff_refused_under_maintenance(env):
     finally:
         tpty._record_pending_handoff = real
         c.emit("term_close", {"term_id": a["term_id"]}, callback=True)
+
+
+def test_terminal_shell_inherits_no_runner_descriptors(env, tmp_path):
+    import socket
+    app_mod, tpty, repos, tmp = env
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen()
+    srv.set_inheritable(True)  # like the live runner's listening socket, which shells used to inherit
+    port = srv.getsockname()[1]
+    t = tpty.Terminal(term_id="fdcheck", kind="shell", cwd=str(tmp_path))
+    sio = type("S", (), {"emit": lambda *a, **k: None})()
+    try:
+        tpty._spawn(t, ["/bin/sh", "-c", "sleep 5"], dict(os.environ), 80, 24, sio)
+        time.sleep(1)
+        holders = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                                 capture_output=True, text=True).stdout.split()
+        assert holders == [str(os.getpid())]  # the shell does not hold the runner's port
+    finally:
+        srv.close()
+        tpty._kill_session(t)
