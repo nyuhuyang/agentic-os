@@ -1884,3 +1884,47 @@ Lesson from runner-write-safety (10 inspections): later rounds drift into inject
 - FINAL-01 fixed: every stderr line (engine and project runs, before any display cap) refreshes the job's `last_progress_at`. Test `test_stderr_activity_is_progress`.
 - FINAL-02 fixed: each kept stderr line records the stdout log's size when it arrived; replay merges stderr back at that position (older plain-string entries go last). Test `test_replay_keeps_stdout_and_stderr_in_their_live_order`.
 - Proof: 577 passed.
+
+## Inspection 27 (fresh Codex, on commit 5591172) — REVISE (2 medium)
+- Result: /private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/43734fe6-827b-4456-8612-0540ddad69af/scratchpad/claudex/i27/claudex-8dwyyqf8/result.json (assurance cross_provider)
+```json
+{
+ "verdict": "REVISE",
+ "summary": "Two material defects remain in stderr heartbeat handling and live/replay ordering.",
+ "findings": [
+  {
+   "id": "UI27-01",
+   "severity": "medium",
+   "path": "runner/app.py:798",
+   "evidence": "_StderrSink.feed refreshes last_progress_at only after receiving a newline and invoking _line. A scheduled command emitting periodic carriage-return progress on stderr, with quiet stdout for over 300 seconds, is therefore killed by stall_detection.check_once despite continuing activity. The project reader also waits for newline-delimited stderr before calling the sink (project_runs.py:393). The new heartbeat test covers newline-terminated output only.",
+   "fix": "Refresh the heartbeat when nonempty stderr chunks arrive, independently of line completion and display limits. Drain project stderr in chunks too. Cover ongoing stderr activity without newlines across the stall threshold."
+  },
+  {
+   "id": "UI27-02",
+   "severity": "medium",
+   "path": "runner/app.py:813",
+   "evidence": "Sampling stdout file size does not establish the live event order. A stdout reader can flush record A at app.py:2470 and be paused before publishing it. The stderr thread then records the position after A and publishes error E first. The live ring contains E,A, but _replay_lines reconstructs A,E. The same gap exists in text, DSH and project readers. This occurs below truncation limits; the new replay test's sleeps avoid this interleaving.",
+   "fix": "Serialize stdout persistence/publication and stderr position capture/publication through one per-run ordering mechanism, or persist a combined sequenced event stream while retaining raw stdout separately. Verify ordering when stderr publication occurs between a stdout flush and its live publication."
+  }
+ ],
+ "coverage": [
+  "Verified the plan SHA256, all 21 manifest file hashes, and the tracked-diff SHA256 against disk.",
+  "Reviewed the supplied plan, review log, complete diff, all added test sources, and affected existing test changes.",
+  "Traced session mutations, confinement, freshness checks, admission claims, PTY ownership, locks, finalization and closure audits.",
+  "Traced project labels through creation, normalization, synchronization, backups, dispatch and lock handoff.",
+  "Traced process-engine callers, retry/fallback, interruption records, streaming, replay, history and terminal callbacks.",
+  "Inspected project selection, file browsing, Run tests wording, and related state callers in state_io.py, run_skill.py, dsh_cli.py and stall_detection."
+ ],
+ "limitations": [
+  "Static inspection only: no edits, tests, delegation, browser operations or native CLI operations.",
+  "Historical test-pass and manual-validation claims were not independently verified.",
+  "Native resume-picker behavior and live Linear API semantics remain unverified.",
+  "SPEC.md and broader architecture documents were not inspected; fidelity was assessed against the supplied plan and inspected implementation contracts."
+ ]
+}
+```
+
+### Dispositions (host Claude; both fixed)
+- UI27-01 fixed: any non-empty stderr chunk refreshes the heartbeat, newline or not; project runs drain stderr in chunks (`read1`). Test `test_stderr_without_newlines_is_progress`.
+- UI27-02 fixed: a per-run order lock (`project_runs.order_lock`) covers a stdout line's log write and its publication, and a stderr line's position capture and publication, on every reader (claude, text, dsh, project). Test `test_stderr_cannot_slip_between_a_stdout_write_and_its_publication`.
+- Proof: 579 passed.

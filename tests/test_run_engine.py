@@ -346,3 +346,42 @@ def test_stderr_activity_is_progress(eng, tmp_path):
     app_mod._running_jobs["eq"] = {"run_id": "eq", "last_progress_at": 0.0}
     app_mod.run_agent_process("eq", [sys.executable, str(tmp_path / "fake_cli.py"), "errquiet", "ok"], stream="claude", timeout=20)
     assert app_mod._running_jobs["eq"]["last_progress_at"] > 0  # the stall pass sees it working (FINAL-01)
+
+
+def test_stderr_without_newlines_is_progress(eng):
+    app_mod, *_ = eng
+    app_mod._running_jobs["cr"] = {"run_id": "cr", "last_progress_at": 0.0}
+    app_mod._StderrSink("cr").feed(b"\rdownloading 12%")  # no newline yet
+    assert app_mod._running_jobs["cr"]["last_progress_at"] > 0  # UI27-01
+
+
+def test_stderr_cannot_slip_between_a_stdout_write_and_its_publication(eng, tmp_path):
+    app_mod, *_ = eng
+    rid = "ord"
+    app_mod._running_jobs[rid] = {"run_id": rid}
+    sink = app_mod._StderrSink(rid)
+    real_publish = app_mod._publish_run_line
+    state = {}
+
+    def publish(run_id, fmt, line):  # the stdout line is flushed; now stderr tries to cut in
+        t = app_mod._REAL_THREAD(target=lambda: sink._line("E"))  # the fixture fakes threading.Thread
+        t.start()
+        t.join(timeout=0.3)
+        state["blocked"] = t.is_alive()
+        real_publish(run_id, fmt, line)
+        state["t"] = t
+    app_mod._publish_run_line = publish
+    try:
+        log = app_mod._claude_stream_log_path(rid)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a", encoding="utf-8") as sf:
+            app_mod._persist_and_publish(rid, "text", sf, "A")
+    finally:
+        app_mod._publish_run_line = real_publish
+    state["t"].join(timeout=5)
+    sink.close()
+    live = plain(pr.RUN_EVENTS[rid].snapshot())
+    assert state["blocked"] and live == ["A", "[stderr] E"]  # UI27-02
+    app_mod._running_jobs.pop(rid)
+    pr.RUN_EVENTS.clear()
+    assert plain(app_mod._replay_lines(rid, "text")) == live

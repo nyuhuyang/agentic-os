@@ -196,6 +196,13 @@ class EventRing:
 
 RUN_EVENTS: dict[str, EventRing] = {}
 MAX_RINGS = 64
+_ORDER_LOCKS: dict[str, threading.Lock] = {}
+
+
+def order_lock(run_id: str) -> threading.Lock:
+    """Per-run lock that keeps stdout's log write + publication and stderr's publication in one
+    order, so the live view and its replay agree (UI27-02)."""
+    return _ORDER_LOCKS.setdefault(run_id, threading.Lock())
 is_active: Callable[[str], bool] = lambda run_id: False  # set by the runner: is this run still going?
 
 
@@ -211,6 +218,7 @@ def ring_for(run_id: str) -> EventRing:
                 break
             if old != run_id and not is_active(old):
                 RUN_EVENTS.pop(old, None)
+                _ORDER_LOCKS.pop(old, None)
                 extra -= 1
     return ring
 
@@ -380,17 +388,19 @@ def run_agent(argv: list[str], cwd: str, env: dict, run_id: str, agent: str, tim
                 if not line:
                     continue
                 lines.append(line)
-                if lf:  # the durable log the run view replays after the ring is gone (C)
-                    lf.write(line + "\n")
-                    lf.flush()
                 sid = on_session and session_id_of(agent, line)
                 if sid:
                     on_session(sid)
-                for shown in render_event(agent, line):
-                    emit("run_event", {"run_id": run_id, "line": shown, "seq": ring.append(shown)})
+                with order_lock(run_id):  # log write and publication as one step (UI27-02)
+                    if lf:  # the durable log the run view replays after the ring is gone (C)
+                        lf.write(line + "\n")
+                        lf.flush()
+                    for shown in render_event(agent, line):
+                        emit("run_event", {"run_id": run_id, "line": shown, "seq": ring.append(shown)})
 
     def read_err():
-        for raw in proc.stderr:  # line by line, so diagnostics show while the agent runs (IR9-02)
+        # chunks as they arrive (not whole lines), so progress without a newline still counts (IR9-02, UI27-01)
+        for raw in iter(lambda: proc.stderr.read1(65536), b""):
             err.append(raw)
             if on_stderr:
                 on_stderr(raw)

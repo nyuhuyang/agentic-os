@@ -796,6 +796,9 @@ class _StderrSink:
         self.tail: collections.deque = collections.deque(maxlen=STDERR_TAIL_LINES)
 
     def feed(self, chunk: bytes) -> None:
+        job = _running_jobs.get(self.run_id) if self.run_id and chunk.strip() else None
+        if job is not None:
+            job["last_progress_at"] = time.monotonic()  # any stderr activity is progress, newline or not (UI27-01)
         self.buf += chunk
         *lines, self.buf = self.buf.split(b"\n")
         for raw in lines:
@@ -805,20 +808,22 @@ class _StderrSink:
         if not ln.strip():
             return
         ln = ln[:300]
-        job = _running_jobs.get(self.run_id) if self.run_id else None
-        if job is not None:
-            job["last_progress_at"] = time.monotonic()  # stderr activity is progress too (FINAL-01)
-        # Where it fell in stdout: the stream log's size now, so replay can put it back in order (FINAL-02).
-        try:
-            pos = _claude_stream_log_path(self.run_id).stat().st_size if self.run_id else 0
-        except OSError:
-            pos = 0
-        self.tail.append({"pos": pos, "line": ln})
-        if self.run_id and self.shown < STDERR_LIVE_LINES:
-            self.shown += 1
-            shown = f"\x1b[31m[stderr] {ln}\x1b[0m"
-            socketio.emit("run_event", {"run_id": self.run_id, "line": shown,
-                                        "seq": project_runs.ring_for(self.run_id).append(shown)})
+        if not self.run_id:
+            self.tail.append({"pos": 0, "line": ln})
+            return
+        # Position and live publication together under the run's order lock, the same lock a
+        # stdout line holds from its log write to its publication: live and replay agree (FINAL-02, UI27-02).
+        with project_runs.order_lock(self.run_id):
+            try:
+                pos = _claude_stream_log_path(self.run_id).stat().st_size
+            except OSError:
+                pos = 0
+            self.tail.append({"pos": pos, "line": ln})
+            if self.shown < STDERR_LIVE_LINES:
+                self.shown += 1
+                shown = f"\x1b[31m[stderr] {ln}\x1b[0m"
+                socketio.emit("run_event", {"run_id": self.run_id, "line": shown,
+                                            "seq": project_runs.ring_for(self.run_id).append(shown)})
 
     def close(self) -> None:
         if self.buf:
@@ -873,6 +878,15 @@ def _read_both(proc, stdout_reader, stop: threading.Event, timeout: float, run_i
 project_runs.is_active = lambda run_id: run_id in _running_jobs  # ring eviction spares live runs (IR19-04)
 
 
+def _persist_and_publish(run_id: str, fmt: str, sf, line: str) -> None:
+    """One stdout line into the durable log and the live view as one step, under the run's order
+    lock, so a stderr line can never be published between them out of order (UI27-02)."""
+    with project_runs.order_lock(run_id):
+        sf.write(line + "\n")
+        sf.flush()
+        _publish_run_line(run_id, fmt, line)
+
+
 def _publish_run_line(run_id: str, fmt: str, line: str) -> None:
     """Every streamed stdout line of every run feeds the live terminal view (ring + socket)
     and, once announced, the job's agent session id (C, A/R02)."""
@@ -916,9 +930,7 @@ def _stream_text_run(
                 line = raw.decode("utf-8", errors="replace").rstrip("\n")
                 if line:
                     collected.append(line)
-                    sf.write(line + "\n")
-                    sf.flush()
-                    _publish_run_line(run_id, fmt, line)
+                    _persist_and_publish(run_id, fmt, sf, line)
                     _write_run_progress_json(run_id, {
                         "state": "running",
                         "stream_log": str(stream_path),
@@ -2466,9 +2478,7 @@ def _stream_claude_run(
                 if not line:
                     continue
                 lines.append(line)
-                sf.write(line + "\n")
-                sf.flush()
-                _publish_run_line(run_id, "claude", line)
+                _persist_and_publish(run_id, "claude", sf, line)
                 try:
                     ev = json.loads(line)
                     if ev.get("type") == "result":
@@ -2519,9 +2529,7 @@ def _stream_dsh_run(
                 line = raw.decode("utf-8", errors="replace").rstrip("\n")
                 if not line:
                     continue
-                sf.write(line + "\n")
-                sf.flush()
-                _publish_run_line(run_id, "dsh", line)
+                _persist_and_publish(run_id, "dsh", sf, line)
                 ev = events.feed_line(line)
                 if ev is None:
                     continue
