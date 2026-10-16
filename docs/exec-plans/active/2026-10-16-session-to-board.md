@@ -17,7 +17,7 @@ User request, 2026-10-16. Follow-up to `docs/exec-plans/active/2026-10-15-dashbo
 - **Card placement.** If the session already has a card, that card moves back to Todo. If it has none (for example a session started in VS Code), a new Todo card is created and bound to it (agent, session id, project, the session's own folder). A card whose session is running or launching is not moved: the button reports that it is still running.
 - **One button.** "Resume" puts the card in Todo and opens the card's detail view with the reply box focused. It does not open the bottom panel. The separate "copy resume" goes away; the card's existing "Open interactive" covers resuming in a terminal.
 - **Session open elsewhere.** If the session is being used somewhere else, the card shows a warning, and sending a reply asks for one confirmation. It is not blocked.
-- **Reviewer.** DeepSeek (`dsh`, read-only) reviews this plan, at the user's request: "需要仔细用deepseek审阅". This is a third-party review, recorded as such; it is not a cross-provider claudex approval.
+- **Reviewer.** DeepSeek (`dsh`, read-only) reviews this plan, at the user's request: "需要仔细用deepseek审阅". This is a third-party review, recorded as such; it is not a cross-provider claudex approval. After the user reported Codex usage reset (2026-10-16), the claudex Codex plan review runs too (`SBR-` findings), under the same convergence standard.
 - **In progress stays as it is (user, 2026-10-16):** "现在在 In progress 可以在tab里面打开terminal，这个功能很好，不用改。" Then (same day): "No，不要在旁边加 \"Open terminal\" 和 \"Copy command\" 两个按钮，现在就很好". The card Terminal tab is not changed at all by this plan: no new buttons in any column.
 - **Convergence (user, 2026-10-16).** The user said: "定过一个收敛标准：只修高危，以及在 macOS单用户环境下真能复现的问题。要把这个标准也用到 plan". After round 12, plan review stops. Only high findings and findings reproducible on this macOS single-user setup are fixed; the rest are accepted risks, listed below.
 - **Scope.** Plan and review only. Building needs a separate go-ahead; standing rule: "你先别动手改，全部都写入plan".
@@ -30,6 +30,10 @@ User request, 2026-10-16. Follow-up to `docs/exec-plans/active/2026-10-15-dashbo
 - [ ] Resume on a session that is running or launching (claimed) returns "still running" and changes nothing
 - [ ] After Resume the card detail opens with the reply box and send controls visible and the reply box focused; the bottom terminal panel does not open
 - [ ] Replying from Todo continues **the same session** (same agent, enforced, and session id), never a fresh session; a failed continuation is an error
+- [ ] A second and later reply on the same card (from Todo, In review, Done or Error) continues the same session in the same folder until a reset to Todo
+- [ ] Open interactive on a resumed session card opens in the session's folder (or its ticket worktree when that is the session's folder)
+- [ ] Choosing In Progress in the issue editor of a resumed Todo card opens the reply instead of dispatching
+- [ ] Local tracker identifiers are never reused after a delete or Empty trash
 - [ ] Session cards are claude/codex only; dsh sessions show no Resume button
 - [ ] Replies run under the project's policy
   - [ ] confidential projects use the sandboxed CLI from `project_runs.agent_cli` and refuse dsh
@@ -51,7 +55,7 @@ User request, 2026-10-16. Follow-up to `docs/exec-plans/active/2026-10-15-dashbo
 ### 0. What a board card is
 `refreshJobBoard` builds the columns only from tracker issues (`/api/linear/issues`): Linear when configured, the local tracker otherwise. Each card's column comes from the issue state, and its `run_id` is the issue's **latest** run (`index.html` ≈L2682–2730). A run record with no `linear_issue_id` is never shown (STB-012). So "the session's card" means a tracker issue, and moving it means moving the issue.
 
-### 1. A card can carry "resume this session" (one-shot, generation-bound)
+### 1. A card can carry "resume this session" (generation-bound)
 - Today a card's continuation comes from `_get_task_agent_lock`. Its lock clears when the latest record is `todo`/`rework`, so a Todo card starts fresh (Decision 11).
 - Every move back to Todo bumps the issue's reset generation:
   - the tracker PATCH route through `_tracker_reset_route`;
@@ -62,7 +66,8 @@ User request, 2026-10-16. Follow-up to `docs/exec-plans/active/2026-10-15-dashbo
 - `api_run_retry` honours it only when **both** hold:
   1. it is on the issue's **latest** run record. "Latest" is one server-side predicate, `_intent_latest(issue)`: the newest record of the issue, skipping `interactive_ended` audits **and** `archived` records (STB-065/077). The intent check and the board payload's `resume_ok` both use it, and the board receives `resume_ok` precomputed rather than deriving it in JS. Opening and closing the card's tab therefore never voids the intent;
   2. `gen == reset_gen.current(issue)`.
-- Any later drag or reset to Todo bumps the generation, so the intent becomes void without anyone having to clear it. `api_run_set_status` and `api_run_restore` also drop the field when they copy `{**original}` (STB-004).
+- Any later drag or reset to Todo bumps the generation, so the intent becomes void without anyone having to clear it. `api_run_set_status` for `todo`/`rework` also drops the field when it copies `{**original}` (STB-004); its other statuses and `api_run_restore` keep it, and it is still checked against the generation at every use.
+- **Not consumed by a reply (SBR-001).** The intent is the card's session routing until the next reset, not only for the first reply. Every continuation record, on both routes of §3.3, copies the same `resume_session` (same `gen`). A second reply, from Todo, In review, Done or Error, therefore takes §3 again: same session, same folder, same policy. Without this, a later reply would reach the old `bound` block (its inline `project_key` and `issue_identifier`) and call `_run_project_ticket(reuse_only=True)`, which fails for a new card and runs a bound ticket's main-checkout session in the worktree.
 - With the intent: strict continuation (no fresh fallback, failure → `error`, as C2's quick reply). Without it: today's behaviour.
 
 ### 2. `POST /api/projects/<key>/sessions/<agent>/<sid>/to-board`
@@ -134,7 +139,13 @@ User request, 2026-10-16. Follow-up to `docs/exec-plans/active/2026-10-15-dashbo
 5. **Prompt.** Only the reply plus the attachment note. It does not include the "Original task / Previous output" wrapper.
 6. **Records (STB-002, STB-018).**
    - Normal, timeout and error records go through one helper that applies `_records_unsafe()` withholding for confidential bindings.
-   - Each record carries `agent_session_id: sid`, `linear_issue_id`, `issue_identifier` (the card's tracker identifier, STB-061: so `open_terminal` keeps taking the same ticket lock as the reply and a drag), the binding and `source: "session"`. It carries no `resume_session`: the intent is consumed.
+   - **Cancel and stall (SBR-005).** Those records are written by `_write_owner_record` from `job["record"]` (app.py ≈L3069), not by the worker. On the generic path, `_running_jobs[run_id]["record"]` therefore carries every field a continuation record needs: `resume_session`, `agent_session_id`, `linear_issue_id`, `issue_identifier`, `project_key`, `confidential` and `source`. `_write_owner_record` applies the same withholding helper, so a confidential prompt is withheld where records are unsafe. The binding sits **only** inside `job["record"]`, never as the job's top-level `project_key`: cancel (app.py ≈L4034) and the stall pass (`stall_detection` ≈L67) treat a top-level `project_key` as a worktree project run and call `_signal_project_run`. A generic session job uses the `run_agent_process` cancel and kill path. A cancelled or stalled reply therefore leaves a latest record that still routes the next reply through §3.
+7. **Shutdown (SBR-009).** `_stop_project_runs` (app.py ≈L2955) selects jobs by top-level `project_key`, and its `projects.stop_all()` kills only processes started through `projects.spawn`. A `run_agent_process` job (own session, `_running_procs`) is neither, so on SIGTERM its agent outlives the runner, and after a restart the session claim is gone while the agent still writes. This gap exists today for every generic run; the session reply makes a second writer on one session likely. Fix, for **every** `run_agent_process` job, not only session replies:
+   - `run_agent_process` refuses to start once `_SHUTTING_DOWN` is set, through the same `_register_proc` handshake (the new process is killed and reaped; the run records `error: shutting down`);
+   - **Shutdown owns the record (SBR-010).** Generic workers never read `job["cancelled"]`; only the party that pops the job owns its record. So the generic branch of `api_run_cancel` (app.py ≈L4039–4062: pop job and proc under `_JOB_LOCK`, SIGTERM then SIGKILL the group with reaping, `_write_owner_record`) becomes one helper, `_cancel_generic(run_id, error)`, used by the cancel route and by shutdown. `_stop_project_runs` calls it, next to `projects.stop_all()`, for every job without a top-level `project_key`, with `error="Cancelled: dashboard shutting down"`. The displaced worker then finds its job gone (`_RunClaim` → not owner) and writes nothing. The record is written synchronously before the helper returns, so shutdown does not rely on the job disappearing;
+   - **Already finalizing.** A worker that won `_end_job` first is still writing. `_RunClaim` adds its run_id to a `_finalizing` set when it takes ownership and removes it after the record write (in a `finally`). The 10 s shutdown wait covers that set as well as the project jobs;
+   - cancel and stall classification is unchanged (top-level `project_key` only).
+   - Each record carries `agent_session_id: sid`, `linear_issue_id`, `issue_identifier` (the card's tracker identifier, STB-061: so `open_terminal` keeps taking the same ticket lock as the reply and a drag), the binding and `source: "session"`. It also carries the unchanged `resume_session` (SBR-001), so the next reply routes the same way until a reset bumps the generation. The worktree route passes it through a new `_run_project_ticket(..., record_extra=...)` parameter that is merged into every record it writes.
 
 ### 4. In use elsewhere
 `session_in_use(target, own_run_id, own_finished_at) -> str | None` returns a reason, or None. It checks:
@@ -159,9 +170,17 @@ Where it is used:
   - while `resume_ok` holds, `#detail-dispatch-group` (fresh dispatch into In Progress) is hidden, so a resumed session card offers only the continuation (STB-036). A drag or reset voids the intent and brings the dispatch buttons back;
   - `resumeFromProject` tolerates a missing `_boardItemsByRunId[run_id]` (opening the detail by `run_id` directly) (STB-031);
   - after a continuation the reply UI stays, because later records keep `linear_issue_id` and `source` (STB-018).
-- **Terminal tab: no change.**
+  - **Issue editor (SBR-003).** `saveLinearIssue` PATCHes the selected state directly, so choosing In Progress in the editor would dispatch a fresh run. While `resume_ok` holds, a save whose state is a started state does not PATCH; it opens the reply focused, as the In Progress drop does. Other fields and other states save as today.
+  - **Metadata-only saves (SBR-006).** `saveLinearIssue` sends `state_name` on every save, and `_tracker_reset_route` bumps the generation whenever `state_name` is Todo. Saving only the title of a resumed Todo card would therefore void its intent. The save sends `state_name` only when the state changed (`stateChanged` is already computed there), for every card. An explicit move to Todo still bumps.
+  - **Reply controls in every state (SBR-008).** `canRetry` (index.html ≈L3034) excludes `done` and `todo`. While `resume_ok` holds and the latest run is not running, it is true in every state, Done included, and the retry group shows only the intent agent. So the main reply box can send a later reply from Done as §1 promises.
+- **Terminal tab: no UI change.**
   - It already shows on every run card in every column (`openDetailModal` hides it only for `linear-*` cards with no run).
   - Its live view, replay, Show in panel and Open interactive stay as they are (user decision).
+  - **Backend for session cards (SBR-002).** `open_terminal` (`runner/modules/pty/__init__.py` ≈L350–381) treats a record's `project_key` + `issue_identifier` as a worktree binding: it calls `projects.load_binding` and opens in the ticket worktree. A to-board card has those fields without a worktree, so Open interactive would fail, and a bound ticket's main-checkout session would open in the wrong folder. For a record with a valid intent (§1):
+    - the tab still takes `ticket_lock(project_key, issue_identifier)` (the lock file needs no binding), so it contends with reply and drag as before;
+    - only when a durable binding exists and its worktree equals the session cwd does it take today's worktree path (`load_binding`, `_effective_project`);
+    - otherwise the cwd is the session's folder from `session_target(..., board_ids=...)`, re-resolved server-side, and the project's confidentiality is the §3.3 effective one. A client cwd is ignored.
+    - **Independent of the intent (SBR-007).** This folder choice depends only on the record's `agent_session_id`, binding and session cwd, never on whether the intent is still valid. A card reset to Todo afterwards, and an older attempt opened from history, therefore still open in the session's folder. The generation check governs only headless continuation (§1).
   - No Open terminal and no Copy command are added (STB-020 N/A). The project row's "Open terminal" stays where it is.
 
 ### 6. Project session row
@@ -247,6 +266,11 @@ Where it is used:
   - The trash panel gets **Empty trash**, with one `confirm()` showing the count.
   - **Local tracker (STB-073).** The board fetch returns only active states, so Empty trash reads Canceled tasks from the local tracker directly (`LocalTracker` raw tasks), and the 🗑 count for local mode comes from that read too.
   - It archives each Canceled issue. In Linear this uses a new `LinearClient.archive_issue` (`issueArchive` mutation): recoverable from Linear's archive, never a hard delete. In the local tracker the issue is removed.
+  - **Local identifiers are never reused (SBR-004).** `LocalTracker._next_identifier` derives `LOC-n` from the remaining tasks only, so after a delete the next task can get a removed task's identifier, and with it the old `ticket:<key>/LOC-n` binding, branch and worktree. Fix:
+    - a persisted high-water mark (`state/local_tracker_meta.json`, `{"loc_max": n}`) read and written inside the same `_tasks_txn` lock;
+    - `_next_identifier` returns `max(tasks, loc_max) + 1` and raises `loc_max`;
+    - `delete_issue` (Empty trash and any other delete) raises `loc_max` to at least the deleted identifier;
+    - when the file is missing, `loc_max` starts from the highest `LOC-n` among the tasks, the run log's `issue_identifier` values and the ticket directories under `WORKTREE_ROOT`.
   - **Poll filter (STB-050).** The poller drops `archived_ids` while building `new_cache` (before `issues_cache.update` and `_sync_cache_to_local`), not only in its carry-over. The `issues` queries keep Linear's default of excluding archived issues: observed on 2026-10-16, a poll after archiving 92 issues returned none of them.
   - **Eviction (STB-029).** Each archived id is removed from every place the poller and the board read: `issues_cache`, `_issues_by_team`, `_local_overrides`, the local tracker's `tasks.json` mirror and any dismissed set, before `linear_issues_updated` is emitted. Otherwise the poller's terminal-issue carry-over and `_sync_cache_to_local` would bring it back.
     - The id also goes into a persisted `archived_ids` set that the poller's carry-over skips, so a restart (which pre-fills the cache from `tasks.json`) does not resurrect it.
@@ -298,6 +322,7 @@ Where it is used:
 
 ## Progress Checklist
 - [x] DeepSeek plan review (third-party, read-only); dispositions in the review log. Closed under the user's convergence standard after 12 rounds (findings 11, 9, 8, 9, 8, 6, 4, 4, 4, 6, 9, 8; every high fixed; round 12's high and reproducible ones fixed; STB-082 and STB-085 accepted). Not a claudex cross-provider approval.
+- [ ] Codex plan review (claudex cross-provider) approved, or closed under the convergence standard; dispositions in the review log
 - [ ] User go-ahead to build
 - [ ] Test: to-board with no card → a tracker issue in Todo (local tracker) plus a linked run record with `resume_session` (current gen), binding, title (withheld when confidential + unsafe); the board lists it
 - [ ] Test: to-board on a found card (Review/Done/Backlog/Error) → issue to Todo, gen bumped, `todo` record with `resume_session` on the issue's latest run_id; interactive_ended/archived records are never picked
@@ -340,6 +365,16 @@ Where it is used:
 - [ ] Implement §11
 - [ ] Test: §2.4 explicit bump and restore on a failed move; intent survives opening and closing the card's tab (STB-065/068); §2.4 record has `issue_identifier`; `session_target` title used, client title ignored; unbound/confidential creates carry the default project id; a running board session is listed via `board_ids`
 - [ ] Test: board-launched session resolves for to-board and reply (STB-070); to-board holds `reserve_card` and a concurrent drag waits (STB-071); LinearError surfaces as 409 and per-issue trash failures (STB-072/074); local Empty trash reads Canceled tasks directly (STB-073); verify timeout is red (STB-076); intent predicate skips archived (STB-077); session card without a record binding uses the `resume_session` project's confidentiality (STB-078)
+- [ ] Test: second reply after a continuation (record carries `resume_session`) from In review/Done takes §3 again, never `_run_project_ticket(reuse_only=True)` for a non-worktree session; `api_run_set_status` to done keeps the field, to todo drops it (SBR-001)
+- [ ] Test: `open_terminal` on a new to-board card opens in the session cwd without `load_binding`, takes the ticket lock; on a bound ticket's main-checkout session opens the main checkout; on a worktree session opens the worktree (SBR-002)
+- [ ] Test: issue editor save with a started state on a `resume_ok` card does not PATCH and opens the reply (SBR-003)
+- [ ] Test: local tracker create LOC-1, delete, create → LOC-2; missing meta file initialised from tasks, run log and worktree dirs (SBR-004)
+- [ ] Test: cancel and stall of a generic session reply write a record carrying `resume_session`, binding, `issue_identifier` and `source` (withheld when confidential + unsafe); the job has no top-level `project_key`; the next reply takes §3 (SBR-005)
+- [ ] Test: title-only save of a resumed Todo card sends no `state_name` and keeps the generation (SBR-006)
+- [ ] Test: Open interactive on a session card after a reset to Todo, and on an older attempt, opens the session folder (SBR-007)
+- [ ] Test: a continuation marked Done shows the reply send controls (intent agent only) and the main reply box sends a continuation (SBR-008)
+- [ ] Test: SIGTERM shutdown with a silent generic session reply running kills its process group, writes its cancel record with the §3.6 fields, and a launch after shutdown began is refused (SBR-009)
+- [ ] Test: shutdown with a silent generic reply → exactly one `cancelled` record (written by `_cancel_generic`, §3.6 fields) exists when `_stop_project_runs` returns, the worker writes none; a worker already finalizing is waited for via `_finalizing` (SBR-010)
 - [ ] Implement §12 (tab strip, drag reorder, localStorage order/active, keyboard reorder)
 - [ ] Manual: §12 in the isolated runner — reorder by drag and by keyboard, reload keeps order, add/remove a project
 - [ ] Full suite passes

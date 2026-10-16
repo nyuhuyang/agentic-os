@@ -1112,3 +1112,233 @@ Round 12 dispositions (host: Claude), under the user's convergence standard ("�
 - The round-12 fixes (STB-079/080/081/083/084/086) were not reviewed again.
 - Assurance: third-party DeepSeek review; this is not a claudex cross-provider approval. Building waits for the user's go-ahead.
 - Final plan SHA256: ce401a887dd0dda6734f8690606e68a95e214d9418abf2e7983b331cec84dfaa
+
+## Codex plan review — round 1 (2026-10-16)
+- User: "已经reset codex usage". The claudex cross-provider plan review now runs on Codex; the DeepSeek rounds above stay third-party.
+- Runner result: `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/stb/codex/r1/claudex-4xvvwf5p/result.json`
+- Provider codex, codex-cli 0.163.0, session `01a1466b-2eba-7593-8611-2d193cbe787f`, assurance `cross_provider`, requested model: CLI default (observed: unknown), plan SHA256 `ce401a887dd0dda6734f8690606e68a95e214d9418abf2e7983b331cec84dfaa`.
+- Verdict: **REVISE**
+
+```json
+{
+  "verdict": "REVISE",
+  "summary": "Four concrete plan defects remain: later replies lose the intended routing, imported cards break interactive terminals, an editor action bypasses continuation, and trash cleanup permits ticket-identifier reuse.",
+  "findings": [
+    {
+      "id": "SBR-001",
+      "severity": "high",
+      "path": "docs/exec-plans/active/2026-10-16-session-to-board.md:119",
+      "evidence": "The routing replacement applies only while resume_session is valid, and §3.6 removes that field after the first reply. A subsequent reply from an imported main-checkout session therefore reaches the existing bound block in runner/app.py:4214–4248. Its inline project_key and issue_identifier cause _run_project_ticket(reuse_only=True): a new card fails because its worktree does not exist; an existing ticket can resume in its ticket worktree instead of the session's folder.",
+      "fix": "Separate persistent session routing from the one-shot Todo intent. Apply session resolution, folder selection, policy and strict continuation to subsequent session-card replies until an explicit reset starts fresh."
+    },
+    {
+      "id": "SBR-002",
+      "severity": "medium",
+      "path": "docs/exec-plans/active/2026-10-16-session-to-board.md:99",
+      "evidence": "New imported cards receive project_key and issue_identifier without creating a ticket worktree. The unchanged runner/modules/pty/__init__.py:350–381 interprets those fields as a worktree binding, calls projects.load_binding, and selects that worktree as cwd. Clicking the card's existing Open interactive therefore fails with missing binding metadata. For a bound ticket's main-checkout session, it selects the wrong folder.",
+      "fix": "Update terminal backend routing to distinguish the tracker identifier used for locking from an actual worktree binding. Resolve the session cwd server-side, preserve the same card reservation and project policy, and retain the existing Terminal UI."
+    },
+    {
+      "id": "SBR-003",
+      "severity": "medium",
+      "path": "docs/exec-plans/active/2026-10-16-session-to-board.md:154",
+      "evidence": "The listed UI guards omit the issue editor's state selector and Save to Linear action. runner/templates/index.html:3358 populates all team states, and saveLinearIssue at line 3419 PATCHes the selected state directly. Selecting In Progress on a resumed Todo card still reaches _issues_patch_reserved and _dispatch_issue_held, which starts a fresh run without the continuation reply or session checks.",
+      "fix": "Guard the editor's In Progress transition while resume_ok holds and focus the reply controls instead. Include this dispatch entry point in the verification checklist."
+    },
+    {
+      "id": "SBR-004",
+      "severity": "high",
+      "path": "docs/exec-plans/active/2026-10-16-session-to-board.md:248",
+      "evidence": "Local trash cleanup deletes tasks while preserving execution state. However, LocalTracker._next_identifier in runner/modules/linear/local_tracker.py:85 derives LOC-n solely from remaining tasks. Run LOC-1 for project P, cancel it, empty trash, then create another task: LOC-1 is reused. The preserved ticket:P/LOC-1 durable binding and projects.create_worktree's reuse behavior can attach the unrelated task to the old branch and worktree.",
+      "fix": "Persist a monotonically increasing local identifier counter under the tracker transaction, initialized above all previously allocated identifiers. Never reuse identifiers after deletion; add a delete-create-dispatch regression scenario."
+    }
+  ],
+  "coverage": [
+    "Verified the plan file matches the supplied SHA256.",
+    "Inspected retry routing, session claims, reset generations, durable bindings, run-log readers/writers, and cancel/stall record ownership.",
+    "Traced tracker creation, dispatch, polling, cache mirroring, and local identifier allocation beyond the plan's primary files.",
+    "Inspected session resolution, project policy, worktree reuse, PTY admission, terminal metadata, and UI dispatch callers.",
+    "Inspected relevant SPEC.md excerpts, verification-badge logic, Claude model parsing, cost lookup, and selected existing test definitions."
+  ],
+  "limitations": [
+    "Static plan review only; no files edited, tests executed, or delegation performed.",
+    "The proposed implementation does not yet exist, so runtime behavior and browser interactions were not verified.",
+    "Live Linear contracts, installed CLI behavior, and current model pricing were not externally verified.",
+    "SPEC.md is a draft and differs from existing lifecycle behavior; pre-existing discrepancies were not reported as new plan defects."
+  ]
+}
+```
+
+### Dispositions
+- SBR-001 (high) — accepted, fixed. §1 "Not consumed by a reply"; §3.6; acceptance criterion and test added.
+- SBR-002 (medium; reproducible: Open interactive on a new session card) — accepted, fixed. §5 "Backend for session cards"; test added.
+- SBR-003 (medium; reproducible via the issue editor) — accepted, fixed. §5 "Issue editor"; test added.
+- SBR-004 (high) — accepted, fixed. §11 "Local identifiers are never reused"; test added.
+
+
+## Codex plan review — round 2 (2026-10-16)
+- Runner result: `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/stb/codex/r2/claudex-8hhgpna4/result.json`
+- Provider codex, codex-cli 0.163.0, session `01a1466b-2eba-7593-8611-2d193cbe787f`, assurance `cross_provider`, requested model: CLI default (observed: unknown), plan SHA256 `b2147a6264b93c2005993ed09653b1dc12e3d222654d6e65c16af7a22c5e9d00`.
+- Verdict: **REVISE**
+
+```json
+{
+  "verdict": "REVISE",
+  "summary": "SBR-001 through SBR-004 are addressed for their original scenarios. Four additional gaps remain in cancellation, metadata saves, terminal history, and Done-card reply controls.",
+  "findings": [
+    {
+      "id": "SBR-005",
+      "severity": "high",
+      "path": "docs/exec-plans/active/2026-10-16-session-to-board.md:140",
+      "evidence": "The generic route's record helper covers normal, timeout and error outcomes, but Cancel and stall write independently through _write_owner_record (runner/app.py:3069; runner/modules/stall_detection/__init__.py:89). Existing retry job metadata at app.py:4282 contains neither the intent nor project binding. Cancel an imported confidential session's reply: the owner record becomes latest without those fields, so the next reply can reach the ordinary retry route and its unsandboxed _build_resume_cmd, bypassing project policy. The worktree record_extra addition does not cover this generic owner.",
+      "fix": "Explicitly integrate generic cancel/stall ownership with the shared record helper, preserving resume_session, binding, source and confidentiality handling. Define cancellation ownership for generic project-session jobs so project_key classification cannot silently select the worktree-only lifecycle."
+    },
+    {
+      "id": "SBR-006",
+      "severity": "medium",
+      "path": "docs/exec-plans/active/2026-10-16-session-to-board.md:167",
+      "evidence": "The editor fix guards started states but leaves other saves unchanged. saveLinearIssue (runner/templates/index.html:3422) always sends state_name, even when only the title changed. On a resumed Todo card, saving a title therefore sends Todo to _tracker_reset_route (runner/modules/linear/__init__.py:335), which unconditionally bumps the generation. This invalidates session routing although the user performed no drag or reset; the next send loses the intended continuation.",
+      "fix": "Omit state_name from metadata-only saves when the state is unchanged. Preserve explicit Todo drag/reset behavior and verify that editing a resumed Todo card's title or description keeps its intent valid."
+    },
+    {
+      "id": "SBR-007",
+      "severity": "medium",
+      "path": "docs/exec-plans/active/2026-10-16-session-to-board.md:171",
+      "evidence": "The terminal backend correction applies only to a record with a valid intent. Import a session without a worktree, then explicitly reset its card to Todo: the generation invalidates that intent, while project_key, issue_identifier and agent_session_id remain. Open interactive then falls back to the existing load_binding branch at runner/modules/pty/__init__.py:375 and fails because no worktree metadata exists. Historical attempts similarly cease to satisfy the issue-latest predicate after another continuation.",
+      "fix": "Resolve terminal session folders independently of retry-intent eligibility, including reset and historical records. Keep generation checks for headless continuation while retaining server-side session validation, project policy and card locking for terminals."
+    },
+    {
+      "id": "SBR-008",
+      "severity": "medium",
+      "path": "docs/exec-plans/active/2026-10-16-session-to-board.md:158",
+      "evidence": "The revised acceptance criteria explicitly allow later replies from Done, but the UI change only extends canRetry to Todo. The existing predicate at runner/templates/index.html:3034 still excludes done. After a continuation is marked Done, its main reply textarea remains visible but its send buttons remain hidden; the plan also suppresses the board retry group while resume_ok holds. Preserving backend routing alone does not enable this promised reply flow.",
+      "fix": "Make a valid, non-running session intent enable the main reply send controls in every promised state, including Done, with the forced agent. Add a UI scenario that marks a continuation Done and sends another reply from the main reply box."
+    }
+  ],
+  "coverage": [
+    "Verified the revised plan matches SHA256 b2147a6264b93c2005993ed09653b1dc12e3d222654d6e65c16af7a22c5e9d00.",
+    "Checked all four prior dispositions against the revised plan and relevant implementation.",
+    "Traced generic retry, cancel/stall owners, session claims, binding lookup and CLI construction.",
+    "Traced editor PATCH writers, reset-generation handling, status/restore records, terminal admission and historical-attempt controls.",
+    "Checked local identifier allocation and the proposed high-water-mark correction."
+  ],
+  "limitations": [
+    "Static review only; no files edited, tests run, or delegation performed.",
+    "The proposed implementation does not yet exist; findings concern integration gaps between the plan and current callers.",
+    "No live Linear, agent CLI, browser interaction or current pricing verification was performed."
+  ]
+}
+```
+
+### Dispositions
+- SBR-005 (high) — ACCEPTED. Confirmed _write_owner_record builds from job["record"] (app.py ≈L3069) and retry job metadata (≈L4282) lacks intent/binding; cancel/stall classify by top-level project_key. Fix: §3.6 "Cancel and stall": the generic job's record carries resume_session, agent_session_id, linear_issue_id, issue_identifier, project_key, confidential, source; _write_owner_record applies the withholding helper; binding only inside job["record"], never top-level project_key, so cancel/stall use the run_agent_process path. Test added.
+- SBR-006 (medium, reproducible: title edit) — ACCEPTED. §5 "Metadata-only saves": state_name sent only when stateChanged. Test added.
+- SBR-007 (medium, reproducible: reset then Open interactive) — ACCEPTED. §5 "Independent of the intent": terminal folder choice depends on record session/binding/session cwd, not on intent validity. Test added.
+- SBR-008 (medium, reproducible: reply from Done) — ACCEPTED. §5 "Reply controls in every state": canRetry true while resume_ok and not running, intent agent only. Test added.
+
+
+## Codex plan review — round 3 (2026-10-16)
+- Runner result: `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/stb/codex/r3/claudex-jydloiqy/result.json`
+- Provider codex, codex-cli 0.163.0, session `01a1466b-2eba-7593-8611-2d193cbe787f`, assurance `cross_provider`, requested model: CLI default (observed: unknown), plan SHA256 `165a1ea17772e8f1aadff7eacf9ce9692f70048e7e17c42999c8af50ab84657b`.
+- Verdict: **REVISE**
+
+```json
+{
+  "verdict": "REVISE",
+  "summary": "SBR-001 through SBR-008 are addressed in the plan. One additional shutdown defect remains in the generic session-job lifecycle.",
+  "findings": [
+    {
+      "id": "SBR-009",
+      "severity": "high",
+      "path": "docs/exec-plans/active/2026-10-16-session-to-board.md:142",
+      "evidence": "The revised generic job deliberately omits top-level project_key. However, runner/app.py:2955–2966 uses that same field to select jobs for shutdown cancellation and finalization waiting. Its projects.stop_all() call only kills processes registered through projects.spawn (runner/projects.py:139–165), whereas the planned generic route uses run_agent_process, which calls subprocess.Popen directly with start_new_session=True (app.py:2616). Start a long-running session reply, then SIGTERM a directly launched dashboard: neither shutdown mechanism selects its process. The agent can survive while the runner exits, releases its locks and loses its session claim, allowing a restarted dashboard to launch another writer against the same session.",
+      "fix": "Explicitly include generic session jobs in shutdown admission, process-group termination, reaping and final-record waiting without classifying them as worktree workers for cancel/stall. Use a separate lifecycle discriminator or inspect their nested binding metadata. Add a shutdown scenario covering a silent generic session reply, preserved/redacted completion metadata, and refusal to launch after shutdown begins."
+    }
+  ],
+  "coverage": [
+    "Verified the plan matches SHA256 165a1ea17772e8f1aadff7eacf9ce9692f70048e7e17c42999c8af50ab84657b.",
+    "Checked the SBR-005–008 revisions and retained SBR-001–004 corrections.",
+    "Traced job classification through cancellation, stall detection, shutdown handlers, process registration, daemon workers and session claims.",
+    "Read existing shutdown test definitions as evidence of the established lifecycle contract."
+  ],
+  "limitations": [
+    "Static plan review only; no files edited, tests executed or delegation performed.",
+    "The proposed implementation and shutdown scenario were not executed.",
+    "Live Linear, browser, CLI and launcher behavior were not verified."
+  ]
+}
+```
+
+### Dispositions
+- SBR-009 (high) — ACCEPTED. Confirmed _stop_project_runs (app.py ≈L2955) selects by top-level project_key and projects.stop_all() covers only projects.spawn; run_agent_process jobs (own session, _running_procs) survive SIGTERM. This is a pre-existing gap for every generic run, so the fix covers all run_agent_process jobs: new §3.7 "Shutdown" — refuse launches once _SHUTTING_DOWN is set via the _register_proc handshake; mark non-project jobs cancelled under _JOB_LOCK and _kill_group their _running_procs entry; the 10 s wait includes them so their cancel records (with §3.6 fields, withheld when needed) are written; cancel/stall classification unchanged. Test added.
+
+
+## Codex plan review — round 4 (2026-10-16)
+- Runner result: `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/stb/codex/r4/claudex-f5xx00eh/result.json`
+- Provider codex, codex-cli 0.163.0, session `01a1466b-2eba-7593-8611-2d193cbe787f`, assurance `cross_provider`, requested model: CLI default (observed: unknown), plan SHA256 `6297be724e6418f46bfa086ab278874a04cdf0b080940be2b389447de0de69cf`.
+- Verdict: **REVISE**
+
+```json
+{
+  "verdict": "REVISE",
+  "summary": "The revision addresses process termination, but shutdown completion ownership remains incomplete. Earlier findings remain addressed at plan level.",
+  "findings": [
+    {
+      "id": "SBR-010",
+      "severity": "medium",
+      "path": "docs/exec-plans/active/2026-10-16-session-to-board.md:145",
+      "evidence": "Marking a generic job cancelled does not invoke its cancellation owner. Generic workers never read job.cancelled: after shutdown kills the process, _RunClaim calls _end_job and the worker records its ordinary outcome—error for a strict reply, often review for other generic runs (runner/app.py:3081–3095, 4347–4370; runner/modules/linear/__init__.py:860–887). Only worktree workers interpret the cancellation flag. Furthermore, _end_job removes the registry entry before the record is written, so extending the shutdown wait to _running_jobs does not establish that durable completion finished. A silent generic reply stopped by SIGTERM therefore does not reliably produce the promised cancelled record before shutdown returns.",
+      "fix": "Define explicit generic shutdown ownership. Reuse cancellation's atomic owner takeover and write through _write_owner_record after terminating and reaping the process, preventing the displaced worker from logging another outcome. Track already-finalizing workers separately until their durable writes finish. Verify that a cancelled record exists before shutdown returns, rather than merely checking that the job disappeared."
+    }
+  ],
+  "coverage": [
+    "Verified SHA256 6297be724e6418f46bfa086ab278874a04cdf0b080940be2b389447de0de69cf.",
+    "Checked the SBR-009 revision against shutdown, process registration, cancellation ownership and record persistence.",
+    "Traced generic completion callers in /run, retry and Linear dispatch, including their _RunClaim ordering.",
+    "Read existing shutdown test definitions; retained the previous review's coverage of SBR-001 through SBR-008."
+  ],
+  "limitations": [
+    "Static plan review only; no edits, test execution or delegation.",
+    "The proposed shutdown changes have not been implemented or exercised.",
+    "Live CLI, browser, Linear and launcher behavior were not verified."
+  ]
+}
+```
+
+### Dispositions
+- SBR-010 (medium; reproducible: restart the dashboard while a reply runs) — ACCEPTED. Confirmed generic workers ignore job["cancelled"] and _end_job pops before the record write. §3.7 now: the generic branch of api_run_cancel (≈L4039–4062) becomes _cancel_generic(run_id, error) — pop under _JOB_LOCK, SIGTERM/SIGKILL with reaping, synchronous _write_owner_record — used by the cancel route and by _stop_project_runs for every job without a top-level project_key; the displaced worker finds no job and writes nothing. Workers that already won _end_job are tracked in a _finalizing set (added at ownership, removed in finally after the record write), and the shutdown wait covers it. Test asserts the cancelled record exists when shutdown returns.
+
+
+## Codex plan review — round 5 (2026-10-16)
+- Runner result: `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/stb/codex/r5/claudex-yvqbzgj8/result.json`
+- Provider codex, codex-cli 0.163.0, session `01a1466b-2eba-7593-8611-2d193cbe787f`, assurance `cross_provider`, requested model: CLI default (observed: unknown), plan SHA256 `00df38e78c4394698f36aba301c11e1be7cad8825bad3682ab3a3c8f359b3404`.
+- Verdict: **APPROVED**
+
+```json
+{
+  "verdict": "APPROVED",
+  "summary": "SBR-001 through SBR-010 are addressed at plan level. The revised shutdown ownership and finalization tracking resolve the latest finding. No additional material unresolved defects identified.",
+  "findings": [],
+  "coverage": [
+    "Verified SHA256 00df38e78c4394698f36aba301c11e1be7cad8825bad3682ab3a3c8f359b3404.",
+    "Rechecked shutdown admission, cancellation ownership, process termination, record persistence and finalizing-worker tracking against relevant callers.",
+    "Across review rounds, traced session routing, reset generations, durable bindings, tracker/cache writers, local identifiers, terminal history and UI dispatch paths.",
+    "Inspected relevant existing test definitions without executing them."
+  ],
+  "limitations": [
+    "Approval covers the plan, not an implemented change.",
+    "No files edited, tests executed or delegation performed.",
+    "Runtime behavior, live Linear contracts, CLI behavior and current pricing remain unverified."
+  ]
+}
+```
+
+### Dispositions
+- None. Approved.
+
+
+## Codex plan review — closure
+- **APPROVED** in round 5 (findings per round: 4, 4, 1, 1, 0; SBR-001…SBR-010 all fixed). Assurance `cross_provider`.
+- Approved plan SHA256: `00df38e78c4394698f36aba301c11e1be7cad8825bad3682ab3a3c8f359b3404`. `runner.py check --approval <r5 result>` → "Approval matches the current plan; assurance=cross_provider."
+- The checklist box "Codex plan review … approved" is left unticked on purpose: ticking it changes the plan hash. It is ticked at build start, right after `check` re-confirms the approval.
+- Building waits for the user's go-ahead.
