@@ -1277,3 +1277,17 @@ def test_counted_thread_construction_failure_releases_the_slot(helper, monkeypat
     with pytest.raises(MemoryError):
         app_mod._start_counted(lambda: None)
     assert app_mod._INFLIGHT == 0  # BUILD-009, constructor variant
+
+
+def test_question_only_run_has_no_badge_after_earlier_commits(helper):
+    """Session-to-board §7 with real git: the badge looks at this run only (STB-022/033), and the
+    record carries the observed cost (STB-034) and a session card's routing (SBR-001)."""
+    app_mod, run, records, state, events, comments, pushes, repo, _ = helper
+    run()
+    assert records()[-1]["verify_badge"] == "pass"  # the first run committed a change
+    state["mode"] = "question"  # the agent only answers
+    run(run_id="run-2", reuse_only=True, record_extra={"source": "session", "resume_session": {"id": "s"}})
+    rec = records()[-1]
+    assert rec["status"] == "review" and "verify_badge" not in rec
+    assert rec["token_cost_usd"] is not None and rec["source"] == "session" and rec["resume_session"] == {"id": "s"}
+    assert rec["project_key"] == "demo"  # the binding wins over record_extra

@@ -1342,3 +1342,339 @@ Round 12 dispositions (host: Claude), under the user's convergence standard ("�
 - Approved plan SHA256: `00df38e78c4394698f36aba301c11e1be7cad8825bad3682ab3a3c8f359b3404`. `runner.py check --approval <r5 result>` → "Approval matches the current plan; assurance=cross_provider."
 - The checklist box "Codex plan review … approved" is left unticked on purpose: ticking it changes the plan hash. It is ticked at build start, right after `check` re-confirms the approval.
 - Building waits for the user's go-ahead.
+
+## Build (2026-10-16)
+- User: "claude 写，然后codex检查". Builder: Claude (host). Inspector: fresh Codex session.
+- `check --approval` re-confirmed before the checklist ticks: "Approval matches the current plan; assurance=cross_provider."
+- Pre-build base: `3e08969a0ee749ed91b13abda1ca7447161de1b0`.
+- Build paused 2026-10-16 (usage limit), uncommitted. Done so far (not yet tested):
+  - projects.py: board_ids/labels on session listing, headless sessions resolvable, title from session_target (§9, STB-069/070).
+  - app.py: observed Claude model + `[1m]` strip in cost lookup, cost on project/Linear runs (§8); `_FINALIZING`, `_cancel_generic`, shutdown cancels generic runs, launch refused once shutting down (§3.7, SBR-009/010); `_write_owner_record` carries `record_extra` with withholding (SBR-005); `_run_project_ticket(record_extra=...)` (SBR-001).
+  - usage_reader.py: `claude-opus-5-5` at 20.00/MTok (claude.com/pricing: $4 in / $20 out).
+  - linear_client.py: `LinearError`, `_graphql_strict`, `find_project`, `create_project`, `find_project_by_slug`, `set_issue_project`, `archive_issue`, `create_issue(project_id=...)`, `project_id` on fetched issues (§10/§11).
+  - Next: linear module (§10 mapping, §11 Empty trash + archived_ids, to-board tracker helpers), local tracker id floor (SBR-004), app.py session-card section (§1–§4 route, retry branch, session_in_use, payload fields), pty open_terminal (SBR-002/007), project_runs badge (§7), UI (§5/§6/§7/§9/§11/§12, SBR-003/006/008), tests, full suite, Codex inspection.
+- Build resumed and finished 2026-10-16 (Claude):
+  - Linear module (§10 mapping, §11 Empty trash/archived ids, to-board helpers), local id high-water mark (SBR-004), app.py session-card section (§1–§4, §3.7), pty session-card folder (SBR-002/007), §7 badge, UI (§5/§6/§7/§9/§11/§12, SBR-003/006/008).
+  - Tests: `tests/test_session_to_board.py` (40) + `tests/test_project_dispatch.py::test_question_only_run_has_no_badge_after_earlier_commits`. Full suite: 629 passed.
+  - Manual (isolated runner :8599, fake claude/codex, Chrome): Resume new and existing card; claude, codex and confidential replies (session folder, `--resume`/`resume`, sandbox flags, neutral title); reply from a Done card; badge, ▶→✎ Reply and In Progress drop open the reply; editor save guards; in-use warning + one confirm; Empty trash; tab drag/keyboard reorder survives reload.
+  - Found and fixed during the manual pass: the detail retry buttons were unlocked by the issue editor's later `_updateDetailRetryLock` calls; Alt+←/→ did not keep the moved tab selected; `session_in_use` matched ids as substrings (now whole tokens) and tests now stub the process table.
+  - Public-repo scan: no hits in files this build changed. A pre-existing tracked binary, `agentic-os-dashboard.png` (since 1e18fa3), matches; left untouched and reported.
+
+## Codex build inspection 1 (2026-10-16)
+- Runner result: `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/stb/codex/i1/claudex-9es8c1ra/result.json`
+- Provider codex, codex-cli 0.163.0, session `01a146d5-ab7c-7b02-b09c-8fdbac1a8514`, assurance `cross_provider`, requested model: CLI default (observed: unknown), plan SHA256 `3e4824c1faba0a820feba05e26cd5b718d58563fcc5841db80fdaca943be4f74`.
+- Verdict: **REVISE**
+
+```json
+{
+  "verdict": "REVISE",
+  "summary": "One confidentiality bypass and six correctness defects remain. Review was static; no tests were run.",
+  "findings": [
+    {
+      "id": "SBI-001",
+      "severity": "high",
+      "path": "runner/app.py:3888",
+      "evidence": "A confidential ticket worktree remains confidential through its sidecar after the registry flag becomes false (projects.py:1016–1049). Emptying its old card and resuming the surviving session creates a new card using only project.confidential=False. The reply then calls _ticket_confidential with no durable ticket identifier (app.py:3948), missing the original sidecar. Its title can reach Linear, and Claude resumes with bypassPermissions. _session_card_folder has the same policy gap when no durable binding exists.",
+      "fix": "Resolve effective confidentiality from the session's actual cwd, its worktree sidecar and existing session bindings before creating the card. Preserve that policy for tracker metadata, replies and interactive terminals, independently of whether the original card still exists."
+    },
+    {
+      "id": "SBI-002",
+      "severity": "medium",
+      "path": "runner/templates/index.html:3204",
+      "evidence": "Resume now makes Todo a reply-writing state, but draft restoration still runs only for In Review. Type a reply on a resumed Todo card, close it and reopen it: openDetailModal clears the saved draft. _loadLinearIssueIntoModal also clears it for Todo at line 3542, and refreshJobBoard clears non-review drafts at line 2807. The same problem affects later replies from Done.",
+      "fix": "Preserve and restore drafts for resumable session cards in every supported reply state. Update all three clearing paths, clearing drafts after successful submission or an explicit invalidating action."
+    },
+    {
+      "id": "SBI-003",
+      "severity": "medium",
+      "path": "runner/app.py:3874",
+      "evidence": "The found-card branch preserves the original source instead of setting a persistent session-card marker. Before its first continuation, a run-status reset removes resume_session (line 4500). open_terminal recognizes session cards only through that field or source='session' (pty/__init__.py:382–392). Consequently, an existing card whose session is in the main checkout reverts to opening its ticket worktree after the reset, contrary to SBR-007.",
+      "fix": "Persist session-folder routing independently of the generation-bound continuation intent for found cards too. Retain enough project/session identity after reset, and resolve older attempts through the same server-side folder logic."
+    },
+    {
+      "id": "SBI-004",
+      "severity": "medium",
+      "path": "runner/modules/linear/__init__.py:1084",
+      "evidence": "Empty trash snapshots Canceled issues once and then archives them sequentially without taking their issue locks or checking their states again. While a large trash operation is processing earlier issues, Resume can successfully move a later issue to Todo and append its intent. Empty trash subsequently archives that now-active card from its stale snapshot. The local delete loop has the equivalent race.",
+      "fix": "For each candidate, hold its issue lock, recheck that it is still Canceled, and keep the transition and eviction coordinated with Resume and tracker state writers. Skip cards that have changed state."
+    },
+    {
+      "id": "SBI-005",
+      "severity": "medium",
+      "path": "runner/modules/linear/__init__.py:1106",
+      "evidence": "Archive tombstones are checked by polling and startup, but other cache writers ignore them. Cancel a running card, empty the trash, then let its worker finish: push_state accepts the unchanged generation and recreates issues_cache[issue_id] at lines 1664–1666, initially containing only a state. In Linear mode /api/linear/issues returns that entry without a tombstone filter. _linear_sync_patch_locked and _push_linear can also repopulate evicted entries.",
+      "fix": "Make archived membership an invariant for every tracker/cache writer and response path. Invalidate outstanding completion generations during eviction and reject later pushes or sync results for tombstoned issues."
+    },
+    {
+      "id": "SBI-006",
+      "severity": "medium",
+      "path": "runner/project_runs.py:519",
+      "evidence": "changed_nothing is captured before verify, but its badge branch never checks seeds. On a public project, a passing verify command that commits a seed after a question-only agent run produces seed_committed entries yet no red badge. Conversely, seeds are still calculated from binding.base_sha (line 510), so an old seed commit flags a later unrelated file-changing run. Both contradict the plan's per-run seed rule.",
+      "fix": "Keep cumulative seed accounting if needed, but separately calculate seed commits over start_sha..HEAD after verify. Evaluate current-run seed violations before suppressing soft badges."
+    },
+    {
+      "id": "SBI-007",
+      "severity": "medium",
+      "path": "runner/app.py:3933",
+      "evidence": "_valid_intent is evaluated before session resolution and the process-table check, without holding the issue lock. If another browser tab resets the card to Todo during that interval, _retry_session_card reads the new generation as launch_gen and still resumes the old session. Its completion now also passes the new generation guard and can move the reset card to Review.",
+      "fix": "Revalidate the latest record and intent generation under reset_gen.issue_lock during admission, before tracker changes or scheduling. Use the validated intent generation as launch_gen; refuse a stale request instead of adopting the reset's generation."
+    }
+  ],
+  "coverage": [
+    "Verified the plan SHA256 and every manifested file SHA256 against the supplied values.",
+    "Inspected changes in all 13 manifested files, including the complete new test file and relevant existing test fixtures.",
+    "Traced Resume, retry, session claims, durable bindings, confidentiality, terminal routing, reset generations, cancellation and shutdown.",
+    "Traced tracker creation, polling, archive eviction, local identifiers, asynchronous state pushes and cache synchronization.",
+    "Inspected related reset_gen.py, state_io.py and stall_detection writers beyond the change manifest.",
+    "Reviewed UI dispatch guards, reply drafts, project tabs, model accounting and verification badges against the plan."
+  ],
+  "limitations": [
+    "No files edited, tests executed, runtime reproductions performed or delegation used. The reported 629 passing tests were not independently verified.",
+    "Live Linear GraphQL contracts, CLI behavior, browser behavior and current model pricing were not verified.",
+    "Spec fidelity was assessed against the supplied plan and inspected implementation invariants; SPEC.md was not inspected.",
+    "The pending public-repository privacy scan was not performed."
+  ]
+}
+```
+
+### Dispositions
+- SBI-001 (high) — fixed. `session_confidential(project, cwd, …)` reads the sidecar of the worktree that owns the session folder; used by to-board (new and found card), the reply route and `_session_card_folder`. Test: `test_session_in_a_confidential_worktree_stays_confidential_without_its_card`.
+- SBI-002 (medium; reproducible: draft lost on reopen) — fixed. Drafts restore/stay for `resume_ok` cards in openDetailModal, `_loadLinearIssueIntoModal` and refreshJobBoard. JS syntax-checked; not re-driven in the browser.
+- SBI-003 (medium) — fixed (cheap): the found-card record now sets `source: "session"` and its `confidential`. Test: `test_found_card_record_marks_the_session_card`.
+- SBI-004 (medium; race) — fixed (cheap): each issue is rechecked and archived under its issue lock; moved cards are skipped. Test: `test_empty_trash_skips_a_card_moved_meanwhile_and_blocks_late_pushes`.
+- SBI-005 (medium) — fixed: eviction bumps the issue's generation; `push_state`, `_push_sync`, `_linear_sync_patch` and the Linear `/api/linear/issues` responses skip archived ids. Same test.
+- SBI-006 (medium) — fixed: the badge uses seeds over `start_sha..HEAD` after verify (red even when nothing else changed); `seed_committed` keeps the cumulative list. Test: `test_seed_committed_by_this_run_is_red_even_when_nothing_else_changed`.
+- SBI-007 (medium; race) — fixed (cheap): the intent is revalidated under `reset_gen.issue_lock` after the card lock; `launch_gen` is the intent's generation. Test: `test_reply_refused_when_the_card_was_reset_during_admission`.
+- Full suite: 634 passed.
+
+
+## Codex build inspection 2 (2026-10-16)
+- Runner result: `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/stb/codex/i2/claudex-_kri74s3/result.json`
+- Provider codex, codex-cli 0.163.0, session `01a146df-0d99-7e62-8f32-61a5cac88341`, assurance `cross_provider`, requested model: CLI default (observed: unknown), plan SHA256 `3e4824c1faba0a820feba05e26cd5b718d58563fcc5841db80fdaca943be4f74`.
+- Verdict: **REVISE**
+
+```json
+{
+  "verdict": "REVISE",
+  "summary": "Two confidentiality gaps and three correctness defects remain. This was a static review; no tests were run.",
+  "findings": [
+    {
+      "id": "SBI-008",
+      "severity": "high",
+      "path": "runner/app.py:3905",
+      "evidence": "Recreating a card loses a main-checkout session's historical confidentiality. Resume a confidential session, cancel and empty its card, change the registry flag to false, then Resume the same session again. The no-card branch calls session_confidential without the old issue/task or any session-history flags. Main-checkout sessions have no worktree sidecar, so the surviving confidential run records are ignored: the session title can reach Linear and subsequent Claude replies use bypassPermissions. SBI-001's fix covers worktree sidecars but leaves this case unresolved.",
+      "fix": "Preserve effective confidentiality by agent/session identity across card archival. Resolve historical session bindings or persist a durable session policy, and apply it to card creation, replies and interactive terminals."
+    },
+    {
+      "id": "SBI-009",
+      "severity": "high",
+      "path": "runner/app.py:4053",
+      "evidence": "The generic reply acquires project_lock only inside its worker, after capturing project, target, confidentiality and the tracker-comment binding. A project confidentiality edit can succeed during the intervening tracker calls or worker scheduling. The worker then acquires the lock but launches using the stale public eff object; its records and closing comments also retain confidential=false. Unlike _run_project_ticket_locked, it never reloads policy under the lifecycle lock.",
+      "fix": "Acquire the project's lifecycle hold before resolving policy and posting feedback, then hand it to the worker. Resolve the registered project, session folder, effective confidentiality and record-location checks under that hold."
+    },
+    {
+      "id": "SBI-010",
+      "severity": "medium",
+      "path": "runner/app.py:3891",
+      "evidence": "The found-card record adds source='session' but does not add project_key when the original run lacked it. Its only project identity then lives inside resume_session. A run-status reset removes that field at line 4524. open_terminal subsequently recognizes source='session' but resolves project_key to None, skips _session_card_folder and opens through the runner-root policy. This leaves SBI-003/SBR-007 incomplete for existing unbound cards.",
+      "fix": "Persist the resolved session project independently of resume_session on found cards. Ensure terminal routing after reset still resolves the server-side session folder and effective project policy."
+    },
+    {
+      "id": "SBI-011",
+      "severity": "medium",
+      "path": "runner/app.py:3337",
+      "evidence": "A worktree continuation writes agent_session_id only from parsed CLI output. If the CLI fails before its init event, the bound worktree is missing, or a silent continuation times out, sid remains None despite resume_session already identifying the session. record_extra does not supply it either. The resulting latest record retains the intent but /events reports resume_eligible=false, removing Open interactive from that card.",
+      "fix": "For strict worktree continuations, retain the requested session id in every terminal record, including prelaunch errors, cancellations and timeouts. Use it as the fallback when no session id was observed."
+    },
+    {
+      "id": "SBI-012",
+      "severity": "medium",
+      "path": "runner/modules/linear/__init__.py:1675",
+      "evidence": "push_state checks archived_ids before taking issue_lock. An unconditional push, such as api_run_cancel's review push, can pass that check while Empty trash holds the lock during issueArchive. After eviction and the generation bump, the waiting push acquires the lock; gen=None passes is_current and recreates issues_cache[iid] as {'state':'In Review'}. The unfiltered-team response checks the value's missing id against tombstones, so this malformed entry escapes the response filter. SBI-005 remains racy.",
+      "fix": "Check archived membership inside issue_lock immediately before every cache mutation. Filter response entries by their cache keys as well, so malformed or incomplete values cannot bypass tombstones."
+    }
+  ],
+  "coverage": [
+    "Verified the supplied plan hash and all 13 manifested file hashes.",
+    "Inspected changes in every manifested file, the new test file and relevant existing fixtures.",
+    "Traced session discovery, card creation, continuation routing, confidentiality, terminal opening and reset generations.",
+    "Traced tracker polling, archive eviction, cache writers, local identifier allocation, cancellation and shutdown.",
+    "Inspected related reset_gen.py, state_io.py, stall_detection and project lifecycle writers beyond the manifest.",
+    "Reviewed UI reply controls, draft retention, project tabs, model recording and verification badges against the plan."
+  ],
+  "limitations": [
+    "No files edited, tests run, runtime reproductions performed or delegation used. Reported test results were not independently verified.",
+    "Live Linear contracts, agent CLI behavior, browser behavior and current pricing were not verified.",
+    "Spec fidelity was assessed against the supplied plan and inspected source; SPEC.md was not inspected.",
+    "The public-repository privacy scan was not performed."
+  ]
+}
+```
+
+### Dispositions
+- SBI-008 (high) — fixed. `session_confidential(..., sid=)` also merges the `confidential` flag of every run record of that session, so an archived card's policy survives; used by to-board, reply and terminal. Test: `test_confidential_history_of_a_session_survives_its_archived_card`.
+- SBI-009 (high) — fixed. The reply takes `project_lock` before reading the registry, session and policy; a generic launch hands that hold to its worker (one hold through launch and record); the worktree route lets the project helper take its own. Test: `test_reply_reads_policy_under_the_project_lock`.
+- SBI-010 (medium) — fixed. Found-card, new-card and continuation records carry `session_project`; `open_terminal` falls back to it after a reset drops `resume_session`. Test: `test_session_card_records_keep_their_project_and_session`.
+- SBI-011 (medium) — fixed. The project helper records `sid or resume_session`, so a continuation that fails before any session event keeps its session. Same test.
+- SBI-012 (medium) — fixed. `push_state` checks the tombstone inside the issue lock; Linear responses filter by cache key. Test: `test_tombstoned_cache_entries_never_reach_the_board`.
+- Full suite: 638 passed.
+
+
+## Codex build inspection 3 (2026-10-16)
+- Runner result: `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/aff7570e-fb57-4e68-b06f-89245cb7eb36/scratchpad/stb/codex/i3/claudex-fyvg2eqd/result.json`
+- Provider codex, codex-cli 0.163.0, session `01a146f5-e38b-7113-a687-d7d978d20bd5`, assurance `cross_provider`, requested model: CLI default (observed: unknown), plan SHA256 `3e4824c1faba0a820feba05e26cd5b718d58563fcc5841db80fdaca943be4f74`.
+- Verdict: **REVISE**
+
+```json
+{
+  "verdict": "REVISE",
+  "summary": "Two confidentiality gaps and one model-recording defect remain. Review was static; no tests were run.",
+  "findings": [
+    {
+      "id": "SBI-013",
+      "severity": "high",
+      "path": "runner/modules/pty/__init__.py:337",
+      "evidence": "The in_worktree branch skips session_confidential and ignores the record's confidential flag. Concrete sequence: run a public ticket; mark its project confidential; Resume its session without sending a reply; mark the project public again; choose Open interactive. Resume recorded confidential=true, but did not promote the sidecar or durable binding. _effective_project now sees only false flags, so Claude launches with bypassPermissions. Headless replies correctly retain the session's confidentiality; this terminal path does not.",
+      "fix": "Merge session_confidential, including the record and session history, on both folder branches before building the interactive command or checking record locations. Keep worktree validation and ticket locking."
+    },
+    {
+      "id": "SBI-014",
+      "severity": "high",
+      "path": "runner/app.py:3835",
+      "evidence": "To-board never takes project_lock. After it computes conf=false and selects the session title, create_session_issue can spend several network calls resolving labels and the Linear Project. During that interval, a second browser tab can successfully promote the project to confidential. The pending Resume still creates the issue with the real title and description and records confidential=false. The shared lifecycle hold added for replies does not protect card creation.",
+      "fix": "Take the project's shared lifecycle lock before loading the registry and resolving the session, and hold it through policy resolution, tracker creation or movement, and record writing."
+    },
+    {
+      "id": "SBI-015",
+      "severity": "medium",
+      "path": "runner/app.py:2498",
+      "evidence": "The observed Claude model remains local to _stream_claude_run until it returns normally. If Claude reports an Opus init event and then times out, _read_both raises before that model is returned; the session worker's timeout record uses _agent_model instead. Cancel and stall records likewise use the job's unchanged fallback model. These cards can still show Sonnet despite the CLI having reported Opus, contrary to §8.",
+      "fix": "Publish the observed model into the job's terminal-record metadata as soon as it is received. Use that value for timeout, error, cancel and stall records, retaining the configured fallback only when no model was observed."
+    }
+  ],
+  "coverage": [
+    "Verified the plan SHA256 and all 13 manifested file hashes.",
+    "Inspected changes in every manifested file, the complete new session-to-board test file, and relevant existing fixtures.",
+    "Traced session discovery, card creation, continuation admission, reset generations, durable bindings and terminal routing.",
+    "Traced tracker polling, archive eviction, cache writers, local identifiers, cancellation, stall handling and shutdown.",
+    "Inspected related reset_gen.py, state_io.py and project lifecycle writers beyond the manifest.",
+    "Reviewed UI reply controls, draft retention, project tabs, verification badges and model accounting against the plan."
+  ],
+  "limitations": [
+    "No files edited, tests executed, runtime reproductions performed or delegation used. Reported test results were not independently verified.",
+    "Live Linear contracts, agent CLI behavior, browser behavior and current pricing were not verified.",
+    "Spec fidelity was assessed against the supplied plan and inspected source; SPEC.md was not inspected.",
+    "The public-repository privacy scan was not performed."
+  ]
+}
+```
+
+### Dispositions
+- SBI-013 (high) — fixed. `_session_card_folder` merges `session_confidential` (record flag, session history, folder sidecar) on both branches, after the worktree's own policy. Test: `test_worktree_terminal_keeps_the_records_confidential_flag`.
+- SBI-014 (high) — fixed. The to-board route takes the project's shared `project_lock` first and holds it through policy, tracker create/move and the record. Test: `test_to_board_reads_policy_under_the_project_lock`.
+- SBI-015 (medium) — fixed. `_stream_claude_run` publishes the init model to `_OBSERVED_MODELS[run_id]` at once; `_write_run_log` uses it for every non-audit record of that run (timeout, error, cancel, stall). Test: `test_observed_model_reaches_cancel_and_timeout_records`.
+- Full suite: 641 passed.
+
+
+## Codex build inspection 4 — not run (Codex usage limit)
+- Result: `failure_kind=provider_unavailable`, `fallback_eligible=true` ("You've hit your usage limit … try again at 9:33 PM").
+- Per the user's rule ("codex 没有usage的时候，审阅用deepseek"), the inspection ran on DeepSeek instead: third-party, read-only, not a claudex cross-provider inspection.
+
+## DeepSeek build inspection 1 (third-party, 2026-10-16)
+- `DSH_PERMISSION_MODE=read-only dsh --profile headless`, prompt = plan context + SBI-001..015 fix summary + full diff vs 3e08969; checkout fingerprint identical before and after.
+- Verdict: **REVISE**
+
+```json
+{
+  "verdict": "REVISE",
+  "summary": "The SBI-001..015 fixes are present and behave as described for the paths I could trace (session_confidential merges sidecar/binding/session history in to-board, reply and both terminal branches; to-board/reply hold project_lock; reset-gen revalidation under issue_lock; tombstone checks in push_state/_push_sync/_linear_sync_patch and the /api/linear/issues response filter; per-run seed sha and observed-model publication). Two concrete gaps remain in the new Linear/tracker cache paths: the poller's wholesale cache rebuild can wipe a freshly created session card (board card disappears; a second Resume makes a duplicate), and the synchronous PATCH writers bypass the archived-ids tombstone the SBI-005/012 fixes claimed to enforce everywhere. Static review only; no tests executed.",
+  "findings": [
+    {
+      "id": "SBI-016",
+      "severity": "medium",
+      "path": "runner/modules/linear/__init__.py:1065 (insert) vs :626-627 (poll rebuild)",
+      "evidence": "Resume on a session with no card creates the Linear issue and inserts it into issues_cache at :1065 with no coordination with the poller. The poll thread fetches Linear issues and then publishes with `self.issues_cache.clear(); self.issues_cache.update(new_cache)` at :626-627. A new id that was not part of the fetch is not preserved, and taking `set(self.issues_cache)` locks does not help because the snapshot is taken before the insert. Concrete failure: the user clicks Resume while a poll fetch is in flight; create_session_issue completes after the poll's Linear query was issued but before its commit, so the commit wipes the new card from issues_cache. `_tracker_issue` then returns None, `/api/linear/issues` returns no card (it only pre-fills from tasks.json when the cache is empty), and the board shows no card although the run record exists. If the user reacts by clicking Resume again, `_session_card` sees no live card (`_tracker_issue` None) and creates a second issue for the same session; the next poll shows both cards. The lost window is the poll's network round-trip, a substantial fraction of the 5 s cycle, so this reproduces in normal single-user use with Linear configured. The same pattern exists for the '+' form at :1220/:1235.",
+      "fix": "Serialize the create/insert with the poller's rebuild: hold a process-wide cache lock across the poller's clear/update (and ideally across fetch+commit) and across create_session_issue's inserts for Linear and local mode, or make the poller merge/preserve non-fetched cache entries created/updated since the fetch began. Cover both create_session_issue and the /api/linear/issues POST path."
+    },
+    {
+      "id": "SBI-017",
+      "severity": "medium",
+      "path": "runner/modules/linear/__init__.py:1422,1464 (also :1220,:1235)",
+      "evidence": "The synchronous writers in _issues_patch_reserved assign `self.issues_cache[issue_id] = ...` at :1422 (local-first dispatch branch) and :1464 (synchronous update) without checking `archived_ids()`. _tracker_reset_route holds the issue lock across the whole route, so an update that acquires the lock after Empty trash's `_evict` can re-add an evicted issue. Concrete failure: a card's detail modal (or an optimistic/drag PATCH) is open when the user clicks Empty trash; the PATCH runs after the eviction, calls Linear, re-adds the issue to issues_cache and sets it back to Todo in Linear, while the persisted tombstone (archived_ids) and the cache-key response filter keep it out of `/api/linear/issues` and out of `_tracker_issue` on every later poll and restart. The result is an active Todo issue that is permanently invisible to the board and to Resume (which then creates a new card). SBI-005/012's disposition claimed the tombstone is checked 'immediately before every cache mutation'; this writer path is not covered. The dispatch sub-path (In Progress on an archived card) is not reachable from the current UI, so the practical symptom is the hidden-but-active card rather than a bogus dispatch.",
+      "fix": "At the top of _issues_patch_reserved (and its local branch) under the issue lock, `if issue_id in archived_ids(): return jsonify({\"ok\": True})` (or 404) before any cache write, and likewise refuse `_issues_local_patch`/`move_to_todo` writes for tombstoned ids; make the tombstone check part of the same locked mutation as the cache write."
+    }
+  ],
+  "coverage": [
+    "Read the full new test file tests/test_session_to_board.py and the changed hunks of all 12 tracked files in the build diff (app.py, linear_client.py, modules/linear/__init__.py, local_tracker.py, modules/pty/__init__.py, project_runs.py, projects.py, index.html, usage_reader.py, plan/review docs, test_project_dispatch.py).",
+    "Traced to-board (found card and no-card), the reply route (_retry_session_card/_retry_session_card_held, generic and worktree branches), session claims/locks, reset generations and _valid_intent/_resume_map/_intent_latest.",
+    "Traced session_confidential and _ticket_confidential through to-board, reply, api_run_detail, api_run_events and _session_card_folder/open_terminal (both folder branches, sandbox flags).",
+    "Traced tracker writers: create_session_issue, move_to_todo, empty_trash/_evict, push_state/_push_sync/_push_linear, _linear_sync_patch, the poll loop's publish, _issues_patch/_issues_patch_reserved, archived_ids persistence and the local identifier high-water mark.",
+    "Traced lifecycle: _cancel_generic, _end_job/_FINALIZING, _write_owner_record, _register_proc/_SHUTTING_DOWN, _stop_project_runs and the shutdown wait.",
+    "Checked _write_run_log/_OBSERVED_MODELS, _compute_token_cost, post_run's changed_nothing/seed-badge logic, and the UI resume/reply/draft/tab/trash paths."
+  ],
+  "limitations": [
+    "Read-only static inspection: I did not run the suite or any test, and the reported 629/641 passing counts are not independently verified.",
+    "Live Linear GraphQL contracts (projects filter fields, issueArchive/issueUpdate), the Claude/Codex CLIs, browser behavior and current model pricing were not exercised.",
+    "The public-repo privacy scan named in the plan was not performed.",
+    "Some residual low-severity observations were not raised as findings because they are pre-existing or have no user-visible effect: `_OBSERVED_MODELS` can retain an entry for a generic run that never writes a record; `_linear_dispatched` is never cleared when a generic session reply completes (it is only read with run-id equality, so harmless); `record_interactive_ended` writes the record prompt without re-running the record-location withholding (pre-existing function, newly reached by session-card terminals); `api_run_events` computes resume_eligible from the registry project rather than the effective session policy (the actual open_terminal path applies the policy); and the poller/Empty-trash serialization relies on the global lock order issue_lock -> file locks, which I checked for cycles but not exhaustively across every CLI entry point."
+  ]
+}
+```
+
+### Dispositions
+- SBI-016 (medium; reproducible with Linear: Resume during a poll fetch) — fixed. Issues created by this process are tracked in `_fresh_ids`; a poll whose fetch began before the insert keeps them. Test: `test_poll_keeps_a_card_created_during_its_fetch`.
+- SBI-017 (medium) — fixed (cheap). Both tracker PATCH routes return 404 for an archived id before any write (inside the issue lock); the reset bump is restored. Test: `test_tracker_patches_refuse_an_emptied_card`.
+- Full suite: 643 passed.
+
+## DeepSeek build inspection 2 (third-party, 2026-10-16)
+- Same setup; prompt carried the SBI-001..017 fix summary and the full diff vs 3e08969; fingerprint identical before and after.
+- Verdict: **REVISE**
+
+```json
+{
+  "verdict": "REVISE",
+  "summary": "Earlier fixes SBI-001..017 are present and behave as described on the paths I traced (session_confidential merges registry/sidecar/binding/session history in to-board, reply and both pty branches; to-board and reply hold project_lock across policy and tracker work; intent is revalidated under reset_gen.issue_lock with launch_gen from the intent; observed-model publication reaches cancel/timeout/error records; tombstones are enforced inside push_state/_push_sync/_linear_sync_patch and by cache-key in /api/linear/issues; per-run start_sha badge and SBR-004 identifier high-water are in place). I found two residual gaps in the new Linear/cache paths: the SBI-016 fresh-id guard does not cover the local-first placeholder from /api/linear/issues POST (and only covers inserts made during the fetch, not inserts the poll then fails to find in Linear), so a poll can wipe a just-created card from issues_cache; and empty_trash assumes every Canceled cache entry has an \"id\", which an id-less entry written by push_state violates, aborting the whole Empty trash with a 409. Static review only; no tests were run.",
+  "findings": [
+    {
+      "id": "SBI-018",
+      "severity": "medium",
+      "path": "runner/modules/linear/__init__.py:631 (fresh predicate) / :1250 (insert without _fresh_ids) / :1080 vs :1294",
+      "evidence": "SBI-016's fix tracks only ids inserted by create_session_issue and preserves them only when `ts >= fetch_started`. The local-first placeholder created by /api/linear/issues POST (line 1250) is inserted into issues_cache and _issues_by_team but never into _fresh_ids, and Linear will never return a `local-*` placeholder in new_cache. Concrete failure: with Linear configured, the user submits the '+' form; local.create_issue returns local-1 and it is cached; _bg_sync_to_linear starts its network calls (ensure_label, linear_project_id, create_issue). Any poll commit in that window does `issues_cache.clear(); update(new_cache); update(fresh)` and permanently drops local-1 from both issues_cache and _issues_by_team (the poll's _sync_cache_to_local leaves tasks.json intact but /api/linear/issues returns issues_cache). The board card vanishes until the sync inserts real_id; if the sync fails the card stays invisible on the board. The session-card path has the analogous hole when the poll begins after the insert (ts < fetch_started): a just-created session card can be dropped, `_session_card` then returns None and a second Resume creates a duplicate issue, exactly the failure SBI-016 set out to prevent. The existing test (test_poll_keeps_a_card_created_during_its_fetch) injects the id inside fetch_issues, so it exercises only the in-flight window and not the POST placeholder. Reproduces in normal single-user use with Linear configured: the placeholder wipe is deterministic whenever a poll commit overlaps the local-first sync (a multi-network-call window of seconds, against a 5 s poll); the duplicate-Reuse variant additionally needs Linear to not return the just-created issue on the next fetch.",
+      "fix": "Set self._fresh_ids[local_id] = time.monotonic() at the POST placeholder insert (line 1250) as create_session_issue does for its issue, and stop keying preservation on `ts >= fetch_started`: keep a fresh id while it is absent from new_cache up to its TTL (or until Linear returns it / the local-first swap completes), so a poll that begins after the insert cannot drop it. Add the placeholder to _issues_by_team consistently and extend test_poll_keeps_a_card_created_during_its_fetch to cover an insert before fetch_started and the /api/linear/issues POST path."
+    },
+    {
+      "id": "SBI-019",
+      "severity": "low",
+      "path": "runner/modules/linear/__init__.py:1113 (empty_trash `iid = issue[\"id\"]`) / :1093 (canceled_issues filter) / :1701-1703 (push_state id-less entry)",
+      "evidence": "push_state builds `cached = dict(self.issues_cache.get(issue_id) or {})`, sets only `cached[\"state\"]`, and stores it. When the issue is not in issues_cache (e.g. a /api/runs/<run_id>/status PATCH with {\"status\":\"cancelled\"} for an issue the poller has not populated, before the startup pre-fill or after state/ was cleared), issues_cache[issue_id] becomes {\"state\":\"Canceled\"} with no \"id\". canceled_issues() filters only on state and `i.get(\"id\") not in gone`, so this entry is returned; empty_trash then does `iid = issue[\"id\"]` and raises KeyError, which _trash_empty turns into 409 and the whole Empty trash aborts (no Canceled issue is archived, not even the valid ones). The UI does not currently expose a run-status 'cancelled' action, so this reproduces only via the API/edge state, not in the normal click path.",
+      "fix": "In empty_trash use `iid = issue.get(\"id\")` and skip entries whose id is missing (or synthesize from the cache key), and make canceled_issues() require an id; additionally have push_state store `cached.setdefault(\"id\", issue_id)` (and team_id when known) so a cache entry is never id-less. Add a test for an id-less Canceled cache entry not aborting empty_trash."
+    }
+  ],
+  "coverage": [
+    "Read the complete new test file tests/test_session_to_board.py and the tracked diff from 3e08969 across runner/app.py, linear_client.py, modules/linear/__init__.py, modules/linear/local_tracker.py, modules/pty/__init__.py, project_runs.py, projects.py, templates/index.html, usage_reader.py and tests/test_project_dispatch.py.",
+    "Traced session_confidential / _ticket_confidential / sidecar / _durable_binding through to-board (found-card and no-card), _retry_session_card(_held) generic and worktree branches, api_run_detail and _session_card_folder/open_terminal (both folder branches, sandbox flags).",
+    "Traced project_lock, session_lock, _SESSION_CLAIMS, _claim_session/_release_session, ticket_lock/card_lock/reserve_card, reset_gen.issue_lock and the _to_board_locked / _retry_session_card_held lock nesting (verified ticket_lock is non-blocking LOCK_NB, so the issue_lock->ticket_lock inversion cannot deadlock).",
+    "Traced run-log writers and readers: _write_run_log (audit pop/discard), _write_owner_record, _cancel_generic, _stall, _stop_project_runs, _FINALIZING, _register_proc, _RunClaim, _all_records cache, _valid_intent/_intent_latest/_resume_map, api_run_set_status/restore/cancel and record_interactive_ended.",
+    "Traced tracker/cache writers and the poller: create_session_issue, move_to_todo, empty_trash/_evict/_still_canceled, _fresh_ids, push_state/_push_sync/_push_linear, _linear_sync_patch, _issues_patch(_reserved), _mark_issue_review, archived_ids persistence and the local identifier high-water mark.",
+    "Checked the UI paths for Resume/reply, drafts, tab strip, Empty trash and the resume_ok board wiring against the plan; inspected the add/remove/reorder listeners."
+  ],
+  "limitations": [
+    "Read-only static inspection: I did not run the suite or any test, and the reported test counts are not independently verified.",
+    "Live Linear GraphQL behavior (issueCreate/issueArchive/project queries, indexing lag), the Claude/Codex CLIs, browser behavior and current model pricing were not exercised.",
+    "Spec fidelity was checked against the supplied plan excerpt/diff and inspected code; SPEC.md and the full plan body were not read (workspace token rule).",
+    "The public-repository privacy scan named in the plan was not performed.",
+    "The SBI-018 duplicate-card consequence depends on Linear not returning a just-created issue; the placeholder wipe is deterministic but transient, so its user-visible impact is a missing card until the sync completes."
+  ]
+}
+```
+
+### Dispositions
+- SBI-018 (medium; reproducible with Linear) — fixed. The "+" placeholder is fresh too and is dropped from `_fresh_ids` at the id swap; a fresh id is kept while Linear has not returned it (up to 120 s), whatever the poll's timing. Test extended: `test_poll_keeps_a_card_created_during_its_fetch` (insert before the poll, "+" placeholder).
+- SBI-019 (low; cheap) — fixed. `canceled_issues` takes the id from the cache key; `push_state` never stores an id-less entry. Test: `test_empty_trash_survives_an_id_less_cache_entry`.
+- Full suite: 644 passed.
+
+## Build inspection closure (convergence standard)
+- Codex 3 rounds (SBI-001..015, 5 high) + DeepSeek 2 rounds (SBI-016..019, no high): every high fixed; every medium was reproducible or cheap and was fixed; no accepted risks added.
+- Not re-inspected: the SBI-018/019 fixes. The 4th Codex inspection could not run (usage limit until 21:33); the DeepSeek rounds are third-party and do not replace a claudex cross-provider inspection.
+- Committed, not pushed.
+- `/verify` before commit (isolated runner :8599 on the staged tree, fake claude): to-board → reply (record: review, `claude-opus-5-5[1m]`, `source: session`, `session_project`); slow reply cancelled → `cancelled` record keeps `resume_session` and the observed model, SIGTERM-ignoring child gone, `inflight` 0; slow reply then runner SIGTERM → record `cancelled` / "Cancelled: dashboard shutting down" with `resume_session`, child gone, no leftover processes.

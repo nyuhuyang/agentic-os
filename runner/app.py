@@ -2097,7 +2097,9 @@ def _compute_token_cost(
     """
     if not model or (not output_tokens and not input_tokens):
         return None
-    price_per_m = _MODEL_PRICES.get(model or "", _DEFAULT_PRICE)
+    # "claude-opus-5-5[1m]" -> "claude-opus-5-5". No prefix fallback: "gpt-5.4-mini" must not
+    # silently price as "gpt-5.4" (STB-024/049).
+    price_per_m = _MODEL_PRICES.get(re.sub(r"\[[^\]]*\]$", "", model), _DEFAULT_PRICE)
     total = (output_tokens or 0) + (input_tokens or 0)
     return round(total / 1_000_000 * price_per_m, 6)
 
@@ -2122,6 +2124,8 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if run_id is None:
         run_id = str(uuid.uuid4())
+    if not audit:
+        model = _OBSERVED_MODELS.pop(run_id, None) or model  # what the CLI said it ran (SBI-015)
     record: dict = {
         "run_id": run_id,
         "skill": skill,
@@ -2169,6 +2173,7 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
     with RUN_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     _runs_cache.clear()  # invalidate so next board refresh sees the new record
+    _FINALIZING.discard(run_id)  # its record is on disk: shutdown need not wait for it (SBR-010)
     if audit:  # history only: no task/job state, it is not an execution (UI3-02)
         return run_id
 
@@ -2454,6 +2459,19 @@ def _claude_stream_log_path(run_id: str) -> Path:
     return RUN_PROGRESS_DIR / f"{safe_id}_stream.jsonl"
 
 
+# run_id -> the model the CLI reported, as soon as it does; every record of that run uses it
+# (_write_run_log pops it). ponytail: a run that never writes a record leaves one entry behind.
+_OBSERVED_MODELS: dict[str, str] = {}
+
+
+def _observed_claude_model(init_model: str | None, result: dict) -> str | None:
+    """The model the CLI says it ran (STB §8): the init event's model, else the first key of the
+    result's modelUsage (its `model` is often null), else the result's `model`."""
+    usage = result.get("modelUsage")
+    first = next(iter(usage), None) if isinstance(usage, dict) else None
+    return init_model or first or result.get("model")
+
+
 def _stream_claude_run(
     proc: "subprocess.Popen[bytes]",
     run_id: str,
@@ -2469,6 +2487,7 @@ def _stream_claude_run(
     lines: list[str] = []
     result_event: dict = {}
     session_id_holder: list[str | None] = [None]
+    init_model: list[str | None] = [None]
     stop = threading.Event()
 
     def _reader() -> None:
@@ -2483,6 +2502,9 @@ def _stream_claude_run(
                     ev = json.loads(line)
                     if ev.get("type") == "result":
                         result_event.update(ev)
+                    if ev.get("type") == "system" and ev.get("subtype") == "init" and ev.get("model"):
+                        init_model[0] = init_model[0] or ev["model"]
+                        _OBSERVED_MODELS[run_id] = init_model[0]  # for a timeout/cancel/stall record too (SBI-015)
                     if not session_id_holder[0] and ev.get("session_id"):
                         session_id_holder[0] = ev["session_id"]
                     _write_run_progress_json(run_id, {
@@ -2497,7 +2519,7 @@ def _stream_claude_run(
 
     output = result_event.get("result", "")
     usage = result_event.get("usage") or {}
-    model = result_event.get("model")
+    model = _observed_claude_model(init_model[0], result_event)
     if not output and lines:
         output = lines[-1]
     session_id = session_id_holder[0] or result_event.get("session_id")
@@ -2614,8 +2636,8 @@ def run_agent_process(run_id: str, cmd: list[str], *, stream: str, timeout: floa
     timeout = AI_RUN_TIMEOUT_S if timeout is None else timeout
     proc = subprocess.Popen(cmd, cwd=str(cwd or ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             start_new_session=True)  # its own group, so a timeout or cancel ends descendants too
-    if not _register_proc(run_id, proc):  # cancelled/stalled meanwhile: proc is already dead
-        raise _RunEnded(run_id)
+    if not _register_proc(run_id, proc):  # cancelled/stalled meanwhile, or shutting down: proc is already dead
+        raise _RunEnded("runner is shutting down" if _SHUTTING_DOWN.is_set() else run_id)
     try:
         if on_proc is not None:
             on_proc(proc)  # the caller keeps the handle for cleanup after a later failure
@@ -2711,7 +2733,7 @@ def _project_cmd(agent: str, project, prompt: str, resume_session: str | None) -
 def _parse_project_output(agent: str, lines: list[str], stderr: str, returncode: int | None):
     """(output, input_tokens, output_tokens, model, session_id, ok, error) from a finished run."""
     if agent == "claude":
-        result, sid = {}, None
+        result, sid, init_model = {}, None, None
         for line in lines:
             try:
                 ev = json.loads(line)
@@ -2721,10 +2743,12 @@ def _parse_project_output(agent: str, lines: list[str], stderr: str, returncode:
                 sid = sid or ev.get("session_id")
                 if ev.get("type") == "result":
                     result = ev
+                elif ev.get("type") == "system" and ev.get("subtype") == "init" and ev.get("model"):
+                    init_model = init_model or ev["model"]
         usage = result.get("usage") or {}
         ok = returncode == 0 and not result.get("is_error")
         return (result.get("result") or "", usage.get("input_tokens"), usage.get("output_tokens"),
-                result.get("model"), sid, ok, "" if ok else stderr)
+                _observed_claude_model(init_model, result), sid, ok, "" if ok else stderr)
     if agent == "codex":
         text = "\n".join(lines)
         output, it, ot, model = _parse_agent_output("codex", text)
@@ -2822,6 +2846,7 @@ def _records_unsafe() -> str | None:
 
 
 _SHUTTING_DOWN = threading.Event()
+_WITHHELD_PROMPT = "[withheld: run-record location not allowed for confidential runs]"
 
 # Maintenance (scripts/relocate_checkout.sh): while set, no new run starts. Every run counts
 # itself in-flight from admission until it returns, i.e. after its record is written, so the
@@ -2953,16 +2978,22 @@ def api_maintenance():
 
 
 def _stop_project_runs() -> None:
-    """Shutdown (SIGTERM/atexit): refuse new project processes, kill and reap every live one
-    (git, agent, verify), then give the workers a moment to write their records (I5-12, I6-08)."""
+    """Shutdown (SIGTERM/atexit): refuse new processes, kill and reap every live one (git, agent,
+    verify), then give the workers a moment to write their records (I5-12, I6-08). A generic run
+    (run_agent_process) is cancelled here, record included, since its worker never reads the
+    cancel flag; one already finalizing is waited for (STB §3.7, SBR-009/010)."""
     _SHUTTING_DOWN.set()
     with _JOB_LOCK:
         for job in list(_running_jobs.values()):
             if job.get("project_key") and job.get("phase") != "finalizing":
                 job.setdefault("cancelled", "cancelled")
     _projects.stop_all()
+    for rid, job in list(_running_jobs.items()):
+        if not job.get("project_key"):
+            with contextlib.suppress(Exception):
+                _cancel_generic(rid, "Cancelled: dashboard shutting down")
     deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and any(j.get("project_key") for j in list(_running_jobs.values())):
+    while time.monotonic() < deadline and (_FINALIZING or any(j.get("project_key") for j in list(_running_jobs.values()))):
         time.sleep(0.1)
 
 
@@ -3022,9 +3053,10 @@ class _RunEnded(Exception):
 
 def _register_proc(run_id: str, proc) -> bool:
     """Launch handshake (WS-004): publish the process only while its run is live. A run ended
-    (cancel, stall) before or during Popen has its new process killed and reaped here."""
+    (cancel, stall) before or during Popen, or any launch once shutdown began (§3.7), has its new
+    process killed and reaped here."""
     with _JOB_LOCK:
-        if run_id in _running_jobs:
+        if run_id in _running_jobs and not _SHUTTING_DOWN.is_set():
             old, _running_procs[run_id] = _running_procs.get(run_id), proc
             live = True
         else:
@@ -3037,13 +3069,43 @@ def _register_proc(run_id: str, proc) -> bool:
     return False
 
 
+# Runs whose worker won _end_job and has not written its record yet; shutdown waits for them.
+# Added by _end_job, removed by _write_run_log once the run's record is on disk (SBR-010).
+_FINALIZING: set[str] = set()
+
+
 def _end_job(run_id: str) -> bool:
     """Retire a run's job and process entries together (WS-006). True when the caller ended
     the run; False when cancel or stall already had, and so owns its terminal side effects."""
     with _JOB_LOCK:
         job = _running_jobs.pop(run_id, None)
         _running_procs.pop(run_id, None)
+        if job is not None:
+            _FINALIZING.add(run_id)
     return job is not None
+
+
+def _cancel_generic(run_id: str, error: str) -> dict | None:
+    """End a generic (run_agent_process) run as its owner: take job and process under the lock,
+    SIGTERM then SIGKILL the group with reaping, and write the cancelled record before
+    returning. The displaced worker then finds no job and writes nothing. None: not running
+    (or already finishing). Used by cancel and by shutdown (SBR-010)."""
+    with _JOB_LOCK:
+        job = _running_jobs.pop(run_id, None)
+        proc = _running_procs.pop(run_id, None) if job is not None else None
+    if job is None:
+        return None
+    if proc is not None:
+        _kill_group(proc, signal.SIGTERM)
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5)
+        # Unconditional: a descendant ignoring SIGTERM outlives a leader that exited promptly (WS-002).
+        # ponytail: the group id could in theory be reused within the grace; same ceiling as _terminate_group.
+        _kill_group(proc)
+        with contextlib.suppress(Exception):
+            proc.wait(timeout=5)
+    _write_owner_record(run_id, job, "cancelled", error)
+    return job
 
 
 def _write_run_log_retrying(*args, **kwargs) -> None:
@@ -3074,8 +3136,13 @@ def _write_owner_record(run_id: str, job: dict, status: str, error: str) -> None
     sid = job.get("agent_session_id") or (_SESSION_CLAIMS.get(run_id) or (None, None))[1]
     if sid:  # a cancelled/stalled run stays resumable (UI2-04)
         meta.setdefault("agent_session_id", sid)
+    # A session card's routing and binding go with it, so the next reply routes the same (SBR-005).
+    extra = job.get("record_extra")
+    prompt = job.get("prompt", "")
+    if extra and extra.get("project_key") and extra.get("confidential") is not False and _records_unsafe():
+        prompt, error = _WITHHELD_PROMPT, f"withheld ({status}): run records are outside this checkout's ignored state/ or outputs/"
     _write_run_log_retrying(job.get("skill", "unknown"), status, job.get("started_at", ""), 0.0,
-                            prompt=job.get("prompt", ""), error=error, run_id=run_id, **meta)
+                            prompt=prompt, error=error, run_id=run_id, extra=extra, **meta)
 
 
 class _RunClaim:
@@ -3132,7 +3199,8 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
                                attempt: int = 0, parent_run_id: str | None = None,
                                resume_session: str | None = None, reuse_only: bool = False,
                                skill: str = "_prompt", confidential: bool | None = None,
-                               ticket_hold: contextlib.ExitStack | None = None) -> dict:
+                               ticket_hold: contextlib.ExitStack | None = None,
+                               record_extra: dict | None = None) -> dict:
     """The one launch helper for every project-bound launch (dispatch and retry/rework).
 
     Holds the ticket lock across worktree -> agent -> runner commit -> verify -> seed check
@@ -3199,6 +3267,11 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
                 _projects.mark_confidential(project, ident)
             binding.update(project_runs.binding_fields(project, ident, wt_info))
             _persist_binding(keys, {k: binding[k] for k in ("worktree", "branch", "base_sha")})
+            run_start_sha = None  # HEAD just before the agent: "this run changed nothing" (§7)
+            with contextlib.suppress(Exception):
+                wt_path = Path(binding["worktree"])
+                run_start_sha = _projects._git(wt_path, "rev-parse", "HEAD",
+                                               confine=_projects.confine_for(project, wt_path)).stdout.strip() or None
             exclude = project_runs.bookkeeping_paths(project, [STATE_DIR, OUTPUTS_DIR])
             before = _projects.fingerprint(project, exclude=exclude)
             tab_open = _main_path_tab_open(project.key)
@@ -3235,7 +3308,8 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
             else:
                 job["phase"] = "post_run"  # bounded by git/verify timeouts; not a stall candidate
                 result = project_runs.post_run(project, binding, agent, title, before, exclude,
-                                               on_start=_track, stopped=lambda: bool(job.get("cancelled")))
+                                               on_start=_track, stopped=lambda: bool(job.get("cancelled")),
+                                               start_sha=run_start_sha)
                 if result.get("post_run_error"):
                     status, error = "error", result["post_run_error"]
                 tab_open = tab_open or _main_path_tab_open(project.key)
@@ -3256,7 +3330,8 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
         if cancelled:  # authoritative through final logging: no review push, no run comment (I5-09)
             status, error = cancelled, "Cancelled by user" if cancelled == "cancelled" else "stalled"
         verify = result.get("verify")
-        extra = {**binding, **{k: v for k, v in result.items() if k != "verify_tail"}}
+        # record_extra: a session card's routing (resume_session, source), merged into the record (SBR-001)
+        extra = {**(record_extra or {}), **binding, **{k: v for k, v in result.items() if k != "verify_tail"}}
         if verify:
             extra["verify"] = verify
         withhold = binding["confidential"] is not False and _records_unsafe()
@@ -3266,8 +3341,10 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
         else:
             prompt_rec = prompt
             output_rec = (output or "") + (f"\n\n[verify tail]\n{result['verify_tail']}" if result.get("verify_tail") else "")
+        # a continuation keeps its session even when none was observed (failed early, timeout, SBI-011)
         _write_run_log(skill, status, started_at, time.monotonic() - t0, prompt=prompt_rec, output=output_rec,
-                       error=error, input_tokens=it, output_tokens=ot, agent_session_id=sid,
+                       error=error, input_tokens=it, output_tokens=ot, agent_session_id=sid or resume_session,
+                       token_cost_usd=_compute_token_cost(ot, it, model or record_kw["model"]),  # STB-034
                        extra=extra, **{**record_kw, "model": model or record_kw["model"]})
         if linear_issue_id:
             if not cancelled:
@@ -3569,6 +3646,486 @@ def _latest_record(run_id: str) -> dict:
     return {}
 
 
+# ── Session cards (session-to-board plan) ─────────────────────────────────────
+# "Resume" puts a session's card back in Todo with a generation-bound intent
+# `resume_session {agent, id, project_key, gen}`; replies to that card continue exactly that
+# session in its own folder, under the project's policy, until a reset to Todo (§1–§4).
+
+_RECORDS_CACHE: dict = {}
+
+
+def _all_records() -> list[dict]:
+    """Every run-log record, oldest first, cached by the file's (mtime, size). Read-only."""
+    try:
+        st = RUN_LOG.stat()
+    except OSError:
+        return []
+    key = (str(RUN_LOG), st.st_mtime_ns, st.st_size)
+    if _RECORDS_CACHE.get("key") != key:
+        out = []
+        for line in RUN_LOG.read_text(encoding="utf-8").splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(r, dict):
+                out.append(r)
+        _RECORDS_CACHE.update(key=key, records=out)
+    return _RECORDS_CACHE["records"]
+
+
+def _board_sessions() -> tuple[set, dict]:
+    """(board_ids, labels) for projects.py (§9): the (agent, session) pairs the runner launched,
+    from its run records, running jobs and session claims; and (agent, session) -> the card's
+    identifier, from the record or the tracker cache."""
+    ids: set = set()
+    labels: dict = {}
+    cache = _linear_cache()
+    for r in _all_records():
+        agent, sid = canonical_agent(r.get("agent")) or r.get("agent"), r.get("agent_session_id")
+        if not agent or not sid:
+            continue
+        ids.add((agent, sid))
+        ident = r.get("issue_identifier") or (cache.get(r.get("linear_issue_id") or "") or {}).get("identifier")
+        if ident:
+            labels[(agent, sid)] = ident
+    ids |= {(canonical_agent(a) or a, s) for a, s in _live_session_ids() if a and s}
+    return ids, labels
+
+
+def _intent_latest(issue_id: str) -> dict | None:
+    """The issue's newest record, skipping interactive_ended audits and archived records: the one
+    predicate for the intent and the board's resume_ok (STB-065/077)."""
+    for r in reversed(_all_records()):
+        if r.get("linear_issue_id") == issue_id and not r.get("interactive_ended") and r.get("status") != "archived":
+            return r
+    return None
+
+
+def _valid_intent(rec: dict | None) -> dict | None:
+    """The record's resume_session when it is the issue's latest record and its generation is
+    current (§1); None otherwise. Any reset to Todo bumps the generation and voids it."""
+    rec = rec or {}
+    intent, issue_id = rec.get("resume_session"), rec.get("linear_issue_id")
+    if not isinstance(intent, dict) or not issue_id or intent.get("agent") not in ("claude", "codex") \
+            or not intent.get("id") or not intent.get("project_key"):
+        return None
+    latest = _intent_latest(issue_id)
+    if not latest or latest.get("run_id") != rec.get("run_id"):
+        return None
+    return intent if intent.get("gen") == reset_gen.current(issue_id) else None
+
+
+def _resume_map() -> dict[str, dict]:
+    """issue id -> {run_id, agent} for every card whose latest record carries a valid intent and
+    is not running: the board's `resume_ok` (§5), computed here, never in JS."""
+    latest: dict[str, dict] = {}
+    for r in _all_records():
+        iid = r.get("linear_issue_id")
+        if iid and not r.get("interactive_ended") and r.get("status") != "archived":
+            latest[iid] = r
+    gens = reset_gen.snapshot()
+    running = {j.get("linear_issue_id") for j in list(_running_jobs.values())}
+    out = {}
+    for iid, r in latest.items():
+        intent = r.get("resume_session")
+        if isinstance(intent, dict) and intent.get("gen") == (gens.get(iid) if isinstance(gens.get(iid), int) else 0) \
+                and iid not in running and r.get("status") != "running":
+            out[iid] = {"run_id": r.get("run_id"), "agent": intent.get("agent")}
+    return out
+
+
+def _tracker_issue(issue_id: str) -> dict | None:
+    """The card's live tracker issue, or None when it is gone or emptied from the trash (§2.3)."""
+    from runner.modules.linear import archived_ids
+    mod = _module_registry.get("linear")
+    if not mod or issue_id in archived_ids():
+        return None
+    issue = mod.issues_cache.get(issue_id)
+    if issue is None and mod._capability.get("type") != "linear":
+        with contextlib.suppress(Exception):
+            issue = mod.get_local_tracker().fetch_issue(issue_id)
+    return issue
+
+
+def _own_activity_end(issue_id: str) -> float | None:
+    """When the card itself last touched its session: the end of its last real attempt, or its
+    newest interactive_ended audit (its own just-closed tab), whichever is later (§4.3)."""
+    end = None
+    for r in _all_records():
+        if r.get("linear_issue_id") != issue_id:
+            continue
+        t = _parse_run_started_at(r.get("started_at"))
+        if t is None:
+            continue
+        if r.get("interactive_ended"):
+            cand = t.timestamp()
+        elif r.get("to_board") or r.get("status") in ("todo", "rework", "archived"):
+            continue
+        else:
+            cand = t.timestamp() + float(r.get("duration_s") or 0)
+        end = cand if end is None else max(end, cand)
+    return end
+
+
+def _process_table() -> dict[int, tuple[int, str]]:
+    """pid -> (ppid, args) of every process, from ps; empty when ps fails."""
+    try:
+        ps = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,args="], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        ps = ""
+    procs: dict[int, tuple[int, str]] = {}
+    for line in ps.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            procs[int(parts[0])] = (int(parts[1]), parts[2])
+    return procs
+
+
+def session_in_use(target: dict, own_run_id: str | None, own_finished_at: float | None) -> str | None:
+    """Why this session looks open somewhere else, or None (§4). Advisory: the reply asks for
+    one confirmation, it is never blocked."""
+    from runner.modules.pty import TERMINALS
+    key = (target["agent"], target["id"])
+    live = {(t.agent, t.session_id) for t in list(TERMINALS.values()) if t.alive and t.session_id}
+    live |= {(j.get("agent"), j.get("agent_session_id")) for rid, j in list(_running_jobs.items())
+             if rid != own_run_id and j.get("agent_session_id")}
+    live |= {v for rid, v in list(_SESSION_CLAIMS.items()) if rid != own_run_id}  # by run_id key (STB-019)
+    if key in live:
+        return "it is open in a dashboard terminal or a running job"
+    procs = _process_table()
+    mine, grew = {os.getpid()}, True
+    while grew:  # the runner and its descendants (our own runs and terminals) are not "elsewhere"
+        more = {pid for pid, (ppid, _) in procs.items() if ppid in mine} - mine
+        mine |= more
+        grew = bool(more)
+    token = re.compile(rf"(?<![\w-]){re.escape(target['id'])}(?![\w-])")  # the whole id, not a substring
+    for pid, (_ppid, args) in procs.items():
+        if pid not in mine and token.search(args):
+            return f"another process (pid {pid}) has it open"
+    with contextlib.suppress(OSError):
+        mtime = target["path"].stat().st_mtime
+        if time.time() - mtime < _projects.SESSION_FRESH_S and (own_finished_at is None or mtime > own_finished_at + 5):
+            return "it was written in the last 2 minutes by something other than this card"
+    return None
+
+
+def _session_ticket(project, cwd: str) -> str | None:
+    """The ticket whose owned worktree holds this session folder, or None (main checkout)."""
+    owned = Path(os.path.realpath(_projects.WORKTREE_ROOT / project.key))
+    real = Path(os.path.realpath(cwd))
+    return real.relative_to(owned).parts[0] if real.is_relative_to(owned) and real != owned else None
+
+
+def session_confidential(project, cwd: str, linear_issue_id: str | None = None, task_id: str | None = None,
+                         *known, sid: str | None = None) -> bool | None:
+    """One policy for a session card, from where the session actually is (SBI-001): the registry,
+    the worktree sidecar of the ticket that owns its folder, any durable binding, `known` flags
+    and every run record of this session (`sid`), so an archived card's policy survives (SBI-008);
+    merged sticky. None (unknown) is treated as confidential everywhere."""
+    history = [r["confidential"] for r in _all_records()
+               if sid and r.get("agent_session_id") == sid and "confidential" in r]
+    return _ticket_confidential(project.key, _session_ticket(project, cwd), linear_issue_id, task_id, *known, *history)
+
+
+def _withheld(conf, prompt: str, output: str = "", error: str = "", status: str = "") -> tuple[str, str, str]:
+    """No confidential text where run records may leak (STB-042/§3.6)."""
+    if conf is not False and _records_unsafe():
+        return (_WITHHELD_PROMPT, "",
+                f"withheld ({status}): run records are outside this checkout's ignored state/ or outputs/" if error else "")
+    return prompt, output, error
+
+
+@app.route("/api/projects/<key>/sessions/<agent>/<sid>/to-board", methods=["POST"])
+def api_session_to_board(key: str, agent: str, sid: str):
+    """Resume = put the session's card back in Todo with the intent to continue it (§2).
+    Found card: moved to Todo, history kept. None: a new Todo issue bound to the session."""
+    try:
+        # The project's shared lifecycle hold first, through policy, tracker and record: a
+        # confidential promotion cannot slip in between (SBI-014). Lock order: project -> ticket.
+        with _projects.project_lock(key):
+            project = _projects.get_project(key, _projects.load_registry(errors={}))
+            board_ids, _labels = _board_sessions()
+            with _projects.session_lock(agent, sid):  # everything below runs inside (STB-027)
+                target = _projects.session_target(project, agent, sid, board_ids=board_ids)
+                if (agent, sid) in _live_session_ids() or any(
+                        j.get("agent_session_id") == sid for j in list(_running_jobs.values())):
+                    return jsonify({"error": "still running"}), 409
+                return _to_board_locked(project, target)
+    except _projects.SessionNotFound as exc:
+        return jsonify({"error": str(exc)}), 404
+    except _projects.SessionBusy as exc:
+        return jsonify({"error": str(exc)}), 409
+    except _projects.ProjectError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+def _session_card(agent: str, sid: str) -> str | None:
+    """The card of this session: the newest record of it (same agent, with a tracker issue,
+    no audits or archived ones), if that issue is still live (§2.3)."""
+    for r in reversed(_all_records()):
+        if r.get("agent_session_id") == sid and r.get("agent") == agent and r.get("linear_issue_id") \
+                and not r.get("interactive_ended") and r.get("status") != "archived":
+            return r["linear_issue_id"] if _tracker_issue(r["linear_issue_id"]) else None
+    return None
+
+
+def _to_board_locked(project, target: dict):
+    from runner.modules.linear import card_locked, reserve_card
+    agent, sid = target["agent"], target["id"]
+    mod = _module_registry.get("linear")
+    if mod is None:
+        return jsonify({"error": "no tracker"}), 409
+    issue_id = _session_card(agent, sid)
+    now = datetime.now(timezone.utc).isoformat()
+    if issue_id:
+        issue = _tracker_issue(issue_id) or {}
+        latest = dict(_intent_latest(issue_id) or {})
+        if latest.get("status") == "running" or mod._issue_is_running(issue_id) or card_locked(issue, issue_id):
+            return jsonify({"error": "still running"}), 409  # after the card is known (STB-057)
+        durable = _durable_binding(issue_id, latest.get("task_id")) or {}
+        ident = durable.get("issue_identifier") or issue.get("identifier") or latest.get("issue_identifier")
+        known = [f[k] for f in (latest, durable) for k in ("confidential",) if k in f]
+        conf = session_confidential(project, target["cwd"], issue_id, latest.get("task_id"), *known, sid=sid)
+        with reset_gen.issue_lock(issue_id):
+            try:
+                held = reserve_card(issue, issue_id)  # a concurrent drag/dispatch waits for us (STB-071)
+            except _projects.ProjectError as exc:
+                return jsonify({"error": str(exc)}), 409
+            with held:
+                previous = reset_gen.current(issue_id)
+                bumped = reset_gen.bump(issue_id)  # explicit: no PATCH body for _tracker_reset_route (STB-068)
+                try:
+                    mod.move_to_todo(issue_id)
+                except Exception as exc:
+                    reset_gen.restore(issue_id, previous, bumped)
+                    return jsonify({"error": f"could not move the card to Todo: {exc}"}), 409
+                gen = reset_gen.current(issue_id)  # after the confirmed move (STB-043)
+                intent = {"agent": agent, "id": sid, "project_key": project.key, "gen": gen}
+                # source "session": the card opens its session's folder even after a reset (SBI-003)
+                rec = {**latest, "status": "todo", "agent_session_id": sid, "agent": agent, "issue_identifier": ident,
+                       "resume_session": intent, "to_board": True, "source": "session", "confidential": conf,
+                       "session_project": project.key}  # survives a reset, unlike resume_session (SBI-010)
+                prompt, output, _ = _withheld(conf, latest.get("prompt", ""), latest.get("output", ""))
+                rec.pop("reset_gen", None)
+                run_id = latest.get("run_id") or str(uuid.uuid4())
+                _write_run_log(rec.get("skill") or "_prompt", "todo", rec.get("started_at") or now,
+                               float(rec.get("duration_s") or 0.0), prompt=prompt, output=output,
+                               error=rec.get("error", "") if prompt == latest.get("prompt", "") else "",
+                               run_id=run_id, output_path=rec.get("output_path", ""), attempt=rec.get("attempt", 0),
+                               parent_run_id=rec.get("parent_run_id"), linear_issue_id=issue_id,
+                               task_id=rec.get("task_id") or run_id, agent=agent, model=rec.get("model"),
+                               agent_session_id=sid, reset_generation=gen, extra=rec, audit=True)
+        socketio.emit("run_logged", {"skill": "_prompt", "run_id": run_id})
+        return jsonify({"ok": True, "run_id": run_id, "issue_id": issue_id, "created": False})
+    conf = session_confidential(project, target["cwd"], sid=sid)  # its folder and history decide (SBI-001/008)
+    title = target.get("title") or "untitled" if conf is False else f"Session {sid[:8]}"  # STB-025
+    try:
+        issue = mod.create_session_issue(title, "" if conf is not False else title, agent, project.key)
+    except Exception as exc:  # label, Linear or registry refusal: nothing created (STB-041)
+        return jsonify({"error": f"could not create the card: {exc}"}), 409
+    gen = reset_gen.current(issue["id"])
+    run_id = str(uuid.uuid4())
+    prompt, _, _ = _withheld(conf, title)
+    _write_run_log("_prompt", "todo", now, 0.0, prompt=prompt, run_id=run_id, linear_issue_id=issue["id"],
+                   task_id=run_id, agent=agent, agent_session_id=sid, reset_generation=gen, audit=True,
+                   extra={"issue_identifier": issue.get("identifier"), "project_key": project.key, "confidential": conf,
+                          "source": "session", "to_board": True, "session_project": project.key,
+                          "resume_session": {"agent": agent, "id": sid, "project_key": project.key, "gen": gen}})
+    socketio.emit("run_logged", {"skill": "_prompt", "run_id": run_id})
+    return jsonify({"ok": True, "run_id": run_id, "issue_id": issue["id"], "created": True})
+
+
+def _retry_session_card(run_id: str, original: dict, intent: dict, data: dict):
+    """A reply to a session card (§3): exactly that session, strict, in its own folder, under the
+    project's policy. A ticket session in its own worktree goes through the project helper
+    (commit/verify kept); any other folder runs the agent there directly, nothing committed."""
+    from runner.modules.linear import reserve_card
+    agent, sid = intent["agent"], intent["id"]
+    body_agent = canonical_agent(data.get("agent"))
+    if body_agent and body_agent != agent:
+        return jsonify({"ok": False, "error": f"this card continues a {agent} session"}), 409
+    reply = (data.get("reply") or "").strip()
+    attachments = data.get("attachments") or []
+    prompt = (reply + _format_prompt_attachments(attachments)).strip()  # the reply only (§3.5)
+    if not prompt:
+        return jsonify({"ok": False, "error": "write a reply first"}), 400
+    linear_issue_id = original["linear_issue_id"]
+    task_id = original.get("task_id") or run_id
+    plock = contextlib.ExitStack()  # the project's lifecycle hold, taken first: policy is read under it (SBI-009)
+    plock.handed = False
+    try:
+        plock.enter_context(_projects.project_lock(intent["project_key"]))
+        return _retry_session_card_held(run_id, original, intent, data, reply, attachments, prompt,
+                                        linear_issue_id, task_id, plock)
+    except _projects.ProjectError as exc:
+        return jsonify({"ok": False, "error": f"session not available: {exc}"}), 409
+    finally:
+        if not plock.handed:
+            plock.close()
+
+
+def _retry_session_card_held(run_id, original, intent, data, reply, attachments, prompt, linear_issue_id,
+                             task_id, plock):
+    """_retry_session_card under the project's lifecycle hold; a generic launch hands `plock`
+    to its worker (plock.handed), which keeps it through launch and record."""
+    from runner.modules.linear import reserve_card
+    agent, sid = intent["agent"], intent["id"]
+    try:
+        project = _projects.get_project(intent["project_key"], _projects.load_registry(errors={}))
+        target = _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])
+    except _projects.ProjectError as exc:  # gone, moved outside the project, or unregistered
+        return jsonify({"ok": False, "error": f"session not available: {exc}"}), 409
+    if not data.get("confirm_in_use"):
+        why = session_in_use(target, None, _own_activity_end(linear_issue_id))
+        if why:
+            return jsonify({"ok": False, "in_use_elsewhere": why}), 409
+    new_run_id = str(uuid.uuid4())
+    started_at = datetime.now(timezone.utc).isoformat()
+    launch_gen = intent["gen"]  # the validated intent's, never a reset's that raced in (SBI-007)
+    attempt = original.get("attempt", 0) + 1
+    try:
+        _claim_session(agent, sid, new_run_id)
+    except _projects.SessionBusy as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 409
+    issue = _tracker_issue(linear_issue_id) or {}
+    try:
+        held = reserve_card(issue, linear_issue_id)  # the lock a drag takes; handed on, never re-taken (STB-079)
+    except _projects.ProjectError as exc:
+        _release_session(new_run_id)
+        return jsonify({"ok": False, "error": str(exc)}), 409
+    with reset_gen.issue_lock(linear_issue_id):  # admission: a reset since the request began wins (SBI-007)
+        if _valid_intent(_intent_latest(linear_issue_id)) != intent:
+            held.close()
+            _release_session(new_run_id)
+            return jsonify({"ok": False, "error": "this card was reset meanwhile; its next run starts fresh"}), 409
+    durable = _durable_binding(linear_issue_id, task_id) or {}
+    ident = original.get("issue_identifier") or issue.get("identifier") or durable.get("issue_identifier")
+    known = [original["confidential"]] if "confidential" in original else []
+    conf = session_confidential(project, target["cwd"], linear_issue_id, task_id, *known, sid=sid)
+    if durable.get("issue_identifier") and durable.get("project_key") == project.key:
+        conf = _sticky(conf, _ticket_confidential(project.key, durable["issue_identifier"], linear_issue_id, task_id))
+    binding = {"project_key": project.key, "confidential": conf}
+    record_extra = {"issue_identifier": ident, "resume_session": intent, "source": "session",
+                    "session_project": project.key, **binding}
+    wt_ident = durable.get("issue_identifier") if durable.get("project_key") == project.key else None
+    in_worktree = bool(wt_ident) and os.path.realpath(_projects.worktree_path(project, wt_ident)) == os.path.realpath(target["cwd"])
+    if not in_worktree and conf is not False and _records_unsafe():  # refuse before launch (STB-013)
+        held.close()
+        _release_session(new_run_id)
+        _write_run_log_retrying("_prompt", "error", started_at, 0.0, prompt=_WITHHELD_PROMPT,
+                                error="withheld (error): run records are outside this checkout's ignored state/ or outputs/",
+                                run_id=new_run_id, attempt=attempt, parent_run_id=run_id, linear_issue_id=linear_issue_id,
+                                agent=agent, task_id=task_id, agent_session_id=sid, reset_generation=launch_gen,
+                                extra=record_extra)
+        return jsonify({"ok": False, "run_id": new_run_id, "error": "confidential project: run records are not in a safe place"}), 409
+    _linear_dispatched[linear_issue_id] = new_run_id
+    try:
+        _push_linear_state_async(linear_issue_id, "running", gen=launch_gen)
+    except Exception as exc:
+        held.close()
+        _release_session(new_run_id)
+        _linear_dispatched.pop(linear_issue_id, None)
+        return jsonify({"ok": False, "error": f"could not start: {exc}"}), 500
+    body = project_runs.tracker_comment(  # a confidential/unknown binding posts nothing (STB-052)
+        binding, "feedback", run_id=new_run_id,
+        fallback=lambda: _linear_comment_body(title="Human Feedback", feedback=reply, attachments=attachments))
+    if body:
+        _comment_quietly(_post_linear_comment, linear_issue_id, body)
+    ok_body = {"ok": True, "run_id": new_run_id, "skill": original.get("skill") or "_prompt", "attempt": attempt, "agent": agent}
+    if in_worktree:
+        try:
+            _start_counted(_run_project_ticket,
+                project_key=project.key, ident=wt_ident, agent=agent, prompt=prompt,
+                title=(original.get("prompt") or "")[:80], run_id=new_run_id, linear_issue_id=linear_issue_id,
+                task_id=task_id, launch_gen=launch_gen, attempt=attempt, parent_run_id=run_id,
+                resume_session=sid, reuse_only=True, skill=original.get("skill") or "_prompt",
+                confidential=conf, ticket_hold=held, record_extra=record_extra)
+        except Exception as exc:
+            held.close()
+            _release_session(new_run_id)
+            _push_linear_state_async(linear_issue_id, "review", gen=launch_gen)
+            return jsonify({"ok": False, "error": f"could not start: {exc}"}), 500
+        return jsonify(ok_body)
+    eff = dataclasses.replace(project, confidential=True) if conf is not False else project  # STB-032
+    skill = original.get("skill") or "_prompt"
+    _running_jobs[new_run_id] = {
+        "run_id": new_run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running",
+        "last_progress_at": time.monotonic(), "linear_issue_id": linear_issue_id, "launch_gen": launch_gen,
+        "agent": agent, "agent_session_id": sid, "model": _agent_model(agent),
+        # no top-level project_key: cancel, stall and shutdown use the generic path (SBR-005)
+        "record": {"attempt": attempt, "parent_run_id": run_id, "agent": agent, "model": _agent_model(agent),
+                   "task_id": task_id, "reset_generation": launch_gen},
+        "record_extra": record_extra,
+    }
+    socketio.emit("run_state_change", {"run_id": new_run_id, "state": "running", "skill": skill})
+
+    def _record(status: str, output: str = "", error: str = "", dur: float = 0.0, it=None, ot=None, model=None):
+        p, o, e = _withheld(conf, prompt, output, error, status)
+        _write_run_log_retrying(skill, status, started_at, dur, prompt=p, output=o, error=e, run_id=new_run_id,
+                                attempt=attempt, parent_run_id=run_id, linear_issue_id=linear_issue_id,
+                                input_tokens=it, output_tokens=ot, agent=agent, model=model or _agent_model(agent),
+                                task_id=task_id, token_cost_usd=_compute_token_cost(ot, it, model or _agent_model(agent)),
+                                agent_session_id=sid, reset_generation=launch_gen, extra=record_extra)
+
+    def _close(status: str, output: str = "", error: str = "") -> None:
+        body = project_runs.tracker_comment(
+            binding, "Run", run_id=new_run_id, status=status,
+            fallback=lambda: _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output, error=error))
+        if body:
+            _comment_quietly(_post_linear_comment, linear_issue_id, body)
+        _push_linear_state_async(linear_issue_id, "review", gen=launch_gen)
+        if reset_gen.is_current(linear_issue_id, launch_gen):
+            socketio.emit("run_state_change", {"run_id": new_run_id, "state": status, "skill": skill})
+        socketio.emit("run_logged", {"skill": skill, "run_id": new_run_id})
+
+    def _work():
+        end = _RunClaim(new_run_id)
+        procs: list = []
+        t0 = time.monotonic()
+        try:
+            with plock:  # the route's lifecycle hold, kept across launch and record (SBI-009)
+                try:
+                    cmd = _project_cmd(agent, eff, prompt, sid)  # the sandboxed CLI for a confidential project
+                    output, it, ot, model, _new_sid, stderr_s, ok = run_agent_process(
+                        new_run_id, cmd, stream=agent, cwd=target["cwd"], env=_project_exec_env(agent, eff),
+                        on_proc=procs.append)
+                    if not end():
+                        return
+                    error = "" if ok else (_extract_real_errors(stderr_s) or f"resume of session {sid} failed")
+                    status = "review" if ok else "error"  # strict: a failed continuation is an error
+                    _record(status, output or "", error, time.monotonic() - t0, it, ot, model)
+                    _close(status, output or "", error)
+                except subprocess.TimeoutExpired:
+                    _kill_and_reap(procs[0] if procs else None)
+                    if not end():
+                        return
+                    _record("timeout", error=f"Timed out after {AI_RUN_TIMEOUT_S}s", dur=time.monotonic() - t0)
+                    _close("timeout", error="timeout")
+                except Exception as exc:
+                    _kill_and_reap(procs[0] if procs else None)
+                    if not end():
+                        return
+                    _record("error", error=str(exc), dur=time.monotonic() - t0)
+                    _close("error", error=str(exc))
+        finally:
+            _release_session(new_run_id)
+            held.close()
+
+    plock.handed = True  # from here the worker (or the failure path below) closes it
+    try:
+        _start_counted(_work)
+    except Exception as exc:  # published but no worker: finish it here (RWS-015)
+        plock.close()
+        held.close()
+        _release_session(new_run_id)
+        if _end_job(new_run_id):
+            _record("error", error=f"could not start: {exc}")
+            _push_linear_state_async(linear_issue_id, "review", gen=launch_gen)
+        return jsonify({"ok": False, "run_id": new_run_id, "error": f"could not start: {exc}"}), 500
+    return jsonify(ok_body)
+
+
 @app.route("/api/runs/<run_id>/events")
 def api_run_events(run_id: str):
     """A run tab's view: the in-memory event ring (or the replayed stream log once it is gone),
@@ -3611,11 +4168,13 @@ def api_projects():
     except _projects.ProjectError as exc:
         return jsonify({"projects": [], "error": str(exc), "registry_hash": registry_hash})
     out = []
+    board_ids, labels = _board_sessions()  # board-launched headless sessions, with their card ids (§9)
     for key, p in reg.items():
         try:  # one project's reader failure never hides the others
             out.append({"key": key, "kind": p.kind, "confidential": p.confidential, "no_push": p.no_push,
                         "note": p.note, "entry": raw.get(key), "baseline": _BASELINES.get(key),
-                        "sessions": _projects.project_sessions(p), "memory": _projects.claude_memory_names(p)})
+                        "sessions": _projects.project_sessions(p, board_ids, labels),
+                        "memory": _projects.claude_memory_names(p)})
         except Exception as exc:
             out.append({"key": key, "error": f"session readers failed: {exc}", "entry": raw.get(key)})
     out += [{"key": key, "error": msg, "entry": raw.get(key)} for key, msg in errors.items()]
@@ -3770,8 +4329,9 @@ def _live_session_ids() -> set[tuple[str, str]]:
 def _session_action(key: str, agent: str, sid: str, act):
     try:
         project = _projects.get_project(key, _projects.load_registry(errors={}))
+        board_ids = _board_sessions()[0]
         with _projects.session_lock(agent, sid):
-            target = _projects.session_target(project, agent, sid)
+            target = _projects.session_target(project, agent, sid, board_ids=board_ids)
             _projects.check_session_idle(target, _live_session_ids())
             result = act(target)
     except _projects.SessionNotFound as exc:
@@ -3867,8 +4427,11 @@ def api_runs():
     runs = load_runs(limit)
     if issue_id_filter:
         runs = [r for r in runs if r.get("linear_issue_id") == issue_id_filter]
+    resumable = _resume_map()
     return jsonify([{
         **r,
+        "resume_ok": (resumable.get(r.get("linear_issue_id") or "") or {}).get("run_id") == r.get("run_id"),
+        "resume_agent": (resumable.get(r.get("linear_issue_id") or "") or {}).get("agent"),
         "when": _fmt_dt(r.get("started_at")),
         "duration": _fmt_dur(r.get("duration_s")),
         # "Waiting for you" (C2): the run ended by asking the user something
@@ -3892,6 +4455,9 @@ def api_runs_latest_by_issue():
                     **{k: r.get(k) for k in ("run_id", "status", "agent", "agent_session_id", "project_key", "started_at")},
                     # the same badge as /api/runs: an older card that waits for the user keeps it (REV31-02)
                     "waiting": project_runs.waiting_question(_assistant_text(r)) if r.get("status") == "review" else None}
+    for iid, info in _resume_map().items():  # the board's reply routing (§5)
+        if iid in latest and latest[iid]["run_id"] == info["run_id"]:
+            latest[iid].update(resume_ok=True, resume_agent=info["agent"])
     return jsonify(latest)
 
 
@@ -3919,6 +4485,16 @@ def api_run_detail(run_id: str):
             if rid == run_id:
                 r["run_id"] = rid
                 r.setdefault("output_path", "")
+                intent = _valid_intent(r) if r.get("status") != "running" else None
+                r["resume_ok"] = bool(intent)  # precomputed for the reply UI (§1, STB-084)
+                if intent:
+                    r["resume_agent"] = intent["agent"]
+                    with contextlib.suppress(Exception):
+                        project = _projects.get_project(intent["project_key"], _projects.load_registry(errors={}))
+                        target = _projects.session_target(project, intent["agent"], intent["id"],
+                                                          board_ids=_board_sessions()[0])
+                        r["session_cwd"] = target["cwd"]
+                        r["in_use_elsewhere"] = session_in_use(target, None, _own_activity_end(r["linear_issue_id"]))
                 return jsonify(r)
         except Exception:
             continue
@@ -3982,6 +4558,7 @@ def api_run_set_status(run_id: str):
     with reset_gen.issue_lock(gen_key):
         if new_status in ("todo", "rework"):
             record["reset_gen"] = reset_gen.bump(gen_key)  # Decision 11: older runs stop counting
+            record.pop("resume_session", None)  # Todo means fresh (STB-004)
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
         with RUN_LOG.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
@@ -4038,25 +4615,11 @@ def api_run_cancel(run_id: str):
         return jsonify({"ok": True, "run_id": run_id})
     # Ending the run = taking both entries under the lock; whoever does owns its record and
     # tracker push (WS-004/006). A job between processes (retry fallback) has no proc: still ours.
-    with _JOB_LOCK:
-        job = _running_jobs.pop(run_id, None)
-        proc = _running_procs.pop(run_id, None) if job is not None else None
+    job = _cancel_generic(run_id, "Cancelled by user")
     if job is None:
         return jsonify({"error": "not running"}), 404
-    if proc is not None:
-        _kill_group(proc, signal.SIGTERM)
-        with contextlib.suppress(Exception):
-            proc.wait(timeout=5)
-        # Unconditional: a descendant ignoring SIGTERM outlives a leader that exited promptly (WS-002).
-        # ponytail: the group id could in theory be reused within the grace; same ceiling as _terminate_group.
-        _kill_group(proc)
-        with contextlib.suppress(Exception):
-            proc.wait(timeout=5)
-    started_at = job.get("started_at", datetime.now(timezone.utc).isoformat())
     skill = job.get("skill", "unknown")
     linear_issue_id = job.get("linear_issue_id")
-    dur = time.monotonic() - (time.monotonic() - 0)  # best effort
-    _write_owner_record(run_id, job, "cancelled", "Cancelled by user")
     if linear_issue_id:
         _push_linear_state_async(linear_issue_id, "review")
     socketio.emit("run_state_change", {"run_id": run_id, "state": "cancelled", "skill": skill})
@@ -4119,6 +4682,9 @@ def api_run_retry(run_id: str):
 
     # Build conversation context: include previous output + human feedback
     req_data = request.get_json(silent=True) or {}
+    intent = _valid_intent(original)
+    if intent:  # a session card: replaces the bound/_run_project_ticket block for it (STB-038)
+        return _retry_session_card(run_id, original, intent, req_data)
     reply = (req_data.get("reply") or "").strip()
     # Quick reply (C2): continue exactly this session or fail; never a fresh session.
     strict = bool(req_data.get("strict"))

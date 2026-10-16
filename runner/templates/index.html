@@ -208,6 +208,7 @@
   .verify-badge { font-size: calc(10px * var(--fs)); padding: 1px 5px; border-radius: 3px; border: 1px solid var(--border); }
   .verify-badge.ok { color: var(--green); border-color: var(--green); }
   .verify-badge.bad { color: var(--red); border-color: var(--red); }
+  .verify-badge.none { color: var(--text-dim); border-color: var(--border); }  /* "no check": neutral (§7) */
   .job-card-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
   .model-badge {
     font-size: calc(8px * var(--fs));
@@ -395,6 +396,13 @@
   .files-preview pre { margin: 0; white-space: pre; font-size: calc(11px * var(--fs)); }
   .files-preview .ln { color: var(--text-dim); user-select: none; display: inline-block; min-width: 3.5em; text-align: right; padding-right: 8px; }
   .project-toolbar { display: flex; justify-content: flex-end; padding: 6px 4px; }
+  /* Projects as draggable tabs (session-to-board §12) */
+  .proj-tabstrip { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 4px; border-bottom: 1px solid var(--border); }
+  .proj-tab { background: transparent; border: 1px solid var(--border); border-bottom: none; border-radius: 4px 4px 0 0; color: var(--text-dim);
+    font: inherit; font-size: calc(12px * var(--fs)); padding: 4px 10px; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
+  .proj-tab.active { color: var(--text); border-color: var(--accent); background: var(--surface); }
+  .proj-tab.error { color: var(--red); border-color: var(--red); }
+  .proj-tab.drop-target { outline: 1px dashed var(--accent); }
   .project-btn { border-radius: 4px !important; }
   #project-dialog .drop-zone { margin-top: 10px; border: 2px dashed var(--border); border-radius: 6px; padding: 18px; text-align: center; color: var(--text-dim); font-size: calc(12px * var(--fs)); }
   #project-dialog .drop-zone.over { border-color: var(--accent); color: var(--accent); }
@@ -772,6 +780,7 @@
       <div class="trash-panel" id="trash-panel" style="display:none">
         <div class="trash-panel-header">
           <span>Canceled <span id="trash-panel-count"></span></span>
+          <button onclick="emptyTrash()" title="Archive every canceled issue; run records and session transcripts stay">Empty trash</button>
           <button onclick="toggleTrash()" title="Hide">✕</button>
         </div>
         <div class="trash-cards" id="trash-cards"></div>
@@ -937,6 +946,7 @@
         <div class="attach-list" id="reply-attach-list"></div>
       </div>
       <div class="detail-reply-status" id="detail-reply-status"></div>
+      <div class="detail-reply-status" id="detail-session-note" style="display:none"></div>
       <div id="mic-status" style="font-size:calc(10px * var(--fs));color:var(--text-dim);margin-top:3px;display:none"></div>
     </div>
     <div id="stt-hint" class="stt-hint" style="display:none"></div>
@@ -1078,7 +1088,6 @@ function initPaceMarkers() {
 }
 
 // ── Projects (Phase 1: read-only session view) ─────────────────────────────
-const _openProjects = new Set();
 let _projectData = { projects: [] };
 let _projectsLoaded = false;  // the new-task form waits on it for its default project (UI2-07)
 let _newIssuePendingProject = null;  // a saved draft project while the list is still loading (UI3-06)
@@ -1102,28 +1111,59 @@ function _renderProjects() {
   }
 }
 
+// Tab order and selection are a per-browser preference; the server keeps registry order (§12).
+function _projTabOrder(ps) {
+  let saved = [];
+  try { saved = JSON.parse(_storageGet('agenticos.projectTabs.order', '[]')); } catch (_) {}
+  const keys = ps.map(p => p.key);
+  const order = (Array.isArray(saved) ? saved : []).filter(k => keys.includes(k));  // removed keys drop out
+  keys.forEach(k => { if (!order.includes(k)) order.push(k); });  // new projects append
+  return order;
+}
+function _projTabActive(order) {
+  const a = _storageGet('agenticos.projectTabs.active', '');
+  return order.includes(a) ? a : order[0];
+}
+function _projTabMove(order, from, to) {
+  const [k] = order.splice(from, 1);
+  order.splice(to, 0, k);
+  _storageSet('agenticos.projectTabs.order', JSON.stringify(order));
+}
+
 function _renderProjectsInto(el) {
   const ps = _projectData.projects || [];
-  const toolbar = '<div class="project-toolbar"><button class="agent-btn active project-btn" data-proj-action="add">+ Project</button></div>';
-  if (_projectData.error) { el.innerHTML = toolbar + `<div class="job-board-empty">Registry error: ${_esc(_projectData.error)}</div>`; return; }
-  if (!ps.length) { el.innerHTML = toolbar + '<div class="job-board-empty">No projects registered yet.</div>'; return; }
+  const add = '<button class="agent-btn active project-btn" data-proj-action="add">+ Project</button>';
+  if (_projectData.error) { el.innerHTML = `<div class="project-toolbar">${add}</div><div class="job-board-empty">Registry error: ${_esc(_projectData.error)}</div>`; return; }
+  if (!ps.length) { el.innerHTML = `<div class="project-toolbar">${add}</div><div class="job-board-empty">No projects registered yet.</div>`; return; }
   const removeBtn = p => `<button class="session-copy" data-proj-action="remove" data-key="${_esc(p.key)}">Remove</button>`;
-  el.innerHTML = toolbar + ps.map(p => {
-    if (p.error) return `<div class="project-section"><div class="project-head project-error">${_esc(p.key)} — ${_esc(p.error)} ${removeBtn(p)}</div></div>`;
-    const open = _openProjects.has(p.key);
-    const badges = (p.confidential ? '<span class="badge risk-destructive">confidential</span>' : '')
-      + (p.no_push ? '<span class="badge">no push</span>' : '') + (p.kind ? `<span class="badge">${_esc(p.kind)}</span>` : '');
+  const byKey = Object.fromEntries(ps.map(p => [p.key, p]));
+  const order = _projTabOrder(ps), active = _projTabActive(order);
+  const badges = p => (p.confidential ? '<span class="badge risk-destructive">confidential</span>' : '')
+    + (p.no_push ? '<span class="badge">no push</span>' : '') + (p.kind ? `<span class="badge">${_esc(p.kind)}</span>` : '');
+  // Tabs hold no nested controls (STB-075): an error project's Remove is in its body.
+  const tabs = order.map(k => {
+    const p = byKey[k], sel = k === active;
+    return `<button class="proj-tab ${sel ? 'active' : ''} ${p.error ? 'error' : ''}" role="tab" aria-selected="${sel}"
+      tabindex="${sel ? 0 : -1}" draggable="true" data-ptab="${_esc(k)}" title="Drag to reorder · Alt+←/→ moves it">
+      ${_esc(k)} ${p.error ? '' : badges(p) + `<span class="session-meta">${(p.sessions || []).length}</span>`}</button>`;
+  }).join('');
+  const p = byKey[active];
+  let body;
+  if (p.error) {
+    body = `<div class="project-head project-error">${_esc(p.key)} — ${_esc(p.error)} ${removeBtn(p)}</div>`;
+  } else {
     const rows = (p.sessions || []).map(s => _sessionRow(p.key, s)).join('') || '<div class="session-empty">No sessions in this project yet.</div>';
-    return `<div class="project-section">
-      <div class="project-head" data-key="${_esc(p.key)}">${open ? '▾' : '▸'} <b>${_esc(p.key)}</b> ${badges}
+    body = `<div class="project-head">
         <span class="session-meta">${(p.sessions || []).length} sessions</span>
         <button class="session-copy" data-open-terminal="${_esc(p.key)}">Open terminal</button>
         ${(p.entry || {}).verify ? `<button class="session-copy" data-proj-action="baseline" data-key="${_esc(p.key)}" title="${_esc(p.entry.verify)} — on a clean copy of HEAD">Run tests</button>` : ''}
         <button class="session-copy" data-proj-action="edit" data-key="${_esc(p.key)}">Edit</button>
         ${removeBtn(p)}</div>
       ${_baselineHtml(p.baseline)}
-      ${open ? _projectBody(p, rows) : ''}</div>`;
-  }).join('');
+      ${_projectBody(p, rows)}`;
+  }
+  el.innerHTML = `<div class="proj-tabstrip" role="tablist" aria-label="Projects">${tabs}<span style="flex:1"></span>${add}</div>
+    <div class="project-section" role="tabpanel">${body}</div>`;
 }
 
 // Rename / Remove on a session row (A): inline, never a modal dialog.
@@ -1132,9 +1172,11 @@ function _sessionRow(key, s) {
   const ed = _sessionEdit && _sessionEdit.key === key && _sessionEdit.agent === s.agent && _sessionEdit.id === s.id ? _sessionEdit : null;
   const ids = `data-key="${_esc(key)}" data-sagent="${_esc(s.agent)}" data-sid="${_esc(s.id)}"`;
   const err = ed && ed.error ? `<span class="session-meta" style="color:var(--red)">${_esc(ed.error)}</span>` : '';
-  let title = `<span class="session-title" title="${_esc(s.cwd)}">${_esc(s.title)}</span>`;
-  let actions = `<button class="session-copy" data-cmd="${_esc(s.resume)}" title="${_esc(s.resume)}">copy resume</button>
-        <button class="session-copy" data-resume-agent="${_esc(s.agent)}" data-resume-id="${_esc(s.id)}" data-resume-cwd="${_esc(s.cwd)}" data-project="${_esc(key)}">Resume in tab</button>
+  // A board-launched session shows its card identifier first, e.g. "AGE-102 · title" (§9).
+  let title = `<span class="session-title" title="${_esc(s.cwd)}">${s.label ? `<b>${_esc(s.label)}</b> · ` : ''}${_esc(s.title)}</span>`;
+  // One Resume (§6): the session's card goes back to Todo and its reply opens.
+  let actions = `<button class="session-copy" data-resume-agent="${_esc(s.agent)}" data-resume-id="${_esc(s.id)}" data-project="${_esc(key)}"
+          title="Put this session's card in Todo and write the next reply (${_esc(s.resume)})">Resume</button>
         <button class="session-copy" data-saction="rename" ${ids}>Rename</button>
         <button class="session-copy" data-saction="remove" ${ids}>Remove</button>`;
   if (ed && ed.mode === 'rename') {
@@ -1475,25 +1517,74 @@ document.getElementById('project-panel-content')?.addEventListener('click', (eve
   const openTerm = event.target.closest('[data-open-terminal]');
   if (openTerm) { openShellTab(openTerm.dataset.openTerminal); return; }
   const resumeBtn = event.target.closest('[data-resume-id]');
-  if (resumeBtn) {
-    openResumeTab(resumeBtn.dataset.resumeAgent, resumeBtn.dataset.resumeId, resumeBtn.dataset.project, resumeBtn.dataset.resumeCwd);
+  if (resumeBtn) { _resumeToBoard(resumeBtn); return; }
+  const ptab = event.target.closest('[data-ptab]');
+  if (ptab) { _storageSet('agenticos.projectTabs.active', ptab.dataset.ptab); _renderProjects(); }
+});
+
+// Resume (§6): to-board, then the card's detail with the reply focused; no bottom panel.
+async function _resumeToBoard(btn) {
+  const { project: key, resumeAgent: agent, resumeId: sid } = btn.dataset;
+  btn.disabled = true;
+  const r = await _projectApi('POST', `/api/projects/${encodeURIComponent(key)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(sid)}/to-board`);
+  btn.disabled = false;
+  if (!r.ok) {  // inline in the row, no alert
+    _sessionEdit = { key, agent, id: sid, mode: 'resume', error: r.data.error || `HTTP ${r.status}` };
+    _renderProjects();
     return;
   }
-  const copy = event.target.closest('.session-copy');
-  if (copy) {
-    navigator.clipboard.writeText(copy.dataset.cmd || '');
-    copy.textContent = 'copied';
-    setTimeout(() => { copy.textContent = 'copy resume'; }, 1200);
-    return;
-  }
-  const head = event.target.closest('.project-head');
-  if (!head || !head.dataset.key) return;
-  const key = head.dataset.key;
-  _openProjects.has(key) ? _openProjects.delete(key) : _openProjects.add(key);
+  _sessionEdit = null;
   _renderProjects();
+  await refreshJobBoard(true);
+  await _openResumeReply(r.data.run_id);
+}
+
+// Tab drag and drop (native HTML5) and keyboard reorder (§12).
+let _projTabDrag = null;
+const _projPanel = document.getElementById('project-panel-content');
+_projPanel?.addEventListener('dragstart', (e) => {
+  const t = e.target.closest?.('[data-ptab]');
+  if (!t) return;
+  _projTabDrag = t.dataset.ptab;
+  e.dataTransfer.effectAllowed = 'move';
+  try { e.dataTransfer.setData('text/plain', _projTabDrag); } catch (_) {}
+});
+_projPanel?.addEventListener('dragover', (e) => {
+  const t = e.target.closest?.('[data-ptab]');
+  if (!_projTabDrag || !t) return;
+  e.preventDefault();
+  _projPanel.querySelectorAll('.proj-tab.drop-target').forEach(x => x.classList.remove('drop-target'));
+  t.classList.add('drop-target');
+});
+_projPanel?.addEventListener('drop', (e) => {
+  const t = e.target.closest?.('[data-ptab]');
+  if (!_projTabDrag || !t) return;
+  e.preventDefault();
+  const order = _projTabOrder(_projectData.projects || []);
+  const from = order.indexOf(_projTabDrag), to = order.indexOf(t.dataset.ptab);
+  if (from >= 0 && to >= 0 && from !== to) _projTabMove(order, from, to);
+  _projTabDrag = null;
+  _renderProjects();
+});
+_projPanel?.addEventListener('dragend', () => {
+  _projTabDrag = null;
+  _projPanel.querySelectorAll('.proj-tab.drop-target').forEach(x => x.classList.remove('drop-target'));
 });
 
 document.getElementById('project-panel-content')?.addEventListener('keydown', (event) => {
+  const ptab = event.target.closest('[data-ptab]');
+  if (ptab && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+    event.preventDefault();
+    const order = _projTabOrder(_projectData.projects || []);
+    const i = order.indexOf(ptab.dataset.ptab), j = i + (event.key === 'ArrowLeft' ? -1 : 1);
+    if (i < 0 || j < 0 || j >= order.length) return;
+    let focusKey = order[j];
+    if (event.altKey) { focusKey = order[i]; _projTabMove(order, i, j); }  // Alt+←/→ moves the tab
+    _storageSet('agenticos.projectTabs.active', focusKey);  // ←/→ selects the next tab; Alt keeps this one
+    _renderProjects();
+    document.querySelector(`[data-ptab="${CSS.escape(focusKey)}"]`)?.focus();
+    return;
+  }
   const input = event.target.closest('.session-rename');
   if (!input) return;
   if (event.key === 'Enter') { event.preventDefault(); _sessionSubmit(input, 'rename'); }
@@ -1867,6 +1958,11 @@ function _buildCol(col, items) {
     if (!payload) return;
     try {
       if (payload.kind === 'linear_issue' && LINEAR_STATE_BY_COL_KEY[col.key]) {
+        const item = _boardItemsByRunId[`linear-${payload.issue_id}`];
+        if (col.key === 'in_progress' && item?.resume_ok) {  // a session card continues by reply, never a fresh dispatch (STB-062)
+          _openResumeReply(item.run_id);
+          return;
+        }
         await _moveLinearIssueToColumn(payload.issue_id, LINEAR_STATE_BY_COL_KEY[col.key]);
         return;
       }
@@ -2453,6 +2549,8 @@ function _buildColCard(run) {
         : 'Click to toggle agent');
   const agentBadgeClick = agentLocked
     ? ''
+    : run.resume_ok  // a session card: the badge opens the reply (STB-056)
+      ? `onclick="event.stopPropagation();_openResumeReply('${_esc(run.run_id)}')"`
     : (state === 'todo' && badgeAgent
       ? `onclick="event.stopPropagation();triggerLinearIssueWithAgent('${_esc(run.linear_issue_id)}','${_esc(badgeAgent)}')"`
       : `onclick="event.stopPropagation();setIssueAgent('${_esc(run.linear_issue_id)}','${_esc(preferredAgent || badgeAgent)}')"`);
@@ -2461,7 +2559,11 @@ function _buildColCard(run) {
     ? `<span class="agent-badge ${_esc(paClass)}${agentLocked ? ' locked' : ''}" title="${_esc(badgeTitle)}" ${agentBadgeClick}>${_esc(paLabel)}</span>`
     : '';
   const hasAssignedAgent = AGENT_IDS.includes(preferredAgent);
-  const todoAgentToggle = run._is_linear_issue && state === 'todo' && hasAssignedAgent && !run.unsynced  // B: no dispatch button until synced
+  const todoAgentToggle = run.resume_ok && state === 'todo'  // continue the session: open its reply (STB-053)
+    ? `<div class="todo-agent-toggle" aria-label="Reply">
+         <button type="button" class="todo-run-btn ${_esc(run.resume_agent)} selected" title="Write the next reply to this ${_esc(_agentLabel(run.resume_agent))} session" onclick="event.stopPropagation();_openResumeReply('${_esc(run.run_id)}')">✎ Reply</button>
+       </div>`
+    : run._is_linear_issue && state === 'todo' && hasAssignedAgent && !run.unsynced  // B: no dispatch button until synced
     ? `<div class="todo-agent-toggle" aria-label="Assign agent">
          <button type="button" class="todo-run-btn ${_esc(preferredAgent)} selected" title="Start with ${_esc(_agentLabel(preferredAgent))}" onclick="event.stopPropagation();triggerLinearIssueWithAgent('${_esc(run.linear_issue_id)}','${_esc(preferredAgent)}')">▶ ${_esc(_agentLabel(preferredAgent))}</button>
        </div>`
@@ -2472,7 +2574,7 @@ function _buildColCard(run) {
   const metaModelHtml = isRunning ? '' : modelBadge;
   // Decision 8: project runs end in review with a verify badge (pass / fail / timeout / seed committed / main checkout changed)
   const verifyHtml = (run.verify_badge
-    ? `<span class="verify-badge ${run.verify_badge === 'pass' ? 'ok' : 'bad'}" title="project ${_esc(run.project_key || '')}">verify: ${_esc(run.verify_badge)}</span>`
+    ? `<span class="verify-badge ${run.verify_badge === 'pass' ? 'ok' : run.verify_badge === 'no check' ? 'none' : 'bad'}" title="project ${_esc(run.project_key || '')}">verify: ${_esc(run.verify_badge)}</span>`
     : '') + (run.latest_run_id
     ? `<span class="verify-badge" title="Open this card's live terminal view" onclick="event.stopPropagation();openCardTerminal('${_esc(run.latest_run_id)}')">▤ Terminal</span>`
     : '');
@@ -2534,7 +2636,7 @@ function _buildColCard(run) {
       }
     });
   }
-  if (canRetry) {
+  if (canRetry && !run.resume_ok) {  // a session card has only its reply box: no empty strict resume (STB-083)
     const preferredAgent = canonAgent(run.preferred_agent || run.agent) || null;
     // Session lock: if agent_session_id exists and status is not todo, dim non-locked agents
     // Lock to run.agent once a run has completed (todo reset clears the lock visually)
@@ -2701,7 +2803,7 @@ async function refreshJobBoard(force = false) {
       let boardStatus = isActivelyRunning ? 'in_progress' : _linearStateToBoard(issue.state);
       if (!isActivelyRunning && latest?.status === 'review' && ['In Progress', 'In Review'].includes(issue.state)) boardStatus = 'in_review';
       if (optimistic?.board_status) boardStatus = optimistic.board_status;
-      if (boardStatus !== 'in_review') {
+      if (boardStatus !== 'in_review' && !latest?.resume_ok) {  // a session card's reply draft stays (SBI-002)
         _clearReplyDraftForIssue(issue.id);
       }
       return {
@@ -2729,6 +2831,8 @@ async function refreshJobBoard(force = false) {
         project_key: latest?.project_key || '',
         issue_project: _projectFromLabels(issue.labels),
         waiting: latest?.waiting || '',
+        resume_ok: !!latest?.resume_ok,  // precomputed by the server (§1)
+        resume_agent: latest?.resume_agent || '',
         unsynced: String(issue.id || '').startsWith('local-') && _trackerType === 'linear',
         _is_linear_issue: true,
       };
@@ -2747,7 +2851,13 @@ function _projectFromLabels(labels) {
 }
 
 function _verifyRank(run) {
-  return run.verify_badge && run.verify_badge !== 'pass' ? 0 : 1;
+  return run.verify_badge && run.verify_badge !== 'pass' && run.verify_badge !== 'no check' ? 0 : 1;
+}
+
+// A session card's controls open its reply instead of dispatching it (session-to-board §5).
+async function _openResumeReply(runId) {
+  await openDetailModal(runId);
+  document.getElementById('detail-reply-input')?.focus();
 }
 
 function _renderBoardItems(all) {
@@ -2768,6 +2878,7 @@ function _renderBoardItems(all) {
   // Failing project runs sort first in In Review (Decision 8); the sort is stable otherwise.
   (byCol['in_review'] || []).sort((a, b) => _verifyRank(a) - _verifyRank(b));
   _cancelledItems = _boardItems.filter(r => (r._boardStatus || r.status || r.state || 'unknown') === 'cancelled');
+  if (_trackerType === 'local') _refreshLocalTrash();  // the local board fetch has no Canceled issues (STB-073)
 
   const container = document.getElementById('job-board-cols');
   if (!container) return;
@@ -2863,6 +2974,30 @@ function toggleTrash() {
   if (_trashOpen) renderTrash(_cancelledItems);
 }
 
+async function _refreshLocalTrash() {
+  try {
+    const r = await fetch('/api/linear/trash');
+    if (!r.ok) return;
+    _cancelledItems = (await r.json()).map(i => ({ run_id: `linear-${i.id}`, linear_issue_id: i.id,
+      identifier: i.identifier, title: i.title, when: '' }));
+    const count = document.getElementById('trash-count');
+    if (count) count.textContent = String(_cancelledItems.length);
+    if (_trashOpen) renderTrash(_cancelledItems);
+  } catch (_) {}
+}
+
+// Empty trash (session-to-board §11): one confirmation, then every Canceled issue is archived.
+async function emptyTrash() {
+  const n = _cancelledItems.length;
+  if (!n) return;
+  const where = _trackerType === 'linear' ? "They stay recoverable from Linear's archive." : 'They are removed from the local tracker.';
+  if (!confirm(`Archive all ${n} canceled issue(s)? ${where} Run records and session transcripts are kept.`)) return;
+  const r = await _projectApi('POST', '/api/linear/trash/empty');
+  const failed = Object.entries((r.data && r.data.failed) || {});
+  if (!r.ok || failed.length) alert('Empty trash: ' + (r.data.error || failed.map(([k, v]) => `${k}: ${v}`).join('\n')));
+  await refreshJobBoard(true);
+}
+
 function renderTrash(runs) {
   const container = document.getElementById('trash-cards');
   const countEl = document.getElementById('trash-panel-count');
@@ -2888,6 +3023,8 @@ function renderTrash(runs) {
   container.replaceChildren(frag);
 }
 
+let _detailResumeOk = false;  // the open card continues a session (session-to-board §5)
+let _detailResumeAgent = null;
 async function openDetailModal(run_id) {
   if (!run_id) return;
   const requestSeq = ++_detailModalLoadSeq;
@@ -2929,6 +3066,8 @@ async function openDetailModal(run_id) {
   document.getElementById('detail-history-count').textContent = '';
   _setDetailReplyValue('');
   _setDetailReplyStatus('');
+  _detailResumeOk = false;
+  document.getElementById('detail-session-note').style.display = 'none';
   _replyAttachments = [];
   _renderAttachList('reply-attach-list', _replyAttachments);
 
@@ -3031,12 +3170,26 @@ async function openDetailModal(run_id) {
       document.getElementById('detail-quality-section').style.display = '';
     }
 
-    const canRetry = !!r.linear_issue_id && state !== 'done' && state !== 'cancelled' && state !== 'todo' && r.status !== 'running';
+    // A session card (session-to-board §5): the reply continues its session from any column,
+    // Done and Todo included (SBR-008), with only its agent; fresh dispatch is hidden (STB-036).
+    _detailResumeOk = !!r.resume_ok;
+    _detailResumeAgent = r.resume_agent || null;
+    const canRetry = !!r.linear_issue_id && r.status !== 'running'
+      && (_detailResumeOk || (state !== 'done' && state !== 'cancelled' && state !== 'todo'));
     document.getElementById('detail-retry-group').style.display = canRetry ? 'inline-flex' : 'none';
-    if (canRetry) _updateDetailRetryLock(r.preferred_agent || r.agent || null, _agentLocksRetry(r.agent));
+    if (canRetry) {
+      if (_detailResumeOk) _updateDetailRetryLock(r.resume_agent, true);
+      else _updateDetailRetryLock(r.preferred_agent || r.agent || null, _agentLocksRetry(r.agent));
+    }
+    const note = document.getElementById('detail-session-note');
+    if (_detailResumeOk) {
+      note.innerHTML = `Continues this ${_esc(r.resume_agent || '')} session · runs in <code>${_esc(r.session_cwd || '?')}</code>`
+        + (r.in_use_elsewhere ? `<br><span style="color:var(--yellow,#d29922)">⚠ This session looks open elsewhere: ${_esc(r.in_use_elsewhere)}. Sending asks once.</span>` : '');
+      note.style.display = '';
+    }
 
     const isTodo = state === 'todo';
-    document.getElementById('detail-dispatch-group').style.display = (isTodo && r.linear_issue_id) ? 'inline-flex' : 'none';
+    document.getElementById('detail-dispatch-group').style.display = (isTodo && r.linear_issue_id && !_detailResumeOk) ? 'inline-flex' : 'none';
 
     const isReview = state === 'in_review';
     _cardTermBind(run_id, r, boardItem);
@@ -3048,12 +3201,12 @@ async function openDetailModal(run_id) {
     document.getElementById('detail-reply-section').style.display = r.linear_issue_id ? '' : 'none';
     document.getElementById('desc-stt-group').style.display = 'none';
     _detailLinearIssueId = r.linear_issue_id ? _sttIssueId(r.linear_issue_id) : null;
-    if (isReview) {
+    if (isReview || _detailResumeOk) {  // a session card takes replies in every column (SBI-002)
       _restoreReplyDraft();
     } else if (_detailLinearIssueId) {
       _clearReplyDraftForIssue(_detailLinearIssueId);
     }
-    _renderDetailReplyStatus(isReview);
+    _renderDetailReplyStatus(isReview || _detailResumeOk);
 
     // Load Linear issue if linked
     if (_linearConfigured && r.linear_issue_id) {
@@ -3108,6 +3261,7 @@ function closeDetailModal({ flush = true } = {}) {
 }
 
 function _updateDetailRetryLock(preferredAgent, sessionLocked = false) {
+  if (_detailResumeOk) { preferredAgent = _detailResumeAgent; sessionLocked = true; }  // a session card: its agent only (STB-015)
   preferredAgent = canonAgent(preferredAgent) || null;
   const retryGroup = document.getElementById('detail-retry-group');
   if (!retryGroup || retryGroup.style.display === 'none') return;
@@ -3147,6 +3301,18 @@ async function dispatchFromDetail(agent) {
   }).catch(err => console.error('Dispatch sync failed:', err));
 }
 
+// A retry; a session card in use elsewhere asks once, then resends with confirmation (§4).
+async function _postRetry(runId, body) {
+  const send = async b => (await fetch(`/api/runs/${runId}/retry`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) })).json();
+  let data = await send(body);
+  if (!data.ok && data.in_use_elsewhere) {
+    if (!confirm(`This session looks open elsewhere: ${data.in_use_elsewhere}.\n\nSend the reply anyway?`)) return null;
+    data = await send({ ...body, confirm_in_use: true });
+  }
+  return data;
+}
+
 async function retryRun(run_id, agent = 'claude', reply = '', attachments = []) {
   if (!run_id) return;
   const boardItem = _boardItemsByRunId[run_id] || null;
@@ -3155,13 +3321,8 @@ async function retryRun(run_id, agent = 'claude', reply = '', attachments = []) 
   const sttCutoff = _sttNewSeq();  // recordings started after this survive the retry
   if (targetRunId.startsWith('linear-')) { alert('No previous run to continue yet. Move the issue to In Progress first.'); return; }
   try {
-    const body = JSON.stringify({ agent, reply, attachments });
-    const res = await fetch(`/api/runs/${targetRunId}/retry`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-    });
-    const data = await res.json();
+    const data = await _postRetry(targetRunId, { agent, reply, attachments });
+    if (!data) return;  // the user kept it from a session open elsewhere
     if (!data.ok) { alert('Retry failed: ' + (data.error || 'unknown')); return; }
     if (replyOwner) _sttCancel(replyOwner, sttCutoff);
     _sttCancel(`agenticos.draft.reply.run.${run_id}`, sttCutoff);
@@ -3371,7 +3532,7 @@ async function _loadLinearIssueIntoModal(linear_issue_id, boardItem = null) {
       stateEl.appendChild(opt);
     });
     const draft = preserveExistingDraft ? currentDraft : _restoreLinearDraft(issue);
-    if (_linearStateToBoard(issue.state) === 'in_review') {
+    if (_linearStateToBoard(issue.state) === 'in_review' || _detailResumeOk) {
       if (_detailReplyDirty()) {
         _saveReplyDraft();
       } else {
@@ -3430,6 +3591,15 @@ async function saveLinearIssue() {
   const stateChanged = String(previousState).trim() !== String(nextState).trim();
   const status = document.getElementById('linear-edit-status');
   const saveBtn = document.getElementById('linear-save-btn');
+  if (_detailResumeOk && stateChanged && _linearStateToBoard(nextState) === 'in_progress') {
+    // A session card continues by reply; In Progress here would start a fresh run (SBR-003).
+    document.getElementById('linear-edit-state').value = previousState;
+    if (status) { status.textContent = 'This card continues its session: write the reply below.'; status.style.color = ''; }
+    document.getElementById('detail-reply-input')?.focus();
+    return;
+  }
+  // The state goes only when it changed: a Todo state_name resets the card (SBR-006).
+  const fields = { title, description: desc, preferred_agent: _detailPreferredAgent, ...(stateChanged ? { state_name: nextState } : {}) };
   _holdBoardRefresh();
   _optimisticPatchLinearIssue(issueId, {
     title,
@@ -3446,16 +3616,16 @@ async function saveLinearIssue() {
   fetch(`/api/linear/issues/local/${issueId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, description: desc, state_name: nextState, preferred_agent: _detailPreferredAgent }),
+    body: JSON.stringify(fields),
   }).catch(() => {});
   // Linear sync in background (fire-and-forget)
   fetch(`/api/linear/issues/${issueId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title, description: desc, state_name: nextState, preferred_agent: _detailPreferredAgent }),
+    body: JSON.stringify(fields),
   }).catch(() => {});
   _clearLinearDraft();
-  if (_linearStateToBoard(nextState) === 'in_progress') _sttCancelIssue(issueId);  // saving as In Progress dispatches
+  if (stateChanged && _linearStateToBoard(nextState) === 'in_progress') _sttCancelIssue(issueId);  // saving as In Progress dispatches
   else _sttCancel(_currentLinearDraftKey());
   _detailLinearInitial = { title, description: desc, state: nextState, preferred_agent: _detailPreferredAgent };
   if (stateChanged) {
@@ -4632,7 +4802,11 @@ async function _cardTermQuickReply() {
   const latestId = _cardTerm.latestRunId || runId;
   if (!reply || !runId || (_cardTerm.viewRunId || runId) !== latestId) return;  // latest attempt only (UI10-02, UI11-02)
   status.textContent = 'sending…';
-  const r = await _projectApi('POST', `/api/runs/${encodeURIComponent(latestId)}/retry`, { reply, strict: true });
+  let r = await _projectApi('POST', `/api/runs/${encodeURIComponent(latestId)}/retry`, { reply, strict: true });
+  if (!r.ok && r.data.in_use_elsewhere) {  // same confirmation as the card reply (§4)
+    if (!confirm(`This session looks open elsewhere: ${r.data.in_use_elsewhere}.\n\nSend the reply anyway?`)) { status.textContent = ''; return; }
+    r = await _projectApi('POST', `/api/runs/${encodeURIComponent(latestId)}/retry`, { reply, strict: true, confirm_in_use: true });
+  }
   refreshJobBoard(true);
   if (!_cardTermCurrent(gen)) return;
   if (!r.ok || r.data.ok === false) { status.textContent = r.data.error || `HTTP ${r.status}`; return; }

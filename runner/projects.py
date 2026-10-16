@@ -1414,7 +1414,20 @@ def _claude_summary(path: Path) -> dict | None:
     return info
 
 
-def claude_sessions(project: Project) -> list[dict]:
+def _headless_ok(agent: str, sid: str, board_ids) -> bool:
+    """A headless session (claude -p / sdk, codex exec) is shown only when the runner launched
+    it: its (agent, id) is in `board_ids`, built by app.py from its run records (STB §9)."""
+    return bool(board_ids) and (agent, sid) in board_ids
+
+
+def _with_label(row: dict, labels) -> dict:
+    label = (labels or {}).get((row["agent"], row["id"]))
+    if label:
+        row["label"] = label  # the card identifier, shown before the title (§9)
+    return row
+
+
+def claude_sessions(project: Project, board_ids=None, labels=None) -> list[dict]:
     from usage_reader import _cached_by_stat  # same per-file (mtime, size) cache as the usage cards
     roots = _session_roots(project)
     prefixes = [_slug(r) for r in roots]
@@ -1435,15 +1448,23 @@ def claude_sessions(project: Project) -> list[dict]:
                     continue
             except Exception:
                 continue  # one odd session file never hides the rest
-            if (info["entrypoint"] or "").startswith("sdk-"):
-                continue  # headless -p / SDK runs are not resumable picker sessions
-            out.append({
+            if (info["entrypoint"] or "").startswith("sdk-") and not _headless_ok("claude", f.stem, board_ids):
+                continue  # headless -p / SDK runs are shown only when the board launched them
+            out.append(_with_label({
                 "agent": "claude", "id": f.stem, "cwd": info["cwd"],
-                "title": info["custom"] or info["ai"] or info["first"] or "untitled",
+                "title": _claude_title(info),
                 "updated": st.st_mtime, "branch": info["branch"], "messages": info["messages"],
                 "resume": f"cd {shlex.quote(info['cwd'])} && claude --resume {shlex.quote(f.stem)}",
-            })
+            }, labels))
     return out
+
+
+def _claude_title(info: dict) -> str:
+    return info["custom"] or info["ai"] or info["first"] or "untitled"
+
+
+def _codex_title(name, title, first) -> str:
+    return name or title or (first or "")[:200] or "untitled"
 
 
 def claude_memory_names(project: Project) -> list[str]:
@@ -1451,7 +1472,7 @@ def claude_memory_names(project: Project) -> list[str]:
     return sorted(p.name for p in mem.glob("*.md")) if mem.is_dir() else []
 
 
-def codex_sessions(project: Project) -> list[dict]:
+def codex_sessions(project: Project, board_ids=None, labels=None) -> list[dict]:
     import sqlite3
     if not CODEX_DB.exists():
         return []
@@ -1460,27 +1481,29 @@ def codex_sessions(project: Project) -> list[dict]:
         db = sqlite3.connect(f"file:{CODEX_DB}?mode=ro", uri=True)
         try:
             rows = db.execute(
-                "SELECT id, cwd, name, title, first_user_message, updated_at, tokens_used, git_branch "
-                "FROM threads WHERE archived = 0 AND source IN ('cli', 'vscode')").fetchall()
+                "SELECT id, cwd, name, title, first_user_message, updated_at, tokens_used, git_branch, source "
+                "FROM threads WHERE archived = 0 AND source IN ('cli', 'vscode', 'exec')").fetchall()
         finally:
             db.close()
     except sqlite3.Error:
         return []  # format drift: degrade to no Codex rows, never crash the view
     out = []
-    for tid, cwd, name, title, first, updated, tokens, branch in rows:
+    for tid, cwd, name, title, first, updated, tokens, branch, source in rows:
         if not isinstance(tid, str) or not isinstance(cwd, str) or not _under(cwd, roots):
             continue
+        if source == "exec" and not _headless_ok("codex", tid, board_ids):
+            continue  # `codex exec` threads are shown only when the board launched them (§9)
         name, title, first, branch = (v if isinstance(v, str) else None for v in (name, title, first, branch))
         try:
             updated = float(updated or 0)
         except (TypeError, ValueError):
             updated = 0.0
-        out.append({
+        out.append(_with_label({
             "agent": "codex", "id": tid, "cwd": cwd,
-            "title": name or title or (first or "")[:200] or "untitled",
+            "title": _codex_title(name, title, first),
             "updated": updated, "branch": branch, "tokens": tokens,
             "resume": f"cd {shlex.quote(cwd)} && codex resume {shlex.quote(tid)}",
-        })
+        }, labels))
     return out
 
 
@@ -1571,8 +1594,10 @@ def session_dirs(registered: list[Path], limit: int = 50) -> list[dict]:
     return out[:limit]
 
 
-def project_sessions(project: Project) -> list[dict]:
-    rows = claude_sessions(project) + codex_sessions(project)
+def project_sessions(project: Project, board_ids=None, labels=None) -> list[dict]:
+    """`board_ids`: (agent, id) pairs the runner launched; `labels`: (agent, id) -> card
+    identifier. Both are built by app.py, which this module never imports (§9)."""
+    rows = claude_sessions(project, board_ids, labels) + codex_sessions(project, board_ids, labels)
     rows.sort(key=lambda r: r["updated"], reverse=True)
     return rows[:MAX_SESSIONS]
 
@@ -1608,9 +1633,10 @@ def session_lock(agent: str, sid: str):
         lock.release()
 
 
-def session_target(project: Project, agent: str, sid: str) -> dict:
-    """Resolve one session of this project: {agent, id, cwd, path} (path: transcript/rollout).
-    Refuses unknown ids, ids with path characters, cwd outside the project, files outside the stores."""
+def session_target(project: Project, agent: str, sid: str, board_ids=None) -> dict:
+    """Resolve one session of this project: {agent, id, cwd, path, title} (path: transcript/rollout).
+    Refuses unknown ids, ids with path characters, cwd outside the project, files outside the stores.
+    A headless session resolves only when its (agent, id) is in `board_ids` (§9)."""
     if agent not in ("claude", "codex"):
         raise ProjectError(f"unknown agent {agent!r}")
     if not isinstance(sid, str) or not _SESSION_ID.match(sid):
@@ -1627,16 +1653,18 @@ def session_target(project: Project, agent: str, sid: str) -> dict:
                 continue
             info = _claude_summary(f)
             if (info and info["cwd"] and _under_resolved(info["cwd"], roots)
-                    and not (info["entrypoint"] or "").startswith("sdk-")):
-                return {"agent": agent, "id": sid, "cwd": info["cwd"], "path": f}
+                    and (not (info["entrypoint"] or "").startswith("sdk-") or _headless_ok(agent, sid, board_ids))):
+                return {"agent": agent, "id": sid, "cwd": info["cwd"], "path": f, "title": _claude_title(info)}
         raise SessionNotFound(f"no Claude session {sid} in project {project.key}")
     import sqlite3
     db_path = _codex_db_checked()
     try:
         db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
         try:
-            row = db.execute("SELECT cwd, rollout_path FROM threads WHERE id = ? AND archived = 0 "
-                             "AND source IN ('cli', 'vscode')", (sid,)).fetchone()
+            sources = ("cli", "vscode", "exec") if _headless_ok(agent, sid, board_ids) else ("cli", "vscode")
+            row = db.execute("SELECT cwd, rollout_path, name, title, first_user_message FROM threads "
+                             f"WHERE id = ? AND archived = 0 AND source IN ({','.join('?' * len(sources))})",
+                             (sid, *sources)).fetchone()
         finally:
             db.close()
     except sqlite3.Error as exc:
@@ -1648,7 +1676,8 @@ def session_target(project: Project, agent: str, sid: str) -> dict:
     if rollout is None or not Path(os.path.realpath(rollout)).is_relative_to(store):
         # its idleness cannot be checked inside the Codex store: refuse rather than guess (IR9-03)
         raise ProjectError(f"Codex session {sid} has no rollout inside {store}; not touched")
-    return {"agent": agent, "id": sid, "cwd": row[0], "path": rollout}
+    texts = [v if isinstance(v, str) else None for v in row[2:5]]
+    return {"agent": agent, "id": sid, "cwd": row[0], "path": rollout, "title": _codex_title(*texts)}
 
 
 def check_session_idle(target: dict, live_ids: set[tuple[str, str]], now: float | None = None) -> None:

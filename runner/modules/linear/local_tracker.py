@@ -72,27 +72,59 @@ def _save_state(state_dir: Path, tasks: dict) -> None:
     write_json_atomic(state_dir / "tasks.json", tasks, indent=2, ensure_ascii=False)
 
 
+class _Tasks(dict):
+    """tasks.json contents plus the identifier high-water mark (`loc_max`, SBR-004), both read
+    and written under the same lock."""
+    loc_max = 0
+
+
 @contextlib.contextmanager
 def _tasks_txn(state_dir: Path):
     """Whole load -> change -> save of tasks.json under one cross-process lock (plan 4b)."""
-    from state_io import file_lock
+    from state_io import file_lock, read_json, write_json_atomic
     with file_lock(state_dir / "tasks.json"):
-        tasks = _load_state(state_dir)
+        tasks = _Tasks(_load_state(state_dir))
+        meta_path = state_dir / "local_tracker_meta.json"
+        meta = read_json(meta_path)
+        start = meta.get("loc_max") if isinstance(meta.get("loc_max"), int) else _allocated_floor(state_dir, tasks)
+        tasks.loc_max = start
         yield tasks
-        _save_state(state_dir, tasks)
+        _save_state(state_dir, dict(tasks))
+        tasks.loc_max = max(tasks.loc_max, _max_loc(t.get("identifier") for t in tasks.values()))
+        if tasks.loc_max != meta.get("loc_max"):
+            write_json_atomic(meta_path, {**meta, "loc_max": tasks.loc_max})
+
+
+_LOC = re.compile(r"LOC-(\d+)")
+
+
+def _max_loc(texts) -> int:
+    return max((int(m) for t in texts if isinstance(t, str) for m in _LOC.findall(t)), default=0)
+
+
+def _allocated_floor(state_dir: Path, tasks: dict) -> int:
+    """First use without the meta file: the highest LOC-n ever handed out, from the tasks, the
+    run logs' identifiers and the ticket directories under the worktree root (SBR-004)."""
+    found = [_max_loc(t.get("identifier") for t in tasks.values())]
+    for name in ("run_log.jsonl", "runs.jsonl"):
+        with contextlib.suppress(OSError):
+            found.append(_max_loc(re.findall(r'"issue_identifier":\s*"(LOC-\d+)"',
+                                             (state_dir / name).read_text(encoding="utf-8", errors="replace"))))
+    with contextlib.suppress(Exception):
+        import projects
+        root = projects.WORKTREE_ROOT
+        names = [p.name for d in root.iterdir() if d.is_dir() for p in d.iterdir()] if root.is_dir() else []
+        found.append(_max_loc(names))
+    return max(found)
 
 
 def _next_identifier(tasks: dict) -> str:
-    """Generate next LOC-<n> identifier."""
-    max_n = 0
-    for t in tasks.values():
-        ident = t.get("identifier", "")
-        m = re.search(r"LOC-(\d+)", ident)
-        if m:
-            n = int(m.group(1))
-            if n > max_n:
-                max_n = n
-    return f"LOC-{max_n + 1}"
+    """Next LOC-<n>: above every task and every identifier ever handed out, so a deleted task's
+    number (and its ticket binding, branch and worktree) is never reused (SBR-004)."""
+    n = max(getattr(tasks, "loc_max", 0), _max_loc(t.get("identifier", "") for t in tasks.values())) + 1
+    if isinstance(tasks, _Tasks):
+        tasks.loc_max = n
+    return f"LOC-{n}"
 
 
 def _with_labels(issue: dict) -> dict:
@@ -222,6 +254,7 @@ class LocalTracker:
         with _tasks_txn(self._state_dir) as tasks:
             if issue_id not in tasks:
                 return False
+            tasks.loc_max = max(tasks.loc_max, _max_loc([tasks[issue_id].get("identifier")]))  # never reused (SBR-004)
             del tasks[issue_id]
             return True
 

@@ -66,6 +66,7 @@ DEFAULT_CTX = 200_000
 
 # Output token price per 1M (USD)
 MODEL_PRICES: dict[str, float] = {
+    "claude-opus-5-5":            20.00,  # claude.com/pricing 2026-10-16: $4 in / $20 out per MTok
     "claude-opus-4-7":            15.00,
     "claude-sonnet-4-6":           3.00,
     "claude-sonnet-4-5-20250929":  3.00,

@@ -236,6 +236,56 @@ def _project_labels(data: dict) -> list[str]:
     return [f"{project_runs.LABEL_PREFIX}{key}"]
 
 
+def archived_ids() -> set[str]:
+    """Issues emptied from the trash (STB §11). Persisted, so neither the poller's terminal
+    carry-over nor a restart (which pre-fills the cache from tasks.json) brings them back."""
+    from state_io import read_json
+    data = read_json(STATE_DIR / "archived_issue_ids.json", default=list)
+    return set(data) if isinstance(data, list) else set()
+
+
+def _add_archived_ids(ids) -> None:
+    from state_io import json_transaction
+    with json_transaction(STATE_DIR / "archived_issue_ids.json", default=list) as store:
+        store.extend(i for i in ids if i not in store)
+
+
+def _registered_project(key: str | None):
+    """The registered Project for a key, or None (unknown key or unreadable registry)."""
+    import projects
+    if not key:
+        return None
+    try:
+        return projects.get_project(projects.registered_key(key) or key, projects.load_registry(errors={}))
+    except projects.ProjectError:
+        return None
+
+
+def linear_project_id(client, team_id: str, project_key: str | None, project_slug: str = "") -> str | None:
+    """The Linear Project an issue of `project_key` belongs in (STB §10): a registered
+    non-confidential project's same-named Project in the team (found, else created; the id is
+    cached in the runner state); unbound, unknown or confidential ones go into the default
+    Project from `tracker.project_slug` (None when there is none). Raises LinearError."""
+    from state_io import json_transaction, read_json
+    project = _registered_project(project_key)
+    if project is not None and not project.confidential:
+        cache_key = f"{team_id}:{project.key}"
+        name = project.key
+    elif project_slug:
+        cache_key, name = f"slug:{project_slug}", None
+    else:
+        return None
+    path = STATE_DIR / "linear_projects.json"
+    cached = read_json(path).get(cache_key)
+    if cached:
+        return cached
+    pid = (client.find_project(name, team_id) or client.create_project(name, team_id)) if name \
+        else client.find_project_by_slug(project_slug)
+    with json_transaction(path) as store:
+        store[cache_key] = pid
+    return pid
+
+
 def unsynced_local_id(issue_id: str | None) -> bool:
     """A task still on its local-first id while the Linear tracker is active: its Linear copy
     is not confirmed, so it is never dispatched or retried (B, R11)."""
@@ -421,6 +471,9 @@ class LinearModule(AgenticModule):
         self._teams_cache: list[dict] = []
         self._teams_last_refreshed: float = 0
         self._local_overrides: dict[str, dict] = {}
+        # Issues this process just created: a poll whose fetch predates them must not drop them
+        # from the cache (SBI-016). id -> monotonic time of the insert.
+        self._fresh_ids: dict[str, float] = {}
 
     def check_capabilities(self) -> dict:
         kind = _tracker_type()
@@ -439,8 +492,10 @@ class LinearModule(AgenticModule):
         # issues (Canceled/Done/Duplicate) are immediately visible in the board & trash
         try:
             local = self.get_local_tracker()
+            gone = archived_ids()
             for issue in local.fetch_issues():
-                self.issues_cache[issue["id"]] = issue
+                if issue["id"] not in gone:
+                    self.issues_cache[issue["id"]] = issue
             if self.issues_cache:
                 logger.info("Pre-populated issues_cache with %d issues from state/tasks.json", len(self.issues_cache))
         except Exception:
@@ -502,11 +557,14 @@ class LinearModule(AgenticModule):
                 import reset_gen
                 gens_before = reset_gen.snapshot()  # a reset during the fetch wins (I6-11)
 
+                gone = archived_ids()  # emptied from the trash: never back into the cache (STB-050)
                 for tid in team_ids_to_poll:
                     team_issues = client.fetch_issues(states, team_id=tid)
                     team_issue_dict: dict[str, dict] = {}
                     for issue in team_issues:
                         iid = issue["id"]
+                        if iid in gone:
+                            continue
                         normalized = _normalize_linear_issue(issue)
                         normalized = self._apply_local_override(iid, normalized)
                         local_state = self.issues_cache.get(iid, {}).get("state")
@@ -548,10 +606,15 @@ class LinearModule(AgenticModule):
                     # since the fetch keeps its current (post-reset) entry (I6-11, I7-04).
                     for iid in sorted(set(new_cache) | set(self.issues_cache)):
                         held.enter_context(reset_gen.issue_lock(iid))
+                    gone = archived_ids()  # re-read: an Empty trash during the fetch wins (STB-050)
+                    for iid in gone:
+                        new_cache.pop(iid, None)
+                        for team_dict in new_by_team.values():
+                            team_dict.pop(iid, None)
                     # Keep terminal-state issues (Canceled/Done/Duplicate) for trash display
                     terminal_issues = {
                         k: v for k, v in self.issues_cache.items()
-                        if v.get("state") in ("Canceled", "Done", "Duplicate")
+                        if v.get("state") in ("Canceled", "Done", "Duplicate") and k not in gone
                     }
                     gens_now = reset_gen.snapshot()
                     for iid in set(new_cache) | set(self.issues_cache):
@@ -563,10 +626,21 @@ class LinearModule(AgenticModule):
                             tid = new_cache[iid].get("team_id") or ""
                             if tid:  # also when the fetch did not include it (I8-07)
                                 new_by_team.setdefault(tid, {})[iid] = new_cache[iid]
+                    # just created here and not fetched yet: kept until Linear returns it or 120 s pass,
+                    # however the poll's timing falls (SBI-016/018)
+                    fresh = {iid: self.issues_cache[iid] for iid in list(self._fresh_ids)
+                             if iid not in new_cache and iid in self.issues_cache and iid not in gone}
+                    for iid in list(self._fresh_ids):
+                        if iid in new_cache or time.monotonic() - self._fresh_ids[iid] > 120:
+                            self._fresh_ids.pop(iid, None)
                     self.issues_cache.clear()
                     self.issues_cache.update(new_cache)
+                    self.issues_cache.update(fresh)
                     self._issues_by_team.clear()
                     self._issues_by_team.update(new_by_team)
+                    for iid, issue in fresh.items():
+                        if issue.get("team_id"):
+                            self._issues_by_team.setdefault(issue["team_id"], {})[iid] = issue
 
                     # Preserve last N terminal issues so the recycle bin stays populated
                     terminal_list = sorted(terminal_issues.items(), key=lambda x: x[1].get("updated_at", ""))
@@ -726,7 +800,7 @@ class LinearModule(AgenticModule):
         import subprocess
         from app import _running_jobs, _running_procs, _python_path, RUNNER, ROOT, _load_registry, _ai_command, _agent_model, _parse_agent_output, _extract_skill_name, _write_run_log, AI_RUN_TIMEOUT_S, _extract_real_errors, _registry_exec_env, _stream_dsh_run, _dsh_ok
         from app import (_RunClaim, _kill_and_reap, _write_run_log_retrying, _comment_quietly, _run_grouped,
-                         run_agent_process, _stream_for, _agent_output_format)
+                         run_agent_process, _stream_for, _agent_output_format, _compute_token_cost)
         issue_id = issue["id"]
         if issue_id in self.dispatched:
             return
@@ -758,6 +832,7 @@ class LinearModule(AgenticModule):
             if reserved and getattr(held, "identity", None) != ("ticket", project_key, ident):
                 held.close()  # the route locked something else (e.g. a card before the label was known, REV-01)
                 reserved = False
+            self._ensure_linear_project(issue, project_key)
             run_id = str(uuid.uuid4())
             self.dispatched[issue_id] = run_id
             self.push_state(issue_id, "running", gen=launch_gen)
@@ -879,6 +954,7 @@ class LinearModule(AgenticModule):
                     agent=backend,
                     model=pm or _agent_model(backend, cfg),
                     task_id=run_id,
+                    token_cost_usd=_compute_token_cost(ot, it, pm or _agent_model(backend, cfg)),  # STB-034
                     agent_session_id=session_id,
                     reset_generation=launch_gen,
                 )
@@ -920,6 +996,160 @@ class LinearModule(AgenticModule):
         finally:
             card_hold.close()
 
+    def _linear_client(self):
+        """(client, tracker config) for the configured Linear tracker; raises when unconfigured."""
+        tc = _load_workflow_config().get("tracker", {})
+        ak = _linear_api_key_from_cfg(tc)
+        if not ak:
+            raise RuntimeError("Linear not configured")
+        from linear_client import LinearClient
+        return LinearClient(ak, tc.get("project_slug", "")), tc
+
+    def _ensure_linear_project(self, issue: dict, project_key: str) -> None:
+        """A project ticket with no Linear Project goes into its project's one at dispatch (STB §10).
+        Best effort: a Linear error is logged and the dispatch continues (STB-085)."""
+        if self._capability.get("type") != "linear" or not ("project_id" in issue and not issue["project_id"]):
+            return
+        try:
+            client, tc = self._linear_client()
+            pid = linear_project_id(client, issue.get("team_id") or tc.get("team_id", ""), project_key,
+                                    tc.get("project_slug", ""))
+            if pid:
+                client.set_issue_project(issue["id"], pid)
+                cached = self.issues_cache.get(issue["id"])
+                if cached is not None:
+                    cached["project_id"] = pid
+        except Exception as e:
+            logger.warning("Linear Project for %s not set: %s", issue.get("identifier") or issue.get("id"), e)
+
+    def move_to_todo(self, issue_id: str) -> None:
+        """Move a card back to Todo the way a board drag does, tracker state included (STB §2.4).
+        The caller holds reset_gen.issue_lock and has bumped the generation. Raises on failure."""
+        state = _BOARD_TO_LINEAR["todo"]
+        if self._capability.get("type") == "linear":
+            client, _tc = self._linear_client()
+            if not client.update_issue_state(issue_id, state):
+                raise RuntimeError(f"Linear did not accept state {state!r}")
+            with contextlib.suppress(Exception):
+                self.get_local_tracker().update_issue_state(issue_id, state)
+        elif not self.get_local_tracker().update_issue_state(issue_id, state):
+            raise RuntimeError("local task not found")
+        self._local_overrides.pop(issue_id, None)
+        self.dispatched.pop(issue_id, None)
+        if issue_id in self.issues_cache:
+            cached = {**self.issues_cache[issue_id], "state": state}
+            self.issues_cache[issue_id] = cached
+            tid = cached.get("team_id") or ""
+            if tid and issue_id in self._issues_by_team.get(tid, {}):
+                self._issues_by_team[tid][issue_id] = cached
+        if self._socketio:
+            self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+
+    def create_session_issue(self, title: str, description: str, agent: str, project_key: str) -> dict:
+        """One Todo issue for a session that has no card (STB §2.5), composed like the "+" form:
+        `project:<key>` label, agent marker, the project's Linear Project. Synchronous, so the
+        record links to the final id. Raises (ValueError, RuntimeError, LinearError) with nothing
+        created on a refused label or Linear error."""
+        labels = _project_labels({"project": project_key})
+        agent = canonical_agent(agent)
+        desc = _compose_issue_description(description, agent)
+        tc = _load_workflow_config().get("tracker", {})
+        tid = tc.get("team_id", "")
+        if self._capability.get("type") == "linear":
+            client, tc = self._linear_client()
+            if not tid:
+                raise RuntimeError("tracker.team_id is required")
+            label_ids = []
+            for name in labels:  # every label or no issue (STB-041)
+                label_id = client.ensure_label(tid, name)
+                if not label_id:
+                    raise RuntimeError(f"Linear label {name!r} could not be resolved")
+                label_ids.append(label_id)
+            project_id = linear_project_id(client, tid, project_key, tc.get("project_slug", ""))
+            created = client.create_issue(tid, title, desc, label_ids=label_ids,
+                                          **({"project_id": project_id} if project_id else {}))
+            if not created:
+                raise RuntimeError("Linear did not create the issue")
+            issue = _normalize_linear_issue(created)
+            issue["labels"] = sorted(set(issue["labels"]) | set(labels))
+            with self.get_local_tracker().raw_transaction() as raw:
+                raw[issue["id"]] = dict(issue)
+        else:
+            issue = self.get_local_tracker().create_issue(title, desc, preferred_agent=agent, team_id=tid, labels=labels)
+        self.issues_cache[issue["id"]] = dict(issue)
+        self._fresh_ids[issue["id"]] = time.monotonic()
+        if issue.get("team_id"):
+            self._issues_by_team.setdefault(issue["team_id"], {})[issue["id"]] = dict(issue)
+        if self._socketio:
+            self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+        return issue
+
+    def canceled_issues(self) -> list[dict]:
+        """The trash: Canceled issues. Local mode reads the tracker directly, since the board
+        fetch returns only active states (STB-073)."""
+        src = ([{**v, "id": k} for k, v in self.issues_cache.items()]  # the cache key is the id (SBI-019)
+               if self._capability.get("type") == "linear" else self.get_local_tracker().fetch_issues())
+        gone = archived_ids()
+        return [i for i in src if _linear_state_key(i.get("state")) in ("canceled", "cancelled") and i.get("id") not in gone]
+
+    def _still_canceled(self, issue_id: str) -> bool:
+        if self._capability.get("type") == "linear":
+            state = (self.issues_cache.get(issue_id) or {}).get("state")
+        else:
+            state = (self.get_local_tracker().fetch_issue(issue_id) or {}).get("state")
+        return _linear_state_key(state) in ("canceled", "cancelled")
+
+    def empty_trash(self) -> tuple[list[str], dict[str, str]]:
+        """Archive every Canceled issue (Linear: issueArchive, recoverable; local: removed) and
+        evict it everywhere the poller and board read. Run records and transcripts are not
+        touched. Each issue is rechecked and archived under its issue lock, so a card that a
+        Resume or drag moved meanwhile is skipped (SBI-004). Returns (archived ids,
+        {identifier: failure reason}) (STB §11)."""
+        import reset_gen
+        linear = self._capability.get("type") == "linear"
+        client = self._linear_client()[0] if linear else None
+        done, failed = [], {}
+        for issue in self.canceled_issues():
+            iid = issue["id"]
+            with reset_gen.issue_lock(iid):
+                if not self._still_canceled(iid):
+                    continue
+                try:
+                    if linear:
+                        client.archive_issue(iid)
+                    elif not self.get_local_tracker().delete_issue(iid):
+                        continue
+                except Exception as e:
+                    failed[issue.get("identifier") or iid] = str(e)
+                    continue
+                reset_gen.bump(iid)  # a run still finishing can no longer push this card (SBI-005)
+                self._evict([iid])
+                done.append(iid)
+        return done, failed
+
+    def _evict(self, ids: list[str]) -> None:
+        if not ids:
+            return
+        import reset_gen
+        _add_archived_ids(ids)  # first: a poll after this point skips them (STB-050)
+        for iid in ids:
+            with reset_gen.issue_lock(iid):
+                self.issues_cache.pop(iid, None)
+                for team_dict in self._issues_by_team.values():
+                    team_dict.pop(iid, None)
+                self._local_overrides.pop(iid, None)
+                self.dispatched.pop(iid, None)
+        with self.get_local_tracker().raw_transaction() as tasks:
+            for iid in ids:
+                tasks.pop(iid, None)
+        with contextlib.suppress(Exception):
+            import app as app_mod
+            if any(i in app_mod._linear_dismissed for i in ids):
+                app_mod._linear_dismissed.difference_update(ids)
+                app_mod._save_dismissed()
+        if self._socketio:
+            self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+
     # ── Route registration ────────────────────────────────────────────────
 
     def register_routes(self, app) -> None:
@@ -949,25 +1179,28 @@ class LinearModule(AgenticModule):
                 if not self.issues_cache:
                     try:
                         local = self.get_local_tracker()
+                        gone = archived_ids()
                         for issue in local.fetch_issues():
-                            self.issues_cache[issue["id"]] = issue
+                            if issue["id"] not in gone:
+                                self.issues_cache[issue["id"]] = issue
                     except Exception:
                         pass
+                gone = archived_ids()  # a stray cache entry of an emptied card never shows (SBI-005)
                 if team_id and team_id in self._issues_by_team:
                     return jsonify([
                         self._apply_local_override(iid, issue)
-                        for iid, issue in self._issues_by_team[team_id].items()
+                        for iid, issue in self._issues_by_team[team_id].items() if iid not in gone
                     ])
                 # Fallback: filter issues_cache by team_id field if team specified
                 if team_id:
                     return jsonify([
-                        self._apply_local_override(v.get("id", ""), v)
-                        for v in self.issues_cache.values()
-                        if v.get("team_id") == team_id
+                        self._apply_local_override(k, v)
+                        for k, v in self.issues_cache.items()
+                        if v.get("team_id") == team_id and k not in gone
                     ])
-                return jsonify([
-                    self._apply_local_override(v.get("id", ""), v)
-                    for v in self.issues_cache.values()
+                return jsonify([  # filtered by cache key: an incomplete value cannot slip through (SBI-012)
+                    self._apply_local_override(k, v)
+                    for k, v in self.issues_cache.items() if k not in gone
                 ])
             t = self.get_local_tracker()
             cfg = _load_workflow_config()
@@ -1015,6 +1248,7 @@ class LinearModule(AgenticModule):
             local_issue = local.create_issue(title, desc, preferred_agent=pa, team_id=tid, labels=labels)
             local_id = local_issue["id"]
             self.issues_cache[local_id] = dict(local_issue)
+            self._fresh_ids[local_id] = time.monotonic()  # the placeholder survives polls until the swap (SBI-018)
             self._issues_by_team.setdefault(tid, {})[local_id] = dict(local_issue)
             if self._socketio:
                 self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
@@ -1029,7 +1263,16 @@ class LinearModule(AgenticModule):
                         if not label_id:
                             raise RuntimeError(f"Linear label {name!r} could not be resolved; task stays local")
                         label_ids.append(label_id)
-                    linear_issue = client.create_issue(tid, title, desc, label_ids=label_ids)
+                    project_id = None
+                    try:  # its project's Linear Project, else the default one (STB §10/STB-064)
+                        import project_runs
+                        project_id = linear_project_id(client, tid, project_runs.project_key_from_labels(labels),
+                                                       tc.get("project_slug", ""))
+                    except Exception as e:
+                        # ponytail: a Project that cannot be resolved never blocks the task itself
+                        logger.warning("Linear Project for %s not resolved (%s); created without one", local_id, e)
+                    linear_issue = client.create_issue(tid, title, desc, label_ids=label_ids,
+                                                       **({"project_id": project_id} if project_id else {}))
                     if not linear_issue:
                         logger.warning("Linear create returned nothing for local %s", local_id)
                         return
@@ -1048,7 +1291,9 @@ class LinearModule(AgenticModule):
                     if local_id in self._local_overrides:
                         self._local_overrides[real_id] = self._local_overrides.pop(local_id)
                     self.issues_cache.pop(local_id, None)
+                    self._fresh_ids.pop(local_id, None)
                     self.issues_cache[real_id] = n
+                    self._fresh_ids[real_id] = time.monotonic()
                     if tid:
                         team_cache = self._issues_by_team.setdefault(tid, {})
                         team_cache.pop(local_id, None)
@@ -1088,6 +1333,8 @@ class LinearModule(AgenticModule):
         @_tracker_reset_route
         def _issues_local_patch(issue_id: str):
             """Write-only local state update, no Linear API call."""
+            if issue_id in archived_ids():  # emptied from the trash: never written back (SBI-017)
+                return jsonify({"error": "this card was emptied from the trash"}), 404
             data = request.get_json(silent=True) or {}
             if data.get("state_name") and _is_linear_in_progress(data["state_name"]) and (
                     unsynced_local_id(issue_id) or card_locked(self.issues_cache.get(issue_id), issue_id)):
@@ -1125,6 +1372,8 @@ class LinearModule(AgenticModule):
         @app.route("/api/linear/issues/<issue_id>", methods=["PATCH", "POST"])
         @_tracker_reset_route
         def _issues_patch(issue_id: str):
+            if issue_id in archived_ids():  # under the issue lock (_tracker_reset_route), before any write (SBI-017)
+                return jsonify({"error": "this card was emptied from the trash"}), 404
             data = request.get_json(silent=True) or {}
             cfg = _load_workflow_config()
             tc = cfg.get("tracker", {})
@@ -1264,6 +1513,18 @@ class LinearModule(AgenticModule):
             ok = _post_linear_comment_raw(issue_id, body, ak)
             return (jsonify({"ok": ok}) if ok else (jsonify({"ok": False, "error": "comment failed"}), 500))
 
+        @app.route("/api/linear/trash")
+        def _trash_list():
+            return jsonify(self.canceled_issues())
+
+        @app.route("/api/linear/trash/empty", methods=["POST"])
+        def _trash_empty():
+            try:
+                done, failed = self.empty_trash()
+            except Exception as e:
+                return jsonify({"ok": False, "error": str(e)}), 409
+            return jsonify({"ok": not failed, "archived": len(done), "failed": failed})
+
         @app.route("/api/linear/id-aliases")
         def _id_aliases():
             return jsonify(load_id_aliases())
@@ -1385,6 +1646,8 @@ class LinearModule(AgenticModule):
         before a later reset is dropped; title/description edits still land (I5-06)."""
         import reset_gen
         with reset_gen.issue_lock(issue_id):
+            if issue_id in archived_ids():
+                return  # SBI-005
             if not reset_gen.is_current(issue_id, gen):
                 data = {k: v for k, v in data.items() if k != "state_name"}
             self._linear_sync_patch_locked(issue_id, data, cfg, preferred_agent)
@@ -1432,12 +1695,14 @@ class LinearModule(AgenticModule):
         """`gen` = the reset generation the caller launched under (None: unconditional)."""
         import reset_gen
         with reset_gen.issue_lock(issue_id):
-            if not reset_gen.is_current(issue_id, gen):
+            # inside the lock: an Empty trash holding it finishes its eviction first (SBI-005/012)
+            if not reset_gen.is_current(issue_id, gen) or issue_id in archived_ids():
                 return
             state_name = _BOARD_TO_LINEAR.get(board_status)
             if state_name:
                 cached = dict(self.issues_cache.get(issue_id) or {})
                 cached["state"] = state_name
+                cached.setdefault("id", issue_id)  # never an id-less entry (SBI-019)
                 self.issues_cache[issue_id] = cached
                 if board_status == "review":
                     self.dispatched.pop(issue_id, None)
@@ -1454,7 +1719,7 @@ class LinearModule(AgenticModule):
         still in flight when a reset arrives is dropped instead of landing after it (MPD-45)."""
         import reset_gen
         with reset_gen.issue_lock(issue_id):
-            if not reset_gen.is_current(issue_id, gen):
+            if not reset_gen.is_current(issue_id, gen) or issue_id in archived_ids():
                 return
             cfg = _load_workflow_config()
             tc = cfg.get("tracker", {})

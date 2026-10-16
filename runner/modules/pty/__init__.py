@@ -314,6 +314,40 @@ def interactive_resume_argv(agent: str, session_id: str, project) -> list[str] |
     return ["codex", "resume", session_id, *flags]
 
 
+def _session_card_folder(t, project, rec: dict, data: dict):
+    """Where a session card's tab opens (SBR-002/007): the session's folder from session_target.
+    The card's ticket lock is taken from its identifier (the lock file needs no binding), so the
+    tab contends with reply and drag. Only a durable binding whose worktree is that folder takes
+    the worktree path; otherwise the project's effective confidentiality applies. Returns the
+    project as the tab's policy sees it."""
+    import dataclasses
+    import projects
+    from app import _board_sessions, _durable_binding, _effective_project
+    target = projects.session_target(project, str(data.get("agent")), str(data.get("session_id") or ""),
+                                     board_ids=_board_sessions()[0])
+    cwd = os.path.realpath(target["cwd"])
+    idents = [i for i in (rec.get("issue_identifier"),) if i]
+    durable = _durable_binding(rec.get("linear_issue_id"), rec.get("task_id")) or {}
+    wid = durable.get("issue_identifier") if durable.get("project_key") == project.key else None
+    in_worktree = bool(wid) and os.path.realpath(projects.worktree_path(project, wid)) == cwd
+    if in_worktree and wid not in idents:
+        idents.append(wid)
+    for ident in idents:
+        t.holds.enter_context(projects.ticket_lock(project.key, ident))
+    if in_worktree:
+        projects.load_binding(project, wid)
+        project = _effective_project(project, wid)
+        t.ticket = wid
+    from app import session_confidential
+    known = [rec["confidential"]] if "confidential" in rec else []
+    # On both branches: the record and the session's history count too (SBI-001/008/013).
+    if session_confidential(project, target["cwd"], rec.get("linear_issue_id"), rec.get("task_id"), *known,
+                            sid=str(data.get("session_id") or "")) is not False:
+        project = dataclasses.replace(project, confidential=True)
+    t.cwd = target["cwd"]
+    return project
+
+
 def open_terminal(data: dict, socketio) -> dict:
     """term_open: shell (project main path, bound worktree, or runner root), resume, or run view."""
     _ensure_imports()
@@ -347,9 +381,17 @@ def open_terminal(data: dict, socketio) -> dict:
                 return {"error": "that session does not belong to this run"}  # recorded and matching (REV-04, IR9-01)
             if rec.get("project_key") and data.get("project_key") not in (None, rec["project_key"]):
                 return {"error": "this session belongs to another project's run"}
-            data = {**data, "run_id": str(run_id), "agent": rec.get("agent") or data.get("agent"),
-                    "project_key": rec.get("project_key"),
-                    "ticket": rec.get("issue_identifier") if rec.get("project_key") else None}
+            sess = rec.get("resume_session") if isinstance(rec.get("resume_session"), dict) else None
+            if sess is not None or rec.get("source") == "session":
+                # A session card: the folder is the session's own, resolved server-side, never a
+                # worktree binding read from inline fields, whatever the intent's validity (SBR-002/007).
+                data = {**data, "run_id": str(run_id), "agent": rec.get("agent") or data.get("agent"),
+                        "project_key": rec.get("project_key") or (sess or {}).get("project_key") or rec.get("session_project"),
+                        "ticket": None, "session_card": True}
+            else:
+                data = {**data, "run_id": str(run_id), "agent": rec.get("agent") or data.get("agent"),
+                        "project_key": rec.get("project_key"),
+                        "ticket": rec.get("issue_identifier") if rec.get("project_key") else None}
     project = None
     key = data.get("project_key")
     admission = contextlib.ExitStack()  # held only until the tab is registered
@@ -361,7 +403,9 @@ def open_terminal(data: dict, socketio) -> dict:
             project = projects.get_project(key, projects.load_registry(errors={}))
             t.project_key = key
         ticket = data.get("ticket")
-        if kind == "resume" and project and data.get("cwd") and not ticket:
+        if data.get("session_card") and project:
+            project = _session_card_folder(t, project, rec, data)
+        elif kind == "resume" and project and data.get("cwd") and not ticket:
             # The server, not the browser, decides whether a session sits in an owned worktree:
             # if so the tab takes that ticket's lock like any worktree tab (I5-08).
             cwd = Path(os.path.realpath(str(data["cwd"])))
@@ -377,7 +421,7 @@ def open_terminal(data: dict, socketio) -> dict:
             projects.load_binding(project, ticket)
             project = _effective_project(project, ticket)  # sticky per ticket (I6-02, I8-01)
             t.ticket, t.cwd = ticket, str(projects.worktree_path(project, ticket))
-        else:
+        elif not (data.get("session_card") and project):  # a session card's folder is already set
             t.cwd = str(project.path if project else ROOT or _PROTO)
         if rec is not None:
             # The run's card: a runner-root card's session holds the card lock while open, so quick
@@ -406,8 +450,8 @@ def open_terminal(data: dict, socketio) -> dict:
             if not resume:
                 t.holds.close()
                 return {"error": "no eligible interactive resume for this session"}
-            if data.get("cwd") and (not t.ticket or Path(os.path.realpath(str(data["cwd"]))).is_relative_to(
-                    Path(os.path.realpath(t.cwd)))):
+            if data.get("cwd") and not data.get("session_card") and (not t.ticket or Path(os.path.realpath(
+                    str(data["cwd"]))).is_relative_to(Path(os.path.realpath(t.cwd)))):
                 t.cwd = str(data["cwd"])
             argv = [argv[0], "-l", "-c", shlex.join(resume) + f"; exec {shlex.quote(argv[0])} -l"]
         short = (t.ticket or Path(t.cwd).name)[:16]

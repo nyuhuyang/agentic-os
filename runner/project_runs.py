@@ -480,7 +480,7 @@ def run_agent(argv: list[str], cwd: str, env: dict, run_id: str, agent: str, tim
 
 def post_run(project: projects.Project, binding: dict, agent: str, title: str,
              fingerprint_before: str, exclude: set[str], on_start=None,
-             stopped: Callable[[], bool] = lambda: False) -> dict:
+             stopped: Callable[[], bool] = lambda: False, start_sha: str | None = None) -> dict:
     """Runner commit (sandboxed Codex, branch checked first), uncommitted check, verify, then
     binding + seed-history checks after verify (it may run git too), shortstat, and the closing
     fingerprint last, also on failure (I4-05, I5-10/11/14). `on_start` gets the verify process
@@ -489,11 +489,16 @@ def post_run(project: projects.Project, binding: dict, agent: str, title: str,
     wt = Path(binding["worktree"])
     result: dict = {}
     seeds, dirty, verify = [], [], None
+    changed_nothing = False  # this run (from start_sha) left no commit and no change (§7)
     try:
         if is_sandboxed_codex(agent, project):
             result["runner_commit"] = projects.runner_commit(project, wt, f"{binding['issue_identifier']}: {title}"[:200])
         dirty = projects.uncommitted(project, wt)
         result["uncommitted"] = dirty[:50]
+        if start_sha:  # before verify: its own artifacts never count as this run's change (STB-081)
+            confine = projects.confine_for(project, wt)
+            changed_nothing = not dirty and not projects._git(
+                wt, "rev-list", f"{start_sha}..HEAD", confine=confine).stdout.strip()
         if not stopped():  # a cancel skips verify, never the closing check and badge (I8-05)
             if project.verify:  # optional: without it the agent ran the project's own tests
                 verify = projects.run_verify(project, wt, base=binding["base_sha"], on_start=on_start)
@@ -503,7 +508,9 @@ def post_run(project: projects.Project, binding: dict, agent: str, title: str,
             dirty = sorted(set(dirty) | set(projects.uncommitted(project, wt)))  # verify may dirty it too (I6-09)
             result["uncommitted"] = dirty[:50]
             seeds = projects.committed_seeds(project, wt, binding["base_sha"])
-            result["seed_committed"] = seeds
+            result["seed_committed"] = seeds  # the ticket's whole history, kept in the record
+            if start_sha:  # the badge judges this run only, verify's commits included (SBI-006)
+                seeds = projects.committed_seeds(project, wt, start_sha)
             result["shortstat"] = projects._git(wt, "diff", "--shortstat", binding["base_sha"], "HEAD",
                                                 confine=projects.confine_for(project, wt)).stdout.strip()
     except projects.ProjectError as exc:  # e.g. the branch was switched: refuse, keep the fingerprint
@@ -511,7 +518,21 @@ def post_run(project: projects.Project, binding: dict, agent: str, title: str,
     finally:
         result.update(closing_check(project, exclude, fingerprint_before))
         changed = result["main_checkout_changed"]
-    if seeds:
+    if changed_nothing:
+        # A question-only run: only red states, evaluated first, show (STB-039/048/076).
+        if seeds:
+            badge = "seed committed"  # e.g. by verify, after the agent changed nothing
+        elif changed is None:
+            badge = "main checkout unchecked"
+        elif changed:
+            badge = "main checkout changed"
+        elif "post_run_error" in result:
+            badge = "error"
+        elif verify is not None and verify["status"] != "pass":
+            badge = verify["status"]
+        else:
+            badge = None  # pass / no check / uncommitted are hidden when nothing changed
+    elif seeds:
         badge = "seed committed"
     elif changed is None:
         badge = "main checkout unchecked"

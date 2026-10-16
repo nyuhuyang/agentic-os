@@ -23,32 +23,32 @@ User request, 2026-10-16. Follow-up to `docs/exec-plans/active/2026-10-15-dashbo
 - **Scope.** Plan and review only. Building needs a separate go-ahead; standing rule: "你先别动手改，全部都写入plan".
 
 ## Acceptance criteria
-- [ ] The project session row shows one **Resume** button instead of "copy resume" + "Resume in tab"; Rename/Remove stay
-- [ ] Resume on a session whose card is in Backlog, In review, Done or Error moves that card to Todo, keeping its history and attempts
-  - [ ] the card's tracker issue moves to Todo (Linear updated when configured), and the intent is bound to the new reset generation
-- [ ] Resume on a session with no card creates one tracker issue in Todo (as the "+" form does) with a linked run record bound to the session, titled with the session title, visible on the board
-- [ ] Resume on a session that is running or launching (claimed) returns "still running" and changes nothing
-- [ ] After Resume the card detail opens with the reply box and send controls visible and the reply box focused; the bottom terminal panel does not open
-- [ ] Replying from Todo continues **the same session** (same agent, enforced, and session id), never a fresh session; a failed continuation is an error
-- [ ] A second and later reply on the same card (from Todo, In review, Done or Error) continues the same session in the same folder until a reset to Todo
-- [ ] Open interactive on a resumed session card opens in the session's folder (or its ticket worktree when that is the session's folder)
-- [ ] Choosing In Progress in the issue editor of a resumed Todo card opens the reply instead of dispatching
-- [ ] Local tracker identifiers are never reused after a delete or Empty trash
-- [ ] Session cards are claude/codex only; dsh sessions show no Resume button
-- [ ] Replies run under the project's policy
-  - [ ] confidential projects use the sandboxed CLI from `project_runs.agent_cli` and refuse dsh
-  - [ ] records withhold text where record locations are unsafe, and a confidential reply outside a ticket worktree refuses to launch when record locations are unsafe
-- [ ] A card moved to Todo the existing way (drag or reset), including one that was resumed earlier, starts fresh: Decision 11 unchanged
-- [ ] When the session is in use elsewhere, the card shows a warning, and the first send (card reply or quick reply) asks for confirmation; with confirmation the reply is dispatched
-  - [ ] the card's own just-finished run never counts as "elsewhere"
-- [ ] The card Terminal tab is unchanged in every column (live view, replay, Show in panel, Open interactive); no new buttons
-- [ ] A project run that changed nothing shows no verify badge; a run with changes but no check command shows a grey "no check"; failures stay red
-- [ ] Claude run records and cards show the model the CLI reported (init event or `modelUsage`), and cost uses it
-- [ ] A session launched from the board (headless claude/codex) appears under its project with its card identifier; other headless sessions stay hidden
-- [ ] Issues created for a non-confidential project go into its same-named Linear Project; confidential and unbound ones stay in the default Project; AGE ids unchanged
-- [ ] Empty trash archives every Canceled issue (Linear archive, local delete) after one confirmation; run records and transcripts stay; Resume on a session whose card was archived creates a new card
-- [ ] Projects panel is a tab strip; tabs drag to reorder, the order and the selected tab survive a reload, and new or removed projects are handled; Alt+Left/Right reorders by keyboard
-- [ ] Full suite passes: `.venv/bin/python -m pytest tests/ -q -p no:cacheprovider`
+- [x] The project session row shows one **Resume** button instead of "copy resume" + "Resume in tab"; Rename/Remove stay — manual, isolated runner + Chrome 2026-10-16: row shows Resume/Rename/Remove
+- [x] Resume on a session whose card is in Backlog, In review, Done or Error moves that card to Todo, keeping its history and attempts — tests/test_session_to_board.py::test_to_board_on_a_found_card…; manual, isolated runner + Chrome 2026-10-16: In Review card → Todo
+  - [x] the card's tracker issue moves to Todo (Linear updated when configured), and the intent is bound to the new reset generation — tests/test_session_to_board.py::test_to_board_on_a_found_card… (gen 0→1), test_failed_move_restores…
+- [x] Resume on a session with no card creates one tracker issue in Todo (as the "+" form does) with a linked run record bound to the session, titled with the session title, visible on the board — tests/test_session_to_board.py::test_to_board_without_a_card…; manual, isolated runner + Chrome 2026-10-16
+- [x] Resume on a session that is running or launching (claimed) returns "still running" and changes nothing — tests/test_session_to_board.py::test_to_board_refuses_a_running_or_claimed…
+- [x] After Resume the card detail opens with the reply box and send controls visible and the reply box focused; the bottom terminal panel does not open — manual, isolated runner + Chrome 2026-10-16: detail open, reply focused, terminal panel closed
+- [x] Replying from Todo continues **the same session** (same agent, enforced, and session id), never a fresh session; a failed continuation is an error — tests/test_session_to_board.py::test_reply_continues…, test_intent_survives…(strict error); manual, isolated runner + Chrome 2026-10-16
+- [x] A second and later reply on the same card (from Todo, In review, Done or Error) continues the same session in the same folder until a reset to Todo — tests/test_session_to_board.py::test_reply_continues… (from Done); manual, isolated runner + Chrome 2026-10-16: reply from a Done card
+- [x] Open interactive on a resumed session card opens in the session's folder (or its ticket worktree when that is the session's folder) — tests/test_session_to_board.py::test_session_card_terminal_opens_in_the_session_folder
+- [x] Choosing In Progress in the issue editor of a resumed Todo card opens the reply instead of dispatching — manual, isolated runner + Chrome 2026-10-16: saveLinearIssue sent no PATCH, reply focused
+- [x] Local tracker identifiers are never reused after a delete or Empty trash — tests/test_session_to_board.py::test_empty_trash_local…, test_identifier_floor…
+- [x] Session cards are claude/codex only; dsh sessions show no Resume button — tests/test_session_to_board.py::test_to_board_refuses_sessions_outside_the_project_and_dsh (dsh → 400); dsh sessions are not listed
+- [x] Replies run under the project's policy — tests/test_session_to_board.py::test_confidential_reply_is_sandboxed_or_refused…; manual, isolated runner + Chrome 2026-10-16: alpha reply had sandbox --settings
+  - [x] confidential projects use the sandboxed CLI from `project_runs.agent_cli` and refuse dsh — tests/test_session_to_board.py::test_confidential_reply…; dsh is not a session-card agent
+  - [x] records withhold text where record locations are unsafe, and a confidential reply outside a ticket worktree refuses to launch when record locations are unsafe — tests/test_session_to_board.py::test_confidential_reply… (refused, reply text absent)
+- [x] A card moved to Todo the existing way (drag or reset), including one that was resumed earlier, starts fresh: Decision 11 unchanged — tests/test_session_to_board.py::test_reply_rules_agent_empty_and_reset
+- [x] When the session is in use elsewhere, the card shows a warning, and the first send (card reply or quick reply) asks for confirmation; with confirmation the reply is dispatched — tests/test_session_to_board.py::test_reply_asks_when…; manual, isolated runner + Chrome 2026-10-16: warning shown, one confirm, dispatched
+  - [x] the card's own just-finished run never counts as "elsewhere" — tests/test_session_to_board.py::test_own_finished_run_is_not_elsewhere
+- [x] The card Terminal tab is unchanged in every column (live view, replay, Show in panel, Open interactive); no new buttons — no Terminal-tab UI code changed (diff); backend folder fix tested
+- [x] A project run that changed nothing shows no verify badge; a run with changes but no check command shows a grey "no check"; failures stay red — tests/test_session_to_board.py::test_badge_for_a_run_that_changed_nothing; tests/test_project_dispatch.py::test_question_only_run…; neutral .verify-badge.none
+- [x] Claude run records and cards show the model the CLI reported (init event or `modelUsage`), and cost uses it — tests/test_session_to_board.py::test_observed_model_and_cost; manual, isolated runner + Chrome 2026-10-16: card shows CLAUDE-OPUS-5-5[1M]
+- [x] A session launched from the board (headless claude/codex) appears under its project with its card identifier; other headless sessions stay hidden — tests/test_session_to_board.py::test_board_launched_headless…, test_codex_exec_threads…
+- [x] Issues created for a non-confidential project go into its same-named Linear Project; confidential and unbound ones stay in the default Project; AGE ids unchanged — tests/test_session_to_board.py::test_linear_project_mapping, test_linear_session_issue…, test_dispatch_moves…
+- [x] Empty trash archives every Canceled issue (Linear archive, local delete) after one confirmation; run records and transcripts stay; Resume on a session whose card was archived creates a new card — tests/test_session_to_board.py::test_empty_trash_local…, test_empty_trash_linear…, test_archived_issues_stay_out…; manual, isolated runner + Chrome 2026-10-16: one confirm, count 1→0
+- [x] Projects panel is a tab strip; tabs drag to reorder, the order and the selected tab survive a reload, and new or removed projects are handled; Alt+Left/Right reorders by keyboard — manual, isolated runner + Chrome 2026-10-16: drag and Alt+←/→ reorder, reload keeps order and selection, added project appended
+- [x] Full suite passes: `.venv/bin/python -m pytest tests/ -q -p no:cacheprovider` — 629 passed
 
 ## Approach
 
@@ -322,63 +322,63 @@ Where it is used:
 
 ## Progress Checklist
 - [x] DeepSeek plan review (third-party, read-only); dispositions in the review log. Closed under the user's convergence standard after 12 rounds (findings 11, 9, 8, 9, 8, 6, 4, 4, 4, 6, 9, 8; every high fixed; round 12's high and reproducible ones fixed; STB-082 and STB-085 accepted). Not a claudex cross-provider approval.
-- [ ] Codex plan review (claudex cross-provider) approved, or closed under the convergence standard; dispositions in the review log
-- [ ] User go-ahead to build
-- [ ] Test: to-board with no card → a tracker issue in Todo (local tracker) plus a linked run record with `resume_session` (current gen), binding, title (withheld when confidential + unsafe); the board lists it
-- [ ] Test: to-board on a found card (Review/Done/Backlog/Error) → issue to Todo, gen bumped, `todo` record with `resume_session` on the issue's latest run_id; interactive_ended/archived records are never picked
-- [ ] Test: to-board while the session is claimed, launching or running → 409, nothing appended
-- [ ] Test: two concurrent to-board calls → one card
-- [ ] Test: a client cwd is ignored; a session outside the project roots → 404
-- [ ] Test: drag to Todo after Resume (tracker PATCH and run status PATCH both) → gen bumped → next retry fresh; `api_run_set_status`/`api_run_restore` drop `resume_session`
-- [ ] Test: retry on a session card with a different body agent → 409; dsh session → no to-board
-- [ ] Test: reply on a ticket-worktree session card goes through `_run_project_ticket` with `resume_session` (commit/verify kept)
-- [ ] Test: reply on another session card → `run_agent_process` in the session cwd with the `agent_cli` argv; confidential → sandbox flags; dsh on confidential → refused; strict failure → error
-- [ ] Test: confidential session reply outside a ticket worktree with unsafe record locations → refused before launch, nothing streamed, withheld error record
-- [ ] Test: reply records keep `linear_issue_id` and `source`; the reply UI stays after a continuation
-- [ ] Test: session moved away → retry 409, nothing recorded, no claim leaked
-- [ ] Test: `session_in_use` reasons (other live id, process argv outside the runner tree, fresh write after own run); own claim (by run_id) and own just-finished run never count; a second claimant does; retry without confirm → 409, with confirm → dispatched
-- [ ] Implement §1–§3 backend (record field and stripping, status helper, to-board route, retry branch on `run_agent_process`/project helper, record withholding)
-- [ ] Implement §4 (`session_in_use`, detail payload field, confirm on card reply and quick reply)
-- [ ] Implement §5 (reply UI for session cards only; Terminal tab untouched)
-- [ ] Implement §6 (Resume button, inline errors)
-- [ ] Test: §7 badge — no changes → no badge; changes + no check → "no check"; verify fail → fail
-- [ ] Implement §7 (badge rule in `project_runs`, neutral style in `index.html`)
-- [ ] Test: §8 — a stream with an init event `model: claude-opus-5-5[1m]` and a json result with `modelUsage` both record that model; cost uses it
-- [ ] Implement §8 (init-event model in the stream readers, `modelUsage` in `_parse_agent_output`)
-- [ ] Test: §9 — an sdk-cli transcript whose id is in the run log is listed (with identifier) and resolvable; one not in the run log is hidden; a codex `exec` thread likewise
-- [ ] Implement §9 (run-log id set, listing and `session_target` filters, identifier label)
-- [ ] Test: §2.5 Linear path creates the issue synchronously (fake client) with `ensure_label` label ids and the agent marker, inserts it into the cache and emits; the record links to the real id; confidential → neutral title; unresolvable label → 409, nothing created; local path sets labels and `preferred_agent`
-- [ ] Test: §2.4 failed Todo move or push → 409, nothing appended, gen unchanged; confidential + unsafe → copied text withheld
-- [ ] Test: §3.3 inline-`project_key` card never calls `_run_project_ticket`; durable binding whose worktree equals the session cwd does; main-checkout session of a bound ticket takes the generic path
-- [ ] Test: §7 order — no-change run with verify fail or main checkout changed keeps its red badge; no-change run with verify pass shows no badge
-- [ ] Test: found-card to-board on a card whose latest run used another session → record's `agent_session_id` is the resumed one; retry passes the strict guard
-- [ ] Test: a card reply without `strict` in the body is still strict and never falls back to a fresh session (STB-060); reply records carry `issue_identifier` (STB-061); a drop of a resumed card onto In Progress opens the reply and does not dispatch (STB-062); §9 identifier label comes from the passed map (STB-063)
-- [ ] Test: on a resumed Todo card neither the ▶ button nor the agent badge dispatches; only the intent agent's retry button renders (STB-056/059); to-board on a card with an in-flight run on another session → 409 (STB-057); §2.5 record carries `issue_identifier`, and an open tab on it blocks a drag (STB-058)
-- [ ] Test: a to-board card's reply resumes `resume_session.id` with strict on (STB-055); generic confidential reply posts no reply/output text to the tracker (STB-052); intent reply and a concurrent drag contend for the same `reserve_card` lock (STB-054); board payload carries `resume_ok`, and the inline ▶ button opens the reply instead of dispatching (STB-053)
-- [ ] Test: confidential §2.5 sends an empty description (agent marker only); `gpt-5.4-mini` cost unchanged; poll with an archived id in the fetch result drops it; intent card reply holds the card or ticket lock and `project_lock`
-- [ ] Test: found-card to-board record keeps the latest run's fields (detail and events unchanged); dispatch group hidden while `resume_ok`; own interactive_ended audit is not "elsewhere"; generic session path treats a non-False binding as confidential
-- [ ] Test: project and Linear runs write `token_cost_usd` from the observed model
-- [ ] Test: §7 per-run start sha (ticket with earlier commits or an earlier seed commit, question-only run → no badge); §8 `_parse_project_output` reads init/`modelUsage`; cost for `claude-opus-5-5[1m]` uses the Opus rate
-- [ ] Test: §10 project → Linear Project mapping (fake client): `find_project`/`create_project` once, reused; `project_id` on create; `set_issue_project` on dispatch; confidential skipped
-- [ ] Implement §10
-- [ ] Test: §11 empty trash archives only Canceled issues (fake client `archive_issue`), evicts them from cache, `_issues_by_team`, overrides and `tasks.json`; a following poll (carry-over) and a restart do not bring them back; run records untouched; Resume afterwards creates a new card
-- [ ] Implement §11
-- [ ] Test: §2.4 explicit bump and restore on a failed move; intent survives opening and closing the card's tab (STB-065/068); §2.4 record has `issue_identifier`; `session_target` title used, client title ignored; unbound/confidential creates carry the default project id; a running board session is listed via `board_ids`
-- [ ] Test: board-launched session resolves for to-board and reply (STB-070); to-board holds `reserve_card` and a concurrent drag waits (STB-071); LinearError surfaces as 409 and per-issue trash failures (STB-072/074); local Empty trash reads Canceled tasks directly (STB-073); verify timeout is red (STB-076); intent predicate skips archived (STB-077); session card without a record binding uses the `resume_session` project's confidentiality (STB-078)
-- [ ] Test: second reply after a continuation (record carries `resume_session`) from In review/Done takes §3 again, never `_run_project_ticket(reuse_only=True)` for a non-worktree session; `api_run_set_status` to done keeps the field, to todo drops it (SBR-001)
-- [ ] Test: `open_terminal` on a new to-board card opens in the session cwd without `load_binding`, takes the ticket lock; on a bound ticket's main-checkout session opens the main checkout; on a worktree session opens the worktree (SBR-002)
-- [ ] Test: issue editor save with a started state on a `resume_ok` card does not PATCH and opens the reply (SBR-003)
-- [ ] Test: local tracker create LOC-1, delete, create → LOC-2; missing meta file initialised from tasks, run log and worktree dirs (SBR-004)
-- [ ] Test: cancel and stall of a generic session reply write a record carrying `resume_session`, binding, `issue_identifier` and `source` (withheld when confidential + unsafe); the job has no top-level `project_key`; the next reply takes §3 (SBR-005)
-- [ ] Test: title-only save of a resumed Todo card sends no `state_name` and keeps the generation (SBR-006)
-- [ ] Test: Open interactive on a session card after a reset to Todo, and on an older attempt, opens the session folder (SBR-007)
-- [ ] Test: a continuation marked Done shows the reply send controls (intent agent only) and the main reply box sends a continuation (SBR-008)
-- [ ] Test: SIGTERM shutdown with a silent generic session reply running kills its process group, writes its cancel record with the §3.6 fields, and a launch after shutdown began is refused (SBR-009)
-- [ ] Test: shutdown with a silent generic reply → exactly one `cancelled` record (written by `_cancel_generic`, §3.6 fields) exists when `_stop_project_runs` returns, the worker writes none; a worker already finalizing is waited for via `_finalizing` (SBR-010)
-- [ ] Implement §12 (tab strip, drag reorder, localStorage order/active, keyboard reorder)
-- [ ] Manual: §12 in the isolated runner — reorder by drag and by keyboard, reload keeps order, add/remove a project
-- [ ] Full suite passes
-- [ ] Manual check in the isolated runner (verify skill), each column, both agents, confidential variant
-- [ ] Fresh build inspection (Codex, or DeepSeek if Codex is unavailable, recorded as third-party) with no unresolved high findings
-- [ ] Public-repo check: `git grep` for the private project names (pattern kept outside the repo) finds nothing in tracked files
-- [ ] Commit (not pushed)
+- [x] Codex plan review (claudex cross-provider) approved, or closed under the convergence standard; dispositions in the review log — APPROVED round 5, SHA 00df38e7…, check re-confirmed at build start
+- [x] User go-ahead to build — 2026-10-16: "claude 写，然后codex检查"
+- [x] Test: to-board with no card → a tracker issue in Todo (local tracker) plus a linked run record with `resume_session` (current gen), binding, title (withheld when confidential + unsafe); the board lists it — tests/test_session_to_board.py::test_to_board_without_a_card…, test_confidential_new_card…
+- [x] Test: to-board on a found card (Review/Done/Backlog/Error) → issue to Todo, gen bumped, `todo` record with `resume_session` on the issue's latest run_id; interactive_ended/archived records are never picked — tests/test_session_to_board.py::test_to_board_on_a_found_card…
+- [x] Test: to-board while the session is claimed, launching or running → 409, nothing appended — tests/test_session_to_board.py::test_to_board_refuses_a_running_or_claimed…
+- [x] Test: two concurrent to-board calls → one card — tests/test_session_to_board.py::test_two_concurrent_to_board_calls_make_one_card
+- [x] Test: a client cwd is ignored; a session outside the project roots → 404 — tests/test_session_to_board.py::test_to_board_refuses_sessions_outside… (the route reads no cwd)
+- [x] Test: drag to Todo after Resume (tracker PATCH and run status PATCH both) → gen bumped → next retry fresh; `api_run_set_status`/`api_run_restore` drop `resume_session` — tests/test_session_to_board.py::test_reply_rules_agent_empty_and_reset; restore keeps the field per SBR-001
+- [x] Test: retry on a session card with a different body agent → 409; dsh session → no to-board — tests/test_session_to_board.py::test_reply_rules…, test_to_board_refuses_sessions_outside_the_project_and_dsh
+- [x] Test: reply on a ticket-worktree session card goes through `_run_project_ticket` with `resume_session` (commit/verify kept) — tests/test_session_to_board.py::test_ticket_session_in_its_worktree…
+- [x] Test: reply on another session card → `run_agent_process` in the session cwd with the `agent_cli` argv; confidential → sandbox flags; dsh on confidential → refused; strict failure → error — tests/test_session_to_board.py::test_reply_continues…, test_confidential_reply…, test_intent_survives…
+- [x] Test: confidential session reply outside a ticket worktree with unsafe record locations → refused before launch, nothing streamed, withheld error record — tests/test_session_to_board.py::test_confidential_reply…
+- [x] Test: reply records keep `linear_issue_id` and `source`; the reply UI stays after a continuation — tests/test_session_to_board.py::test_reply_continues…; manual, isolated runner + Chrome 2026-10-16
+- [x] Test: session moved away → retry 409, nothing recorded, no claim leaked — tests/test_session_to_board.py::test_session_moved_away…
+- [x] Test: `session_in_use` reasons (other live id, process argv outside the runner tree, fresh write after own run); own claim (by run_id) and own just-finished run never count; a second claimant does; retry without confirm → 409, with confirm → dispatched — tests/test_session_to_board.py::test_own_finished_run_is_not_elsewhere, test_reply_asks_when…
+- [x] Implement §1–§3 backend (record field and stripping, status helper, to-board route, retry branch on `run_agent_process`/project helper, record withholding) — runner/app.py session-card section
+- [x] Implement §4 (`session_in_use`, detail payload field, confirm on card reply and quick reply) — session_in_use, detail fields, _postRetry and quick-reply confirm
+- [x] Implement §5 (reply UI for session cards only; Terminal tab untouched) — index.html detail/board controls
+- [x] Implement §6 (Resume button, inline errors) — _resumeToBoard, inline row error
+- [x] Test: §7 badge — no changes → no badge; changes + no check → "no check"; verify fail → fail — tests/test_session_to_board.py::test_badge_for_a_run_that_changed_nothing
+- [x] Implement §7 (badge rule in `project_runs`, neutral style in `index.html`) — project_runs.post_run start_sha rule; .verify-badge.none
+- [x] Test: §8 — a stream with an init event `model: claude-opus-5-5[1m]` and a json result with `modelUsage` both record that model; cost uses it — tests/test_session_to_board.py::test_observed_model_and_cost
+- [x] Implement §8 (init-event model in the stream readers, `modelUsage` in `_parse_agent_output`) — _observed_claude_model in both readers; price key strip
+- [x] Test: §9 — an sdk-cli transcript whose id is in the run log is listed (with identifier) and resolvable; one not in the run log is hidden; a codex `exec` thread likewise — tests/test_session_to_board.py::test_board_launched_headless…, test_codex_exec_threads…
+- [x] Implement §9 (run-log id set, listing and `session_target` filters, identifier label) — _board_sessions → project_sessions/session_target
+- [x] Test: §2.5 Linear path creates the issue synchronously (fake client) with `ensure_label` label ids and the agent marker, inserts it into the cache and emits; the record links to the real id; confidential → neutral title; unresolvable label → 409, nothing created; local path sets labels and `preferred_agent` — tests/test_session_to_board.py::test_linear_session_issue…, test_linear_error_on_create…, test_confidential_new_card…
+- [x] Test: §2.4 failed Todo move or push → 409, nothing appended, gen unchanged; confidential + unsafe → copied text withheld — tests/test_session_to_board.py::test_failed_move_restores…
+- [x] Test: §3.3 inline-`project_key` card never calls `_run_project_ticket`; durable binding whose worktree equals the session cwd does; main-checkout session of a bound ticket takes the generic path — tests/test_session_to_board.py::test_reply_continues…, test_main_checkout_session_of_a_bound_ticket…, test_ticket_session_in_its_worktree…
+- [x] Test: §7 order — no-change run with verify fail or main checkout changed keeps its red badge; no-change run with verify pass shows no badge — tests/test_session_to_board.py::test_badge_for_a_run_that_changed_nothing
+- [x] Test: found-card to-board on a card whose latest run used another session → record's `agent_session_id` is the resumed one; retry passes the strict guard — tests/test_session_to_board.py::test_to_board_on_a_found_card…
+- [x] Test: a card reply without `strict` in the body is still strict and never falls back to a fresh session (STB-060); reply records carry `issue_identifier` (STB-061); a drop of a resumed card onto In Progress opens the reply and does not dispatch (STB-062); §9 identifier label comes from the passed map (STB-063) — tests/test_session_to_board.py::test_intent_survives…; manual, isolated runner + Chrome 2026-10-16: drop onto In Progress opened the reply; §9 label test
+- [x] Test: on a resumed Todo card neither the ▶ button nor the agent badge dispatches; only the intent agent's retry button renders (STB-056/059); to-board on a card with an in-flight run on another session → 409 (STB-057); §2.5 record carries `issue_identifier`, and an open tab on it blocks a drag (STB-058) — manual, isolated runner + Chrome 2026-10-16: ✎ Reply and badge open the reply, only the intent agent's button; tests/test_session_to_board.py::test_to_board_refuses_a_running…
+- [x] Test: a to-board card's reply resumes `resume_session.id` with strict on (STB-055); generic confidential reply posts no reply/output text to the tracker (STB-052); intent reply and a concurrent drag contend for the same `reserve_card` lock (STB-054); board payload carries `resume_ok`, and the inline ▶ button opens the reply instead of dispatching (STB-053) — tests/test_session_to_board.py::test_reply_continues…, test_reply_holds_the_card_and_project_locks…, test_to_board_contends…
+- [x] Test: confidential §2.5 sends an empty description (agent marker only); `gpt-5.4-mini` cost unchanged; poll with an archived id in the fetch result drops it; intent card reply holds the card or ticket lock and `project_lock` — tests/test_session_to_board.py::test_confidential_new_card…, test_observed_model_and_cost, test_archived_issues_stay_out…, test_reply_holds…; poll-loop filter by code review only
+- [x] Test: found-card to-board record keeps the latest run's fields (detail and events unchanged); dispatch group hidden while `resume_ok`; own interactive_ended audit is not "elsewhere"; generic session path treats a non-False binding as confidential — tests/test_session_to_board.py::test_to_board_on_a_found_card…, test_intent_survives…; manual, isolated runner + Chrome 2026-10-16: dispatch group hidden
+- [x] Test: project and Linear runs write `token_cost_usd` from the observed model — tests/test_project_dispatch.py::test_question_only_run…; Linear dispatch by code review
+- [x] Test: §7 per-run start sha (ticket with earlier commits or an earlier seed commit, question-only run → no badge); §8 `_parse_project_output` reads init/`modelUsage`; cost for `claude-opus-5-5[1m]` uses the Opus rate — tests/test_project_dispatch.py::test_question_only_run…; test_observed_model_and_cost
+- [x] Test: §10 project → Linear Project mapping (fake client): `find_project`/`create_project` once, reused; `project_id` on create; `set_issue_project` on dispatch; confidential skipped — tests/test_session_to_board.py::test_linear_project_mapping, test_linear_session_issue…, test_dispatch_moves…
+- [x] Implement §10 — linear_client project calls, linear_project_id, create/dispatch wiring
+- [x] Test: §11 empty trash archives only Canceled issues (fake client `archive_issue`), evicts them from cache, `_issues_by_team`, overrides and `tasks.json`; a following poll (carry-over) and a restart do not bring them back; run records untouched; Resume afterwards creates a new card — tests/test_session_to_board.py::test_empty_trash_local…, test_empty_trash_linear…, test_archived_issues_stay_out…
+- [x] Implement §11 — empty_trash/_evict, archived_ids, poll filter, UI button
+- [x] Test: §2.4 explicit bump and restore on a failed move; intent survives opening and closing the card's tab (STB-065/068); §2.4 record has `issue_identifier`; `session_target` title used, client title ignored; unbound/confidential creates carry the default project id; a running board session is listed via `board_ids` — tests/test_session_to_board.py::test_failed_move_restores…, test_intent_survives…, test_to_board_without_a_card…
+- [x] Test: board-launched session resolves for to-board and reply (STB-070); to-board holds `reserve_card` and a concurrent drag waits (STB-071); LinearError surfaces as 409 and per-issue trash failures (STB-072/074); local Empty trash reads Canceled tasks directly (STB-073); verify timeout is red (STB-076); intent predicate skips archived (STB-077); session card without a record binding uses the `resume_session` project's confidentiality (STB-078) — tests/test_session_to_board.py::test_board_launched_headless…, test_to_board_contends…, test_linear_error_on_create…, test_empty_trash_linear…
+- [x] Test: second reply after a continuation (record carries `resume_session`) from In review/Done takes §3 again, never `_run_project_ticket(reuse_only=True)` for a non-worktree session; `api_run_set_status` to done keeps the field, to todo drops it (SBR-001) — tests/test_session_to_board.py::test_reply_continues…
+- [x] Test: `open_terminal` on a new to-board card opens in the session cwd without `load_binding`, takes the ticket lock; on a bound ticket's main-checkout session opens the main checkout; on a worktree session opens the worktree (SBR-002) — tests/test_session_to_board.py::test_session_card_terminal_opens_in_the_session_folder
+- [x] Test: issue editor save with a started state on a `resume_ok` card does not PATCH and opens the reply (SBR-003) — manual, isolated runner + Chrome 2026-10-16
+- [x] Test: local tracker create LOC-1, delete, create → LOC-2; missing meta file initialised from tasks, run log and worktree dirs (SBR-004) — tests/test_session_to_board.py::test_empty_trash_local…, test_identifier_floor…
+- [x] Test: cancel and stall of a generic session reply write a record carrying `resume_session`, binding, `issue_identifier` and `source` (withheld when confidential + unsafe); the job has no top-level `project_key`; the next reply takes §3 (SBR-005) — tests/test_session_to_board.py::test_cancel_of_a_session_reply_keeps_its_routing
+- [x] Test: title-only save of a resumed Todo card sends no `state_name` and keeps the generation (SBR-006) — manual, isolated runner + Chrome 2026-10-16: no state_name sent, resume_ok kept
+- [x] Test: Open interactive on a session card after a reset to Todo, and on an older attempt, opens the session folder (SBR-007) — tests/test_session_to_board.py::test_session_card_terminal_opens_in_the_session_folder
+- [x] Test: a continuation marked Done shows the reply send controls (intent agent only) and the main reply box sends a continuation (SBR-008) — manual, isolated runner + Chrome 2026-10-16: Done card showed ↺ Codex only and sent the reply
+- [x] Test: SIGTERM shutdown with a silent generic session reply running kills its process group, writes its cancel record with the §3.6 fields, and a launch after shutdown began is refused (SBR-009) — tests/test_session_to_board.py::test_shutdown_cancels_generic_runs…
+- [x] Test: shutdown with a silent generic reply → exactly one `cancelled` record (written by `_cancel_generic`, §3.6 fields) exists when `_stop_project_runs` returns, the worker writes none; a worker already finalizing is waited for via `_finalizing` (SBR-010) — tests/test_session_to_board.py::test_shutdown_cancels_generic_runs…, test_finalizing_runs_are_waited_for
+- [x] Implement §12 (tab strip, drag reorder, localStorage order/active, keyboard reorder) — index.html tab strip
+- [x] Manual: §12 in the isolated runner — reorder by drag and by keyboard, reload keeps order, add/remove a project — manual, isolated runner + Chrome 2026-10-16
+- [x] Full suite passes — 629 passed
+- [x] Manual check in the isolated runner (verify skill), each column, both agents, confidential variant — manual, isolated runner + Chrome 2026-10-16: claude, codex, confidential; Todo/In Review/Done paths
+- [x] Fresh build inspection (Codex, or DeepSeek if Codex is unavailable, recorded as third-party) with no unresolved high findings — Codex 3 rounds (SBI-001..015) + DeepSeek 2 rounds third-party (SBI-016..019, Codex usage limit); all fixed, none unresolved; SBI-018/019 fixes not re-inspected
+- [ ] Public-repo check: `git grep` for the private project names (pattern kept outside the repo) finds nothing in tracked files — BLOCKED: no hits in this build's files; the pre-existing tracked binary `agentic-os-dashboard.png` (1e18fa3) matches; user decision pending
+- [x] Commit (not pushed) — this commit; /verify passed on the staged tree first
