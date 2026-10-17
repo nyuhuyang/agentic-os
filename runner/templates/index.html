@@ -2721,11 +2721,7 @@ async function startLinearIssue(issueId) {
 async function triggerLinearIssueWithAgent(issueId, agent, { refresh = true } = {}) {
   if (!issueId) return;
   const agentVal = canonAgent(agent) || 'claude';
-  const titleEl = document.getElementById('linear-edit-title');
-  const descEl = document.getElementById('linear-edit-desc');
-  const body = { preferred_agent: agentVal, state_name: 'In Progress' };
-  if (titleEl) body.title = titleEl.value;
-  if (descEl) body.description = descEl.value;
+  const body = { preferred_agent: agentVal, state_name: 'In Progress', ..._detailEditsFor(issueId) };
   const sttCutoff = _sttNewSeq();  // recordings started while the PATCH is in flight survive
   const draftKey = `agenticos.draft.linear.${_sttIssueId(issueId)}`;
   try {
@@ -3281,15 +3277,27 @@ function _updateDetailRetryLock(preferredAgent, sessionLocked = false) {
   }
 }
 
+// Unsaved title/description in the detail modal, only when it shows this issue: starting a card
+// sends them, so text typed and never saved still reaches the agent and Linear (AGE-104).
+function _detailEditsFor(issueId) {
+  if (!_isModalOpen('detail-modal') || _detailLinearIssueId !== _sttIssueId(issueId)) return {};
+  return {
+    title: document.getElementById('linear-edit-title')?.value || '',
+    description: document.getElementById('linear-edit-desc')?.value || '',
+  };
+}
+
 async function dispatchFromDetail(agent) {
   if (!_detailLinearIssueId) return;
   const linearIssueId = _detailLinearIssueId;
+  const fields = { state_name: 'In Progress', preferred_agent: agent, ..._detailEditsFor(linearIssueId) };
   _sttCancelIssue(linearIssueId);
+  _clearLinearDraft(linearIssueId);
   // Local state + close modal immediately
   fetch(`/api/linear/issues/local/${linearIssueId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ state_name: 'In Progress', preferred_agent: agent }),
+    body: JSON.stringify(fields),
   }).catch(() => {});
   refreshJobBoard();
   closeDetailModal();
@@ -3297,7 +3305,7 @@ async function dispatchFromDetail(agent) {
   fetch(`/api/linear/issues/${linearIssueId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ state_name: 'In Progress', preferred_agent: agent }),
+    body: JSON.stringify(fields),
   }).catch(err => console.error('Dispatch sync failed:', err));
 }
 

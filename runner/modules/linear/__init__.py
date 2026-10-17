@@ -1224,7 +1224,8 @@ class LinearModule(AgenticModule):
                 labels = _project_labels(data)
             except ValueError as exc:
                 return jsonify({"error": str(exc)}), 400
-            desc = _compose_issue_description(desc, pa)
+            # the local tracker keeps the agent in preferred_agent; only Linear needs the marker in the text
+            linear_desc = _compose_issue_description(desc, pa)
             cfg = _load_workflow_config()
             tc = cfg.get("tracker", {})
             tid = (data.get("team_id") or "").strip() or tc.get("team_id", "")
@@ -1271,7 +1272,7 @@ class LinearModule(AgenticModule):
                     except Exception as e:
                         # ponytail: a Project that cannot be resolved never blocks the task itself
                         logger.warning("Linear Project for %s not resolved (%s); created without one", local_id, e)
-                    linear_issue = client.create_issue(tid, title, desc, label_ids=label_ids,
+                    linear_issue = client.create_issue(tid, title, linear_desc, label_ids=label_ids,
                                                        **({"project_id": project_id} if project_id else {}))
                     if not linear_issue:
                         logger.warning("Linear create returned nothing for local %s", local_id)
@@ -1468,7 +1469,7 @@ class LinearModule(AgenticModule):
                 if preferred_agent is not None:
                     base_description = data.get("description")
                     if base_description is None:
-                        base_description = existing.get("description", "")
+                        base_description = _strip_issue_metadata(existing.get("description"))
                     updates["description"] = _compose_issue_description(str(base_description or ""), preferred_agent)
                 if updates:
                     cl.update_issue(issue_id, **updates)  # type: ignore[arg-type]
@@ -1668,7 +1669,9 @@ class LinearModule(AgenticModule):
                 updates["title"] = data.get("title")
                 updates["description"] = data.get("description")
             if preferred_agent is not None:
-                base_description = data.get("description") or existing.get("description", "")
+                base_description = data.get("description")
+                if base_description is None:  # raw Linear text carries the marker: strip it, never double it
+                    base_description = _strip_issue_metadata(existing.get("description"))
                 updates["description"] = _compose_issue_description(str(base_description), preferred_agent)
             if updates:
                 cl.update_issue(issue_id, **updates)

@@ -304,3 +304,18 @@ def test_poll_keeps_a_terminal_ticket_reset_during_the_fetch(env, monkeypatch):
         mod._polling_loop(app_mod.socketio)
     assert mod.issues_cache[ISSUE]["state"] == "Todo"
     assert mod._issues_by_team["team"][ISSUE]["state"] == "Todo"  # team board too (I8-07)
+
+
+def test_agent_sync_never_doubles_the_marker(env, monkeypatch):
+    """AGE-104: starting a card without a description edit keeps Linear's text and one agent marker."""
+    import types
+    app_mod, mod, client, *_ = env
+
+    class MarkedClient(FakeLinearClient):
+        def fetch_issue(self, i):
+            return {"id": i, "title": "t", "description": "keep me\n\n<!-- agent_backend: claude -->", "state": "Todo"}
+
+    monkeypatch.setitem(sys.modules, "linear_client", types.SimpleNamespace(LinearClient=MarkedClient))
+    MarkedClient.calls = []
+    mod._linear_sync_patch_locked(ISSUE, {"state_name": "In Progress"}, {"tracker": {"api_key": "k"}}, "claude")
+    assert MarkedClient.calls[0] == ("update", {"description": "keep me\n\n<!-- agent_backend: claude -->"})
