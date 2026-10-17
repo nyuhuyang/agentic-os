@@ -342,7 +342,7 @@ def _archive_stale_sent() -> None:
                     started = started.replace(tzinfo=timezone.utc)
                 if started < cutoff:
                     rid = r.get("run_id", "")
-                    archived = {**r, "status": "archived", "prev_status": "sent"}
+                    archived = _sanitize_record({**r, "status": "archived", "prev_status": "sent"})
                     appended.append(json.dumps(archived))
                     if rid:
                         socketio.emit("run_state_change", {"run_id": rid, "state": "archived"})
@@ -353,6 +353,23 @@ def _archive_stale_sent() -> None:
             f.write("\n".join(appended) + "\n")
         with STATE_RUN_LOG.open("a", encoding="utf-8") as f:
             f.write("\n".join(appended) + "\n")
+
+
+def _sanitize_record(record: dict) -> dict:
+    """Every run-log writer, record copies included (status change, restore, archive): a
+    confidential or unknown-policy project run keeps no issue_title where records may leak
+    (DP-24, R13-01). The policy is the current sticky one, not the copied flag alone."""
+    if "issue_title" not in record or not (record.get("project_key") or "confidential" in record):
+        return record
+    conf = record.get("confidential")
+    if record.get("project_key"):
+        with contextlib.suppress(Exception):
+            conf = _ticket_confidential(record["project_key"], record.get("issue_identifier"),
+                                        record.get("linear_issue_id"), record.get("task_id"),
+                                        *([record["confidential"]] if "confidential" in record else []))
+    if conf is not False and _records_unsafe():
+        return {k: v for k, v in record.items() if k != "issue_title"}
+    return record
 
 
 # Linear issue cache — delegates to LinearModule.issues_cache (the real source of truth)
@@ -2171,6 +2188,7 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
     if progress_path.exists():
         record["log_path"] = str(progress_path)
 
+    record = _sanitize_record(record)
     # Write to both locations: state/ (operational truth) and outputs/ (backward compat)
     with STATE_RUN_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
@@ -5026,6 +5044,7 @@ def api_run_set_status(run_id: str):
         if new_status in ("todo", "rework"):
             record["reset_gen"] = reset_gen.bump(gen_key)  # Decision 11: older runs stop counting
             record.pop("resume_session", None)  # Todo means fresh (STB-004)
+        record = _sanitize_record(record)  # a copy is a write: the title rule applies (R13-01)
         OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
         with RUN_LOG.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
@@ -5061,6 +5080,7 @@ def api_run_restore(run_id: str):
                 prev_status = r.get("prev_status", "failed")
                 record = {k: v for k, v in r.items() if k not in ("prev_status",)}
                 record["status"] = prev_status
+                record = _sanitize_record(record)  # a copy is a write: the title rule applies (R13-01)
                 OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
                 with RUN_LOG.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(record) + "\n")

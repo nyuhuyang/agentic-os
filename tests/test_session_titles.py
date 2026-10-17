@@ -837,3 +837,16 @@ def test_persisted_intent_for_a_removed_session_starts_fresh(cs, demo, monkeypat
     r = client.post("/api/runs/a/retry", json={"reply": "x"})
     assert r.status_code == 200, r.get_json()
     assert seen["resume_session"] is None and "removed or archived" in seen["note"]  # R12-01
+
+
+# ── Codex build inspection 13 (PVST-R13-01) ────────────────────────────────
+
+def test_status_change_copy_withholds_a_confidential_title(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "project_key": "demo",
+                    "issue_identifier": "T-1", "confidential": True, "issue_title": "Secret deal"})
+    monkeypatch.setattr(app_mod, "_records_unsafe", lambda: "state/ moved outside the checkout")
+    assert client.patch("/api/runs/a/status", json={"status": "archived"}).status_code == 200
+    copied = records(log)[-1]
+    assert copied["status"] == "archived" and "issue_title" not in copied  # R13-01
+    assert app_mod._sanitize_record({"issue_title": "x", "linear_issue_id": ISSUE}) == {"issue_title": "x", "linear_issue_id": ISSUE}

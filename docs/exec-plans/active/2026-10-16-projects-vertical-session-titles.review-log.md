@@ -214,3 +214,8 @@
 - Tests: 3 new (Claude removed, Codex archived, Codex rollout missing).
   - `tests/test_session_to_board.py::test_session_moved_away_refuses_the_reply_and_leaks_no_claim` encoded the session-to-board refusal. It is rewritten as `…_starts_a_fresh_session_and_leaks_no_claim`, a D3 change of behaviour.
 - Proof: 704 passed.
+
+## Codex build inspection 13 — REVISE (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i13/claudex-i1id2i0g/result.json` (324 s). 1 medium finding, accepted.
+- PVST-R13-01: the record-copying writers (`api_run_set_status`, `api_run_restore`, `_archive_stale_sent`) bypassed the `issue_title` withholding. → `_sanitize_record` applies to all of them, and to `_write_run_log` as the last gate. It uses the current sticky `_ticket_confidential` policy, not only the copied flag.
+- Tests: 1 new. Proof: 705 passed.
