@@ -997,6 +997,16 @@ class LinearModule(AgenticModule):
             try:
                 # Built inside the try: a missing/old dsh fails this run cleanly (error record,
                 # running/dispatch entries cleared, ticket back to review) instead of hanging as running.
+                from app import _card_admitted
+                if not _card_admitted(issue_id, launch_gen):  # reset or removed during routing (R3-01)
+                    if end():
+                        _write_run_log_retrying(selected_skill, "cancelled", started_at, 0.0, prompt=prompt,
+                                                error="the card was removed or reset before its run started",
+                                                run_id=run_id, linear_issue_id=issue_id, agent=backend, task_id=run_id,
+                                                reset_generation=launch_gen)
+                        socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
+                    self.dispatched.pop(issue_id, None)
+                    return
                 if resume_sid and is_entrypoint:
                     resume_sid = None  # an entrypoint skill always starts fresh (DP-21)
                 if note:

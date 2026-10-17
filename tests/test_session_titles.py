@@ -525,3 +525,51 @@ def test_recorded_title_is_only_a_confirmed_one(cs, monkeypatch):
     mod.issues_cache[ISSUE] = {"id": ISSUE, "title": "B unconfirmed"}  # a /local edit Linear never took
     app_mod._confirm_linear_title(ISSUE, "A", "2026-10-17T00:00:00Z")
     assert app_mod._issue_title_extra(ISSUE) == {"issue_title": "A"}  # PVST-03
+
+
+# ── Codex build inspection 3 (PVST-R3-01..03) ──────────────────────────────
+
+def test_retry_worker_refuses_a_card_reset_while_queued(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review"})
+    calls = []
+    monkeypatch.setattr(app_mod, "_card_admitted", lambda iid, gen: (calls.append(1), len(calls) == 1)[1])  # route yes, worker no
+    procs = stub(app_mod, monkeypatch)
+    assert client.post("/api/runs/a/retry", json={"reply": "x"}).status_code == 200
+    assert procs == [] and records(log)[-1]["status"] == "cancelled"  # R3-01: nothing launched
+
+
+def test_dispatch_refuses_a_card_reset_during_routing(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    monkeypatch.setattr(app_mod, "_run_grouped", lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "_prompt", ""))
+    monkeypatch.setattr(app_mod, "_card_admitted", lambda iid, gen: False)
+    procs = stub(app_mod, monkeypatch)
+    issue = {"id": ISSUE, "identifier": "T-1", "title": "t", "description": ""}
+    mod._dispatch_issue_counted(issue, {"agent": {"backend": "claude"}}, app_mod.socketio)
+    assert procs == [] and records(log)[-1]["status"] == "cancelled" and ISSUE not in mod.dispatched
+
+
+def test_board_label_uses_the_live_local_title_after_a_restart(cs):
+    app_mod, mod, client, log, events, tmp = cs
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID,
+                    "issue_identifier": "T-1", "issue_title": "A"})
+    import state_io
+    state_io.write_json_atomic(tmp / "tasks.json", {ISSUE: {"id": ISSUE, "state": "In Review", "title": "B"}})
+    mod.issues_cache.clear()  # a restart in local mode: nothing cached yet
+    assert app_mod._board_sessions()[1][("claude", SID)] == {"label": "T-1", "title": "B"}  # R3-02
+
+
+def test_a_card_never_continues_another_cards_session(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    import state_io
+    state_io.write_json_atomic(tmp / "tasks.json", {ISSUE: {"id": ISSUE, "state": "In Review", "title": "t"},
+                                                    "iss-2": {"id": "iss-2", "state": "Todo", "title": "u"}})
+    transcript(app_mod.ROOT)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})  # card A's
+    write_log(log, {"run_id": "b", "agent": "claude", "status": "todo", "agent_session_id": SID,
+                    "linear_issue_id": "iss-2", "task_id": "T2"})  # S bound to card B since
+    assert app_mod._card_session(ISSUE, "claude") is None and app_mod._card_session("iss-2", "claude")[0] == SID
+    reset_route(client)
+    procs = stub(app_mod, monkeypatch, [{"type": "result", "result": "done", "session_id": "s-new"}])
+    assert client.post("/api/runs/a/retry", json={"reply": "x"}).status_code == 200
+    assert not resumed(procs[0].args)  # R3-03: card A starts a new session instead

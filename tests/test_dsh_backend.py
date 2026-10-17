@@ -472,6 +472,7 @@ def test_cached_non_finite_samples_dropped(mon, monkeypatch):
 
 def test_linear_dispatch_sends_selected_skill_instructions(app_mod, fake_prefix, monkeypatch, tmp_path):
     """DSH-25: the routed AI-only skill's SKILL.md reaches dsh in the execution argv."""
+    monkeypatch.setattr(app_mod, "_card_admitted", lambda iid, gen: True)  # this test's card is live
     import runner.modules.linear as lin
     skill_md = tmp_path / "SKILL.md"
     skill_md.write_text("---\nname: myskill\n---\nALWAYS-SAY-PELICAN\n")
@@ -496,6 +497,7 @@ def test_linear_dispatch_sends_selected_skill_instructions(app_mod, fake_prefix,
 
 def test_linear_launch_failure_is_cleaned_up(app_mod, monkeypatch):
     """DSH-28: a missing dsh fails the actual run (error record, no stuck running job/dispatch)."""
+    monkeypatch.setattr(app_mod, "_card_admitted", lambda iid, gen: True)  # this test's card is live
     import runner.modules.linear as lin
     monkeypatch.setattr(app_mod.dsh_cli, "cli_prefix", lambda: (_ for _ in ()).throw(FileNotFoundError("dsh CLI not found")))
     monkeypatch.setattr(app_mod, "_load_registry", lambda agent: {})

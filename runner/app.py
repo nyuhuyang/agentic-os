@@ -3268,8 +3268,9 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
     try:
         if _SHUTTING_DOWN.is_set():
             raise project_runs.ProjectRunError("runner is shutting down")
-        if linear_issue_id and _module_registry.get("linear") is not None and _tracker_issue(linear_issue_id) is None:
-            raise _projects.ProjectError("this card no longer exists")  # gone while queued: no launch (R4)
+        if linear_issue_id and not _card_admitted(linear_issue_id, launch_gen):
+            # gone or reset while queued: no launch (R4, R3-01)
+            raise _projects.ProjectError("this card was removed or reset before its run started")
         errors: dict = {}
         project = _projects.get_project(project_key, _projects.load_registry(errors=errors))
         # Resolved above. Unknown (an unreadable sidecar) stays None: treated as confidential
@@ -3722,12 +3723,18 @@ def _board_sessions() -> tuple[set, dict]:
     ids: set = set()
     labels: dict = {}
     cache = _linear_cache()
+    live: dict = {}
+
+    def _issue(iid: str) -> dict:  # the live tracker issue, the local tracker included (R3-02)
+        if iid not in live:
+            live[iid] = (cache.get(iid) or {}) if (cache.get(iid) or {}).get("title") else (_tracker_issue(iid) or {})
+        return live[iid]
     for r in _all_records():
         agent, sid = canonical_agent(r.get("agent")) or r.get("agent"), r.get("agent_session_id")
         if not agent or not sid:
             continue
         ids.add((agent, sid))
-        issue = cache.get(r.get("linear_issue_id") or "") or {}
+        issue = _issue(r["linear_issue_id"]) if r.get("linear_issue_id") else {}
         ident = r.get("issue_identifier") or issue.get("identifier")
         if ident:
             labels[(agent, sid)] = {"label": ident, "title": issue.get("title") or r.get("issue_title")}
@@ -3737,7 +3744,7 @@ def _board_sessions() -> tuple[set, dict]:
         iid = job.get("linear_issue_id")
         if not agent or not sid or not iid:
             continue
-        issue = cache.get(iid) or {}
+        issue = _issue(iid)
         extra = job.get("record_extra") or {}
         ident = extra.get("issue_identifier") or issue.get("identifier") or (labels.get((agent, sid)) or {}).get("label")
         if ident:
@@ -4015,9 +4022,11 @@ def _card_session(issue_id: str | None, agent: str | None) -> tuple[str, dict] |
     agent = canonical_agent(agent) or agent
     if not issue_id or agent not in _SESSION_AGENTS or _tracker_issue(issue_id) is None:
         return None
+    owners = _card_sessions(live_only=False)
     for r in reversed(_all_records()):
         if r.get("linear_issue_id") == issue_id and (canonical_agent(r.get("agent")) or r.get("agent")) == agent \
-                and r.get("agent_session_id") and not r.get("interactive_ended") and r.get("status") != "archived":
+                and r.get("agent_session_id") and not r.get("interactive_ended") and r.get("status") != "archived" \
+                and owners.get((agent, r["agent_session_id"])) == issue_id:  # never another card's session (R3-03)
             return r["agent_session_id"], r
     return None
 
@@ -4449,6 +4458,11 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
         t0 = time.monotonic()
         try:
             with plock:  # the route's lifecycle hold, kept across launch and record (SBI-009)
+                if not _card_admitted(linear_issue_id, launch_gen):  # reset or removed while queued (R3-01)
+                    if end():
+                        _record("cancelled", error="the card was removed or reset before its run started")
+                        socketio.emit("run_logged", {"skill": skill, "run_id": new_run_id})
+                    return
                 try:
                     cmd = _project_cmd(agent, eff, prompt, sid)  # the sandboxed CLI for a confidential project
                     output, it, ot, model, _new_sid, stderr_s, ok = run_agent_process(
@@ -5149,6 +5163,8 @@ def api_run_retry(run_id: str):
     if linear_issue_id and agent in _SESSION_AGENTS and is_entry:
         card_note = "new session: skill has its own entrypoint"
     elif linear_issue_id and agent in _SESSION_AGENTS:
+        if _lock_session_id and _card_sessions(live_only=False).get((agent, _lock_session_id)) not in (None, linear_issue_id):
+            _lock_session_id = None  # the lock's session now belongs to another card (R3-03)
         sid = _lock_session_id or (_card_session(linear_issue_id, agent) or (None, None))[0]
         target = _projects.find_session(agent, sid) if sid else None
         project_key = (bound or {}).get("project_key") or original.get("session_project")
@@ -5319,6 +5335,15 @@ def api_run_retry(run_id: str):
                                          timeout=AI_SESSION_TIMEOUT_S if card_session else None)
 
             end = _RunClaim(new_run_id)
+            if linear_issue_id and not _card_admitted(linear_issue_id, _launch_gen):  # reset or removed while queued (R3-01)
+                if end():
+                    _write_run_log_retrying(skill, "cancelled", started_at, 0.0, prompt=prompt,
+                                            error="the card was removed or reset before its run started",
+                                            run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
+                                            linear_issue_id=linear_issue_id, agent=agent, task_id=task_id,
+                                            reset_generation=_launch_gen)
+                    socketio.emit("run_logged", {"skill": skill, "run_id": new_run_id})
+                return
             if card_note:
                 _session_note(new_run_id, card_note)
             try:

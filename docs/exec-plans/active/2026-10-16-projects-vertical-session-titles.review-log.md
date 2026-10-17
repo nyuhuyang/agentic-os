@@ -145,3 +145,11 @@
 - Deviation: the closing-marker watcher polls every 0.2 s instead of every 1 s, so a counted watcher releases quickly.
 - Tests: 2 new. `test_retry_and_baseline_are_refused_before_any_state` now waits for its own run's counted sync before it switches maintenance on.
 - Proof: 682 passed.
+
+## Codex build inspection 3 — REVISE (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i3/claudex-p9970q4m/result.json` (185 s). 3 medium findings. All accepted.
+- PVST-R3-01: queued workers launched without rechecking the card. → Each one now calls `_card_admitted` (liveness + generation, under the issue lock) right before launch: the session-card worker, the plain retry worker, generic dispatch after routing, and the project helper (generation added). Stale work is recorded `cancelled` and nothing launches.
+- PVST-R3-02: in local mode after a restart (empty cache), labels used the recorded title. → `_board_sessions` resolves each issue live, local tracker included.
+- PVST-R3-03: `_card_session` and the lock could pick a session another card now owns. → Both are validated against the `_card_sessions` newest-owner map; another card's session is never resumed.
+- Tests: 4 new. 2 dsh dispatch tests whose cards are not in any tracker now treat their cards as live.
+- Proof: 686 passed.
