@@ -160,3 +160,11 @@
 - PVST-R4-02: a persisted intent was accepted for a session another card now owns. → `_valid_intent` and the session-card admission both check the newest-owner map.
 - PVST-R4-03: a structured failure (Claude `is_error`, Codex `turn.failed`) at exit 0 was recorded as review. → `project_runs.pop_agent_failure` adds a terminal-failure flag. It fails the session-card reply, card continuations on the retry path, a resumed dispatch, and the project helper. A Codex `error` event alone stays diagnostic.
 - Tests: 3 new. Proof: 689 passed.
+
+## Codex build inspection 5 — REVISE (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i5/claudex-wob0d3ih/result.json` (266 s). 1 medium finding, accepted.
+- PVST-R5-01: `_rename_idle` read the marker and the jobs without `_JOB_LOCK`, and normal completion retired the job before any marker existed.
+  - `_rename_idle` now takes its marker and live-set snapshot under `_JOB_LOCK`.
+  - `_end_job` (normal completion) installs the closing marker under the same lock before popping, like cancel and stall.
+  - The project helper's final job removal does the same.
+- Tests: 2 new deterministic ones, with a surviving descendant and a TERM-ignoring group. Proof: 691 passed.

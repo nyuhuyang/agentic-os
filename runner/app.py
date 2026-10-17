@@ -3089,6 +3089,7 @@ def _end_job(run_id: str) -> bool:
     """Retire a run's job and process entries together (WS-006). True when the caller ended
     the run; False when cancel or stall already had, and so owns its terminal side effects."""
     with _JOB_LOCK:
+        _mark_job_closing(run_id)  # leftovers of a finished run still block renames (R5-01)
         job = _running_jobs.pop(run_id, None)
         _running_procs.pop(run_id, None)
         if job is not None:
@@ -3400,7 +3401,9 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
         socketio.emit("run_logged", {"skill": skill, "run_id": run_id})
         return {"status": status, "error": error, **extra}
     finally:
-        _running_jobs.pop(run_id, None)
+        with _JOB_LOCK:  # the closing marker first, then the job leaves the live set (R5-01)
+            _mark_closing(agent, sid or resume_session, agent_pgid[0])
+            _running_jobs.pop(run_id, None)
         # after the record and the job's removal; the group was reaped by run_agent (§2 triggers)
         _after_card_run(run_id, linear_issue_id, agent, sid or resume_session, agent_pgid[0])
 
@@ -4071,17 +4074,20 @@ def _rename_idle(target: dict, issue_id: str, ended: tuple | None) -> bool:
     run or terminal (DP-26), or was made by the `ended` owner that has just exited (DP-03/11)."""
     from runner.modules.pty import TERMINALS
     key = (target["agent"], target["id"])
-    if key in _CLOSING_SESSIONS:
-        if _group_alive(_CLOSING_SESSIONS[key]):
-            return False
-        _CLOSING_SESSIONS.pop(key, None)
     kind, owner, owner_key = ended if ended else (None, None, None)
-    live = {(t.agent, t.session_id) for tid, t in list(TERMINALS.items())
-            if t.alive and t.session_id and not (kind == "term" and tid == owner)}
-    live |= {(canonical_agent(j.get("agent")) or j.get("agent"), j.get("agent_session_id"))
-             for rid, j in list(_running_jobs.items()) if j.get("agent_session_id") and not (kind == "run" and rid == owner)}
-    live |= {(canonical_agent(a) or a, s) for rid, (a, s) in list(_SESSION_CLAIMS.items())
-             if not (kind == "run" and rid == owner)}
+    # One snapshot with job retirement: cancel, stall and completion install the closing marker
+    # under _JOB_LOCK before they remove the job, so no window shows neither (R5-01).
+    with _JOB_LOCK:
+        if key in _CLOSING_SESSIONS:
+            if _group_alive(_CLOSING_SESSIONS[key]):
+                return False
+            _CLOSING_SESSIONS.pop(key, None)
+        live = {(t.agent, t.session_id) for tid, t in list(TERMINALS.items())
+                if t.alive and t.session_id and not (kind == "term" and tid == owner)}
+        live |= {(canonical_agent(j.get("agent")) or j.get("agent"), j.get("agent_session_id"))
+                 for rid, j in list(_running_jobs.items()) if j.get("agent_session_id") and not (kind == "run" and rid == owner)}
+        live |= {(canonical_agent(a) or a, s) for rid, (a, s) in list(_SESSION_CLAIMS.items())
+                 if not (kind == "run" and rid == owner)}
     if key in live:
         return False
     try:

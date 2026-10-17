@@ -610,3 +610,51 @@ def test_continuation_with_a_failed_turn_at_exit_zero_is_an_error(cs, monkeypatc
     assert client.post("/api/runs/a/retry", json={"reply": "x"}).status_code == 200
     rec = records(log)[-1]
     assert rec["status"] == "error" and rec["error"] == USAGE  # R4-03
+
+
+# ── Codex build inspection 5 (PVST-R5-01) ──────────────────────────────────
+
+def test_completion_with_a_surviving_descendant_blocks_renames_until_the_group_is_gone(cs):
+    app_mod, mod, client, log, events, tmp = cs
+    f = transcript(tmp / "elsewhere")
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    proc = subprocess.Popen(["/bin/sh", "-c", "sleep 30 & sleep 30"], start_new_session=True)
+    time.sleep(0.5)
+    try:
+        app_mod._running_jobs["r"] = {"run_id": "r", "agent": "claude", "agent_session_id": SID, "linear_issue_id": ISSUE}
+        app_mod._running_procs["r"] = proc
+        assert app_mod._end_job("r")  # normal completion retires the job ...
+        app_mod._FINALIZING.discard("r")
+        assert app_mod._CLOSING_SESSIONS.get(("claude", SID)) == proc.pid  # ... marker installed first (R5-01)
+        app_mod._sync_card_session_names(ISSUE)  # e.g. a title edit right then
+        assert custom_titles(f) == []
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+    deadline = time.monotonic() + 5
+    while app_mod._group_alive(proc.pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    app_mod._sync_card_session_names(ISSUE)
+    assert custom_titles(f) == ["t"]
+
+
+def test_cancel_blocks_renames_while_its_group_exits(cs):
+    app_mod, mod, client, log, events, tmp = cs
+    f = transcript(tmp / "elsewhere")
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    proc = subprocess.Popen(["/bin/sh", "-c", "trap '' TERM; sleep 30 & sleep 30"], start_new_session=True)
+    time.sleep(0.5)
+    try:
+        app_mod._running_jobs["r"] = {"run_id": "r", "agent": "claude", "agent_session_id": SID, "linear_issue_id": ISSUE}
+        app_mod._running_procs["r"] = proc
+        with app_mod._JOB_LOCK:  # the cancel's first step: marker, then retirement (R3, R5-01)
+            app_mod._mark_job_closing("r")
+            app_mod._running_jobs.pop("r")
+            app_mod._running_procs.pop("r")
+        app_mod._sync_card_session_names(ISSUE)
+        assert custom_titles(f) == []  # no window with neither the job nor the marker
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
