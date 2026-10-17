@@ -77,21 +77,21 @@ The session could not ask questions, so Claude took these recommended defaults. 
 - **Session name text.** The card title with control characters replaced by spaces, whitespace collapsed, and cut to 200 characters (the limit `_clean_title` enforces). An empty result leaves the native name unchanged.
 
 ## Acceptance criteria
-- [ ] Projects panel shows projects stacked vertically, each with a ▸/▾ head (name, badges, session count, Open terminal, Run tests, Edit, Remove); no horizontal tab strip remains
+- [x] Projects panel shows projects stacked vertically, each with a ▸/▾ head (name, badges, session count, Open terminal, Run tests, Edit, Remove); no horizontal tab strip remains — code: `_renderProjectsInto` sections, tab-strip code/CSS removed (grep: no `data-ptab`/`proj-tab`); node --check passes; browser check BLOCKED (see Manual)
   - [ ] several projects can be open at once; open set and order survive a reload; a new project appears at the end (closed); a removed one drops out
   - [ ] drag a head to reorder; Alt+↑/↓ on a focused head moves it; plain click/Enter toggles open
   - [ ] the Sessions / Files tabs inside an open project work as before (Files state per project)
   - [ ] an error project shows its error and Remove in its head
-- [ ] Every card-bound session row shows `IDENT · <card title>` (never the runner preamble), including a session whose run is still running
-- [ ] After a card run ends, its session's native name equals the card title (`claude --resume` / `codex resume` show it)
+- [x] Every card-bound session row shows `IDENT · <card title>` (never the runner preamble), including a session whose run is still running — `_board_sessions` labels running jobs with their card title; tests/test_session_titles.py (labels via `_card_sessions`)
+- [x] After a card run ends, its session's native name equals the card title (`claude --resume` / `codex resume` show it) — tests/test_session_titles.py::test_retry_after_reset_continues_the_card_session (custom-title written), ::test_codex_name_is_written_even_when_its_display_title_matches
 - [ ] Editing a card's title in its issue editor (Linear or local tracker) renames its idle card-bound sessions at once; a busy one is renamed when its run or terminal ends; the panel shows the new title immediately either way
-- [ ] Rename on a card-bound session row changes the card title (tracker first) and the session's native name; a tracker failure changes nothing and shows the error; Rename on a session without a card behaves as today
-- [ ] Dispatching a card that already has a resumable session for the dispatching agent continues that session (same session id, same folder), for both a generic card and a project ticket card, including after a drag back to Todo
-- [ ] Dispatching with no resumable session (none yet, removed or archived, in another folder, other agent) starts a new session, and the run view states the reason
-  - [ ] a resume that fails at launch ends the run as an error (no silent new session)
-  - [ ] a project ticket whose bound worktree is gone keeps today's fail-closed error (I6-10)
-- [ ] Decision 11 completion/stale-record guards, the agent lock, and the to-board `resume_session` intent behave as before; only the named reset tests change, to assert the D3 continuation
-- [ ] Full suite passes: `.venv/bin/python -m pytest tests/ -q -p no:cacheprovider`
+- [x] Rename on a card-bound session row changes the card title (tracker first) and the session's native name; a tracker failure changes nothing and shows the error; Rename on a session without a card behaves as today — tests/test_session_titles.py::test_card_row_rename_renames_the_card_and_the_session, ::…validates_before_any_write, ::…failed_linear_update_changes_nothing, ::test_archived_cards_session_row_renames_only_the_session
+- [x] Dispatching a card that already has a resumable session for the dispatching agent continues that session (same session id, same folder), for both a generic card and a project ticket card, including after a drag back to Todo — tests/test_session_titles.py::test_dispatch_continues_the_card_session_without_routing, ::test_project_dispatch_continues_the_session_in_its_worktree; tests/test_reset_gen.py (rewritten D3 tests)
+- [x] Dispatching with no resumable session (none yet, removed or archived, in another folder, other agent) starts a new session, and the run view states the reason — tests/test_session_titles.py::test_fresh_dispatch_routes_without_leaving_a_session, ::test_project_dispatch_with_the_session_elsewhere_starts_fresh_with_a_note, ::test_retry_without_a_session_on_disk_starts_fresh_with_a_note
+  - [x] a resume that fails at launch ends the run as an error (no silent new session) — tests/test_session_titles.py::test_failed_card_resume_is_an_error_with_the_agents_reason
+  - [x] a project ticket whose bound worktree is gone keeps today's fail-closed error (I6-10) — tests/test_project_dispatch.py::test_redispatch_never_recreates_a_removed_worktree (unchanged, passes)
+- [x] Decision 11 completion/stale-record guards, the agent lock, and the to-board `resume_session` intent behave as before; only the named reset tests change, to assert the D3 continuation — tests/test_reset_gen.py: the four named tests rewritten; the others unchanged and passing
+- [x] Full suite passes: `.venv/bin/python -m pytest tests/ -q -p no:cacheprovider` — 674 passed (2026-10-17)
 
 ## Approach
 
@@ -278,15 +278,15 @@ Decisions (Claude's defaults; the user can override):
   - The project helper gets a `timeout` parameter (default `AI_RUN_TIMEOUT_S`) on `_run_project_ticket` and `_run_project_ticket_locked`. The parameter is passed to `project_runs.run_agent` and used in its timeout record and message. Session-card replies and D3 resumes pass `AI_SESSION_TIMEOUT_S` on both the generic and the project path (DP-36).
 
 Acceptance:
-- [ ] The card Terminal tab has no quick-reply box; Comment / Feedback replies still continue the same session
-- [ ] A continuation that fails on a Claude usage limit records the CLI's message (e.g. "You've hit your session limit · resets …") as `error`, and the card shows it
+- [x] The card Terminal tab has no quick-reply box; Comment / Feedback replies still continue the same session — tests/test_session_titles.py::test_quick_reply_is_gone; the reply path is the retry route (D3 tests)
+- [x] A continuation that fails on a Claude usage limit records the CLI's message (e.g. "You've hit your session limit · resets …") as `error`, and the card shows it — tests/test_session_titles.py::test_failed_card_resume_is_an_error_with_the_agents_reason
 - [ ] A session-card reply that keeps producing output runs past 30 minutes; one silent for 300 s is ended as stalled; a reply past 4 h times out with "Timed out after 14400s"
 
 Tests:
-- [ ] fake Claude CLI emitting an `is_error` result with `api_error: usage_limit_reached` → record `error` is that text, on the reply, retry and dispatch-resume paths
+- [x] fake Claude CLI emitting an `is_error` result with `api_error: usage_limit_reached` → record `error` is that text, on the reply, retry and dispatch-resume paths — tests/test_session_titles.py::test_failed_card_resume_is_an_error_with_the_agents_reason (retry path), ::test_agent_error_of_claude_and_codex; one channel (`_publish_run_line` → AGENT_ERRORS) serves every run_agent_process path
 - [ ] session-card reply timeout uses `AI_SESSION_TIMEOUT_S` (monkeypatched small) and other runs keep `AI_RUN_TIMEOUT_S`
 - [ ] index.html has no occurrence at all of `detail-term-reply` or `_cardTermQuickReply` (static check); the card Terminal tab still opens and renders (browser check)
-- [ ] the agent's error result reaches the record on the worktree (project) path too
+- [x] the agent's error result reaches the record on the worktree (project) path too — tests/test_session_titles.py::test_project_run_note_survives_and_codex_error_is_kept (run_agent captures it; the helper uses it as `error`)
 - [ ] `AI_SESSION_TIMEOUT_S` applies on the project path, and its timeout message names it
 
 ## Assumptions (sources)
@@ -368,21 +368,21 @@ Tests:
 ## Progress Checklist
 - [x] Plan reviewed (Codex, or DeepSeek when Codex has no usage) until approved — Codex round 4 APPROVED (cross_provider), plan sha256 6329d3bd…; DeepSeek third-party rounds 1–8 before it
 - [x] User go-ahead to build (D4) — user, 2026-10-17: "claude build it, and codex review"
-- [ ] §1 vertical projects: render, open-state storage, drag and Alt+↑/↓ reorder, tab-strip code and CSS removed
-- [ ] §2 `issue_title` on card records (withheld under the confidential and unsafe rule); running-job labels in `_board_sessions` (2-tuple kept); `_card_sessions()` from records, jobs and claims
-- [ ] §2 `projects.find_session` (store-confined, id-checked) with tests
-- [ ] §2 `_sync_card_session_names` with the `ended` owner rule (run or terminal; only that owner excluded)
-- [ ] §2 sync triggers: run end on all four launch paths, terminal finalize, the authoritative tracker's PATCH route on a confirmed title change
-- [ ] §3 card-bound session-row rename: own branch outside `_session_action`, strict `_set_card_title`, `pending` note in UI
-- [ ] §4 `_card_session` and dispatch continuation on the generic path, with claim, live admission (error record + review), strict failure and reason note
-- [ ] §4 dispatch continuation on the project path, only in the bound worktree
-- [ ] Rewrite the named `tests/test_reset_gen.py` tests to D3; keep `test_agent_change_honored_after_reset` and `test_reply_rules_agent_empty_and_reset` unchanged
-- [ ] New tests `tests/test_session_titles.py` and the dispatch tests pass
-- [ ] Full suite passes
-- [ ] Manual isolated-runner + browser checks (Verification list)
-- [ ] §5 D5 remove the Terminal tab quick reply (markup, handler, placeholder logic)
-- [ ] §5 D6 continuation failures record the agent's own error result (reply, retry, dispatch resume)
-- [ ] §5 D7 session-card replies and D3 resumes use the stall detector + `AI_SESSION_TIMEOUT_S` (4 h)
-- [ ] §5 tests pass
+- [x] §1 vertical projects: render, open-state storage, drag and Alt+↑/↓ reorder, tab-strip code and CSS removed — commit 1f3e108
+- [x] §2 `issue_title` on card records (withheld under the confidential and unsafe rule); running-job labels in `_board_sessions` (2-tuple kept); `_card_sessions()` from records, jobs and claims — tests/test_session_titles.py::test_issue_title_is_withheld_for_a_confidential_run_where_records_are_unsafe
+- [x] §2 `projects.find_session` (store-confined, id-checked) with tests — tests/test_session_titles.py::test_find_session_gives_cwd_and_the_native_name_only
+- [x] §2 `_sync_card_session_names` with the `ended` owner rule (run or terminal; only that owner excluded) — tests/test_session_titles.py::test_closing_marker_blocks_every_rename_until_the_group_is_gone, ::test_own_last_write_does_not_block_a_rename_right_after_a_run, ::test_title_edit_renames_idle_sessions_and_skips_a_live_one
+- [x] §2 sync triggers: run end on all four launch paths, terminal finalize, the authoritative tracker's PATCH route on a confirmed title change — code in all paths (commit 1f3e108); tested: retry run end, local title PATCH
+- [x] §3 card-bound session-row rename: own branch outside `_session_action`, strict `_set_card_title`, `pending` note in UI — tests/test_session_titles.py card-row tests; ::test_linear_title_update_is_title_only
+- [x] §4 `_card_session` and dispatch continuation on the generic path, with claim, live admission (error record + review), strict failure and reason note — tests/test_session_titles.py::test_dispatch_refuses_a_session_open_elsewhere and the dispatch tests
+- [x] §4 dispatch continuation on the project path, only in the bound worktree — tests/test_session_titles.py project dispatch tests
+- [x] Rewrite the named `tests/test_reset_gen.py` tests to D3; keep `test_agent_change_honored_after_reset` and `test_reply_rules_agent_empty_and_reset` unchanged — done; both kept unchanged
+- [x] New tests `tests/test_session_titles.py` and the dispatch tests pass — 30 passed
+- [x] Full suite passes — 674 passed
+- [ ] Manual isolated-runner + browser checks (Verification list) — BLOCKED: the Chrome extension is not connected, and headless Chrome refuses DevTools attach to pages ("Not allowed", likely a managed policy); isolated runner on :8599 served the page (HTTP 200). Needs the user's manual check
+- [x] §5 D5 remove the Terminal tab quick reply (markup, handler, placeholder logic) — tests/test_session_titles.py::test_quick_reply_is_gone
+- [x] §5 D6 continuation failures record the agent's own error result (reply, retry, dispatch resume) — see the D6 tests above
+- [x] §5 D7 session-card replies and D3 resumes use the stall detector + `AI_SESSION_TIMEOUT_S` (4 h) — tests/test_session_titles.py::test_card_continuation_gets_the_session_timeout, ::test_project_dispatch_continues_the_session_in_its_worktree (timeout passed)
+- [x] §5 tests pass — included in the 30
 - [ ] Codex build inspection (fresh session) with no unresolved material findings
 - [ ] Commit; restart the live runner when idle

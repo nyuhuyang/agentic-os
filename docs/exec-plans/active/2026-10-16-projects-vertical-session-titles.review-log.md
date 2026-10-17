@@ -112,3 +112,11 @@
 
 ## Build (2026-10-17)
 - The user authorized it: "claude build it, and codex review". Builder: Claude (host). Final inspector: a fresh Codex session.
+- Build commit `1f3e108`, base `dbbacd0`. Proof: full suite 674 passed. New tests: `tests/test_session_titles.py`, 30 passed.
+- Deviations and notes:
+  - `on_session`: `_publish_run_line` already records every streamed session id on its job for every `run_agent_process` caller, so the generic and retry paths needed no new callback. A resumed dispatch sets the id on its job before launch.
+  - D6: one channel, `project_runs.AGENT_ERRORS`, filled by `_publish_run_line` and by `project_runs.run_agent`. It is used before stderr on every continuation path, and in the project helper.
+  - Retry: when the agent lock names a session whose store entry is not visible, the retry keeps today's resume with its fresh fallback. A session from `_card_session` that is not on disk starts fresh with a note.
+  - Test safety: `tests/conftest.py` now points `CLAUDE_PROJECTS` and `CODEX_DB` at tmp in every test, so no sync can touch the real stores.
+  - The R2 liveness check made 3 `test_project_dispatch.py` retries hit fixture cards that do not exist; that fixture now treats its cards as live.
+- Manual browser checks BLOCKED: the Chrome extension is not connected, and headless Chrome refuses DevTools attach to pages ("Not allowed"). Playwright 's driver fails on Chrome 155.
