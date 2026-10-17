@@ -174,3 +174,9 @@
 - PVST-R6-01: closing markers blocked only renames, not new continuations. → A live closing group now counts as occupied in `_live_session_ids` and `session_in_use`. `_claim_session` refuses it unconditionally under the session lock, and `confirm_in_use` cannot bypass it.
 - PVST-R6-02: ordinary card creation did not record Linear's confirmed title, and a later first confirmation never renamed the session. → The create response is recorded before the id swap. A first or changed confirmed title for a card with sessions starts a name sync, so a title changed in Linear itself is followed too.
 - Tests: 2 new. Proof: 693 passed.
+
+## Codex build inspection 7 — REVISE (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i7/claudex-7_kjfix3/result.json` (168 s). 2 medium findings. Both accepted.
+- PVST-R7-01: a first confirmation from the poll started its sync before the cache was published, so the sync saw no issue and was never retried. → The poll and the async refresh collect these syncs (`pending`) and start them only after the cache is published.
+- PVST-R7-02: an old watcher, and `_closing_live`, removed markers unconditionally. → `_clear_closing(key, token)` under `_CLOSING_LOCK` removes a marker only if it is still the inspected one (the pgid is the token) and its group is gone. A watcher whose marker was replaced stops; the newer run syncs at its own end.
+- Tests: 2 new. Proof: 695 passed.

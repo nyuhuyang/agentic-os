@@ -286,13 +286,21 @@ def linear_project_id(client, team_id: str, project_key: str | None, project_slu
     return pid
 
 
-def _note_linear_title(issue: dict | None) -> None:
+def _note_linear_title(issue: dict | None, pending: set | None = None) -> None:
     """A title as Linear itself returned it: the only source a native session rename may use in
-    Linear mode (DP-31), versioned by updatedAt (R4)."""
+    Linear mode (DP-31), versioned by updatedAt (R4). With `pending`, a first or changed title's
+    session sync is collected there, to start once the issue is published in the cache (R7-01)."""
     if isinstance(issue, dict) and issue.get("id"):
         with contextlib.suppress(Exception):
             from app import _confirm_linear_title
-            _confirm_linear_title(issue["id"], issue.get("title"), issue.get("updated_at") or issue.get("updatedAt") or "")
+            _confirm_linear_title(issue["id"], issue.get("title"), issue.get("updated_at") or issue.get("updatedAt") or "",
+                                  pending=pending)
+
+
+def _start_title_syncs(pending: set) -> None:
+    """The session syncs a poll collected, after its cache is published (R7-01)."""
+    for issue_id in pending:
+        _title_changed(issue_id)
 
 
 def _title_changed(issue_id: str, title: str | None = None) -> None:
@@ -574,6 +582,7 @@ class LinearModule(AgenticModule):
                 gens_before = reset_gen.snapshot()  # a reset during the fetch wins (I6-11)
 
                 gone = archived_ids()  # emptied from the trash: never back into the cache (STB-050)
+                title_syncs: set = set()  # started once this poll's cache is published (R7-01)
                 for tid in team_ids_to_poll:
                     team_issues = client.fetch_issues(states, team_id=tid)
                     team_issue_dict: dict[str, dict] = {}
@@ -581,7 +590,7 @@ class LinearModule(AgenticModule):
                         iid = issue["id"]
                         if iid in gone:
                             continue
-                        _note_linear_title(issue)  # before any local override (DP-31)
+                        _note_linear_title(issue, title_syncs)  # before any local override (DP-31)
                         normalized = _normalize_linear_issue(issue)
                         normalized = self._apply_local_override(iid, normalized)
                         local_state = self.issues_cache.get(iid, {}).get("state")
@@ -669,6 +678,7 @@ class LinearModule(AgenticModule):
                         if tid:
                             self._issues_by_team.setdefault(tid, {})[iid] = issue
                     self._sync_cache_to_local()
+                _start_title_syncs(title_syncs)  # the issues are visible now (R7-01)
                 socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
             except Exception as e:
                 logger.error("Linear polling error: %s", e)
@@ -1734,12 +1744,14 @@ class LinearModule(AgenticModule):
             live = cl.fetch_issues(_linear_poll_states(tc), team_id=tc.get("team_id", "") or None)
             # Build new dict first, then swap — avoids empty-cache flicker
             updated: dict[str, dict] = {}
+            title_syncs: set = set()
             for issue in live:
                 self._localize_issue(issue)
-                _note_linear_title(issue)
+                _note_linear_title(issue, title_syncs)
                 updated[issue["id"]] = _normalize_linear_issue(issue)
             self.issues_cache.clear()
             self.issues_cache.update(updated)
+            _start_title_syncs(title_syncs)
             # Only notify via socket if cache changed (the polling loop already handles periodic emit)
         except Exception as e:
             logger.debug("async linear refresh failed: %s", e)

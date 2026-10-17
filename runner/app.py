@@ -3946,6 +3946,21 @@ def _session_card(agent: str, sid: str) -> str | None:
 
 _SESSION_AGENTS = ("claude", "codex")
 _CLOSING_SESSIONS: dict[tuple[str, str], int] = {}  # (agent, sid) -> pgid of a run still exiting (R6)
+_CLOSING_LOCK = threading.Lock()  # every marker read-check-remove and replacement (R7-02)
+
+
+def _clear_closing(key: tuple, pgid: int | None) -> bool:
+    """Drop this marker only if it is still the one inspected and its group is gone. True when
+    the session carries no live marker afterwards. ponytail: the pgid is the ownership token;
+    a pid reused within the check is the ceiling (a sequence number would lift it)."""
+    with _CLOSING_LOCK:
+        current = _CLOSING_SESSIONS.get(key)
+        if current is None:
+            return True
+        if current != pgid or _group_alive(current):
+            return False
+        _CLOSING_SESSIONS.pop(key, None)
+        return True
 _LINEAR_TITLES: dict[str, tuple[str, str]] = {}  # issue -> (title, updatedAt), only as Linear returned it
 _TITLE_SYNC_LOCKS: dict[str, threading.Lock] = {}
 _TITLE_SYNC_GUARD = threading.Lock()
@@ -3958,7 +3973,7 @@ def _title_sync_lock(issue_id: str) -> threading.Lock:
         return _TITLE_SYNC_LOCKS.setdefault(issue_id, threading.Lock())
 
 
-def _confirm_linear_title(issue_id: str, title: object, updated_at: object = "") -> None:
+def _confirm_linear_title(issue_id: str, title: object, updated_at: object = "", pending: set | None = None) -> None:
     """Record a title Linear itself returned. An older one never replaces a newer one, so a poll
     that fetched before a confirmed rename cannot roll it back (R4)."""
     if not issue_id or not isinstance(title, str) or not title.strip():
@@ -3972,7 +3987,10 @@ def _confirm_linear_title(issue_id: str, title: object, updated_at: object = "")
     # A first or changed confirmation names the card's sessions now: a run that ended before any
     # confirmation skipped them (R6-02). Outside the lock: the sync takes it itself.
     if changed and issue_id in set(_card_sessions(live_only=False).values()):
-        _sync_titles_soon(issue_id, title)
+        if pending is not None:
+            pending.add(issue_id)  # the caller starts it once the issue is published (R7-01)
+        else:
+            _sync_titles_soon(issue_id, title)
 
 
 def _confirmed_title(issue_id: str) -> str | None:
@@ -4072,7 +4090,8 @@ def _mark_closing(agent: str | None, sid: str | None, pgid: int | None) -> None:
     renames that session (R6)."""
     agent = canonical_agent(agent) or agent
     if agent in _SESSION_AGENTS and sid and _group_alive(pgid):
-        _CLOSING_SESSIONS[(agent, sid)] = pgid
+        with _CLOSING_LOCK:
+            _CLOSING_SESSIONS[(agent, sid)] = pgid
 
 
 def _rename_idle(target: dict, issue_id: str, ended: tuple | None) -> bool:
@@ -4085,10 +4104,8 @@ def _rename_idle(target: dict, issue_id: str, ended: tuple | None) -> bool:
     # One snapshot with job retirement: cancel, stall and completion install the closing marker
     # under _JOB_LOCK before they remove the job, so no window shows neither (R5-01).
     with _JOB_LOCK:
-        if key in _CLOSING_SESSIONS:
-            if _group_alive(_CLOSING_SESSIONS[key]):
-                return False
-            _CLOSING_SESSIONS.pop(key, None)
+        if not _clear_closing(key, _CLOSING_SESSIONS.get(key)):
+            return False
         live = {(t.agent, t.session_id) for tid, t in list(TERMINALS.items())
                 if t.alive and t.session_id and not (kind == "term" and tid == owner)}
         live |= {(canonical_agent(j.get("agent")) or j.get("agent"), j.get("agent_session_id"))
@@ -4153,15 +4170,18 @@ def _after_card_run(run_id: str, issue_id: str | None, agent: str | None, sid: s
     if key:
         _mark_closing(agent, sid, pgid)
 
+    mine = _CLOSING_SESSIONS.get(key) if key else None  # this run's own marker, if it set one
+
     def _watch() -> None:
-        if key and key in _CLOSING_SESSIONS:
+        if key and mine is not None:
             deadline = time.monotonic() + 300
-            while _group_alive(_CLOSING_SESSIONS.get(key)):
+            while not _clear_closing(key, mine):  # never another run's newer marker (R7-02)
+                if _CLOSING_SESSIONS.get(key) != mine:
+                    return  # a newer run owns the session now; its own end will sync
                 if time.monotonic() > deadline:
                     logger.warning("session %s still has live processes; its name is not written", sid)
                     return
                 time.sleep(0.2)
-            _CLOSING_SESSIONS.pop(key, None)
         _sync_card_session_names(issue_id, ended=(kind, run_id, key))
 
     try:  # a counted writer: maintenance and relocation wait for it (PVST-04)
@@ -4726,13 +4746,7 @@ def _release_session(run_id: str) -> None:
 def _closing_live(agent: str | None, sid: str | None) -> bool:
     """A finished or stopped run of this session still has processes: it is occupied (R6-01)."""
     key = (canonical_agent(agent) or agent, sid)
-    pgid = _CLOSING_SESSIONS.get(key)
-    if pgid is None:
-        return False
-    if _group_alive(pgid):
-        return True
-    _CLOSING_SESSIONS.pop(key, None)
-    return False
+    return not _clear_closing(key, _CLOSING_SESSIONS.get(key))
 
 
 def _live_session_ids() -> set[tuple[str, str]]:

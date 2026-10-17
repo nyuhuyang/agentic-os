@@ -690,3 +690,32 @@ def test_first_linear_confirmation_names_the_cards_session(cs, monkeypatch):
     mod.issues_cache[ISSUE] = {"id": ISSUE, "title": "Linear title"}
     app_mod._confirm_linear_title(ISSUE, "Linear title", "2026-10-17T03:00:00Z")  # the first poll after the run
     assert custom_titles(f) == ["Linear title"]  # R6-02
+
+
+# ── Codex build inspection 7 (PVST-R7-01..02) ──────────────────────────────
+
+def test_poll_confirmation_syncs_only_after_the_issue_is_published(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    import runner.modules.linear as lin
+    monkeypatch.setattr(mod, "_capability", {"available": True, "type": "linear"})
+    f = transcript(tmp / "elsewhere")
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    mod.issues_cache.clear()  # a restart: the poll has not published anything yet
+    pending: set = set()
+    lin._note_linear_title({"id": ISSUE, "title": "From Linear", "updated_at": "2026-10-17T04:00:00Z"}, pending)
+    assert pending == {ISSUE} and custom_titles(f) == []  # collected, not run against an empty cache
+    mod.issues_cache[ISSUE] = {"id": ISSUE, "title": "From Linear"}  # the poll publishes
+    lin._start_title_syncs(pending)
+    assert custom_titles(f) == ["From Linear"]  # R7-01
+
+
+def test_an_old_watcher_never_clears_a_newer_runs_marker(cs):
+    app_mod, mod, client, log, events, tmp = cs
+    newer = subprocess.Popen(["/bin/sh", "-c", "sleep 30"], start_new_session=True)
+    try:
+        app_mod._CLOSING_SESSIONS[("claude", SID)] = newer.pid  # run B's marker
+        assert app_mod._clear_closing(("claude", SID), 999999) is False  # run A's watcher, A's token (R7-02)
+        assert app_mod._CLOSING_SESSIONS[("claude", SID)] == newer.pid
+    finally:
+        os.killpg(newer.pid, signal.SIGKILL)
+        newer.wait()
