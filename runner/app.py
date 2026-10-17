@@ -1338,7 +1338,8 @@ def _load_claude_live_limit(window_key: str) -> dict:
 
 
 _CLAUDE_LIVE_MAX_AGE_S = int(os.environ.get("CLAUDE_LIVE_MAX_AGE_S", "600"))
-_CLAUDE_USAGE_API = "https://api.anthropic.com/api/oauth/usage"
+# cedar_ember=1 adds the limit-reset grants ("Full reset") the way Claude Code reads them
+_CLAUDE_USAGE_API = "https://api.anthropic.com/api/oauth/usage?cedar_ember=1&skip_spend=1"
 _CLAUDE_USAGE_CACHE_TTL_S = 55.0
 _CLAUDE_USAGE_RETRY_S = 120.0       # wait after a failed fetch: the endpoint 429s under polling
 _CLAUDE_USAGE_MAX_AGE_S = 15 * 60   # keep showing the last good reading this long
@@ -1484,6 +1485,53 @@ def _claude_quota_card(
     }
 
 
+def _claude_reset_card(block: object) -> dict:
+    """Third Claude card: limit-reset grants ("Full reset") and when they expire, like Codex's
+    reset card. `block` is the usage payload's `cedar_ember` object (None when not offered)."""
+    now_unix = datetime.now(timezone.utc).timestamp()
+    grants = []
+    for raw in (block.get("grants") or []) if isinstance(block, dict) else []:
+        if not isinstance(raw, dict):
+            continue
+        expires_at = _coerce_unix_timestamp(raw.get("ends_at"))
+        if expires_at and expires_at <= now_unix:
+            continue
+        try:
+            left = max(0, int(raw.get("resets_left") or 0))
+            total = max(left, int(raw.get("resets_total") or 0))
+        except (TypeError, ValueError):
+            continue
+        grants.append({"label": str(raw.get("label") or ""), "left": left, "total": total,
+                       "expires_at": expires_at, "usable_now": bool(raw.get("usable_now"))})
+    card = {
+        "title": next((g["label"] for g in grants if g["label"]), "Full reset"),
+        "window_minutes": 0, "resets_at_unix": None, "pct": 0, "used_pct": None,
+        "remaining_pct": None, "tokens": 0, "limit": 0, "sessions": 0,
+        "value_suffix": " available", "quota_source": "official-claude",
+    }
+    if not grants:
+        reason = block.get("ineligible_reason") if isinstance(block, dict) else None
+        return {**card, "reset": "—", "value": 0, "value_line": "0 available",
+                "display_line": f"No reset available ({reason})" if reason else "No reset available"}
+    left = sum(g["left"] for g in grants)
+    total = sum(g["total"] for g in grants)
+    expiries = [g["expires_at"] for g in grants if g["left"] and g["expires_at"]]
+    next_expiry = min(expiries, default=None)
+    expiry_label = (datetime.fromtimestamp(next_expiry).strftime("%b %d").replace(" 0", " ")
+                    if next_expiry else None)
+    return {
+        **card,
+        "reset": f"Expires {expiry_label}" if expiry_label else "No expiry",
+        "pct": round((total - left) / total * 100) if total else 0,
+        "value": left,
+        "value_line": f"{left} available",
+        "display_line": (f"{left} of {total} left"
+                         + (f" · expires {expiry_label}" if expiry_label else "")
+                         + (" · usable now" if any(g["usable_now"] and g["left"] for g in grants) else "")),
+        "next_expiry_at": next_expiry,
+    }
+
+
 def _load_claude_official_windows() -> dict:
     """Expose only a fresh Claude rate-limit snapshot as quota information.
 
@@ -1494,17 +1542,6 @@ def _load_claude_official_windows() -> dict:
     now = datetime.now(timezone.utc)
     api_usage, api_age_s = _load_claude_oauth_usage()
     if api_usage:
-        fable = {}
-        for entry in api_usage.get("limits") or []:
-            if not isinstance(entry, dict):
-                continue
-            model = _nested_mapping(entry, "scope", "model")
-            if str(model.get("display_name") or "").casefold() == "fable":
-                fable = {
-                    "used_percentage": entry.get("percent", entry.get("utilization")),
-                    "resets_at": entry.get("resets_at"),
-                }
-                break
         return {
             "agent": "claude",
             "window_5h": _claude_quota_card(
@@ -1519,10 +1556,7 @@ def _load_claude_official_windows() -> dict:
                  "resets_at": (api_usage.get("seven_day") or {}).get("resets_at")},
                 captured_age_s=api_age_s, source_status="live",
             ),
-            "aux": _claude_quota_card(
-                "Weekly · Fable", 10080, fable, captured_age_s=api_age_s,
-                source_status="live" if fable else "missing",
-            ),
+            "aux": _claude_reset_card(api_usage.get("cedar_ember")),
             "quota_source": "official-claude-api",
             "plan_type": None,
             "limits_estimated": False,
@@ -1548,13 +1582,8 @@ def _load_claude_official_windows() -> dict:
     weekly = _first_claude_limit(rate_limits, (
         ("seven_day",), ("weekly",), ("all_models",),
     ))
-    fable = _first_claude_limit(rate_limits, (
-        ("fable",), ("seven_day_fable",), ("fable_seven_day",),
-        ("seven_day", "fable"), ("weekly", "fable"), ("models", "fable"),
-    ))
 
     base_status = "live" if snapshot_is_fresh else ("stale" if captured_at else "unavailable")
-    fable_status = base_status if fable else ("missing" if snapshot_is_fresh else base_status)
     return {
         "agent": "claude",
         "window_5h": _claude_quota_card(
@@ -1563,9 +1592,8 @@ def _load_claude_official_windows() -> dict:
         "window_7d": _claude_quota_card(
             "Weekly · All models", 10080, weekly, captured_age_s=age_s, source_status=base_status,
         ),
-        "aux": _claude_quota_card(
-            "Weekly · Fable", 10080, fable, captured_age_s=age_s, source_status=fable_status,
-        ),
+        "aux": {**_claude_reset_card(None), "value": None, "value_line": "",
+                "display_line": "Reset data needs the official usage API"},
         "quota_source": "official-claude",
         "plan_type": None,
         "limits_estimated": False,
