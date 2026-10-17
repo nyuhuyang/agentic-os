@@ -397,12 +397,7 @@
   .files-preview .ln { color: var(--text-dim); user-select: none; display: inline-block; min-width: 3.5em; text-align: right; padding-right: 8px; }
   .project-toolbar { display: flex; justify-content: flex-end; padding: 6px 4px; }
   /* Projects as draggable tabs (session-to-board §12) */
-  .proj-tabstrip { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 6px 4px; border-bottom: 1px solid var(--border); }
-  .proj-tab { background: transparent; border: 1px solid var(--border); border-bottom: none; border-radius: 4px 4px 0 0; color: var(--text-dim);
-    font: inherit; font-size: calc(12px * var(--fs)); padding: 4px 10px; cursor: pointer; display: inline-flex; gap: 6px; align-items: center; }
-  .proj-tab.active { color: var(--text); border-color: var(--accent); background: var(--surface); }
-  .proj-tab.error { color: var(--red); border-color: var(--red); }
-  .proj-tab.drop-target { outline: 1px dashed var(--accent); }
+  .project-head.drop-target { outline: 1px dashed var(--accent); }
   .project-btn { border-radius: 4px !important; }
   #project-dialog .drop-zone { margin-top: 10px; border: 2px dashed var(--border); border-radius: 6px; padding: 18px; text-align: center; color: var(--text-dim); font-size: calc(12px * var(--fs)); }
   #project-dialog .drop-zone.over { border-color: var(--accent); color: var(--accent); }
@@ -557,10 +552,8 @@
   .detail-output-tab-content .detail-section-body.error-panel { color:var(--red); }
   .detail-term-pinned { max-height:110px; overflow:auto; white-space:pre-wrap; border-left:2px solid var(--accent); padding:4px 8px; margin-bottom:6px; font-size:calc(11px * var(--fs)); }
   .detail-term-bar { display:flex; gap:6px; align-items:center; margin-bottom:6px; flex-wrap:wrap; }
-  .detail-term-bar select, .detail-term-reply input { background:var(--surface); color:var(--text); border:1px solid var(--border); font:inherit; font-size:calc(11px * var(--fs)); }
+  .detail-term-bar select { background:var(--surface); color:var(--text); border:1px solid var(--border); font:inherit; font-size:calc(11px * var(--fs)); }
   .detail-term-view { height:300px; background:#0d0d0d; }
-  .detail-term-reply { display:flex; gap:6px; margin-top:6px; }
-  .detail-term-reply input { flex:1; padding:4px 6px; }
   .waiting-badge { color:#111; background:var(--yellow, #d29922); border-radius:3px; padding:0 4px; font-size:calc(10px * var(--fs)); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; }
   .detail-footer { padding: 12px 20px; display: flex; gap: 8px; justify-content: flex-end; border-top: 1px solid var(--border); }
   .attach-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
@@ -918,10 +911,6 @@
           <button class="session-copy" onclick="_cardTermNext('todo')">Send back to Todo</button>
           <button class="session-copy" onclick="_cardTermNext('review')">Leave in review</button>
         </div>
-        <div class="detail-term-reply">
-          <input id="detail-term-reply" placeholder="Quick reply: continues this same session headless" onkeydown="if(event.key==='Enter'){event.preventDefault();_cardTermQuickReply();}">
-          <button class="session-copy" onclick="_cardTermQuickReply()">Send</button>
-        </div>
       </div>
     </div>
     <div class="detail-section" id="detail-path-section" style="display:none">
@@ -1111,7 +1100,7 @@ function _renderProjects() {
   }
 }
 
-// Tab order and selection are a per-browser preference; the server keeps registry order (§12).
+// Project order and the open set are per-browser preferences; the server keeps registry order.
 function _projTabOrder(ps) {
   let saved = [];
   try { saved = JSON.parse(_storageGet('agenticos.projectTabs.order', '[]')); } catch (_) {}
@@ -1120,9 +1109,15 @@ function _projTabOrder(ps) {
   keys.forEach(k => { if (!order.includes(k)) order.push(k); });  // new projects append
   return order;
 }
-function _projTabActive(order) {
-  const a = _storageGet('agenticos.projectTabs.active', '');
-  return order.includes(a) ? a : order[0];
+function _projOpen() {  // the open projects; a missing or invalid value means none open
+  let v = [];
+  try { v = JSON.parse(_storageGet('agenticos.projects.open', '[]')); } catch (_) {}
+  return new Set(Array.isArray(v) ? v : []);
+}
+function _projToggle(key) {
+  const open = _projOpen();
+  open.has(key) ? open.delete(key) : open.add(key);
+  _storageSet('agenticos.projects.open', JSON.stringify([...open]));
 }
 function _projTabMove(order, from, to) {
   const [k] = order.splice(from, 1);
@@ -1137,33 +1132,26 @@ function _renderProjectsInto(el) {
   if (!ps.length) { el.innerHTML = `<div class="project-toolbar">${add}</div><div class="job-board-empty">No projects registered yet.</div>`; return; }
   const removeBtn = p => `<button class="session-copy" data-proj-action="remove" data-key="${_esc(p.key)}">Remove</button>`;
   const byKey = Object.fromEntries(ps.map(p => [p.key, p]));
-  const order = _projTabOrder(ps), active = _projTabActive(order);
+  const open = _projOpen();
   const badges = p => (p.confidential ? '<span class="badge risk-destructive">confidential</span>' : '')
     + (p.no_push ? '<span class="badge">no push</span>' : '') + (p.kind ? `<span class="badge">${_esc(p.kind)}</span>` : '');
-  // Tabs hold no nested controls (STB-075): an error project's Remove is in its body.
-  const tabs = order.map(k => {
-    const p = byKey[k], sel = k === active;
-    return `<button class="proj-tab ${sel ? 'active' : ''} ${p.error ? 'error' : ''}" role="tab" aria-selected="${sel}"
-      tabindex="${sel ? 0 : -1}" draggable="true" data-ptab="${_esc(k)}" title="Drag to reorder · Alt+←/→ moves it">
-      ${_esc(k)} ${p.error ? '' : badges(p) + `<span class="session-meta">${(p.sessions || []).length}</span>`}</button>`;
-  }).join('');
-  const p = byKey[active];
-  let body;
-  if (p.error) {
-    body = `<div class="project-head project-error">${_esc(p.key)} — ${_esc(p.error)} ${removeBtn(p)}</div>`;
-  } else {
+  // Projects stacked vertically, each its own ▸/▾ section (D1); drag a head or Alt+↑/↓ reorders.
+  const head = p => `draggable="true" tabindex="0" data-phead="${_esc(p.key)}" title="Click to open or close · drag or Alt+↑/↓ to reorder"`;
+  el.innerHTML = `<div class="project-toolbar">${add}</div>` + _projTabOrder(ps).map(k => {
+    const p = byKey[k];
+    if (p.error) return `<div class="project-section"><div class="project-head project-error" ${head(p)}>${_esc(p.key)} — ${_esc(p.error)} ${removeBtn(p)}</div></div>`;
+    const isOpen = open.has(p.key);
     const rows = (p.sessions || []).map(s => _sessionRow(p.key, s)).join('') || '<div class="session-empty">No sessions in this project yet.</div>';
-    body = `<div class="project-head">
+    return `<div class="project-section">
+      <div class="project-head" ${head(p)} aria-expanded="${isOpen}">${isOpen ? '▾' : '▸'} <b>${_esc(p.key)}</b> ${badges(p)}
         <span class="session-meta">${(p.sessions || []).length} sessions</span>
         <button class="session-copy" data-open-terminal="${_esc(p.key)}">Open terminal</button>
         ${(p.entry || {}).verify ? `<button class="session-copy" data-proj-action="baseline" data-key="${_esc(p.key)}" title="${_esc(p.entry.verify)} — on a clean copy of HEAD">Run tests</button>` : ''}
         <button class="session-copy" data-proj-action="edit" data-key="${_esc(p.key)}">Edit</button>
         ${removeBtn(p)}</div>
       ${_baselineHtml(p.baseline)}
-      ${_projectBody(p, rows)}`;
-  }
-  el.innerHTML = `<div class="proj-tabstrip" role="tablist" aria-label="Projects">${tabs}<span style="flex:1"></span>${add}</div>
-    <div class="project-section" role="tabpanel">${body}</div>`;
+      ${isOpen ? _projectBody(p, rows) : ''}</div>`;
+  }).join('');
 }
 
 // Rename / Remove on a session row (A): inline, never a modal dialog.
@@ -1171,7 +1159,7 @@ let _sessionEdit = null;  // {key, agent, id, mode: 'rename' | 'remove', error, 
 function _sessionRow(key, s) {
   const ed = _sessionEdit && _sessionEdit.key === key && _sessionEdit.agent === s.agent && _sessionEdit.id === s.id ? _sessionEdit : null;
   const ids = `data-key="${_esc(key)}" data-sagent="${_esc(s.agent)}" data-sid="${_esc(s.id)}"`;
-  const err = ed && ed.error ? `<span class="session-meta" style="color:var(--red)">${_esc(ed.error)}</span>` : '';
+  const err = ed && ed.error ? `<span class="session-meta" style="color:${ed.mode === 'note' ? 'var(--text-dim)' : 'var(--red)'}">${_esc(ed.error)}</span>` : '';
   // A board-launched session shows its card identifier first, e.g. "AGE-102 · title" (§9).
   let title = `<span class="session-title" title="${_esc(s.cwd)}">${s.label ? `<b>${_esc(s.label)}</b> · ` : ''}${_esc(s.card_title || s.title)}</span>`;
   // One Resume (§6): the session's card goes back to Todo and its reply opens.
@@ -1180,7 +1168,9 @@ function _sessionRow(key, s) {
         <button class="session-copy" data-saction="rename" ${ids}>Rename</button>
         <button class="session-copy" data-saction="remove" ${ids}>Remove</button>`;
   if (ed && ed.mode === 'rename') {
-    title = `<input class="session-rename" ${ids} value="${_esc(s.title)}" maxlength="200" style="flex:1;font:inherit">`;
+    // the name the row shows: a card's session is renamed by renaming the card (D2, DP-16)
+    title = `<input class="session-rename" ${ids} value="${_esc(s.card_title || s.title)}" maxlength="200" style="flex:1;font:inherit"
+      ${s.label ? 'title="Renames the card too"' : ''}>`;
     actions = `<button class="session-copy" data-saction="save" ${ids}>Save</button><button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
   } else if (ed && ed.mode === 'remove') {
     const where = s.agent === 'codex' ? "it is archived the way Codex archives (its rollout moves to ~/.codex/archived_sessions); restore with Codex's unarchive"
@@ -1206,7 +1196,8 @@ async function _sessionSubmit(el, mode) {
   }
   const r = await _projectApi('POST', `${base}/${mode}`, body);
   if (!r.ok) { _sessionEdit = { key, agent: sagent, id: sid, mode, error: r.data.error || `HTTP ${r.status}` }; _renderProjects(); return; }
-  _sessionEdit = null;
+  // a busy card session: the card is renamed now, the session when it is idle (§3)
+  _sessionEdit = r.data.pending ? { key, agent: sagent, id: sid, mode: 'note', error: 'card renamed; the session name follows when it is idle' } : null;
   loadProjects();
 }
 
@@ -1518,8 +1509,9 @@ document.getElementById('project-panel-content')?.addEventListener('click', (eve
   if (openTerm) { openShellTab(openTerm.dataset.openTerminal); return; }
   const resumeBtn = event.target.closest('[data-resume-id]');
   if (resumeBtn) { _resumeToBoard(resumeBtn); return; }
-  const ptab = event.target.closest('[data-ptab]');
-  if (ptab) { _storageSet('agenticos.projectTabs.active', ptab.dataset.ptab); _renderProjects(); }
+  // a click on a project head (not on one of its buttons) opens or closes it
+  const phead = event.target.closest('[data-phead]');
+  if (phead && !event.target.closest('button') && !phead.classList.contains('project-error')) { _projToggle(phead.dataset.phead); _renderProjects(); }
 });
 
 // Resume (§6): to-board, then the card's detail with the reply focused; no bottom panel.
@@ -1539,51 +1531,59 @@ async function _resumeToBoard(btn) {
   await _openResumeReply(r.data.run_id);
 }
 
-// Tab drag and drop (native HTML5) and keyboard reorder (§12).
+// Project drag and drop (native HTML5) and keyboard reorder: Alt+↑/↓ on a focused head.
 let _projTabDrag = null;
 const _projPanel = document.getElementById('project-panel-content');
 _projPanel?.addEventListener('dragstart', (e) => {
-  const t = e.target.closest?.('[data-ptab]');
+  const t = e.target.closest?.('[data-phead]');
   if (!t) return;
-  _projTabDrag = t.dataset.ptab;
+  _projTabDrag = t.dataset.phead;
   e.dataTransfer.effectAllowed = 'move';
   try { e.dataTransfer.setData('text/plain', _projTabDrag); } catch (_) {}
 });
 _projPanel?.addEventListener('dragover', (e) => {
-  const t = e.target.closest?.('[data-ptab]');
+  const t = e.target.closest?.('[data-phead]');
   if (!_projTabDrag || !t) return;
   e.preventDefault();
-  _projPanel.querySelectorAll('.proj-tab.drop-target').forEach(x => x.classList.remove('drop-target'));
+  _projPanel.querySelectorAll('.project-head.drop-target').forEach(x => x.classList.remove('drop-target'));
   t.classList.add('drop-target');
 });
 _projPanel?.addEventListener('drop', (e) => {
-  const t = e.target.closest?.('[data-ptab]');
+  const t = e.target.closest?.('[data-phead]');
   if (!_projTabDrag || !t) return;
   e.preventDefault();
   const order = _projTabOrder(_projectData.projects || []);
-  const from = order.indexOf(_projTabDrag), to = order.indexOf(t.dataset.ptab);
+  const from = order.indexOf(_projTabDrag), to = order.indexOf(t.dataset.phead);
   if (from >= 0 && to >= 0 && from !== to) _projTabMove(order, from, to);
   _projTabDrag = null;
   _renderProjects();
 });
 _projPanel?.addEventListener('dragend', () => {
   _projTabDrag = null;
-  _projPanel.querySelectorAll('.proj-tab.drop-target').forEach(x => x.classList.remove('drop-target'));
+  _projPanel.querySelectorAll('.project-head.drop-target').forEach(x => x.classList.remove('drop-target'));
 });
 
 document.getElementById('project-panel-content')?.addEventListener('keydown', (event) => {
-  const ptab = event.target.closest('[data-ptab]');
-  if (ptab && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
-    event.preventDefault();
-    const order = _projTabOrder(_projectData.projects || []);
-    const i = order.indexOf(ptab.dataset.ptab), j = i + (event.key === 'ArrowLeft' ? -1 : 1);
-    if (i < 0 || j < 0 || j >= order.length) return;
-    let focusKey = order[j];
-    if (event.altKey) { focusKey = order[i]; _projTabMove(order, i, j); }  // Alt+←/→ moves the tab
-    _storageSet('agenticos.projectTabs.active', focusKey);  // ←/→ selects the next tab; Alt keeps this one
-    _renderProjects();
-    document.querySelector(`[data-ptab="${CSS.escape(focusKey)}"]`)?.focus();
-    return;
+  const phead = event.target.closest('[data-phead]');
+  if (phead && event.target === phead) {
+    const key = phead.dataset.phead;
+    if (event.altKey && (event.key === 'ArrowUp' || event.key === 'ArrowDown')) {  // Alt+↑/↓ moves the project
+      event.preventDefault();
+      const order = _projTabOrder(_projectData.projects || []);
+      const i = order.indexOf(key), j = i + (event.key === 'ArrowUp' ? -1 : 1);
+      if (i < 0 || j < 0 || j >= order.length) return;
+      _projTabMove(order, i, j);
+      _renderProjects();
+      document.querySelector(`[data-phead="${CSS.escape(key)}"]`)?.focus();  // focus stays on the moved head
+      return;
+    }
+    if ((event.key === 'Enter' || event.key === ' ') && !phead.classList.contains('project-error')) {
+      event.preventDefault();
+      _projToggle(key);
+      _renderProjects();
+      document.querySelector(`[data-phead="${CSS.escape(key)}"]`)?.focus();
+      return;
+    }
   }
   const input = event.target.closest('.session-rename');
   if (!input) return;
@@ -4550,7 +4550,7 @@ function _tabEnded(t) { if (t.info.kind === 'resume') _offerCardNext(t.info.term
 
 socket.on('run_logged', () => { refreshJobBoard(); });
 
-// ── Card Terminal tab (C / C2): live or replayed run view, quick reply, embedded interactive
+// ── Card Terminal tab (C / C2): live or replayed run view, embedded interactive
 // session. Nothing here opens, expands or adds to the bottom panel unless the user asks.
 // Every async step captures the view generation it started in and drops its result if the user
 // has moved to another card or attempt meanwhile (UI-05). The interactive session of a card is
@@ -4565,7 +4565,6 @@ function _cardTermBind(runId, run, item) {
   Object.assign(_cardTerm, { gen: _cardTerm.gen + 1, runId, run, item, data: null, viewRunId: null, latestRunId: null, endedRunId: null, endedTermId: null });
   document.getElementById('detail-term-pinned').textContent = '';
   document.getElementById('detail-term-status').textContent = '';
-  document.getElementById('detail-term-reply').value = '';  // a reply typed for one card never goes to another (UI3-05)
   document.getElementById('detail-term-next').style.display = 'none';
   document.getElementById('detail-term-interactive').style.display = 'none';
   document.getElementById('detail-term-end').style.display = 'none';
@@ -4646,10 +4645,6 @@ async function _cardTermUse(runId, gen) {
   _cardTerm.data = data;
   const pinned = (data.last_message || '').trim();
   document.getElementById('detail-term-pinned').textContent = pinned ? pinned.split('\n').slice(-12).join('\n') : '';
-  const latest = runId === (_cardTerm.latestRunId || _cardTerm.runId), reply = document.getElementById('detail-term-reply');
-  reply.disabled = !latest;
-  reply.placeholder = latest ? 'Quick reply: continues this same session headless'
-    : 'Viewing an earlier attempt — switch to the latest to reply';
   return true;
 }
 async function _cardTermLoad(runId) {
@@ -4659,11 +4654,6 @@ async function _cardTermLoad(runId) {
   Object.assign(_cardTerm, { viewRunId: runId, pending: [], data: null, attemptGen: (_cardTerm.attemptGen || 0) + 1 });
   document.getElementById('detail-term-interactive').style.display = 'none';
   document.getElementById('detail-term-next').style.display = _cardTerm.endedRunId === runId ? '' : 'none';  // UI12-03, UI14-02
-  // Quick reply continues the card's current session, so it is offered on the latest attempt only (UI10-02).
-  const latest = runId === (_cardTerm.latestRunId || _cardTerm.runId), reply = document.getElementById('detail-term-reply');
-  reply.disabled = !latest;
-  reply.placeholder = latest ? 'Quick reply: continues this same session headless'
-    : 'Viewing an earlier attempt — switch to the latest to reply';
   let data = { lines: [] };
   try {
     const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/events`);
@@ -4796,26 +4786,6 @@ function _cardTermShowInPanel() {
     openRunTab(_cardTerm.viewRunId || _cardTerm.runId, (_cardTerm.data || {}).project_key);
   }
 }
-async function _cardTermQuickReply() {
-  const gen = _cardTerm.gen, input = document.getElementById('detail-term-reply'), status = document.getElementById('detail-term-status');
-  const reply = input.value.trim(), runId = _cardTerm.runId;
-  const latestId = _cardTerm.latestRunId || runId;
-  if (!reply || !runId || (_cardTerm.viewRunId || runId) !== latestId) return;  // latest attempt only (UI10-02, UI11-02)
-  status.textContent = 'sending…';
-  let r = await _projectApi('POST', `/api/runs/${encodeURIComponent(latestId)}/retry`, { reply, strict: true });
-  if (!r.ok && r.data.in_use_elsewhere) {  // same confirmation as the card reply (§4)
-    if (!confirm(`This session looks open elsewhere: ${r.data.in_use_elsewhere}.\n\nSend the reply anyway?`)) { status.textContent = ''; return; }
-    r = await _projectApi('POST', `/api/runs/${encodeURIComponent(latestId)}/retry`, { reply, strict: true, confirm_in_use: true });
-  }
-  refreshJobBoard(true);
-  if (!_cardTermCurrent(gen)) return;
-  if (!r.ok || r.data.ok === false) { status.textContent = r.data.error || `HTTP ${r.status}`; return; }
-  input.value = '';
-  status.textContent = 'continuing the same session…';
-  _cardTerm.runId = r.data.run_id;
-  await _cardTermAttempts(gen);
-  if (_cardTermCurrent(gen)) _cardTermLoad(r.data.run_id);
-}
 socket.on('run_event', (d) => {
   if (_cardTerm.mode !== 'run' || !_cardTerm.xterm || d.run_id !== _cardTerm.viewRunId) return;
   if (_cardTerm.pending) _cardTerm.pending.push(d);
@@ -4920,9 +4890,12 @@ socket.on('run_state_change', (data) => {
   }
 });
 
+let _projectsReloadTimer = null;  // a card title change shows in the session rows at once, debounced (DP-18)
 socket.on('linear_issues_updated', (data) => {
   if (data && data.id_map) _sttApplyAliases(data.id_map);
   if (_linearConfigured) _requestBoardRefresh();
+  clearTimeout(_projectsReloadTimer);
+  _projectsReloadTimer = setTimeout(loadProjects, 500);
 });
 
 socket.on('run_progress', (data) => {

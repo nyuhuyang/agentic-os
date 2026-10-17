@@ -86,7 +86,7 @@ def _stall(_app, socketio, run_id: str, job: dict) -> None:
         proc = _app._running_procs.pop(run_id, None)
     if proc:
         _app._kill_group(proc)
-    _app._write_owner_record(run_id, job, "stalled", "stalled")
+    _app._write_owner_record(run_id, job, "stalled", "stalled", proc=proc)
     socketio.emit("run_state_change", {"run_id": run_id, "state": "stalled", "skill": job.get("skill", "unknown")})
     issue_id = job.get("linear_issue_id")
     linear_mod = _app._module_registry.get("linear")

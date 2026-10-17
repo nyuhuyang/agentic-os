@@ -162,6 +162,9 @@ _running_procs: dict[str, "subprocess.Popen[bytes]"] = {}
 
 STALL_TIMEOUT_S = 300
 AI_RUN_TIMEOUT_S = int(os.environ.get("AI_RUN_TIMEOUT_S", "1800"))  # 30 min default
+# A card continuing its own session (a reply, Retry or re-dispatch) is bounded by the stall
+# detector (no output for STALL_TIMEOUT_S) and this ceiling, not the 30-minute cap (D7).
+AI_SESSION_TIMEOUT_S = int(os.environ.get("AI_SESSION_TIMEOUT_S", "14400"))
 
 app = Flask(__name__, template_folder="templates")
 
@@ -893,6 +896,7 @@ def _publish_run_line(run_id: str, fmt: str, line: str) -> None:
     for shown in project_runs.render_event(fmt, line):
         seq = project_runs.ring_for(run_id).append(shown)
         socketio.emit("run_event", {"run_id": run_id, "line": shown, "seq": seq})
+    project_runs.note_agent_error(run_id, fmt, line)  # the agent's own failure text, for the record (D6)
     job = _running_jobs.get(run_id)
     if job is not None:
         job["last_progress_at"] = time.monotonic()  # a streaming agent is making progress (stall pass, UI2-03)
@@ -2351,13 +2355,20 @@ def _ai_command(
     output_format: str = "json",
     skill_name: str | None = None,
     registry: dict[str, dict] | None = None,
+    persist: bool = True,
 ) -> list[str]:
     """Build a non-interactive agent command with agent-specific flags.
 
     For Claude, the harness loads SKILL.md from ~/.claude/skills/ automatically.
     For Codex and DeepSeek, we prepend SKILL.md content to the prompt directly.
+    persist=False (a one-off call such as skill routing) leaves no session in the agent's
+    store, so it never shows up in `claude --resume` / `codex resume` (DP-28).
     """
     cli = _ai_cli(agent)
+    if not persist and agent == "claude":
+        cli = cli + ["--no-session-persistence"]
+    elif not persist and agent == "codex":
+        cli = cli[:2] + ["--ephemeral"] + cli[2:]  # an exec option: right after `codex exec`
     if agent == "claude":
         return cli + [prompt, "--output-format", output_format]
     # Codex / DeepSeek: inject skill instructions into prompt
@@ -3104,7 +3115,7 @@ def _cancel_generic(run_id: str, error: str) -> dict | None:
         _kill_group(proc)
         with contextlib.suppress(Exception):
             proc.wait(timeout=5)
-    _write_owner_record(run_id, job, "cancelled", error)
+    _write_owner_record(run_id, job, "cancelled", error, proc=proc)
     return job
 
 
@@ -3128,21 +3139,32 @@ def _comment_quietly(post, *args) -> None:
         logger.exception("closing tracker comment failed")
 
 
-def _write_owner_record(run_id: str, job: dict, status: str, error: str) -> None:
+def _write_owner_record(run_id: str, job: dict, status: str, error: str, proc=None) -> None:
     """Terminal record by the party that ended a run (cancel, stall). It carries the launch's
     metadata (job["record"]), so a retry of it keeps its task, ancestry and agent (RWS-002).
-    Tried twice: the displaced worker writes nothing, so a lost record loses the run (RWS-003)."""
+    Tried twice: the displaced worker writes nothing, so a lost record loses the run (RWS-003).
+    `proc`: the run's signalled process; until its group is gone, its session is not renamed (R6)."""
     meta = {"linear_issue_id": job.get("linear_issue_id"), **job.get("record", {})}
     sid = job.get("agent_session_id") or (_SESSION_CLAIMS.get(run_id) or (None, None))[1]
     if sid:  # a cancelled/stalled run stays resumable (UI2-04)
         meta.setdefault("agent_session_id", sid)
+    agent = meta.get("agent") or job.get("agent")
+    pgid = getattr(proc, "pid", None)
+    _mark_closing(agent, sid, pgid)  # before the record: no trigger renames a session still exiting
     # A session card's routing and binding go with it, so the next reply routes the same (SBR-005).
     extra = job.get("record_extra")
     prompt = job.get("prompt", "")
-    if extra and extra.get("project_key") and extra.get("confidential") is not False and _records_unsafe():
+    unsafe = extra and extra.get("project_key") and extra.get("confidential") is not False and _records_unsafe()
+    if unsafe:
         prompt, error = _WITHHELD_PROMPT, f"withheld ({status}): run records are outside this checkout's ignored state/ or outputs/"
-    _write_run_log_retrying(job.get("skill", "unknown"), status, job.get("started_at", ""), 0.0,
+    if extra and unsafe and "issue_title" in extra:
+        extra = {k: v for k, v in extra.items() if k != "issue_title"}  # withheld like the prompt (DP-24)
+    started = _parse_run_started_at(job.get("started_at"))
+    # the real elapsed time, so the card's own last activity ends at the cancel or stall (DP-27)
+    dur = max(0.0, (datetime.now(timezone.utc) - started).total_seconds()) if started else 0.0
+    _write_run_log_retrying(job.get("skill", "unknown"), status, job.get("started_at", ""), dur,
                             prompt=prompt, error=error, run_id=run_id, extra=extra, **meta)
+    _after_card_run(run_id, meta.get("linear_issue_id"), agent, sid, pgid)
 
 
 class _RunClaim:
@@ -3200,7 +3222,8 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
                                resume_session: str | None = None, reuse_only: bool = False,
                                skill: str = "_prompt", confidential: bool | None = None,
                                ticket_hold: contextlib.ExitStack | None = None,
-                               record_extra: dict | None = None) -> dict:
+                               record_extra: dict | None = None, timeout: float | None = None,
+                               note: str | None = None) -> dict:
     """The one launch helper for every project-bound launch (dispatch and retry/rework).
 
     Holds the ticket lock across worktree -> agent -> runner commit -> verify -> seed check
@@ -3208,9 +3231,13 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
     worktree ends as an error record, never as a launch at the runner root. `confidential` is
     the persisted flag (None = unknown); it never weakens, and unknown is treated as
     confidential for tracker comments (I5-02). Cancel, stall and shutdown only flag the job;
-    this helper writes every record, so each carries the binding (I5-01)."""
+    this helper writes every record, so each carries the binding (I5-01).
+    `timeout`: a session continuation passes AI_SESSION_TIMEOUT_S (D7); `note`: why this run
+    started a new session, written first into its stream (DP-39)."""
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
+    timeout = AI_RUN_TIMEOUT_S if timeout is None else timeout
+    agent_pgid: list = [None]  # the agent's process group, for the run-end name sync (R6)
     gen_key = linear_issue_id or task_id
     stored = _durable_binding(linear_issue_id, task_id, project_key, ident) or {}
     confidential = _ticket_confidential(project_key, ident, linear_issue_id, task_id,
@@ -3228,6 +3255,8 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
 
     def _track(proc):
         _running_procs[run_id] = proc
+        if agent_pgid[0] is None:
+            agent_pgid[0] = getattr(proc, "pid", None)
         if job.get("cancelled"):  # cancelled between phases: stop this one too
             _terminate_group(proc)
 
@@ -3288,15 +3317,18 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
             try:
                 lines, stderr_s, code, timed_out = project_runs.run_agent(
                     cmd, binding["worktree"], _project_exec_env(agent, project), run_id, agent,
-                    AI_RUN_TIMEOUT_S, _emit, on_start=_track,
+                    timeout, _emit, on_start=_track,
                     on_session=lambda sid: job.update(agent_session_id=sid), log_path=log_path,
-                    on_stderr=sink.feed)  # stderr live as it arrives (IR9-02)
+                    on_stderr=sink.feed, note=note)  # stderr live as it arrives (IR9-02)
             finally:
                 sink.close()
             _running_procs.pop(run_id, None)
             output, it, ot, model, sid, ok, error = _parse_project_output(agent, lines, stderr_s, code)
+            agent_error = project_runs.AGENT_ERRORS.pop(run_id, None)
+            if not ok and agent_error:
+                error = agent_error  # the agent's own reason, e.g. a usage limit or turn.failed (D6, DP-44)
             if timed_out:
-                status, error = "timeout", f"Timed out after {AI_RUN_TIMEOUT_S}s"
+                status, error = "timeout", f"Timed out after {int(timeout)}s"
             else:
                 status = "review" if ok else "error"
             if job.get("cancelled"):  # skip the work, keep the safety check (I6-13, I7-07)
@@ -3331,10 +3363,14 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
             status, error = cancelled, "Cancelled by user" if cancelled == "cancelled" else "stalled"
         verify = result.get("verify")
         # record_extra: a session card's routing (resume_session, source), merged into the record (SBR-001)
-        extra = {**(record_extra or {}), **binding, **{k: v for k, v in result.items() if k != "verify_tail"}}
+        extra = {**(record_extra or {}), **binding, **{k: v for k, v in result.items() if k != "verify_tail"},
+                 **_issue_title_extra(linear_issue_id, binding["confidential"]),
+                 **({"session_note": note} if note else {})}
         if verify:
             extra["verify"] = verify
         withhold = binding["confidential"] is not False and _records_unsafe()
+        if withhold:
+            extra.pop("issue_title", None)  # withheld like the prompt (DP-24)
         if withhold:  # never write confidential text where records may leak (I5-04, I6-05)
             prompt_rec, output_rec = "[withheld: run-record location not allowed for confidential runs]", ""
             error = f"withheld ({status}): run records are outside this checkout's ignored state/ or outputs/"
@@ -3360,6 +3396,8 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
         return {"status": status, "error": error, **extra}
     finally:
         _running_jobs.pop(run_id, None)
+        # after the record and the job's removal; the group was reaped by run_agent (§2 triggers)
+        _after_card_run(run_id, linear_issue_id, agent, sid or resume_session, agent_pgid[0])
 
 
 def _reset_key(records: list[dict], task_id: str) -> str:
@@ -3689,7 +3727,18 @@ def _board_sessions() -> tuple[set, dict]:
         issue = cache.get(r.get("linear_issue_id") or "") or {}
         ident = r.get("issue_identifier") or issue.get("identifier")
         if ident:
-            labels[(agent, sid)] = {"label": ident, "title": issue.get("title")}
+            labels[(agent, sid)] = {"label": ident, "title": issue.get("title") or r.get("issue_title")}
+    # A running card's session is labelled while it runs, not only once its record lands (§2).
+    for job in list(_running_jobs.values()):
+        agent, sid = canonical_agent(job.get("agent")) or job.get("agent"), job.get("agent_session_id")
+        iid = job.get("linear_issue_id")
+        if not agent or not sid or not iid:
+            continue
+        issue = cache.get(iid) or {}
+        extra = job.get("record_extra") or {}
+        ident = extra.get("issue_identifier") or issue.get("identifier") or (labels.get((agent, sid)) or {}).get("label")
+        if ident:
+            labels[(agent, sid)] = {"label": ident, "title": issue.get("title") or extra.get("issue_title") or job.get("issue_title")}
     ids |= {(canonical_agent(a) or a, s) for a, s in _live_session_ids() if a and s}
     return ids, labels
 
@@ -3713,6 +3762,8 @@ def _valid_intent(rec: dict | None) -> dict | None:
         return None
     latest = _intent_latest(issue_id)
     if not latest or latest.get("run_id") != rec.get("run_id"):
+        return None
+    if _tracker_issue(issue_id) is None:  # the card is gone: no reply resumes through it (DP-45)
         return None
     return intent if intent.get("gen") == reset_gen.current(issue_id) else None
 
@@ -3871,6 +3922,269 @@ def _session_card(agent: str, sid: str) -> str | None:
     return None
 
 
+# ── One task, one session, named by the card title (2026-10-16 plan §2–§4) ───────────────
+# A card-bound session is named by its card's title, natively too, and every launch of a card
+# continues the card's own session. Only claude and codex sessions; dsh is out of scope.
+
+_SESSION_AGENTS = ("claude", "codex")
+_CLOSING_SESSIONS: dict[tuple[str, str], int] = {}  # (agent, sid) -> pgid of a run still exiting (R6)
+_LINEAR_TITLES: dict[str, tuple[str, str]] = {}  # issue -> (title, updatedAt), only as Linear returned it
+_TITLE_SYNC_LOCKS: dict[str, threading.Lock] = {}
+_TITLE_SYNC_GUARD = threading.Lock()
+
+
+def _title_sync_lock(issue_id: str) -> threading.Lock:
+    """Serializes one card's confirmed-title writes with its native renames (R5). Blocking, and
+    separate from reset_gen.issue_lock. Lock order: this, then projects.session_lock."""
+    with _TITLE_SYNC_GUARD:
+        return _TITLE_SYNC_LOCKS.setdefault(issue_id, threading.Lock())
+
+
+def _confirm_linear_title(issue_id: str, title: object, updated_at: object = "") -> None:
+    """Record a title Linear itself returned. An older one never replaces a newer one, so a poll
+    that fetched before a confirmed rename cannot roll it back (R4)."""
+    if not issue_id or not isinstance(title, str) or not title.strip():
+        return
+    stamp = updated_at if isinstance(updated_at, str) else ""
+    with _title_sync_lock(issue_id):
+        old = _LINEAR_TITLES.get(issue_id)
+        if old is None or stamp >= old[1]:
+            _LINEAR_TITLES[issue_id] = (title, stamp)
+
+
+def _confirmed_title(issue_id: str) -> str | None:
+    """The card title a native rename may use: never the display cache, which can hold an
+    unconfirmed /local title (DP-31), and never the session's own title (DP-46)."""
+    mod = _module_registry.get("linear")
+    if mod is not None and mod._capability.get("type") == "linear":
+        if issue_id in _LINEAR_TITLES:
+            return _LINEAR_TITLES[issue_id][0]
+    elif mod is not None:
+        with contextlib.suppress(Exception):
+            issue = mod.get_local_tracker().fetch_issue(issue_id)
+            if issue and isinstance(issue.get("title"), str) and issue["title"].strip():
+                return issue["title"]
+    for r in reversed(_all_records()):  # the title recorded at launch
+        if r.get("linear_issue_id") == issue_id and isinstance(r.get("issue_title"), str) and r["issue_title"].strip():
+            return r["issue_title"]
+    return None
+
+
+def _issue_title_extra(issue_id: str | None, conf=False) -> dict:
+    """{"issue_title": the card title at launch} for a card's run record, withheld like the
+    prompt for a confidential run whose records may leak (DP-24)."""
+    if not issue_id or (conf is not False and _records_unsafe()):
+        return {}
+    title = (_tracker_issue(issue_id) or {}).get("title") or _confirmed_title(issue_id)
+    return {"issue_title": title} if isinstance(title, str) and title.strip() else {}
+
+
+def _card_sessions(live_only: bool = True) -> dict[tuple[str, str], str]:
+    """(agent, sid) -> issue id of every card-bound session: from run records (newest wins),
+    running jobs and session claims (DP-01, DP-08). live_only drops cards that are gone (DP-29)."""
+    out: dict[tuple[str, str], str] = {}
+    for r in _all_records():
+        agent, sid, iid = canonical_agent(r.get("agent")) or r.get("agent"), r.get("agent_session_id"), r.get("linear_issue_id")
+        if iid and sid and agent in _SESSION_AGENTS and r.get("status") != "archived":
+            out[(agent, sid)] = iid
+    jobs = dict(_running_jobs)
+    for job in jobs.values():
+        agent, sid, iid = canonical_agent(job.get("agent")) or job.get("agent"), job.get("agent_session_id"), job.get("linear_issue_id")
+        if iid and sid and agent in _SESSION_AGENTS:
+            out[(agent, sid)] = iid
+    for rid, (agent, sid) in list(_SESSION_CLAIMS.items()):
+        iid = (jobs.get(rid) or {}).get("linear_issue_id")
+        agent = canonical_agent(agent) or agent
+        if iid and sid and agent in _SESSION_AGENTS:
+            out[(agent, sid)] = iid
+    if live_only:
+        live = {iid: _tracker_issue(iid) is not None for iid in set(out.values())}
+        out = {k: v for k, v in out.items() if live[v]}
+    return out
+
+
+def _card_session(issue_id: str | None, agent: str | None) -> tuple[str, dict] | None:
+    """The card's own session for this agent: the newest record of the issue with that agent and
+    a session id, across every reset generation (D3), skipping audits and archived records. None
+    when the card is gone (DP-43) or the agent is not claude/codex (DP-22)."""
+    agent = canonical_agent(agent) or agent
+    if not issue_id or agent not in _SESSION_AGENTS or _tracker_issue(issue_id) is None:
+        return None
+    for r in reversed(_all_records()):
+        if r.get("linear_issue_id") == issue_id and (canonical_agent(r.get("agent")) or r.get("agent")) == agent \
+                and r.get("agent_session_id") and not r.get("interactive_ended") and r.get("status") != "archived":
+            return r["agent_session_id"], r
+    return None
+
+
+def _group_alive(pgid: int | None) -> bool:
+    """Whether any process is left in this process group (a reaped leader is not enough, R6)."""
+    if not pgid or pgid <= 1:
+        return False
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _mark_closing(agent: str | None, sid: str | None, pgid: int | None) -> None:
+    """A run that carries a session is being stopped: until its whole group is gone, no trigger
+    renames that session (R6)."""
+    agent = canonical_agent(agent) or agent
+    if agent in _SESSION_AGENTS and sid and _group_alive(pgid):
+        _CLOSING_SESSIONS[(agent, sid)] = pgid
+
+
+def _rename_idle(target: dict, issue_id: str, ended: tuple | None) -> bool:
+    """A native rename may write now: no live terminal, job, claim or closing marker holds the
+    session (the `ended` owner excepted), and its last write is old, or was this card's own last
+    run or terminal (DP-26), or was made by the `ended` owner that has just exited (DP-03/11)."""
+    from runner.modules.pty import TERMINALS
+    key = (target["agent"], target["id"])
+    if key in _CLOSING_SESSIONS:
+        if _group_alive(_CLOSING_SESSIONS[key]):
+            return False
+        _CLOSING_SESSIONS.pop(key, None)
+    kind, owner, owner_key = ended if ended else (None, None, None)
+    live = {(t.agent, t.session_id) for tid, t in list(TERMINALS.items())
+            if t.alive and t.session_id and not (kind == "term" and tid == owner)}
+    live |= {(canonical_agent(j.get("agent")) or j.get("agent"), j.get("agent_session_id"))
+             for rid, j in list(_running_jobs.items()) if j.get("agent_session_id") and not (kind == "run" and rid == owner)}
+    live |= {(canonical_agent(a) or a, s) for rid, (a, s) in list(_SESSION_CLAIMS.items())
+             if not (kind == "run" and rid == owner)}
+    if key in live:
+        return False
+    try:
+        mtime = target["path"].stat().st_mtime
+    except OSError:
+        return True
+    if time.time() - mtime >= _projects.SESSION_FRESH_S or (owner_key == key):
+        return True
+    own = _own_activity_end(issue_id)
+    return own is not None and mtime <= own + 5
+
+
+def _sync_card_session_names(issue_id: str | None, *, title: str | None = None, ended: tuple | None = None) -> set:
+    """Name every session of this card after its confirmed title, natively (D2). Returns the
+    (agent, sid) pairs skipped as busy; they are renamed at a later trigger. Never raises."""
+    busy: set = set()
+    if not issue_id:
+        return busy
+    try:
+        with _title_sync_lock(issue_id):  # title choice and native write as one step (R5)
+            if _tracker_issue(issue_id) is None:
+                return busy
+            name = _projects.session_name_text(_confirmed_title(issue_id) or title)
+            if not name:
+                return busy  # no confirmed title: never the runner preamble (DP-46)
+            for (agent, sid), iid in _card_sessions(live_only=False).items():
+                if iid != issue_id:
+                    continue
+                target = _projects.find_session(agent, sid)
+                if not target or target.get("native_title") == name:
+                    continue
+                try:
+                    with _projects.session_lock(agent, sid):
+                        if not _rename_idle(target, issue_id, ended):
+                            busy.add((agent, sid))
+                            continue
+                        _projects.rename_session(target, name)
+                except _projects.SessionBusy:
+                    busy.add((agent, sid))
+                except Exception as exc:
+                    logger.warning("session name for %s %s not written: %s", agent, sid, exc)
+    except Exception:
+        logger.exception("session-name sync for %s failed", issue_id)
+    return busy
+
+
+def _after_card_run(run_id: str, issue_id: str | None, agent: str | None, sid: str | None,
+                    pgid: int | None = None, kind: str = "run") -> None:
+    """Run-end trigger: name the card's sessions once the run's process group is gone. A group
+    still exiting keeps a closing marker (R6), checked every second for up to 5 minutes.
+    kind="term": `run_id` is a card terminal's id, ended by close or by itself (DP-11)."""
+    if not issue_id:
+        return
+    agent = canonical_agent(agent) or agent
+    key = (agent, sid) if sid and agent in _SESSION_AGENTS else None
+    if key:
+        _mark_closing(agent, sid, pgid)
+
+    def _watch() -> None:
+        if key and key in _CLOSING_SESSIONS:
+            deadline = time.monotonic() + 300
+            while _group_alive(_CLOSING_SESSIONS.get(key)):
+                if time.monotonic() > deadline:
+                    logger.warning("session %s still has live processes; its name is not written", sid)
+                    return
+                time.sleep(1)
+            _CLOSING_SESSIONS.pop(key, None)
+        _sync_card_session_names(issue_id, ended=(kind, run_id, key))
+
+    try:
+        threading.Thread(target=_watch, daemon=True, name=f"title-sync-{run_id[:8]}").start()
+    except Exception:
+        logger.exception("session-name sync for %s not started", run_id)
+
+
+def _sync_titles_soon(issue_id: str, title: str | None = None) -> None:
+    """A confirmed title change: rename the card's idle sessions now, in the background."""
+    threading.Thread(target=_sync_card_session_names, args=(issue_id,), kwargs={"title": title},
+                     daemon=True, name=f"title-sync-{issue_id[:8]}").start()
+
+
+def _session_note(run_id: str, text: str) -> None:
+    """A runner note in a generic run's stream: why this run started a new session (DP-19/32)."""
+    try:
+        RUN_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
+        with _claude_stream_log_path(run_id).open("a", encoding="utf-8") as sf:
+            _persist_and_publish(run_id, "text", sf, project_runs.note_line(text))
+    except OSError:
+        logger.warning("run note for %s not written", run_id)
+
+
+def _resumable_card_session(issue_id: str | None, agent: str | None, folder: str | Path | None
+                            ) -> tuple[str | None, str | None]:
+    """(sid, None) when the card's session for this agent can continue in `folder`; otherwise
+    (None, reason) for the run view's `new session: <reason>` note (§4)."""
+    agent = canonical_agent(agent) or agent
+    if agent not in _SESSION_AGENTS:
+        return None, "only claude and codex sessions continue"
+    found = _card_session(issue_id, agent)
+    if not found:
+        other = any(_card_session(issue_id, a) for a in _SESSION_AGENTS if a != agent)
+        return None, "the card's session belongs to another agent" if other else "no session yet"
+    sid = found[0]
+    target = _projects.find_session(agent, sid)
+    if not target:
+        return None, "the card's session was removed or archived"
+    if folder is not None and os.path.realpath(target["cwd"]) != os.path.realpath(str(folder)):
+        return None, "the card's session is in a different folder"
+    return sid, None
+
+
+def _resume_admission(issue_id: str | None, agent: str, sid: str, run_id: str) -> str | None:
+    """Why a dispatch may not continue this session now, or None: live in the dashboard, open
+    outside it (DP-25), or held by a rename/sync (SessionBusy at claim, DP-13). On None the
+    session is claimed for `run_id`."""
+    target = _projects.find_session(agent, sid)
+    if not target:
+        return "the card's session was removed or archived"
+    if (agent, sid) in {(canonical_agent(a) or a, s) for a, s in _live_session_ids()}:
+        return "session in use elsewhere: it is open in a dashboard terminal or a running job"
+    why = session_in_use(target, None, _own_activity_end(issue_id))
+    if why:
+        return f"session in use elsewhere: {why}"
+    try:
+        _claim_session(agent, sid, run_id)
+    except _projects.SessionBusy as exc:
+        return f"session in use elsewhere: {exc}"
+    return None
+
+
 def _to_board_locked(project, target: dict):
     from runner.modules.linear import card_locked, reserve_card
     agent, sid = target["agent"], target["id"]
@@ -3906,7 +4220,8 @@ def _to_board_locked(project, target: dict):
                 # source "session": the card opens its session's folder even after a reset (SBI-003)
                 rec = {**latest, "status": "todo", "agent_session_id": sid, "agent": agent, "issue_identifier": ident,
                        "resume_session": intent, "to_board": True, "source": "session", "confidential": conf,
-                       "session_project": project.key}  # survives a reset, unlike resume_session (SBI-010)
+                       "session_project": project.key,  # survives a reset, unlike resume_session (SBI-010)
+                       **_issue_title_extra(issue_id, conf)}
                 prompt, output, _ = _withheld(conf, latest.get("prompt", ""), latest.get("output", ""))
                 rec.pop("reset_gen", None)
                 run_id = latest.get("run_id") or str(uuid.uuid4())
@@ -3932,15 +4247,18 @@ def _to_board_locked(project, target: dict):
                    task_id=run_id, agent=agent, agent_session_id=sid, reset_generation=gen, audit=True,
                    extra={"issue_identifier": issue.get("identifier"), "project_key": project.key, "confidential": conf,
                           "source": "session", "to_board": True, "session_project": project.key,
+                          **({"issue_title": issue.get("title")} if issue.get("title") and not (conf is not False and _records_unsafe()) else {}),
                           "resume_session": {"agent": agent, "id": sid, "project_key": project.key, "gen": gen}})
     socketio.emit("run_logged", {"skill": "_prompt", "run_id": run_id})
     return jsonify({"ok": True, "run_id": run_id, "issue_id": issue["id"], "created": True})
 
 
-def _retry_session_card(run_id: str, original: dict, intent: dict, data: dict):
+def _retry_session_card(run_id: str, original: dict, intent: dict, data: dict, card_sourced: bool = False):
     """A reply to a session card (§3): exactly that session, strict, in its own folder, under the
     project's policy. A ticket session in its own worktree goes through the project helper
-    (commit/verify kept); any other folder runs the agent there directly, nothing committed."""
+    (commit/verify kept); any other folder runs the agent there directly, nothing committed.
+    card_sourced: a transient intent built from the card's own session after a reset (D3), not a
+    persisted resume_session; admitted on a live card and the current generation (DP-34)."""
     from runner.modules.linear import reserve_card
     agent, sid = intent["agent"], intent["id"]
     body_agent = canonical_agent(data.get("agent"))
@@ -3958,7 +4276,7 @@ def _retry_session_card(run_id: str, original: dict, intent: dict, data: dict):
     try:
         plock.enter_context(_projects.project_lock(intent["project_key"]))
         return _retry_session_card_held(run_id, original, intent, data, reply, attachments, prompt,
-                                        linear_issue_id, task_id, plock)
+                                        linear_issue_id, task_id, plock, card_sourced)
     except _projects.ProjectError as exc:
         return jsonify({"ok": False, "error": f"session not available: {exc}"}), 409
     finally:
@@ -3967,7 +4285,7 @@ def _retry_session_card(run_id: str, original: dict, intent: dict, data: dict):
 
 
 def _retry_session_card_held(run_id, original, intent, data, reply, attachments, prompt, linear_issue_id,
-                             task_id, plock):
+                             task_id, plock, card_sourced=False):
     """_retry_session_card under the project's lifecycle hold; a generic launch hands `plock`
     to its worker (plock.handed), which keeps it through launch and record."""
     from runner.modules.linear import reserve_card
@@ -3996,10 +4314,16 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
         _release_session(new_run_id)
         return jsonify({"ok": False, "error": str(exc)}), 409
     with reset_gen.issue_lock(linear_issue_id):  # admission: a reset since the request began wins (SBI-007)
-        if _valid_intent(_intent_latest(linear_issue_id)) != intent:
+        if _tracker_issue(linear_issue_id) is None:  # deleted outside the dashboard: no generation bump (R2)
             held.close()
             _release_session(new_run_id)
-            return jsonify({"ok": False, "error": "this card was reset meanwhile; its next run starts fresh"}), 409
+            return jsonify({"ok": False, "error": "this card no longer exists"}), 409
+        admitted = (reset_gen.current(linear_issue_id) == intent["gen"]) if card_sourced \
+            else _valid_intent(_intent_latest(linear_issue_id)) == intent
+        if not admitted:
+            held.close()
+            _release_session(new_run_id)
+            return jsonify({"ok": False, "error": "this card was reset meanwhile; send the reply again"}), 409
     durable = _durable_binding(linear_issue_id, task_id) or {}
     ident = original.get("issue_identifier") or issue.get("identifier") or durable.get("issue_identifier")
     known = [original["confidential"]] if "confidential" in original else []
@@ -4007,8 +4331,11 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
     if durable.get("issue_identifier") and durable.get("project_key") == project.key:
         conf = _sticky(conf, _ticket_confidential(project.key, durable["issue_identifier"], linear_issue_id, task_id))
     binding = {"project_key": project.key, "confidential": conf}
-    record_extra = {"issue_identifier": ident, "resume_session": intent, "source": "session",
-                    "session_project": project.key, **binding}
+    # A card-sourced continuation persists no intent: the next reply finds the session again
+    # through _card_session (DP-34).
+    record_extra = {"issue_identifier": ident, "source": "session", "session_project": project.key,
+                    **({} if card_sourced else {"resume_session": intent}), **binding,
+                    **_issue_title_extra(linear_issue_id, conf)}
     wt_ident = durable.get("issue_identifier") if durable.get("project_key") == project.key else None
     in_worktree = bool(wt_ident) and os.path.realpath(_projects.worktree_path(project, wt_ident)) == os.path.realpath(target["cwd"])
     if not in_worktree and conf is not False and _records_unsafe():  # refuse before launch (STB-013)
@@ -4041,7 +4368,8 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
                 title=(original.get("prompt") or "")[:80], run_id=new_run_id, linear_issue_id=linear_issue_id,
                 task_id=task_id, launch_gen=launch_gen, attempt=attempt, parent_run_id=run_id,
                 resume_session=sid, reuse_only=True, skill=original.get("skill") or "_prompt",
-                confidential=conf, ticket_hold=held, record_extra=record_extra)
+                confidential=conf, ticket_hold=held, record_extra=record_extra,
+                timeout=AI_SESSION_TIMEOUT_S)  # a session continuation: stall detector + 4 h (D7)
         except Exception as exc:
             held.close()
             _release_session(new_run_id)
@@ -4090,19 +4418,23 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
                     cmd = _project_cmd(agent, eff, prompt, sid)  # the sandboxed CLI for a confidential project
                     output, it, ot, model, _new_sid, stderr_s, ok = run_agent_process(
                         new_run_id, cmd, stream=agent, cwd=target["cwd"], env=_project_exec_env(agent, eff),
-                        on_proc=procs.append)
+                        on_proc=procs.append, timeout=AI_SESSION_TIMEOUT_S)
+                    agent_error = project_runs.AGENT_ERRORS.pop(new_run_id, None)
                     if not end():
                         return
-                    error = "" if ok else (_extract_real_errors(stderr_s) or f"resume of session {sid} failed")
+                    # the agent's own reason first, e.g. a usage limit (D6)
+                    error = "" if ok else (agent_error or _extract_real_errors(stderr_s) or f"resume of session {sid} failed")
                     status = "review" if ok else "error"  # strict: a failed continuation is an error
                     _record(status, output or "", error, time.monotonic() - t0, it, ot, model)
                     _close(status, output or "", error)
+                    _after_card_run(new_run_id, linear_issue_id, agent, sid, procs[0].pid if procs else None)
                 except subprocess.TimeoutExpired:
                     _kill_and_reap(procs[0] if procs else None)
                     if not end():
                         return
-                    _record("timeout", error=f"Timed out after {AI_RUN_TIMEOUT_S}s", dur=time.monotonic() - t0)
+                    _record("timeout", error=f"Timed out after {AI_SESSION_TIMEOUT_S}s", dur=time.monotonic() - t0)
                     _close("timeout", error="timeout")
+                    _after_card_run(new_run_id, linear_issue_id, agent, sid, procs[0].pid if procs else None)
                 except Exception as exc:
                     _kill_and_reap(procs[0] if procs else None)
                     if not end():
@@ -4349,7 +4681,33 @@ def _session_action(key: str, agent: str, sid: str, act):
 @app.route("/api/projects/<key>/sessions/<agent>/<sid>/rename", methods=["POST"])
 def api_session_rename(key: str, agent: str, sid: str):
     title = (request.get_json(silent=True) or {}).get("title")
+    issue_id = _card_sessions().get((canonical_agent(agent) or agent, sid))
+    if issue_id:  # a card's session is named by the card: rename the card (D2, §3)
+        return _rename_card_session(key, agent, sid, issue_id, title)
     return _session_action(key, agent, sid, lambda t: {"title": _projects.rename_session(t, title)})
+
+
+def _rename_card_session(key: str, agent: str, sid: str, issue_id: str, title: object):
+    """Outside _session_action and its session lock, so the sync can take that lock (DP-06):
+    validate, change the card title through the tracker (strict), then rename the sessions."""
+    try:
+        project = _projects.get_project(key, _projects.load_registry(errors={}))
+        _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])  # this project's row
+        clean = _projects._clean_title(title)  # before any write (DP-17)
+    except _projects.SessionNotFound as exc:
+        return jsonify({"error": str(exc)}), 404
+    except _projects.ProjectError as exc:
+        return jsonify({"error": str(exc)}), 400
+    mod = _module_registry.get("linear")
+    if mod is None:
+        return jsonify({"error": "no tracker"}), 409
+    try:
+        mod.set_card_title(issue_id, clean)
+    except Exception as exc:
+        return jsonify({"error": f"the card title was not changed: {exc}"}), 502
+    busy = _sync_card_session_names(issue_id, title=clean)
+    return jsonify({"ok": True, "title": clean, "card": True,
+                    "pending": (canonical_agent(agent) or agent, sid) in busy})
 
 
 @app.route("/api/projects/<key>/sessions/<agent>/<sid>/remove", methods=["POST"])
@@ -4680,6 +5038,9 @@ def api_run_retry(run_id: str):
     from runner.modules.linear import unsynced_local_id
     if unsynced_local_id(linear_issue_id):  # its Linear copy is not confirmed yet (B, R11)
         return jsonify({"ok": False, "error": "not synced to Linear yet; try again in a moment"}), 409
+    if linear_issue_id and _module_registry.get("linear") is not None and _tracker_issue(linear_issue_id) is None:
+        # before any intent, lock, tracker or scheduling work: nothing launches for a gone card (R2)
+        return jsonify({"ok": False, "error": "this card no longer exists"}), 409
 
     # Build conversation context: include previous output + human feedback
     req_data = request.get_json(silent=True) or {}
@@ -4742,6 +5103,44 @@ def api_run_retry(run_id: str):
     entry = registry.get(skill, {})
     _gen_key = linear_issue_id or task_id
     _launch_gen = reset_gen.current(_gen_key)
+    bound = _durable_binding(linear_issue_id, task_id) or (original if original.get("project_key") else None)
+
+    # One task, one session (D3): a tracker card always continues its own session, whether the
+    # agent lock or _card_session supplies it, routed by the session's own folder (DP-34, R1).
+    card_session = False  # this retry continues the card's session: strict, 4 h ceiling (DP-35, D7)
+    card_note: str | None = None  # why it starts a new session instead (§4)
+    is_entry = bool(entry.get("schedule_eligible") and entry.get("entrypoint"))
+    if linear_issue_id and agent in _SESSION_AGENTS and is_entry:
+        card_note = "new session: skill has its own entrypoint"
+    elif linear_issue_id and agent in _SESSION_AGENTS:
+        sid = _lock_session_id or (_card_session(linear_issue_id, agent) or (None, None))[0]
+        target = _projects.find_session(agent, sid) if sid else None
+        project_key = (bound or {}).get("project_key") or original.get("session_project")
+        if not sid:
+            card_note = "new session: " + (_resumable_card_session(linear_issue_id, agent, None)[1] or "no session yet")
+        elif not target and _lock_session_id:
+            pass  # its store entry is not visible here: today's resume, with its fresh fallback
+        elif not target:
+            card_note = "new session: the card's session was removed or archived"
+        else:
+            in_ticket_wt = False
+            if bound and bound.get("issue_identifier") and project_key:
+                with contextlib.suppress(_projects.ProjectError):
+                    wt = _projects.worktree_path(_projects.get_project(project_key, _projects.load_registry(errors={})),
+                                                 bound["issue_identifier"])
+                    in_ticket_wt = os.path.realpath(str(wt)) == os.path.realpath(target["cwd"])
+            if project_key and not in_ticket_wt:
+                # main checkout or any other folder of the project: the session-card worker (§3.3)
+                transient = {"agent": agent, "id": sid, "project_key": project_key, "gen": reset_gen.current(linear_issue_id)}
+                return _retry_session_card(run_id, original, transient, req_data, card_sourced=True)
+            if not project_key and os.path.realpath(target["cwd"]) != os.path.realpath(str(ROOT)):
+                card_note, _lock_session_id = "new session: the card's session is in a different folder", None
+            else:
+                if not req_data.get("confirm_in_use"):
+                    why = session_in_use(target, None, _own_activity_end(linear_issue_id))
+                    if why:
+                        return jsonify({"ok": False, "in_use_elsewhere": why}), 409
+                _lock_session_id, card_session = sid, True
     try:  # before any tracker change: a session being renamed/removed/opened is refused (A, R02)
         _claim_session(agent, _lock_session_id, new_run_id)
     except _projects.SessionBusy as exc:
@@ -4778,7 +5177,6 @@ def api_run_retry(run_id: str):
                 _push_linear_state_async(linear_issue_id, "review", gen=_launch_gen)
         return jsonify({"ok": False, "run_id": new_run_id, "error": f"could not start: {exc}"}), 500
 
-    bound = _durable_binding(linear_issue_id, task_id) or (original if original.get("project_key") else None)
     try:
         if bound and bound.get("issue_identifier"):
             card_hold.enter_context(_projects.ticket_lock(bound["project_key"], bound["issue_identifier"]))
@@ -4812,7 +5210,9 @@ def api_run_retry(run_id: str):
                 linear_issue_id=linear_issue_id, task_id=task_id, launch_gen=_launch_gen,
                 attempt=prev_attempt + 1, parent_run_id=run_id, resume_session=_lock_session_id,
                 reuse_only=True, skill=skill, confidential=bound.get("confidential"),
-                ticket_hold=card_hold if bound.get("issue_identifier") else None)
+                ticket_hold=card_hold if bound.get("issue_identifier") else None,
+                timeout=AI_SESSION_TIMEOUT_S if card_session or (_lock_session_id and linear_issue_id) else None,
+                note=card_note)
         except Exception as e:
             return _start_failed(e, binding=bound)
         return jsonify({"ok": True, "run_id": new_run_id, "skill": skill, "attempt": prev_attempt + 1, "agent": agent})
@@ -4842,6 +5242,7 @@ def api_run_retry(run_id: str):
                     attachments=attachments,
                 ),
             )
+    _card_extra = {**_issue_title_extra(linear_issue_id), **({"session_note": card_note} if card_note else {})}
     _running_jobs[new_run_id] = {
         "run_id": new_run_id, "skill": skill, "started_at": started_at,
         "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(),
@@ -4850,6 +5251,7 @@ def api_run_retry(run_id: str):
                    "model": _agent_model(agent, cfg), "task_id": task_id, "reset_generation": _launch_gen},
         "agent": agent,
         "model": _agent_model(agent, cfg),
+        **({"record_extra": _card_extra} if _card_extra else {}),
     }
     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "running", "skill": skill})
 
@@ -4875,9 +5277,12 @@ def api_run_retry(run_id: str):
                 between attempts still reaches this group's leftovers (RWS-005)."""
                 return run_agent_process(new_run_id, cmd, stream=_stream_for(stream),
                                          env=_registry_exec_env(agent, registry),
-                                         on_proc=lambda p: attempt_proc.__setitem__(0, p))
+                                         on_proc=lambda p: attempt_proc.__setitem__(0, p),
+                                         timeout=AI_SESSION_TIMEOUT_S if card_session else None)
 
             end = _RunClaim(new_run_id)
+            if card_note:
+                _session_note(new_run_id, card_note)
             try:
                 _stream = agent
                 if entry.get("schedule_eligible") and entry.get("entrypoint") and not strict:
@@ -4898,7 +5303,8 @@ def api_run_retry(run_id: str):
                 # (adoption error, session/writer-held, or a runtime failure after work) is recorded
                 # as status error, and the user resets to todo to start fresh.
                 # Early out for a cancelled/stalled run; _register_proc is the guarantee (WS-004).
-                if _used_resume and not ok and agent != "dsh" and not strict and new_run_id in _running_jobs:
+                # A card continuing its own session never falls back to a new one (DP-35).
+                if _used_resume and not ok and agent != "dsh" and not strict and not card_session and new_run_id in _running_jobs:
                     logger.warning(
                         "[retry] resume failed for %s session=%s; full retry without resume",
                         agent, _lock_session_id,
@@ -4907,15 +5313,18 @@ def api_run_retry(run_id: str):
                                                skill_name=skill, registry=registry)
                     output, input_tokens, output_tokens, parsed_model, new_sid, stderr_s, ok = _dispatch_cmd(fallback_cmd, _stream)
 
+                agent_error = project_runs.AGENT_ERRORS.pop(new_run_id, None)
                 error_s = _extract_real_errors(stderr_s)
+                if not ok and agent_error:
+                    error_s = agent_error  # the agent's own reason first, e.g. a usage limit (D6)
                 if not output:
                     output = error_s or stderr_s
                 dur = time.monotonic() - t0
                 if not end():
                     return  # cancel/stall ended the run and did its record and tracker push
-                # A failed strict continuation (quick reply) is an error, never a review (C2, UI-06).
-                final_state = "error" if not ok and (_stream == "dsh" or strict) else "review"
-                if strict and not ok and not error_s:
+                # A failed strict continuation is an error, never a review (C2, UI-06, DP-35).
+                final_state = "error" if not ok and (_stream == "dsh" or strict or card_session) else "review"
+                if (strict or card_session) and not ok and not error_s:
                     error_s = f"resume of session {_lock_session_id} failed (exit {attempt_proc[0].returncode if attempt_proc[0] else '?'})"
                 _footer = _parse_run_footer(output)
                 _cost = _compute_token_cost(output_tokens, input_tokens, parsed_model or _agent_model(agent, cfg))
@@ -4929,8 +5338,10 @@ def api_run_retry(run_id: str):
                                output_path=_footer["output_path"],
                                quality_score=_footer["quality_score"],
                                token_cost_usd=_cost,
-                               agent_session_id=new_sid,
-                               reset_generation=_launch_gen)
+                               agent_session_id=new_sid or (_lock_session_id if card_session else None),
+                               reset_generation=_launch_gen, extra=_card_extra or None)
+                _after_card_run(new_run_id, linear_issue_id, agent, new_sid or _lock_session_id,
+                                getattr(attempt_proc[0], "pid", None))
                 if linear_issue_id:
                     _comment_quietly(_post_linear_comment, linear_issue_id, _linear_comment_body(title="AgenticOS Retry", prompt=prompt, output=output))
                 _finish(final_state)
@@ -4940,11 +5351,13 @@ def api_run_retry(run_id: str):
                 _kill_group(_running_procs.get(new_run_id))  # the reader already did; harmless twice
                 if not end():
                     return
-                msg = f"Timed out after {AI_RUN_TIMEOUT_S}s"
+                msg = f"Timed out after {AI_SESSION_TIMEOUT_S if card_session else AI_RUN_TIMEOUT_S}s"
                 _write_run_log_retrying(skill, "timeout", started_at, dur, prompt=prompt, error=msg,
                                run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
                                linear_issue_id=linear_issue_id, agent=agent,
-                               model=_agent_model(agent, cfg), task_id=task_id, reset_generation=_launch_gen, agent_session_id=end.session)
+                               model=_agent_model(agent, cfg), task_id=task_id, reset_generation=_launch_gen, agent_session_id=end.session,
+                               extra=_card_extra or None)
+                _after_card_run(new_run_id, linear_issue_id, agent, end.session, getattr(attempt_proc[0], "pid", None))
                 if linear_issue_id:
                     _comment_quietly(_post_linear_comment, linear_issue_id, _linear_comment_body(title="AgenticOS Retry Timeout", prompt=prompt))
                 _finish("review")
@@ -4957,7 +5370,9 @@ def api_run_retry(run_id: str):
                 _write_run_log_retrying(skill, "error", started_at, 0.0, prompt=prompt, error=str(e),
                                run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
                                linear_issue_id=linear_issue_id, agent=agent,
-                               model=_agent_model(agent, cfg), task_id=task_id, reset_generation=_launch_gen, agent_session_id=end.session)
+                               model=_agent_model(agent, cfg), task_id=task_id, reset_generation=_launch_gen, agent_session_id=end.session,
+                               extra=_card_extra or None)
+                _after_card_run(new_run_id, linear_issue_id, agent, end.session, getattr(attempt_proc[0], "pid", None))
                 if linear_issue_id:
                     _comment_quietly(
                         _post_linear_comment,

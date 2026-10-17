@@ -286,6 +286,22 @@ def linear_project_id(client, team_id: str, project_key: str | None, project_slu
     return pid
 
 
+def _note_linear_title(issue: dict | None) -> None:
+    """A title as Linear itself returned it: the only source a native session rename may use in
+    Linear mode (DP-31), versioned by updatedAt (R4)."""
+    if isinstance(issue, dict) and issue.get("id"):
+        with contextlib.suppress(Exception):
+            from app import _confirm_linear_title
+            _confirm_linear_title(issue["id"], issue.get("title"), issue.get("updated_at") or issue.get("updatedAt") or "")
+
+
+def _title_changed(issue_id: str, title: str | None = None) -> None:
+    """A confirmed title change: rename the card's sessions, in the background (§2 triggers)."""
+    with contextlib.suppress(Exception):
+        from app import _sync_titles_soon
+        _sync_titles_soon(issue_id, title)
+
+
 def unsynced_local_id(issue_id: str | None) -> bool:
     """A task still on its local-first id while the Linear tracker is active: its Linear copy
     is not confirmed, so it is never dispatched or retried (B, R11)."""
@@ -565,6 +581,7 @@ class LinearModule(AgenticModule):
                         iid = issue["id"]
                         if iid in gone:
                             continue
+                        _note_linear_title(issue)  # before any local override (DP-31)
                         normalized = _normalize_linear_issue(issue)
                         normalized = self._apply_local_override(iid, normalized)
                         local_state = self.issues_cache.get(iid, {}).get("state")
@@ -834,6 +851,20 @@ class LinearModule(AgenticModule):
                 reserved = False
             self._ensure_linear_project(issue, project_key)
             run_id = str(uuid.uuid4())
+            # One task, one session (D3): continue the card's session when it lives in the ticket's
+            # worktree; a missing bound worktree still fails closed in the helper (I6-10, DP-09).
+            from app import _resumable_card_session, _resume_admission, AI_SESSION_TIMEOUT_S
+            resume_sid, why_new = None, None
+            if backend in ("claude", "codex"):
+                wt = None
+                with contextlib.suppress(Exception):
+                    wt = projects_mod.worktree_path(projects_mod.get_project(project_key, projects_mod.load_registry(errors={})), ident)
+                resume_sid, why_new = _resumable_card_session(issue_id, backend, wt)
+            if resume_sid:
+                refused = _resume_admission(issue_id, backend, resume_sid, run_id)
+                if refused:  # no HTTP channel here: an error record and the card back to review (DP-05/25)
+                    self._refuse_resume(issue, run_id, backend, launch_gen, refused)
+                    return
             self.dispatched[issue_id] = run_id
             self.push_state(issue_id, "running", gen=launch_gen)
             try:
@@ -847,7 +878,9 @@ class LinearModule(AgenticModule):
                     task_id=run_id, launch_gen=launch_gen,
                     # the route's reservation goes on only if it is this very ticket's lock; otherwise
                     # the helper takes the ticket lock itself (REV-01)
-                    ticket_hold=held.pop_all() if reserved else None)
+                    ticket_hold=held.pop_all() if reserved else None,
+                    resume_session=resume_sid, timeout=AI_SESSION_TIMEOUT_S if resume_sid else None,
+                    note=f"new session: {why_new}" if why_new and not resume_sid else None)
             finally:
                 self.dispatched.pop(issue_id, None)
             return
@@ -863,6 +896,25 @@ class LinearModule(AgenticModule):
             except projects.ProjectError as exc:
                 logger.warning("dispatch of %s refused: %s", issue_id, exc)
                 return
+        from app import (_resumable_card_session, _resume_admission, _session_note, _after_card_run,
+                         _issue_title_extra, _card_session, _build_resume_cmd, _release_session,
+                         AI_SESSION_TIMEOUT_S)
+        run_id = None
+        try:
+            registry = _load_registry(backend)
+            # One task, one session (D3): a card continues its own session in ROOT, where generic
+            # dispatch runs, and then needs no routing call (DP-28).
+            resume_sid, why_new = (None, None)
+            if backend in ("claude", "codex"):
+                resume_sid, why_new = _resumable_card_session(issue_id, backend, ROOT)
+            prev = _card_session(issue_id, backend) if resume_sid else None
+            prev_skill = (prev[1].get("selected_skill") or prev[1].get("skill")) if prev else None
+            prev_entry = registry.get(prev_skill or "", {})
+            if resume_sid and prev_entry.get("schedule_eligible") and prev_entry.get("entrypoint"):
+                resume_sid, why_new = None, "skill has its own entrypoint"
+        except Exception:
+            logger.exception("dispatch of %s: session lookup failed", issue_id)
+            resume_sid, why_new, prev_skill = None, None, None
         try:
             registry = _load_registry(backend)
             skill_list = "\n".join(f"- {n}: {e.get('purpose', '')[:100]}" for n, e in registry.items())
@@ -873,23 +925,34 @@ class LinearModule(AgenticModule):
                 f"Available skills:\n{skill_list}\n\n"
                 "Return exactly one skill name, nothing else."
             )
-            try:
-                result = _run_grouped(  # its own group: a routing timeout ends descendants too (RWS-016)
-                    _ai_command(backend, routing_prompt, output_format="text"),
-                    60,
-                    cwd=str(ROOT),
-                    env=_registry_exec_env(backend, registry),
-                    text=True,
-                )
-                selected_skill = _extract_skill_name(result.stdout or "", registry)
-            except Exception:
-                selected_skill = "_prompt"
+            if resume_sid:
+                selected_skill = prev_skill if prev_skill in registry else "_prompt"  # no routing call (DP-28)
+            else:
+                try:
+                    result = _run_grouped(  # its own group: a routing timeout ends descendants too (RWS-016)
+                        # persist=False: the routing call leaves no session in the agent's store (DP-28)
+                        _ai_command(backend, routing_prompt, output_format="text", persist=False),
+                        60,
+                        cwd=str(ROOT),
+                        env=_registry_exec_env(backend, registry),
+                        text=True,
+                    )
+                    selected_skill = _extract_skill_name(result.stdout or "", registry)
+                except Exception:
+                    selected_skill = "_prompt"
 
             run_id = str(uuid.uuid4())
+            if resume_sid:
+                refused = _resume_admission(issue_id, backend, resume_sid, run_id)
+                if refused:  # no HTTP channel here: an error record and the card back to review (DP-05/25)
+                    self._refuse_resume(issue, run_id, backend, launch_gen, refused)
+                    return
             started_at = datetime.now(timezone.utc).isoformat()
             t0 = time.monotonic()
             prompt = f"{issue['identifier']}: {issue['title']}\n\n{_strip_issue_metadata(issue.get('description') or '')}"
             self.dispatched[issue_id] = run_id
+            note = f"new session: {why_new}" if why_new and not resume_sid and backend in ("claude", "codex") else None
+            card_extra = {**_issue_title_extra(issue_id), **({"session_note": note} if note else {})}
             # Running is pushed before the job is published: a cancel or stall can only end the
             # run after it, so their review is never followed by this running (RWS-001).
             try:
@@ -914,6 +977,8 @@ class LinearModule(AgenticModule):
                 "record": {"agent": backend, "model": _agent_model(backend, cfg), "task_id": run_id,  # RWS-002
                            "selected_skill": selected_skill, "reset_generation": launch_gen},
                 "agent": backend,
+                **({"agent_session_id": resume_sid} if resume_sid else {}),  # live while it runs (DP-15)
+                "record_extra": card_extra,
             }
             entry = registry.get(selected_skill, {})
             is_entrypoint = bool(entry.get("schedule_eligible") and entry.get("entrypoint"))
@@ -922,19 +987,31 @@ class LinearModule(AgenticModule):
             try:
                 # Built inside the try: a missing/old dsh fails this run cleanly (error record,
                 # running/dispatch entries cleared, ticket back to review) instead of hanging as running.
+                if resume_sid and is_entrypoint:
+                    resume_sid = None  # an entrypoint skill always starts fresh (DP-21)
+                if note:
+                    _session_note(run_id, note)
                 cmd = ([_python_path(), str(RUNNER), selected_skill] if is_entrypoint else
+                       _build_resume_cmd(backend, resume_sid, prompt) if resume_sid else
                        _ai_command(backend, prompt, output_format=_agent_output_format(backend),
                                    skill_name=selected_skill, registry=registry))
                 # One process engine (C0): streamed live like every other launch, session id kept.
                 output, it, ot, pm, session_id, stderr_s, ok = run_agent_process(
                     run_id, cmd, stream="text" if is_entrypoint else _stream_for(backend),
-                    env=_registry_exec_env(backend, registry), on_proc=procs.append)
+                    env=_registry_exec_env(backend, registry), on_proc=procs.append,
+                    timeout=AI_SESSION_TIMEOUT_S if resume_sid else None)
+                import project_runs as _pr
+                agent_error = _pr.AGENT_ERRORS.pop(run_id, None)
                 if backend == "dsh" and not is_entrypoint:
                     output = output or ""
+                elif resume_sid:
+                    ok = ok and bool(output)  # a resumed session keeps its real result: no silent review (DP-14)
                 else:
-                    ok = True  # other agents keep the unconditional review status
+                    ok = True  # a fresh launch keeps the unconditional review status
                 dur = time.monotonic() - t0
                 error_s = _extract_real_errors(stderr_s)
+                if not ok:
+                    error_s = agent_error or error_s or (f"resume of session {resume_sid} failed" if resume_sid else error_s)
                 if not end():
                     return
                 final_state = "review" if ok else "error"
@@ -955,9 +1032,11 @@ class LinearModule(AgenticModule):
                     model=pm or _agent_model(backend, cfg),
                     task_id=run_id,
                     token_cost_usd=_compute_token_cost(ot, it, pm or _agent_model(backend, cfg)),  # STB-034
-                    agent_session_id=session_id,
+                    agent_session_id=session_id or resume_sid,
                     reset_generation=launch_gen,
+                    extra=card_extra or None,
                 )
+                _after_card_run(run_id, issue_id, backend, session_id or resume_sid, getattr(procs[0], "pid", None) if procs else None)
                 _comment_quietly(self.post_comment, issue_id, _linear_comment_body(title="AgenticOS Run", prompt=prompt, output=output, error=error_s))
                 self._mark_issue_review(issue_id, gen=launch_gen)
                 if reset_gen.is_current(issue_id, launch_gen):
@@ -968,10 +1047,11 @@ class LinearModule(AgenticModule):
                 _kill_and_reap(procs[0] if procs else None)
                 if not end():
                     return
-                msg = f"Timed out after {AI_RUN_TIMEOUT_S}s"
+                msg = f"Timed out after {AI_SESSION_TIMEOUT_S if resume_sid else AI_RUN_TIMEOUT_S}s"
                 _write_run_log_retrying(selected_skill, "timeout", started_at, dur, prompt=prompt, error=msg, run_id=run_id,
                                linear_issue_id=issue_id, agent=backend, reset_generation=launch_gen, agent_session_id=end.session,
-                               task_id=run_id, model=_agent_model(backend, cfg))  # findable by retry/quick reply (FB5-01)
+                               task_id=run_id, model=_agent_model(backend, cfg), extra=card_extra or None)  # findable by retry (FB5-01)
+                _after_card_run(run_id, issue_id, backend, end.session, getattr(procs[0], "pid", None) if procs else None)
                 _comment_quietly(self.post_comment, issue_id, _linear_comment_body(title="AgenticOS Run Timeout", prompt=prompt, error=msg))
                 self._mark_issue_review(issue_id, gen=launch_gen)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": selected_skill})
@@ -982,7 +1062,8 @@ class LinearModule(AgenticModule):
                     return
                 _write_run_log_retrying(selected_skill, "error", started_at, 0.0, prompt=prompt, error=str(e), run_id=run_id,
                                linear_issue_id=issue_id, agent=backend, reset_generation=launch_gen, agent_session_id=end.session,
-                               task_id=run_id, model=_agent_model(backend, cfg))  # findable by retry/quick reply (FB5-01)
+                               task_id=run_id, model=_agent_model(backend, cfg), extra=card_extra or None)  # findable by retry (FB5-01)
+                _after_card_run(run_id, issue_id, backend, end.session, getattr(procs[0], "pid", None) if procs else None)
                 _comment_quietly(self.post_comment, issue_id, _linear_comment_body(title="AgenticOS Run Error", prompt=prompt, error=str(e)))
                 self._mark_issue_review(issue_id, gen=launch_gen)
                 socketio.emit("run_state_change", {"run_id": run_id, "state": "review", "skill": selected_skill})
@@ -994,7 +1075,23 @@ class LinearModule(AgenticModule):
             except Exception:
                 pass
         finally:
+            if run_id:
+                _release_session(run_id)  # the resume claim taken at admission
             card_hold.close()
+
+    def _refuse_resume(self, issue: dict, run_id: str, backend: str, launch_gen: int, why: str) -> None:
+        """A dispatch that cannot continue the card's session right now: nothing launches; an error
+        record says why, and the card leaves In Progress (DP-05, DP-13, DP-25)."""
+        from app import _write_run_log_retrying, _agent_model
+        issue_id = issue["id"]
+        prompt = f"{issue.get('identifier', '')}: {issue.get('title', '')}"
+        _write_run_log_retrying("_prompt", "error", datetime.now(timezone.utc).isoformat(), 0.0, prompt=prompt,
+                                error=why, run_id=run_id, linear_issue_id=issue_id, agent=backend, task_id=run_id,
+                                reset_generation=launch_gen, model=_agent_model(backend))
+        with contextlib.suppress(Exception):
+            self._mark_issue_review(issue_id, gen=launch_gen)
+        if self._socketio:
+            self._socketio.emit("run_logged", {"skill": "_prompt", "run_id": run_id})
 
     def _linear_client(self):
         """(client, tracker config) for the configured Linear tracker; raises when unconfigured."""
@@ -1045,6 +1142,30 @@ class LinearModule(AgenticModule):
         if self._socketio:
             self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
 
+    def set_card_title(self, issue_id: str, title: str) -> None:
+        """A card-row rename (§3): the tracker confirms the title first; only then do the caches,
+        the local override and the board change. Raises with nothing changed otherwise (DP-04)."""
+        import reset_gen
+        with reset_gen.issue_lock(issue_id):
+            if self._capability.get("type") == "linear":
+                client, _tc = self._linear_client()
+                confirmed = client.update_title(issue_id, title)  # title-only mutation (DP-42)
+                from app import _confirm_linear_title
+                _confirm_linear_title(issue_id, confirmed["title"], confirmed["updated_at"])
+                with contextlib.suppress(Exception):  # the local backup follows Linear
+                    self.get_local_tracker().update_issue(issue_id, title=title)
+                self._remember_local_override(issue_id, {"title": title})  # a stale poll keeps it shown
+            elif not self.get_local_tracker().update_issue(issue_id, title=title):
+                raise ValueError("card not found")
+            cached = dict(self.issues_cache.get(issue_id) or {"id": issue_id})
+            cached["title"] = title
+            self.issues_cache[issue_id] = cached
+            tid = cached.get("team_id") or ""
+            if tid and issue_id in self._issues_by_team.get(tid, {}):
+                self._issues_by_team[tid][issue_id] = cached  # the team-filtered board too (DP-23)
+        if self._socketio:
+            self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+
     def create_session_issue(self, title: str, description: str, agent: str, project_key: str) -> dict:
         """One Todo issue for a session that has no card (STB §2.5), composed like the "+" form:
         `project:<key>` label, agent marker, the project's Linear Project. Synchronous, so the
@@ -1071,6 +1192,7 @@ class LinearModule(AgenticModule):
             if not created:
                 raise RuntimeError("Linear did not create the issue")
             issue = _normalize_linear_issue(created)
+            _note_linear_title(issue)  # a new to-board card has a confirmed title before any poll (DP-46)
             issue["labels"] = sorted(set(issue["labels"]) | set(labels))
             with self.get_local_tracker().raw_transaction() as raw:
                 raw[issue["id"]] = dict(issue)
@@ -1343,13 +1465,17 @@ class LinearModule(AgenticModule):
             local = self.get_local_tracker()
             preferred_agent = canonical_agent(data.get("preferred_agent"))
             self._remember_local_override(issue_id, data, preferred_agent)
-            local.update_issue(
+            updated = local.update_issue(
                 issue_id,
                 title=data.get("title"),
                 description=data.get("description"),
                 state_name=data.get("state_name"),
                 preferred_agent=preferred_agent,
             )
+            # Only an authoritative local tracker renames sessions; in Linear mode this route is the
+            # editor's parallel mirror and would rename on a failed Linear update (DP-10).
+            if updated and data.get("title") is not None and self._capability.get("type") == "local":
+                _title_changed(issue_id, updated.get("title"))
             if issue_id in self.issues_cache:
                 cached = dict(self.issues_cache[issue_id])
                 if data.get("state_name"):
@@ -1415,6 +1541,8 @@ class LinearModule(AgenticModule):
                     self.issues_cache[issue_id] = issue
                     if self._socketio:
                         self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+                    if data.get("title") is not None:
+                        _title_changed(issue_id, issue.get("title"))  # the local tracker is authoritative here
                     if data.get("state_name") and _is_linear_in_progress(data["state_name"]) and not self._issue_is_running(issue_id):
                         self.dispatched.pop(issue_id, None)
                         self._start_dispatch(issue, cfg, previous_board_status, card_hold=_handoff())
@@ -1480,12 +1608,15 @@ class LinearModule(AgenticModule):
                     _state_committed()
                 issue = cl.fetch_issue(issue_id)
                 if issue:
+                    _note_linear_title(issue)  # what Linear confirmed, before any override (DP-31)
                     n = _normalize_linear_issue(issue)
                     self._clear_local_override_if_synced(issue_id, n)
                     n = self._apply_local_override(issue_id, n)
                     self.issues_cache[issue_id] = n
                     if self._socketio:
                         self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+                    if data.get("title") is not None and issue.get("title") == data.get("title"):
+                        _title_changed(issue_id, issue.get("title"))  # confirmed: rename the card's sessions
                     return jsonify({"ok": True, "issue": n})
                 return jsonify({"error": "update failed"}), 500
             except Exception as e:
@@ -1572,6 +1703,7 @@ class LinearModule(AgenticModule):
             updated: dict[str, dict] = {}
             for issue in live:
                 self._localize_issue(issue)
+                _note_linear_title(issue)
                 updated[issue["id"]] = _normalize_linear_issue(issue)
             self.issues_cache.clear()
             self.issues_cache.update(updated)
@@ -1677,6 +1809,9 @@ class LinearModule(AgenticModule):
             # Refresh cache with Linear's authoritative version
             synced = cl.fetch_issue(issue_id)
             if synced:
+                _note_linear_title(synced)
+                if data.get("title") is not None and synced.get("title") == data.get("title"):
+                    _title_changed(issue_id, synced.get("title"))  # the local-first branch's confirmation (DP-31)
                 normalized = _normalize_linear_issue(synced)
                 self._clear_local_override_if_synced(issue_id, normalized)
                 normalized = self._apply_local_override(issue_id, normalized)

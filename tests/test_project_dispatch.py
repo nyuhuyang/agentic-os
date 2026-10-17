@@ -240,6 +240,7 @@ def helper(proj, tmp_path, monkeypatch):
         monkeypatch.setattr(app_mod, name, value)
     monkeypatch.setattr(app_mod, "_load_registry", lambda agent: {})
     monkeypatch.setattr(pj, "record_location_problem", lambda paths, checkout: None)  # tmp records
+    monkeypatch.setattr(app_mod, "_tracker_issue", lambda iid: {"id": iid})  # this fixture's cards are live (R2)
     events, comments, pushes = [], [], []
     monkeypatch.setattr(app_mod.socketio, "emit", lambda *a, **k: events.append(a))
     monkeypatch.setattr(app_mod, "_post_linear_comment", lambda i, b: comments.append(b))

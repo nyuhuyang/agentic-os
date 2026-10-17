@@ -1684,6 +1684,55 @@ def session_target(project: Project, agent: str, sid: str, board_ids=None) -> di
     return {"agent": agent, "id": sid, "cwd": row[0], "path": rollout, "title": _codex_title(*texts)}
 
 
+def find_session(agent: str, sid: str) -> dict | None:
+    """A session the runner itself launched or bound (its id comes from run records, never from
+    a client): {agent, id, cwd, path, title, native_title}, or None. Store-confined like
+    session_target, but with no project-root check. native_title is the name the agent's picker
+    shows (Claude's newest custom-title, Codex threads.name), None when unset (DP-30)."""
+    if agent not in ("claude", "codex") or not isinstance(sid, str) or not _SESSION_ID.match(sid):
+        return None
+    if agent == "claude":
+        if not CLAUDE_PROJECTS.is_dir():
+            return None
+        store = CLAUDE_PROJECTS.resolve()
+        for d in CLAUDE_PROJECTS.iterdir():
+            f = d / f"{sid}.jsonl"
+            if not d.is_dir() or not f.is_file() or f.is_symlink() or not f.resolve().is_relative_to(store):
+                continue
+            info = _claude_summary(f)
+            if info and info["cwd"]:
+                return {"agent": agent, "id": sid, "cwd": info["cwd"], "path": f,
+                        "title": _claude_title(info), "native_title": info["custom"]}
+        return None
+    import sqlite3
+    try:
+        db = sqlite3.connect(f"file:{_codex_db_checked()}?mode=ro", uri=True, timeout=5)
+        try:
+            row = db.execute("SELECT cwd, rollout_path, name, title, first_user_message FROM threads "
+                             "WHERE id = ? AND archived = 0", (sid,)).fetchone()
+        finally:
+            db.close()
+    except (sqlite3.Error, ProjectError):
+        return None
+    if not row or not isinstance(row[0], str) or not isinstance(row[1], str) or not row[1]:
+        return None
+    store = Path(os.path.realpath(CODEX_DB.parent))
+    if not Path(os.path.realpath(row[1])).is_relative_to(store):
+        return None
+    texts = [v if isinstance(v, str) else None for v in row[2:5]]
+    return {"agent": agent, "id": sid, "cwd": row[0], "path": Path(row[1]),
+            "title": _codex_title(*texts), "native_title": texts[0] or None}
+
+
+def session_name_text(title: object) -> str:
+    """A card title as a session name: control characters as spaces, whitespace collapsed,
+    at most 200 characters; '' when nothing is left (§Definitions)."""
+    if not isinstance(title, str):
+        return ""
+    text = "".join(" " if unicodedata.category(c) == "Cc" else c for c in title)
+    return " ".join(text.split())[:200].strip()
+
+
 def check_session_idle(target: dict, live_ids: set[tuple[str, str]], now: float | None = None) -> None:
     """Refuse a live session: held by a terminal or running job (`live_ids` of (agent, id)), or
     its transcript/rollout written in the last SESSION_FRESH_S seconds."""

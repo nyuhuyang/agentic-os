@@ -329,10 +329,58 @@ def _codex_tool_lines(t: str, item: dict) -> list[str]:
     return [f"{_DIM}  ↳ {shown}{_RESET}"]
 
 
+NOTE_TYPE = "agenticos-note"  # a line the runner itself writes into a run's stream (§4 DP-19)
+
+
+def note_line(text: str) -> str:
+    """The stream line for a runner note, e.g. why a run started a new session."""
+    return json.dumps({"type": NOTE_TYPE, "text": text}, ensure_ascii=False)
+
+
+# run_id -> the agent's own error text (Claude is_error result, Codex turn.failed/error), set by
+# the stream readers and popped by the caller after the run (D6).
+AGENT_ERRORS: dict[str, str] = {}
+
+
+def agent_error_of(fmt: str, line: str) -> str | None:
+    """The error an agent reports about its own turn, if this stdout line carries one."""
+    if fmt not in ("claude", "codex") or "rror" not in line and "failed" not in line:
+        return None
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(ev, dict):
+        return None
+    t = ev.get("type")
+    if fmt == "claude" and t == "result" and ev.get("is_error"):
+        msg = ev.get("result") or ev.get("api_error") or ev.get("subtype")
+    elif fmt == "codex" and t == "turn.failed":
+        err = ev.get("error")
+        msg = err.get("message") if isinstance(err, dict) else err
+    elif fmt == "codex" and t == "error":
+        msg = ev.get("message")
+    else:
+        return None
+    return str(msg).strip()[:2000] if msg else None
+
+
+def note_agent_error(run_id: str, fmt: str, line: str) -> None:
+    """Keep the agent's error for this run. A Codex turn.failed wins over an earlier error event."""
+    msg = agent_error_of(fmt, line)
+    if msg and (run_id not in AGENT_ERRORS or '"turn.failed"' in line or fmt == "claude"):
+        AGENT_ERRORS[run_id] = msg
+
+
 def render_event(fmt: str, line: str) -> list[str]:
     """One raw stdout line -> terminal lines for the live/replay run view (shared by both).
     fmt: claude (stream-json), codex (exec --json), dsh (--json) or text (plain output).
-    Tool calls cyan, tool results dim and truncated, errors red."""
+    Tool calls cyan, tool results dim and truncated, errors red. A runner note shows in every format."""
+    if NOTE_TYPE in line[:40]:
+        with contextlib.suppress(ValueError):
+            ev = json.loads(line)
+            if isinstance(ev, dict) and ev.get("type") == NOTE_TYPE:
+                return [f"{_DIM}[runner] {ev.get('text', '')}{_RESET}"]
     if fmt not in ("claude", "codex", "dsh"):
         return [line] if line.strip() else []
     try:
@@ -421,7 +469,7 @@ def session_id_of(fmt: str, line: str) -> str | None:
 def run_agent(argv: list[str], cwd: str, env: dict, run_id: str, agent: str, timeout: float,
               emit: Callable[[str, dict], None], on_start: Callable[[subprocess.Popen], None] | None = None,
               on_session: Callable[[str], None] | None = None, log_path: Path | None = None,
-              on_stderr: Callable[[bytes], None] | None = None
+              on_stderr: Callable[[bytes], None] | None = None, note: str | None = None
               ) -> tuple[list[str], str, int | None, bool]:
     """Run one agent in its own process group, streaming stdout line by line.
 
@@ -439,11 +487,19 @@ def run_agent(argv: list[str], cwd: str, env: dict, run_id: str, agent: str, tim
     def read_out():
         log = open(log_path, "w", encoding="utf-8") if log_path else contextlib.nullcontext()
         with log as lf:
+            if note:  # first, right after the log is opened (truncated), so it survives into replay (DP-39)
+                with order_lock(run_id):
+                    if lf:
+                        lf.write(note_line(note) + "\n")
+                        lf.flush()
+                    for shown in render_event(agent, note_line(note)):
+                        emit("run_event", {"run_id": run_id, "line": shown, "seq": ring.append(shown)})
             for raw in proc.stdout:
                 line = raw.decode("utf-8", "replace").rstrip("\n")
                 if not line:
                     continue
                 lines.append(line)
+                note_agent_error(run_id, agent, line)
                 sid = on_session and session_id_of(agent, line)
                 if sid:
                     on_session(sid)

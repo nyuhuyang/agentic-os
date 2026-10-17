@@ -1,0 +1,439 @@
+"""One task, one session, named by the card title (plan 2026-10-16-projects-vertical-session-titles).
+Fixture session stores under tmp_path (conftest); fake names only."""
+
+import contextlib
+import json
+import os
+import signal
+import sqlite3
+import subprocess
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test_reset_gen import ISSUE, SID, capture_launches, env, reset_route, resumed, write_log  # noqa: E402,F401
+
+import projects as pj  # noqa: E402
+import project_runs  # noqa: E402
+
+USAGE = "You've hit your session limit · resets 10:50pm (America/New_York)"
+
+
+@pytest.fixture
+def cs(env, monkeypatch):
+    app_mod, mod, client, log, events, tmp = env
+    monkeypatch.setattr(app_mod, "_running_jobs", {})
+    monkeypatch.setattr(app_mod, "_running_procs", {})
+    monkeypatch.setattr(app_mod, "_SESSION_CLAIMS", {})
+    monkeypatch.setattr(app_mod, "_LINEAR_TITLES", {})
+    monkeypatch.setattr(app_mod, "_CLOSING_SESSIONS", {})
+    monkeypatch.setattr(app_mod, "_process_table", lambda: {})  # no real ps: nothing open elsewhere
+    return env
+
+
+def transcript(cwd, sid=SID, age=600, title=None):
+    d = pj.CLAUDE_PROJECTS / pj._slug(str(cwd))
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f"{sid}.jsonl"
+    lines = [{"type": "user", "cwd": str(cwd), "entrypoint": "sdk-cli",
+              "message": {"role": "user", "content": "You are working in a git worktree of project 'x'"}}]
+    if title:
+        lines.append({"type": "custom-title", "customTitle": title, "sessionId": sid})
+    f.write_text("".join(json.dumps(x) + "\n" for x in lines))
+    os.utime(f, (time.time() - age, time.time() - age))
+    return f
+
+
+def custom_titles(f):
+    return [json.loads(l)["customTitle"] for l in f.read_text().splitlines() if '"custom-title"' in l]
+
+
+def codex_store(root_cwd, tid, name=None, title="t", first="first"):
+    pj.CODEX_DB.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(pj.CODEX_DB)
+    db.execute("CREATE TABLE IF NOT EXISTS threads (id TEXT, cwd TEXT, name TEXT, title TEXT, first_user_message TEXT, "
+               "updated_at INTEGER, tokens_used INTEGER, git_branch TEXT, source TEXT, archived INTEGER, "
+               "archived_at INTEGER, rollout_path TEXT)")
+    rollout = pj.CODEX_DB.parent / f"rollout-{tid}.jsonl"
+    rollout.write_text("{}\n")
+    os.utime(rollout, (time.time() - 600, time.time() - 600))
+    db.execute("INSERT INTO threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+               (tid, str(root_cwd), name, title, first, 1, 0, "main", "exec", 0, None, str(rollout)))
+    db.commit()
+    db.close()
+
+
+def thread_name(tid):
+    db = sqlite3.connect(pj.CODEX_DB)
+    try:
+        return db.execute("SELECT name FROM threads WHERE id = ?", (tid,)).fetchone()[0]
+    finally:
+        db.close()
+
+
+def records(log):
+    return [json.loads(l) for l in log.read_text().splitlines()]
+
+
+def tasks(tmp):
+    return json.loads((tmp / "tasks.json").read_text())
+
+
+class Proc:
+    """A finished agent process: its stdout lines, its exit code, no pid (no group to wait for)."""
+    def __init__(self, cmd, lines=(), rc=0, **kw):
+        self.args, self.returncode = cmd, rc
+        self.stdout = iter([(json.dumps(x) + "\n").encode() for x in lines])
+        self.stderr = type("E", (), {"read": lambda s: b""})()
+    def communicate(self, timeout=None): return b"", b""
+    def wait(self, timeout=None): return self.returncode
+    def poll(self): return self.returncode
+    def kill(self): pass
+
+
+def stub(app_mod, monkeypatch, lines=(), rc=0):
+    procs = []
+
+    def make(cmd, **kw):
+        procs.append(Proc(cmd, lines, rc))
+        return procs[-1]
+    monkeypatch.setattr(app_mod.subprocess, "Popen", make)
+    return procs
+
+
+# ── units ──────────────────────────────────────────────────────────────────
+
+def test_find_session_gives_cwd_and_the_native_name_only(tmp_path):
+    transcript(tmp_path, "c1")
+    t = pj.find_session("claude", "c1")
+    assert t["cwd"] == str(tmp_path) and t["native_title"] is None and t["title"].startswith("You are working")
+    transcript(tmp_path, "c2", title="Named")
+    assert pj.find_session("claude", "c2")["native_title"] == "Named"
+    codex_store(tmp_path, "x1", name=None, title="Card")
+    t = pj.find_session("codex", "x1")
+    assert t["title"] == "Card" and t["native_title"] is None  # threads.name, not the display chain (DP-30)
+    assert pj.find_session("claude", "../etc") is None and pj.find_session("dsh", "c1") is None
+
+
+def test_session_name_text_sanitizes():
+    assert pj.session_name_text("  a\x07b \n c  ") == "a b c"
+    assert len(pj.session_name_text("x" * 500)) == 200
+    assert pj.session_name_text("\x00\x01") == "" and pj.session_name_text(None) == ""
+
+
+def test_runner_note_renders_in_every_format():
+    line = project_runs.note_line("new session: no session yet")
+    for fmt in ("claude", "codex", "dsh", "text"):
+        assert any("new session: no session yet" in x for x in project_runs.render_event(fmt, line))
+
+
+def test_agent_error_of_claude_and_codex():
+    claude = json.dumps({"type": "result", "is_error": True, "result": USAGE, "api_error": "usage_limit_reached"})
+    assert project_runs.agent_error_of("claude", claude) == USAGE
+    assert project_runs.agent_error_of("claude", json.dumps({"type": "result", "is_error": False, "result": "ok"})) is None
+    failed = json.dumps({"type": "turn.failed", "error": {"message": "quota exhausted"}})
+    assert project_runs.agent_error_of("codex", failed) == "quota exhausted"
+
+
+def test_routing_call_leaves_no_session(cs):
+    app_mod, *_ = cs
+    assert "--no-session-persistence" in app_mod._ai_command("claude", "p", output_format="text", persist=False)
+    cmd = app_mod._ai_command("codex", "p", persist=False)
+    assert cmd[:3] == ["codex", "exec", "--ephemeral"]
+    assert "--no-session-persistence" not in app_mod._ai_command("claude", "p")
+
+
+def test_older_linear_title_never_replaces_a_newer_one(cs):
+    app_mod, *_ = cs
+    app_mod._confirm_linear_title("i", "B", "2026-10-17T02:00:00Z")
+    app_mod._confirm_linear_title("i", "A", "2026-10-17T01:00:00Z")  # a poll that fetched before the rename
+    assert app_mod._LINEAR_TITLES["i"][0] == "B"
+
+
+def test_owner_record_has_the_real_duration(cs):
+    app_mod, mod, client, log, events, tmp = cs
+    started = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+    job = {"run_id": "o", "skill": "_prompt", "started_at": started, "prompt": "p", "linear_issue_id": ISSUE,
+           "record": {"agent": "claude", "task_id": "T"}}
+    app_mod._write_owner_record("o", job, "cancelled", "Cancelled by user")
+    assert records(log)[-1]["duration_s"] >= 29  # the card's own activity ends at the cancel (DP-27)
+
+
+def test_issue_title_is_withheld_for_a_confidential_run_where_records_are_unsafe(cs, monkeypatch):
+    app_mod, *_ = cs
+    assert app_mod._issue_title_extra(ISSUE) == {"issue_title": "t"}
+    monkeypatch.setattr(app_mod, "_records_unsafe", lambda: "outside the checkout")
+    assert app_mod._issue_title_extra(ISSUE, None) == {} and app_mod._issue_title_extra(ISSUE, True) == {}
+
+
+def test_quick_reply_is_gone():
+    html = (Path(__file__).resolve().parents[1] / "runner" / "templates" / "index.html").read_text()
+    assert "detail-term-reply" not in html and "_cardTermQuickReply" not in html
+
+
+# ── one task, one session ─────────────────────────────────────────────────
+
+def test_retry_after_reset_continues_the_card_session(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    f = transcript(app_mod.ROOT)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    reset_route(client)
+    procs = stub(app_mod, monkeypatch, [{"type": "system", "subtype": "init", "session_id": SID},
+                                        {"type": "result", "result": "done", "session_id": SID}])
+    assert client.post("/api/runs/a/retry", json={"reply": "go on"}).status_code == 200
+    assert len(procs) == 1 and "--resume" in procs[0].args and SID in procs[0].args
+    rec = records(log)[-1]
+    assert rec["status"] == "review" and rec["agent_session_id"] == SID and rec["issue_title"] == "t"
+    assert custom_titles(f) == ["t"]  # the run's end named the session after the card
+
+
+def test_failed_card_resume_is_an_error_with_the_agents_reason(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    transcript(app_mod.ROOT)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    reset_route(client)
+    procs = stub(app_mod, monkeypatch, [{"type": "result", "is_error": True, "result": USAGE,
+                                         "api_error": "usage_limit_reached", "session_id": SID}], rc=1)
+    assert client.post("/api/runs/a/retry", json={"reply": "go on"}).status_code == 200
+    assert len(procs) == 1  # no fresh fallback (DP-35)
+    rec = records(log)[-1]
+    assert rec["status"] == "error" and rec["error"] == USAGE  # D6
+
+
+def test_retry_without_a_session_on_disk_starts_fresh_with_a_note(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review"})
+    procs = stub(app_mod, monkeypatch, [{"type": "result", "result": "done", "session_id": "new-1"}])
+    assert client.post("/api/runs/a/retry", json={}).status_code == 200
+    assert not resumed(procs[0].args)
+    assert records(log)[-1]["session_note"] == "new session: no session yet"
+    log_lines = app_mod._claude_stream_log_path(records(log)[-1]["run_id"]).read_text()
+    assert "agenticos-note" in log_lines
+
+
+def test_retry_for_a_card_that_is_gone_is_refused(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    import state_io
+    state_io.write_json_atomic(tmp / "tasks.json", {})
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    procs = stub(app_mod, monkeypatch)
+    r = client.post("/api/runs/a/retry", json={"reply": "x"})
+    assert r.status_code == 409 and "no longer exists" in r.get_json()["error"] and procs == []
+
+
+def test_dispatch_continues_the_card_session_without_routing(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    transcript(app_mod.ROOT)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    reset_route(client)
+    routed = []
+    monkeypatch.setattr(app_mod, "_run_grouped", lambda cmd, *a, **k: routed.append(cmd))
+    procs = stub(app_mod, monkeypatch, [{"type": "result", "result": "done", "session_id": SID}])
+    issue = {"id": ISSUE, "identifier": "T-1", "title": "t", "description": ""}
+    mod._dispatch_issue_counted(issue, {"agent": {"backend": "claude"}}, app_mod.socketio)
+    assert routed == [] and len(procs) == 1 and "--resume" in procs[0].args and SID in procs[0].args
+    assert records(log)[-1]["agent_session_id"] == SID and records(log)[-1]["status"] == "review"
+
+
+def test_fresh_dispatch_routes_without_leaving_a_session(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    routed = []
+
+    def route(cmd, *a, **k):
+        routed.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "_prompt", "")
+    monkeypatch.setattr(app_mod, "_run_grouped", route)
+    procs = stub(app_mod, monkeypatch, [{"type": "result", "result": "done", "session_id": "s-new"}])
+    issue = {"id": ISSUE, "identifier": "T-1", "title": "t", "description": ""}
+    mod._dispatch_issue_counted(issue, {"agent": {"backend": "claude"}}, app_mod.socketio)
+    assert "--no-session-persistence" in routed[0] and not resumed(procs[0].args)
+    assert records(log)[-1]["session_note"] == "new session: no session yet"
+
+
+def test_dispatch_refuses_a_session_open_elsewhere(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    transcript(app_mod.ROOT)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    monkeypatch.setattr(app_mod, "_process_table", lambda: {999999: (1, f"claude --resume {SID}")})
+    monkeypatch.setattr(app_mod, "_run_grouped", lambda *a, **k: None)
+    procs = stub(app_mod, monkeypatch)
+    issue = {"id": ISSUE, "identifier": "T-1", "title": "t", "description": ""}
+    mod._dispatch_issue_counted(issue, {"agent": {"backend": "claude"}}, app_mod.socketio)
+    rec = records(log)[-1]
+    assert procs == [] and rec["status"] == "error" and "session in use elsewhere" in rec["error"]
+    assert app_mod._SESSION_CLAIMS == {}
+
+
+# ── the card title as the session name ────────────────────────────────────
+
+def test_title_edit_renames_idle_sessions_and_skips_a_live_one(cs):
+    app_mod, mod, client, log, events, tmp = cs
+    f = transcript(tmp / "elsewhere")
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    assert client.patch(f"/api/linear/issues/local/{ISSUE}", json={"title": "New name"}).status_code == 200
+    assert custom_titles(f) == ["New name"]
+    app_mod._running_jobs["x"] = {"run_id": "x", "agent": "claude", "agent_session_id": SID}
+    assert client.patch(f"/api/linear/issues/local/{ISSUE}", json={"title": "Newer"}).status_code == 200
+    assert custom_titles(f) == ["New name"]  # live: renamed at its run's end instead
+
+
+def test_sync_never_writes_the_preamble_without_a_confirmed_title(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    f = transcript(tmp / "elsewhere")
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    monkeypatch.setattr(app_mod, "_confirmed_title", lambda iid: None)
+    app_mod._sync_card_session_names(ISSUE)
+    assert custom_titles(f) == []
+
+
+def test_codex_name_is_written_even_when_its_display_title_matches(cs):
+    app_mod, mod, client, log, events, tmp = cs
+    codex_store(tmp, "x1", name=None, title="t")
+    write_log(log, {"run_id": "a", "agent": "codex", "status": "review", "agent_session_id": "x1"})
+    app_mod._sync_card_session_names(ISSUE)
+    assert thread_name("x1") == "t"
+
+
+def test_closing_marker_blocks_every_rename_until_the_group_is_gone(cs):
+    app_mod, mod, client, log, events, tmp = cs
+    f = transcript(tmp / "elsewhere")
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    proc = subprocess.Popen(["/bin/sh", "-c", "sleep 30 & sleep 30"], start_new_session=True)
+    time.sleep(0.5)  # both children started
+    try:
+        app_mod._mark_closing("claude", SID, proc.pid)
+        os.kill(proc.pid, signal.SIGKILL)  # the leader is gone, its child still in the group
+        proc.wait()
+        app_mod._sync_card_session_names(ISSUE)
+        assert custom_titles(f) == []  # a reaped leader is not enough (R6)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+    deadline = time.monotonic() + 5
+    while app_mod._group_alive(proc.pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    app_mod._sync_card_session_names(ISSUE)
+    assert custom_titles(f) == ["t"] and app_mod._CLOSING_SESSIONS == {}
+
+
+def test_own_last_write_does_not_block_a_rename_right_after_a_run(cs):
+    app_mod, mod, client, log, events, tmp = cs
+    f = transcript(tmp / "elsewhere", age=0)  # written just now ...
+    started = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID,
+                    "started_at": started, "duration_s": 5})  # ... by this card's own last run (DP-26)
+    app_mod._sync_card_session_names(ISSUE)
+    assert custom_titles(f) == ["t"]
+
+
+@pytest.fixture
+def demo(cs, monkeypatch, tmp_path):
+    proj = tmp_path / "demo"
+    proj.mkdir()
+    subprocess.run(["git", "init", "-q", str(proj)], check=True)
+    reg = tmp_path / "projects.yaml"
+    reg.write_text(yaml.safe_dump({"projects": {"demo": {"path": str(proj), "confidential": False}}}))
+    monkeypatch.setattr(pj, "REGISTRY_PATH", reg)
+    monkeypatch.setattr(pj, "WORKTREE_ROOT", tmp_path / "wt")
+    return proj
+
+
+def test_card_row_rename_renames_the_card_and_the_session(cs, demo):
+    app_mod, mod, client, log, events, tmp = cs
+    f = transcript(demo)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    r = client.post(f"/api/projects/demo/sessions/claude/{SID}/rename", json={"title": "Row name"})
+    assert r.status_code == 200 and r.get_json()["card"] is True
+    assert tasks(tmp)[ISSUE]["title"] == "Row name" and custom_titles(f) == ["Row name"]
+
+
+def test_card_row_rename_validates_before_any_write(cs, demo):
+    app_mod, mod, client, log, events, tmp = cs
+    f = transcript(demo)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    r = client.post(f"/api/projects/demo/sessions/claude/{SID}/rename", json={"title": "bad\x07"})
+    assert r.status_code == 400 and tasks(tmp)[ISSUE]["title"] == "t" and custom_titles(f) == []
+
+
+def test_card_row_rename_with_a_failed_linear_update_changes_nothing(cs, demo, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    f = transcript(demo)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    monkeypatch.setattr(mod, "set_card_title", lambda iid, title: (_ for _ in ()).throw(RuntimeError("Linear down")))
+    r = client.post(f"/api/projects/demo/sessions/claude/{SID}/rename", json={"title": "Row name"})
+    assert r.status_code == 502 and tasks(tmp)[ISSUE]["title"] == "t" and custom_titles(f) == []
+
+
+def test_archived_cards_session_row_renames_only_the_session(cs, demo):
+    app_mod, mod, client, log, events, tmp = cs
+    import state_io
+    f = transcript(demo)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    state_io.write_json_atomic(tmp / "tasks.json", {})  # the card is gone (DP-29)
+    r = client.post(f"/api/projects/demo/sessions/claude/{SID}/rename", json={"title": "Own name"})
+    assert r.status_code == 200 and "card" not in r.get_json() and custom_titles(f) == ["Own name"]
+
+
+def test_linear_title_update_is_title_only():
+    import linear_client
+    sent = {}
+
+    class Client(linear_client.LinearClient):
+        def _graphql_strict(self, query, variables=None):
+            sent.update(query=query, variables=variables)
+            return {"issueUpdate": {"success": True, "issue": {"id": "i", "title": "N", "updatedAt": "u"}}}
+    out = Client("k", "").update_title("i", "N")
+    assert out == {"id": "i", "title": "N", "updated_at": "u"}
+    assert "description" not in sent["query"] and "stateId" not in sent["query"]  # nothing cleared (DP-42)
+
+
+def test_project_dispatch_continues_the_session_in_its_worktree(cs, demo, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    wt = pj.worktree_path(pj.get_project("demo"), "T-1")
+    wt.mkdir(parents=True)
+    transcript(wt)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    seen = {}
+    monkeypatch.setattr(app_mod, "_run_project_ticket", lambda **kw: seen.update(kw))
+    issue = {"id": ISSUE, "identifier": "T-1", "title": "t", "description": "", "labels": ["project:demo"]}
+    mod._dispatch_issue_counted(issue, {"agent": {"backend": "claude"}}, app_mod.socketio)
+    assert seen["resume_session"] == SID and seen["timeout"] == app_mod.AI_SESSION_TIMEOUT_S and seen["note"] is None
+
+
+def test_project_dispatch_with_the_session_elsewhere_starts_fresh_with_a_note(cs, demo, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    transcript(demo)  # in the main checkout, not the ticket's worktree
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    seen = {}
+    monkeypatch.setattr(app_mod, "_run_project_ticket", lambda **kw: seen.update(kw))
+    issue = {"id": ISSUE, "identifier": "T-1", "title": "t", "description": "", "labels": ["project:demo"]}
+    mod._dispatch_issue_counted(issue, {"agent": {"backend": "claude"}}, app_mod.socketio)
+    assert seen["resume_session"] is None and seen["note"] == "new session: the card's session is in a different folder"
+
+
+def test_card_continuation_gets_the_session_timeout(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    transcript(app_mod.ROOT)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    seen = []
+    monkeypatch.setattr(app_mod, "run_agent_process", lambda rid, cmd, **kw: (seen.append(kw.get("timeout")), ("ok", 0, 0, None, SID, "", True))[1])
+    assert client.post("/api/runs/a/retry", json={"reply": "x"}).status_code == 200
+    assert seen == [app_mod.AI_SESSION_TIMEOUT_S]  # D7: stall detector + 4 h, not the 30-minute cap
+
+
+def test_project_run_note_survives_and_codex_error_is_kept(tmp_path):
+    script = tmp_path / "agent.py"
+    script.write_text("import json; print(json.dumps({'type': 'turn.failed', 'error': {'message': 'quota exhausted'}}))\n")
+    log_path = tmp_path / "run_stream.jsonl"
+    events = []
+    project_runs.run_agent([sys.executable, str(script)], str(tmp_path), dict(os.environ), "pr1", "codex", 30,
+                           lambda e, p: events.append(p), log_path=log_path, note="new session: no session yet")
+    first = log_path.read_text().splitlines()[0]
+    assert json.loads(first)["type"] == "agenticos-note"  # written after the log's "w" open (DP-39)
+    assert any("new session" in p["line"] for p in events)
+    assert project_runs.AGENT_ERRORS.pop("pr1") == "quota exhausted"  # DP-44
