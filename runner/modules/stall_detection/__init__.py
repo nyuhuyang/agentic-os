@@ -81,6 +81,7 @@ def _stall(_app, socketio, run_id: str, job: dict) -> None:
     # Ending the run = taking both entries under the lock; then the stall pass owns its
     # record and tracker push, and the worker touches neither (WS-004/006/007).
     with _app._JOB_LOCK:
+        _app._mark_job_closing(run_id)  # before it leaves the live set (R3)
         if _app._running_jobs.pop(run_id, None) is None:
             return  # the worker or a cancel ended it meanwhile
         proc = _app._running_procs.pop(run_id, None)

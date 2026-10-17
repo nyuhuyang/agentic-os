@@ -863,10 +863,20 @@ class LinearModule(AgenticModule):
             if resume_sid:
                 refused = _resume_admission(issue_id, backend, resume_sid, run_id)
                 if refused:  # no HTTP channel here: an error record and the card back to review (DP-05/25)
-                    self._refuse_resume(issue, run_id, backend, launch_gen, refused)
+                    from app import _ticket_confidential
+                    conf = _ticket_confidential(project_key, ident, issue_id, None,
+                                                *([bound["confidential"]] if "confidential" in bound else []))
+                    self._refuse_resume(issue, run_id, backend, launch_gen, refused,
+                                        binding={"project_key": project_key, "issue_identifier": ident, "confidential": conf})
                     return
             self.dispatched[issue_id] = run_id
-            self.push_state(issue_id, "running", gen=launch_gen)
+            try:
+                self.push_state(issue_id, "running", gen=launch_gen)
+            except BaseException:  # before the helper owns cleanup: release what admission took (R5)
+                from app import _release_session
+                _release_session(run_id)
+                self.dispatched.pop(issue_id, None)
+                raise
             try:
                 _run_project_ticket(
                     project_key=project_key, ident=bound.get("issue_identifier") or issue.get("identifier") or issue_id,
@@ -1079,15 +1089,19 @@ class LinearModule(AgenticModule):
                 _release_session(run_id)  # the resume claim taken at admission
             card_hold.close()
 
-    def _refuse_resume(self, issue: dict, run_id: str, backend: str, launch_gen: int, why: str) -> None:
+    def _refuse_resume(self, issue: dict, run_id: str, backend: str, launch_gen: int, why: str,
+                       binding: dict | None = None) -> None:
         """A dispatch that cannot continue the card's session right now: nothing launches; an error
-        record says why, and the card leaves In Progress (DP-05, DP-13, DP-25)."""
-        from app import _write_run_log_retrying, _agent_model
+        record says why, and the card leaves In Progress (DP-05, DP-13, DP-25). A project card's
+        record keeps its binding and withholds its title where records may leak (R1)."""
+        from app import _write_run_log_retrying, _agent_model, _records_unsafe, _WITHHELD_PROMPT
         issue_id = issue["id"]
         prompt = f"{issue.get('identifier', '')}: {issue.get('title', '')}"
+        if binding is not None and binding.get("confidential") is not False and _records_unsafe():
+            prompt = _WITHHELD_PROMPT
         _write_run_log_retrying("_prompt", "error", datetime.now(timezone.utc).isoformat(), 0.0, prompt=prompt,
                                 error=why, run_id=run_id, linear_issue_id=issue_id, agent=backend, task_id=run_id,
-                                reset_generation=launch_gen, model=_agent_model(backend))
+                                reset_generation=launch_gen, model=_agent_model(backend), extra=binding)
         with contextlib.suppress(Exception):
             self._mark_issue_review(issue_id, gen=launch_gen)
         if self._socketio:

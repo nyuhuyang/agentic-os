@@ -437,3 +437,66 @@ def test_project_run_note_survives_and_codex_error_is_kept(tmp_path):
     assert json.loads(first)["type"] == "agenticos-note"  # written after the log's "w" open (DP-39)
     assert any("new session" in p["line"] for p in events)
     assert project_runs.AGENT_ERRORS.pop("pr1") == "quota exhausted"  # DP-44
+
+
+# ── Codex build inspection 1 (R1–R6) ───────────────────────────────────────
+
+def test_locked_session_gone_from_disk_starts_fresh_with_a_note(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})  # lock, no store entry
+    procs = stub(app_mod, monkeypatch, [{"type": "result", "result": "done", "session_id": "s-new"}])
+    assert client.post("/api/runs/a/retry", json={"reply": "x"}).status_code == 200
+    assert len(procs) == 1 and not resumed(procs[0].args)  # no doomed resume, no fallback (R2)
+    assert records(log)[-1]["session_note"] == "new session: the card's session was removed or archived"
+
+
+def test_codex_thread_with_its_rollout_gone_is_not_resumable(tmp_path):
+    codex_store(tmp_path, "x2")
+    (pj.CODEX_DB.parent / "rollout-x2.jsonl").unlink()
+    assert pj.find_session("codex", "x2") is None  # R6
+
+
+def test_cancel_marks_the_session_closing_before_it_leaves_the_live_set(cs):
+    app_mod, mod, client, log, events, tmp = cs
+    proc = subprocess.Popen(["/bin/sh", "-c", "sleep 30"], start_new_session=True)
+    try:
+        app_mod._running_jobs["r"] = {"run_id": "r", "agent": "claude", "agent_session_id": SID}
+        app_mod._running_procs["r"] = proc
+        with app_mod._JOB_LOCK:
+            app_mod._mark_job_closing("r")
+        assert app_mod._CLOSING_SESSIONS == {("claude", SID): proc.pid}  # R3
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+
+
+def test_retry_refused_when_the_card_was_reset_while_queued(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review"})
+    monkeypatch.setattr(app_mod, "_card_admitted", lambda iid, gen: False)
+    procs = stub(app_mod, monkeypatch)
+    r = client.post("/api/runs/a/retry", json={"reply": "x"})
+    assert r.status_code == 409 and procs == [] and app_mod._SESSION_CLAIMS == {}  # R4
+
+
+def test_project_dispatch_releases_its_claim_when_the_state_push_fails(cs, demo, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    wt = pj.worktree_path(pj.get_project("demo"), "T-1")
+    wt.mkdir(parents=True)
+    transcript(wt)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    monkeypatch.setattr(mod, "push_state", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no thread")))
+    issue = {"id": ISSUE, "identifier": "T-1", "title": "t", "description": "", "labels": ["project:demo"]}
+    with pytest.raises(RuntimeError):
+        mod._dispatch_issue_held(issue, {"agent": {"backend": "claude"}}, app_mod.socketio,
+                                 contextlib.ExitStack(), False)
+    assert app_mod._SESSION_CLAIMS == {} and ISSUE not in mod.dispatched  # R5
+
+
+def test_refusal_record_of_a_confidential_project_withholds_the_title(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    monkeypatch.setattr(app_mod, "_records_unsafe", lambda: "outside the checkout")
+    mod._refuse_resume({"id": ISSUE, "identifier": "T-1", "title": "Secret deal"}, "rr", "claude", 0, "busy",
+                       binding={"project_key": "demo", "issue_identifier": "T-1", "confidential": True})
+    rec = records(log)[-1]
+    assert "Secret deal" not in json.dumps(rec) and rec["project_key"] == "demo" and rec["confidential"] is True  # R1

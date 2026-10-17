@@ -13,7 +13,7 @@ sys.path.insert(0, str(RUNNER))
 sys.path.insert(0, str(RUNNER.parent))
 
 import project_runs as pr  # noqa: E402
-from test_reset_gen import ISSUE, SID, env, write_log  # noqa: E402,F401  (env: fixture)
+from test_reset_gen import ISSUE, SID, env, on_disk, write_log  # noqa: E402,F401  (env: fixture)
 from test_runner_write_safety import statuses, stub_launches, tracker_state  # noqa: E402
 
 
@@ -86,6 +86,8 @@ def test_review_runs_carry_waiting_and_the_last_message(harness):
 
 def test_quick_reply_resumes_the_same_session(harness, monkeypatch):
     app_mod, mod, client, log, events, tmp = harness
+    on_disk(app_mod, "claude", SID)
+    monkeypatch.setattr(app_mod, "_process_table", lambda: {})
     write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
     procs = stub_launches(app_mod, monkeypatch, [{}])
     r = client.post("/api/runs/a/retry", json={"reply": "go ahead", "strict": True})
@@ -96,6 +98,8 @@ def test_quick_reply_resumes_the_same_session(harness, monkeypatch):
 
 def test_strict_continuation_never_falls_back(harness, monkeypatch):
     app_mod, mod, client, log, events, tmp = harness
+    on_disk(app_mod, "claude", SID)
+    monkeypatch.setattr(app_mod, "_process_table", lambda: {})
     write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
     procs = stub_launches(app_mod, monkeypatch, [{"rc": 1}])
     rid = client.post("/api/runs/a/retry", json={"reply": "x", "strict": True}).get_json()["run_id"]
@@ -164,7 +168,8 @@ def test_project_card_lock_refuses_quick_reply(harness, monkeypatch):
         assert client.post("/api/runs/a/retry", json={"reply": "x", "strict": True}).status_code == 409
     assert launched == [] and (log.read_text(), tracker_state(tmp)) == before
     assert client.post("/api/runs/a/retry", json={"reply": "x", "strict": True}).status_code == 200
-    assert launched[0]["ticket_hold"] is not None and launched[0]["resume_session"] == SID
+    # SID is not in any session store here: a new session, said so (D3, R2)
+    assert launched[0]["ticket_hold"] is not None and launched[0]["resume_session"] is None and launched[0]["note"]
 
 
 def test_dispatch_is_refused_while_the_card_is_held(harness):
@@ -465,6 +470,8 @@ def test_timed_out_linear_dispatch_stays_resumable(harness, monkeypatch):
     assert rec["status"] == "timeout" and rec["task_id"] == rec["run_id"]  # FB5-01
     assert app_mod._get_task_agent_lock(rec["task_id"])["agent_session_id"] == "lin-sess"
     monkeypatch.setattr(app_mod, "run_agent_process", real_engine)
+    on_disk(app_mod, "claude", "lin-sess")
+    monkeypatch.setattr(app_mod, "_process_table", lambda: {})
     procs = stub_launches(app_mod, monkeypatch, [{}])
     assert client.post(f"/api/runs/{rec['run_id']}/retry", json={"reply": "go", "strict": True}).status_code == 200
     assert "--resume" in procs[0].args and "lin-sess" in procs[0].args

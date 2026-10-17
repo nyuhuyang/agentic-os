@@ -1717,8 +1717,9 @@ def find_session(agent: str, sid: str) -> dict | None:
     if not row or not isinstance(row[0], str) or not isinstance(row[1], str) or not row[1]:
         return None
     store = Path(os.path.realpath(CODEX_DB.parent))
-    if not Path(os.path.realpath(row[1])).is_relative_to(store):
-        return None
+    rollout = Path(os.path.realpath(row[1]))
+    if not rollout.is_relative_to(store) or not rollout.is_file() or not os.access(rollout, os.R_OK):
+        return None  # a thread row whose rollout is gone is not resumable (R6)
     texts = [v if isinstance(v, str) else None for v in row[2:5]]
     return {"agent": agent, "id": sid, "cwd": row[0], "path": Path(row[1]),
             "title": _codex_title(*texts), "native_title": texts[0] or None}

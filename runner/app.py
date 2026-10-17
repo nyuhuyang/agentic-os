@@ -3102,6 +3102,7 @@ def _cancel_generic(run_id: str, error: str) -> dict | None:
     returning. The displaced worker then finds no job and writes nothing. None: not running
     (or already finishing). Used by cancel and by shutdown (SBR-010)."""
     with _JOB_LOCK:
+        _mark_job_closing(run_id)  # before the job leaves the live set: no rename slips in (R3)
         job = _running_jobs.pop(run_id, None)
         proc = _running_procs.pop(run_id, None) if job is not None else None
     if job is None:
@@ -3267,6 +3268,8 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
     try:
         if _SHUTTING_DOWN.is_set():
             raise project_runs.ProjectRunError("runner is shutting down")
+        if linear_issue_id and _module_registry.get("linear") is not None and _tracker_issue(linear_issue_id) is None:
+            raise _projects.ProjectError("this card no longer exists")  # gone while queued: no launch (R4)
         errors: dict = {}
         project = _projects.get_project(project_key, _projects.load_registry(errors=errors))
         # Resolved above. Unknown (an unreadable sidecar) stays None: treated as confidential
@@ -4030,6 +4033,16 @@ def _group_alive(pgid: int | None) -> bool:
     return True
 
 
+def _mark_job_closing(run_id: str) -> None:
+    """Called under _JOB_LOCK by cancel and stall before they take a run out of the live set:
+    its session stays blocked for renames until the run's whole group is gone (R3)."""
+    job, proc = _running_jobs.get(run_id), _running_procs.get(run_id)
+    if job is None:
+        return
+    sid = job.get("agent_session_id") or (_SESSION_CLAIMS.get(run_id) or (None, None))[1]
+    _mark_closing((job.get("record") or {}).get("agent") or job.get("agent"), sid, getattr(proc, "pid", None))
+
+
 def _mark_closing(agent: str | None, sid: str | None, pgid: int | None) -> None:
     """A run that carries a session is being stopped: until its whole group is gone, no trigger
     renames that session (R6)."""
@@ -4134,6 +4147,15 @@ def _sync_titles_soon(issue_id: str, title: str | None = None) -> None:
     """A confirmed title change: rename the card's idle sessions now, in the background."""
     threading.Thread(target=_sync_card_session_names, args=(issue_id,), kwargs={"title": title},
                      daemon=True, name=f"title-sync-{issue_id[:8]}").start()
+
+
+def _card_admitted(issue_id: str | None, gen: int) -> bool:
+    """Admission for a queued card launch, under the issue lock: the card is still live and no
+    reset happened since the request read its generation (R2, R4)."""
+    if not issue_id or _module_registry.get("linear") is None:
+        return True
+    with reset_gen.issue_lock(issue_id):
+        return _tracker_issue(issue_id) is not None and reset_gen.current(issue_id) == gen
 
 
 def _session_note(run_id: str, text: str) -> None:
@@ -5118,10 +5140,8 @@ def api_run_retry(run_id: str):
         project_key = (bound or {}).get("project_key") or original.get("session_project")
         if not sid:
             card_note = "new session: " + (_resumable_card_session(linear_issue_id, agent, None)[1] or "no session yet")
-        elif not target and _lock_session_id:
-            pass  # its store entry is not visible here: today's resume, with its fresh fallback
-        elif not target:
-            card_note = "new session: the card's session was removed or archived"
+        elif not target:  # removed or archived: a new session, said so, never a doomed resume (R2)
+            card_note, _lock_session_id = "new session: the card's session was removed or archived", None
         else:
             in_ticket_wt = False
             if bound and bound.get("issue_identifier") and project_key:
@@ -5187,6 +5207,10 @@ def api_run_retry(run_id: str):
         card_hold.close()
         status = 409 if isinstance(exc, _projects.TicketLocked) else 400
         return jsonify({"ok": False, "error": str(exc)}), status
+    if linear_issue_id and not _card_admitted(linear_issue_id, _launch_gen):  # before any tracker change (R4)
+        _release_session(new_run_id)
+        card_hold.close()
+        return jsonify({"ok": False, "error": "this card no longer exists or was reset meanwhile; try again"}), 409
     if bound:
         bound = {**bound, "confidential": _ticket_confidential(  # before any comment (I6-03, I9-02)
             bound["project_key"], bound.get("issue_identifier"), linear_issue_id, task_id,

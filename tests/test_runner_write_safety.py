@@ -191,7 +191,8 @@ def test_cancel_before_registration_kills_the_new_process(harness, monkeypatch):
 
 def test_cancel_before_fallback_registration_kills_the_fallback(harness, monkeypatch):
     app_mod, mod, client, log, events, tmp = harness
-    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID,
+                    "linear_issue_id": None})  # a /run card: its resume keeps the fresh fallback (D3 covers tracker cards)
     seen = {}
     procs = stub_launches(app_mod, monkeypatch, [{"rc": 1}, {"on_launch": canceller(app_mod, client, seen)}])
     client.post("/api/runs/a/retry", json={})
@@ -452,7 +453,8 @@ def test_a_reader_that_cannot_start_ends_the_run(app_mod, monkeypatch, reader, f
 
 def test_cancel_between_attempts_still_ends_the_first_group(harness, monkeypatch):
     app_mod, mod, client, log, events, tmp = harness
-    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID,
+                    "linear_issue_id": None})  # a /run card: its resume keeps the fresh fallback (D3 covers tracker cards)
     seen = {}
     procs = stub_launches(app_mod, monkeypatch, [{"rc": 1}])
 
@@ -546,7 +548,8 @@ def test_buffered_lines_stop_with_the_reader(app_mod):
 
 def test_a_fallback_setup_failure_ends_the_first_attempts_group(harness, monkeypatch):
     app_mod, mod, client, log, events, tmp = harness
-    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID,
+                    "linear_issue_id": None})  # a /run card: its resume keeps the fresh fallback (D3 covers tracker cards)
     procs = stub_launches(app_mod, monkeypatch, [{"rc": 1}])
     real_cmd = app_mod._ai_command
 

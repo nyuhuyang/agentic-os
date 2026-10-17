@@ -120,3 +120,17 @@
   - Test safety: `tests/conftest.py` now points `CLAUDE_PROJECTS` and `CODEX_DB` at tmp in every test, so no sync can touch the real stores.
   - The R2 liveness check made 3 `test_project_dispatch.py` retries hit fixture cards that do not exist; that fixture now treats its cards as live.
 - Manual browser checks BLOCKED: the Chrome extension is not connected, and headless Chrome refuses DevTools attach to pages ("Not allowed"). Playwright 's driver fails on Chrome 155.
+
+## Codex build inspection 1 — REVISE (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i1/claudex-4oboigmj/result.json` (223 s), on `8e1d070` against `dbbacd0`. 6 findings: 1 high, 5 medium. All accepted.
+- R1 (high): the project dispatch refusal record wrote the real title with no binding. → `_refuse_resume(binding=…)` withholds the title under the confidential + unsafe rule and keeps the binding.
+- R2 (medium): a locked session missing from disk was still resumed, with the fresh fallback and the 30-minute cap. → A new session with a "removed or archived" note. Every attempted tracker-card resume stays strict with `AI_SESSION_TIMEOUT_S`.
+- R3 (medium): cancel and stall took the job out of the live set before the closing marker existed. → `_mark_job_closing` runs under `_JOB_LOCK` before the job is popped.
+- R4 (medium): the ordinary retry and the project helper did not recheck liveness/generation once admitted. → `_card_admitted` (issue lock) runs before any tracker change in the retry route, and the project helper refuses a gone card before launch.
+- R5 (medium): a failed `push_state` in project dispatch leaked the session claim and `dispatched`. → Both are released before the helper owns cleanup.
+- R6 (medium): Codex `find_session` accepted a thread whose rollout was gone. → It now requires an existing, readable rollout file.
+- Tests: 6 new regression tests. 9 older tests adapted to D3:
+  - card continuations now have a session on disk;
+  - fallback-mechanics tests use `/run` cards (no tracker issue), the only cards that keep the fresh fallback;
+  - the project ticket-lock test expects a new session for a session not in any store.
+- Proof: 680 passed.

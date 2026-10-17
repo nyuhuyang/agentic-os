@@ -174,7 +174,8 @@ def test_every_non_project_launch_goes_through_the_engine_with_one_record(eng, m
     client.post("/run", json={"prompt": "p", "agent": "claude", "skill": "sk"})
     monkeypatch.setattr(app_mod, "_load_registry", lambda agent: {})
     # retry: a failed resume then the fallback = one run, two processes, one record
-    write_log(log, {"run_id": "b", "agent": "claude", "status": "review", "agent_session_id": SID})
+    write_log(log, {"run_id": "b", "agent": "claude", "status": "review", "agent_session_id": SID,
+                    "linear_issue_id": None})  # a /run card: its resume keeps the fresh fallback (D3 covers tracker cards)
     client.post("/api/runs/b/retry", json={})
     # Linear dispatch
     mod._dispatch_issue({"id": ISSUE, "identifier": "LOC-1", "title": "t", "description": "", "labels": []},
@@ -210,7 +211,8 @@ def test_stderr_flood_does_not_stall_the_reader(eng, tmp_path):
 
 def test_fallback_keeps_the_failed_attempts_log_and_seq_cursor(eng):
     app_mod, mod, client, log, events, tmp, calls, stamped, mode = eng
-    write_log(log, {"run_id": "b", "agent": "claude", "status": "review", "agent_session_id": SID})
+    write_log(log, {"run_id": "b", "agent": "claude", "status": "review", "agent_session_id": SID,
+                    "linear_issue_id": None})  # a /run card: its resume keeps the fresh fallback (D3 covers tracker cards)
     client.post("/api/runs/b/retry", json={})
     rid = calls[0][0]
     live = client.get(f"/api/runs/{rid}/events").get_json()
