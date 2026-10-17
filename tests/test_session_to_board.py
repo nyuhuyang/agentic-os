@@ -66,6 +66,8 @@ def stb(env, tmp_path, monkeypatch):
 
     def fake_run(rid, cmd, **kw):
         launches.append({"rid": rid, "cmd": cmd, **kw})
+        import project_runs
+        project_runs.REPLIED.add(rid)  # what the stream reader notes for a real reply (R16-01)
         return "done", 10, 20, "claude-opus-5-5[1m]", SID, "", True
     monkeypatch.setattr(app_mod, "run_agent_process", fake_run)
     return app_mod, mod, client, log, tmp, proj, conf, launches

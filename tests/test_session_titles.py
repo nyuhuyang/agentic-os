@@ -854,11 +854,24 @@ def test_status_change_copy_withholds_a_confidential_title(cs, monkeypatch):
 
 # ── Codex build inspection 14 (PVST-R14-01) ────────────────────────────────
 
-def test_has_reply_ignores_protocol_fallback():
-    import app as app_mod
-    assert not app_mod._has_reply(json.dumps({"type": "system", "subtype": "init", "session_id": "s"}))
-    assert not app_mod._has_reply('{"type":"thread.started","thread_id":"t"}\n{"type":"turn.completed"}')
-    assert not app_mod._has_reply("") and app_mod._has_reply("Done: added the button.")
+def test_reply_is_observed_in_the_stream_not_judged_by_shape():
+    assert project_runs.is_reply("claude", json.dumps({"type": "result", "result": '{"type":"report","value":42}'}))  # R16-01
+    assert not project_runs.is_reply("claude", json.dumps({"type": "system", "subtype": "init", "session_id": "s"}))
+    assert not project_runs.is_reply("claude", json.dumps({"type": "result", "result": ""}))
+    msg = {"type": "item.completed", "item": {"type": "agent_message", "text": '{"type":"x"}'}}
+    assert project_runs.is_reply("codex", json.dumps(msg))
+    assert not project_runs.is_reply("codex", '{"type":"thread.started","thread_id":"t"}')
+
+
+def test_resumed_dispatch_with_a_typed_json_reply_succeeds(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    transcript(app_mod.ROOT)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    monkeypatch.setattr(app_mod, "_run_grouped", lambda *a, **k: None)
+    stub(app_mod, monkeypatch, [{"type": "result", "result": '{"type":"report","value":42}', "session_id": SID}])
+    issue = {"id": ISSUE, "identifier": "T-1", "title": "t", "description": ""}
+    mod._dispatch_issue_counted(issue, {"agent": {"backend": "claude"}}, app_mod.socketio)
+    assert records(log)[-1]["status"] == "review"  # R16-01
 
 
 @pytest.mark.parametrize("lines", [[{"type": "system", "subtype": "init", "session_id": SID}],

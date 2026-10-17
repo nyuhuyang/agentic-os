@@ -234,3 +234,9 @@
 - DSI-01: the project helper accepted a resumed run with no reply. → `_has_reply` gates `resume_session` runs there too; failure: "resume of session … failed (no reply)".
 - DSI-02: queued runs dropped before launch skipped the run-end name sync, so a title edit held back by their claim was lost. → `_after_card_run` or `_sync_titles_soon` on the retry-worker drop, the session-worker drop, the dispatch drop, `_start_failed`, and the session worker's start failure.
 - Tests: 2 new. Proof: 710 passed.
+
+## Codex build inspection 16 — REVISE (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i16/claudex-kzjuo_57/result.json` (184 s). 1 medium finding, accepted.
+- PVST-R16-01: `_has_reply` judged replies by their shape, so a typed-JSON reply counted as a failure. → It is removed. The stream readers note reply content as it streams (`project_runs.REPLIED` via `is_reply`): Claude's non-empty result or assistant text, Codex's `agent_message`, dsh's `final`. Every continuation gate uses `pop_replied`, so R14-01's ceiling is gone.
+- Tests: 2 new (typed-JSON reply succeeds; observation per agent). The session-to-board fixture's fake engine records its reply as the stream reader would.
+- Proof: 711 passed.

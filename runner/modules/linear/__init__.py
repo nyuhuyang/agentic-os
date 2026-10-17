@@ -1054,8 +1054,7 @@ class LinearModule(AgenticModule):
                     output = output or ""
                 elif resume_sid:
                     # a resumed session keeps its real result: no silent review (DP-14, R4-03)
-                    from app import _has_reply
-                    ok = ok and _has_reply(output) and not turn_failed  # protocol lines are no reply (R14-01)
+                    ok = ok and _pr.pop_replied(run_id) and not turn_failed  # the agent must have replied (R16-01)
                 else:
                     ok = True  # a fresh launch keeps the unconditional review status
                 dur = time.monotonic() - t0

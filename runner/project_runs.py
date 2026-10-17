@@ -346,6 +346,43 @@ AGENT_ERRORS: dict[str, str] = {}
 AGENT_FAILED: set[str] = set()
 
 
+# run_ids whose agent produced reply content (Claude: a non-empty result or assistant text;
+# Codex: an agent_message; dsh: a final text), observed in the stream itself, so a reply is
+# never judged by its shape (R16-01, replacing R14-01's shape check).
+REPLIED: set[str] = set()
+
+
+def is_reply(fmt: str, line: str) -> bool:
+    """Whether this stdout line carries reply content from the agent."""
+    if fmt not in ("claude", "codex", "dsh"):
+        return False
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        return False
+    if not isinstance(ev, dict):
+        return False
+    t = ev.get("type")
+    if fmt == "claude":
+        if t == "result" and not ev.get("is_error"):
+            return isinstance(ev.get("result"), str) and bool(ev["result"].strip())
+        if t == "assistant":
+            return any(isinstance(b, dict) and b.get("type") == "text" and str(b.get("text") or "").strip()
+                       for b in (ev.get("message") or {}).get("content") or [])
+        return False
+    if fmt == "codex":
+        item = ev.get("item") or {}
+        return t == "item.completed" and item.get("type") == "agent_message" and bool(str(item.get("text") or "").strip())
+    return t == "final" and bool(str(ev.get("text") or "").strip())
+
+
+def pop_replied(run_id: str) -> bool:
+    """Whether the finished run's agent replied at all, cleared."""
+    replied = run_id in REPLIED
+    REPLIED.discard(run_id)
+    return replied
+
+
 def pop_agent_failure(run_id: str) -> tuple[str | None, bool]:
     """(the agent's own error text, whether its turn failed) for a finished run, cleared."""
     failed = run_id in AGENT_FAILED
@@ -377,7 +414,10 @@ def agent_error_of(fmt: str, line: str) -> str | None:
 
 
 def note_agent_error(run_id: str, fmt: str, line: str) -> None:
-    """Keep the agent's error for this run. A Codex turn.failed wins over an earlier error event."""
+    """Keep the agent's error for this run (a Codex turn.failed wins over an earlier error
+    event), and note whether it replied at all (R16-01)."""
+    if run_id not in REPLIED and is_reply(fmt, line):
+        REPLIED.add(run_id)
     msg = agent_error_of(fmt, line)
     terminal = fmt == "claude" or '"turn.failed"' in line
     if msg and (run_id not in AGENT_ERRORS or terminal):
