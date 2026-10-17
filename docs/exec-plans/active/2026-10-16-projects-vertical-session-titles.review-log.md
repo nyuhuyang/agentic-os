@@ -193,3 +193,11 @@
 - PVST-R9-01 (medium): the transient intent re-read the generation. → It uses the request's `_launch_gen`, so a reset during the route's lookups refuses the request at admission.
 - PVST-R9-02 (medium): `set_card_title` cached only {id, title} when the cache was empty. → It publishes the whole stored issue, merged with any cached fields, to the cache and the team cache.
 - Tests: 2 new. Proof: 699 passed.
+
+## Codex build inspection 10 — REVISE (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i10/claudex-gb3ugsm5/result.json` (293 s). 3 medium findings. All accepted.
+- PVST-R10-01: a deleted card's `issue_title` still labelled its session row. → `_board_sessions` keeps labels only for sessions whose newest owning card is live; visibility (ids) is unchanged.
+- PVST-R10-02: the PTY reader marked the terminal dead before any closing marker existed. → Under `_JOB_LOCK`, the marker (the shell's group) comes first, then `alive = False`. Ceiling: a child that moved to another group outlives the check.
+- PVST-R10-03: a poll could publish a title normalized before a confirmed rename. → Under the issue locks, right before publishing, each entry gets the current override and any newer confirmed title, in place so the team caches agree.
+- Tests: 1 new (R10-01). R10-02 and R10-03 are interleavings covered by code review only.
+- Proof: 700 passed.

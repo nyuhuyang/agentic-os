@@ -780,3 +780,19 @@ def test_retry_transient_intent_keeps_the_generation_the_request_read(cs, demo, 
     monkeypatch.setattr(app_mod, "run_agent_process", lambda *a, **k: launched.append(1))
     r = client.post("/api/runs/a/retry", json={"reply": "x"})
     assert r.status_code == 409 and launched == []  # R9-01
+
+
+# ── Codex build inspection 10 (PVST-R10-01) ────────────────────────────────
+
+def test_a_deleted_cards_session_shows_its_own_name(cs, demo):
+    app_mod, mod, client, log, events, tmp = cs
+    import state_io
+    f = transcript(demo)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID,
+                    "issue_identifier": "T-1", "issue_title": "Old card"})
+    assert app_mod._board_sessions()[1][("claude", SID)]["label"] == "T-1"
+    state_io.write_json_atomic(tmp / "tasks.json", {})  # emptied from the trash
+    assert ("claude", SID) not in app_mod._board_sessions()[1]  # R10-01: no stale card title
+    assert client.post(f"/api/projects/demo/sessions/claude/{SID}/rename", json={"title": "Mine"}).status_code == 200
+    rows = {r["id"]: r for r in pj.project_sessions(pj.get_project("demo"), *app_mod._board_sessions())}
+    assert rows[SID]["title"] == "Mine" and "card_title" not in rows[SID]

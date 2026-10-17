@@ -178,8 +178,15 @@ def _reader(t: Terminal, socketio) -> None:
             _append_scrollback(t, data)
             socketio.emit("term_output", {"term_id": t.term_id, "data": data.decode("utf-8", "replace")},
                           to=_room(t.term_id))
-    with t.lock:
+    from app import _JOB_LOCK, _mark_closing
+    # The closing marker first, then the terminal stops counting as live, at the boundary the
+    # rename check snapshots under (R10-02). ponytail: the shell's own group stands for the
+    # terminal's session; a child that moved to another group outlives the check.
+    with _JOB_LOCK:
+        if t.kind == "resume" and t.session_id:
+            _mark_closing(t.agent, t.session_id, t.pid)
         t.alive = False
+    with t.lock:
         if t.pid:
             with contextlib.suppress(ChildProcessError, OSError):
                 pid, status = os.waitpid(t.pid, os.WNOHANG)

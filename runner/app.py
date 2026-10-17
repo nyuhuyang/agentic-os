@@ -3754,6 +3754,10 @@ def _board_sessions() -> tuple[set, dict]:
         if ident:
             labels[(agent, sid)] = {"label": ident, "title": issue.get("title") or extra.get("issue_title") or job.get("issue_title")}
     ids |= {(canonical_agent(a) or a, s) for a, s in _live_session_ids() if a and s}
+    # A card label only while the session's newest owning card is live: a card emptied from the
+    # trash leaves the session its own name (R10-01). Visibility (ids) is unaffected.
+    owners = _card_sessions(live_only=True)
+    labels = {k: v for k, v in labels.items() if k in owners}
     return ids, labels
 
 

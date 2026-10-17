@@ -633,6 +633,16 @@ class LinearModule(AgenticModule):
                     for iid in sorted(set(new_cache) | set(self.issues_cache)):
                         held.enter_context(reset_gen.issue_lock(iid))
                     gone = archived_ids()  # re-read: an Empty trash during the fetch wins (STB-050)
+                    # Under the issue locks: a title confirmed (and its override) since this poll's
+                    # fetch wins over the fetched one, in place so the team caches agree (R10-03).
+                    from app import _LINEAR_TITLES
+                    for iid, n in new_cache.items():
+                        fresh = self._apply_local_override(iid, dict(n))
+                        confirmed = _LINEAR_TITLES.get(iid)
+                        if confirmed and confirmed[1] > (n.get("updated_at") or ""):
+                            fresh["title"] = confirmed[0]
+                        n.clear()
+                        n.update(fresh)
                     for iid in gone:
                         new_cache.pop(iid, None)
                         for team_dict in new_by_team.values():
