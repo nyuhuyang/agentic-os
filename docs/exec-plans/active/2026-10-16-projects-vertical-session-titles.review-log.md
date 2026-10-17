@@ -207,3 +207,10 @@
 - PVST-R11-01 (medium): an archived record of an older owner could relabel a session another card owns. → Labels come only from records and jobs of the session's current owner in the `_card_sessions` map.
 - PVST-R11-02 (low): a removed project's order and open state persisted. → After an authoritative `/api/projects` load, both preferences are pruned to the listed keys, so a re-added project appears last and closed.
 - Tests: 1 new. `node --check` passes. Proof: 701 passed.
+
+## Codex build inspection 12 — REVISE (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i12/claudex-5c8lzj8k/result.json` (257 s). 1 medium finding, accepted.
+- PVST-R12-01: a persisted intent whose session was removed or archived (or a Codex thread without its rollout) still went to the reply worker, which refused it with 409. → `api_run_retry` drops such an intent when `find_session` cannot resolve its session. The card then starts fresh through the ordinary admission, with the "removed or archived" note, keeping the project policy, locks, generation checks and the missing-bound-worktree refusal.
+- Tests: 3 new (Claude removed, Codex archived, Codex rollout missing).
+  - `tests/test_session_to_board.py::test_session_moved_away_refuses_the_reply_and_leaks_no_claim` encoded the session-to-board refusal. It is rewritten as `…_starts_a_fresh_session_and_leaks_no_claim`, a D3 change of behaviour.
+- Proof: 704 passed.

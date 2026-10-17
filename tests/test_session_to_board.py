@@ -505,13 +505,17 @@ def test_intent_survives_the_cards_own_tab_and_a_failed_reply_is_an_error(stb, m
     assert len(launches) == 1 and rec["status"] == "error" and rec["issue_identifier"]  # strict, no fallback (STB-060/061)
 
 
-def test_session_moved_away_refuses_the_reply_and_leaks_no_claim(stb):
+def test_session_moved_away_starts_a_fresh_session_and_leaks_no_claim(stb, monkeypatch):
+    """Since the 2026-10-16 plan (D3, R12-01): a session card whose session was removed starts a
+    new session, saying why, instead of refusing the reply."""
     app_mod, mod, client, log, tmp, proj, conf, launches = stb
     rid, _ = _new_card(client, log)
     next((tmp / "claude").rglob(f"{SID}.jsonl")).unlink()
-    before = log.read_text()
-    assert client.post(f"/api/runs/{rid}/retry", json={"reply": "x"}).status_code == 409
-    assert log.read_text() == before and not app_mod._SESSION_CLAIMS and launches == []
+    seen = {}
+    monkeypatch.setattr(app_mod, "_run_project_ticket", lambda **kw: seen.update(kw))
+    assert client.post(f"/api/runs/{rid}/retry", json={"reply": "x"}).status_code == 200
+    assert seen["resume_session"] is None and "removed or archived" in seen["note"]
+    assert not app_mod._SESSION_CLAIMS and launches == []
 
 
 def test_reply_holds_the_card_and_project_locks_and_posts_no_text_for_confidential(stb, monkeypatch):

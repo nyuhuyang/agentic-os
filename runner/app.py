@@ -5153,6 +5153,10 @@ def api_run_retry(run_id: str):
     # Build conversation context: include previous output + human feedback
     req_data = request.get_json(silent=True) or {}
     intent = _valid_intent(original)
+    if intent and _projects.find_session(intent["agent"], intent["id"]) is None:
+        # removed or archived (or a Codex thread without its rollout): the card starts fresh, with
+        # the reason, through the ordinary admission below (R12-01)
+        intent = None
     if intent:  # a session card: replaces the bound/_run_project_ticket block for it (STB-038)
         return _retry_session_card(run_id, original, intent, req_data)
     reply = (req_data.get("reply") or "").strip()

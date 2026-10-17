@@ -811,3 +811,29 @@ def test_label_comes_from_the_owning_card_even_after_an_old_record_is_archived(c
     write_log(log, {"run_id": "a", "agent": "claude", "status": "archived", "agent_session_id": SID,
                     "issue_identifier": "A-1"})  # A's old run archived afterwards
     assert app_mod._board_sessions()[1][("claude", SID)]["label"] == "B-1"  # R11-01
+
+
+# ── Codex build inspection 12 (PVST-R12-01) ────────────────────────────────
+
+@pytest.mark.parametrize("gone", ["claude-removed", "codex-archived", "codex-no-rollout"])
+def test_persisted_intent_for_a_removed_session_starts_fresh(cs, demo, monkeypatch, gone):
+    app_mod, mod, client, log, events, tmp = cs
+    import reset_gen
+    agent = "claude" if gone.startswith("claude") else "codex"
+    if gone == "codex-archived":
+        codex_store(demo, SID)
+        db = sqlite3.connect(pj.CODEX_DB)
+        db.execute("UPDATE threads SET archived = 1 WHERE id = ?", (SID,))
+        db.commit()
+        db.close()
+    elif gone == "codex-no-rollout":
+        codex_store(demo, SID)
+        (pj.CODEX_DB.parent / f"rollout-{SID}.jsonl").unlink()
+    intent = {"agent": agent, "id": SID, "project_key": "demo", "gen": reset_gen.current(ISSUE)}
+    write_log(log, {"run_id": "a", "agent": agent, "status": "todo", "agent_session_id": SID, "resume_session": intent,
+                    "project_key": "demo", "issue_identifier": "T-1", "source": "session", "session_project": "demo"})
+    seen = {}
+    monkeypatch.setattr(app_mod, "_run_project_ticket", lambda **kw: seen.update(kw))
+    r = client.post("/api/runs/a/retry", json={"reply": "x"})
+    assert r.status_code == 200, r.get_json()
+    assert seen["resume_session"] is None and "removed or archived" in seen["note"]  # R12-01
