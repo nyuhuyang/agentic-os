@@ -385,4 +385,4 @@ Tests:
 - [x] §5 D7 session-card replies and D3 resumes use the stall detector + `AI_SESSION_TIMEOUT_S` (4 h) — tests/test_session_titles.py::test_card_continuation_gets_the_session_timeout, ::test_project_dispatch_continues_the_session_in_its_worktree (timeout passed)
 - [x] §5 tests pass — included in the 30
 - [x] Codex build inspection (fresh session) with no unresolved material findings — Codex inspection 17 APPROVED (cross_provider), `/private/tmp/claude-501/claudex-pvst/i17/claudex-5b86jv_c/result.json`; 16 REVISE rounds before it, all fixed (review log)
-- [ ] Commit; restart the live runner when idle
+- [x] Commit; restart the live runner when idle — restarted on the user's request 2026-10-17 19:58 (pid 82518); Chrome check of :8510: 6 projects stacked vertically, no tab strip, no quick reply; agentic-os rows show `AGE-105 · Project UI updates` etc.
