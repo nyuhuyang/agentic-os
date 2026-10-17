@@ -1340,7 +1340,10 @@ def _load_claude_live_limit(window_key: str) -> dict:
 _CLAUDE_LIVE_MAX_AGE_S = int(os.environ.get("CLAUDE_LIVE_MAX_AGE_S", "600"))
 _CLAUDE_USAGE_API = "https://api.anthropic.com/api/oauth/usage"
 _CLAUDE_USAGE_CACHE_TTL_S = 55.0
+_CLAUDE_USAGE_RETRY_S = 120.0       # wait after a failed fetch: the endpoint 429s under polling
+_CLAUDE_USAGE_MAX_AGE_S = 15 * 60   # keep showing the last good reading this long
 _claude_usage_cache: tuple[float, dict | None] = (0.0, None)
+_claude_usage_retry_at = 0.0
 _claude_usage_lock = threading.Lock()
 
 
@@ -1372,20 +1375,27 @@ def _fetch_claude_oauth_usage(timeout_s: float = 4.0) -> dict:
         return {}
 
 
-def _load_claude_oauth_usage() -> dict:
-    global _claude_usage_cache
-    cached_at, cached = _claude_usage_cache
-    now = time.monotonic()
-    if cached is not None and now - cached_at < _CLAUDE_USAGE_CACHE_TTL_S:
-        return cached
+def _load_claude_oauth_usage() -> tuple[dict, float]:
+    """Last good official usage and its age in seconds, or ({}, 0.0) when none is recent.
+
+    A failed fetch keeps the last good reading and blocks retries for
+    _CLAUDE_USAGE_RETRY_S, so a 429 neither blanks the cards nor gets re-hit on every poll.
+    """
+    global _claude_usage_cache, _claude_usage_retry_at
     with _claude_usage_lock:
         cached_at, cached = _claude_usage_cache
-        if cached is not None and time.monotonic() - cached_at < _CLAUDE_USAGE_CACHE_TTL_S:
-            return cached
-        usage = _fetch_claude_oauth_usage()
-        if usage:
-            _claude_usage_cache = (time.monotonic(), usage)
-        return usage or {}
+        now = time.monotonic()
+        expired = cached is None or now - cached_at >= _CLAUDE_USAGE_CACHE_TTL_S
+        if expired and now >= _claude_usage_retry_at:
+            usage = _fetch_claude_oauth_usage()
+            if usage:
+                cached_at, cached = _claude_usage_cache = (time.monotonic(), usage)
+            else:
+                _claude_usage_retry_at = time.monotonic() + _CLAUDE_USAGE_RETRY_S
+        age = time.monotonic() - cached_at
+        if cached is None or age > _CLAUDE_USAGE_MAX_AGE_S:
+            return {}, 0.0
+        return cached, age
 
 
 def _coerce_unix_timestamp(value: object) -> int | None:
@@ -1482,7 +1492,7 @@ def _load_claude_official_windows() -> dict:
     quota card when the official snapshot is absent or stale.
     """
     now = datetime.now(timezone.utc)
-    api_usage = _load_claude_oauth_usage()
+    api_usage, api_age_s = _load_claude_oauth_usage()
     if api_usage:
         fable = {}
         for entry in api_usage.get("limits") or []:
@@ -1501,23 +1511,23 @@ def _load_claude_official_windows() -> dict:
                 "Current session", 300,
                 {"used_percentage": (api_usage.get("five_hour") or {}).get("utilization"),
                  "resets_at": (api_usage.get("five_hour") or {}).get("resets_at")},
-                captured_age_s=0, source_status="live",
+                captured_age_s=api_age_s, source_status="live",
             ),
             "window_7d": _claude_quota_card(
                 "Weekly · All models", 10080,
                 {"used_percentage": (api_usage.get("seven_day") or {}).get("utilization"),
                  "resets_at": (api_usage.get("seven_day") or {}).get("resets_at")},
-                captured_age_s=0, source_status="live",
+                captured_age_s=api_age_s, source_status="live",
             ),
             "aux": _claude_quota_card(
-                "Weekly · Fable", 10080, fable, captured_age_s=0,
+                "Weekly · Fable", 10080, fable, captured_age_s=api_age_s,
                 source_status="live" if fable else "missing",
             ),
             "quota_source": "official-claude-api",
             "plan_type": None,
             "limits_estimated": False,
-            "captured_at": now.isoformat().replace("+00:00", "Z"),
-            "snapshot_age_seconds": 0,
+            "captured_at": (now - timedelta(seconds=api_age_s)).isoformat().replace("+00:00", "Z"),
+            "snapshot_age_seconds": round(api_age_s),
         }
 
     payload: dict = {}
