@@ -240,3 +240,8 @@
 - PVST-R16-01: `_has_reply` judged replies by their shape, so a typed-JSON reply counted as a failure. → It is removed. The stream readers note reply content as it streams (`project_runs.REPLIED` via `is_reply`): Claude's non-empty result or assistant text, Codex's `agent_message`, dsh's `final`. Every continuation gate uses `pop_replied`, so R14-01's ceiling is gone.
 - Tests: 2 new (typed-JSON reply succeeds; observation per agent). The session-to-board fixture's fake engine records its reply as the stream reader would.
 - Proof: 711 passed.
+
+## Codex build inspection 17 — APPROVED (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i17/claudex-5b86jv_c/result.json` (141 s). No material unresolved defects. Reviewer limit: static review against the plan.
+- Build inspection totals: 17 Codex rounds (16 REVISE, all findings fixed) plus 1 DeepSeek third-party round (DSI-01..02, fixed). Final suite: 711 passed.
+- The plan stays active: the manual browser checks are BLOCKED in this environment (no Chrome extension; DevTools attach "Not allowed"), and two acceptance items are PARTIAL (see the plan).

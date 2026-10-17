@@ -84,7 +84,7 @@ The session could not ask questions, so Claude took these recommended defaults. 
   - [ ] an error project shows its error and Remove in its head
 - [x] Every card-bound session row shows `IDENT · <card title>` (never the runner preamble), including a session whose run is still running — `_board_sessions` labels running jobs with their card title; tests/test_session_titles.py (labels via `_card_sessions`)
 - [x] After a card run ends, its session's native name equals the card title (`claude --resume` / `codex resume` show it) — tests/test_session_titles.py::test_retry_after_reset_continues_the_card_session (custom-title written), ::test_codex_name_is_written_even_when_its_display_title_matches
-- [ ] Editing a card's title in its issue editor (Linear or local tracker) renames its idle card-bound sessions at once; a busy one is renamed when its run or terminal ends; the panel shows the new title immediately either way
+- [ ] Editing a card's title in its issue editor (Linear or local tracker) renames its idle card-bound sessions at once; a busy one is renamed when its run or terminal ends; the panel shows the new title immediately either way — PARTIAL: local tracker tested (tests/test_session_titles.py::test_title_edit_renames_idle_sessions_and_skips_a_live_one); Linear confirmation path tested via `_confirm_linear_title`/poll (R6-02, R7-01); the Linear editor route itself has no direct test; panel refresh not browser-checked
 - [x] Rename on a card-bound session row changes the card title (tracker first) and the session's native name; a tracker failure changes nothing and shows the error; Rename on a session without a card behaves as today — tests/test_session_titles.py::test_card_row_rename_renames_the_card_and_the_session, ::…validates_before_any_write, ::…failed_linear_update_changes_nothing, ::test_archived_cards_session_row_renames_only_the_session
 - [x] Dispatching a card that already has a resumable session for the dispatching agent continues that session (same session id, same folder), for both a generic card and a project ticket card, including after a drag back to Todo — tests/test_session_titles.py::test_dispatch_continues_the_card_session_without_routing, ::test_project_dispatch_continues_the_session_in_its_worktree; tests/test_reset_gen.py (rewritten D3 tests)
 - [x] Dispatching with no resumable session (none yet, removed or archived, in another folder, other agent) starts a new session, and the run view states the reason — tests/test_session_titles.py::test_fresh_dispatch_routes_without_leaving_a_session, ::test_project_dispatch_with_the_session_elsewhere_starts_fresh_with_a_note, ::test_retry_without_a_session_on_disk_starts_fresh_with_a_note
@@ -280,14 +280,14 @@ Decisions (Claude's defaults; the user can override):
 Acceptance:
 - [x] The card Terminal tab has no quick-reply box; Comment / Feedback replies still continue the same session — tests/test_session_titles.py::test_quick_reply_is_gone; the reply path is the retry route (D3 tests)
 - [x] A continuation that fails on a Claude usage limit records the CLI's message (e.g. "You've hit your session limit · resets …") as `error`, and the card shows it — tests/test_session_titles.py::test_failed_card_resume_is_an_error_with_the_agents_reason
-- [ ] A session-card reply that keeps producing output runs past 30 minutes; one silent for 300 s is ended as stalled; a reply past 4 h times out with "Timed out after 14400s"
+- [ ] A session-card reply that keeps producing output runs past 30 minutes; one silent for 300 s is ended as stalled; a reply past 4 h times out with "Timed out after 14400s" — PARTIAL: the 4 h ceiling is passed and tested; the stall detector is unchanged (STALL_TIMEOUT_S 300, existing tests); a real 30-minute run was not exercised
 
 Tests:
 - [x] fake Claude CLI emitting an `is_error` result with `api_error: usage_limit_reached` → record `error` is that text, on the reply, retry and dispatch-resume paths — tests/test_session_titles.py::test_failed_card_resume_is_an_error_with_the_agents_reason (retry path), ::test_agent_error_of_claude_and_codex; one channel (`_publish_run_line` → AGENT_ERRORS) serves every run_agent_process path
-- [ ] session-card reply timeout uses `AI_SESSION_TIMEOUT_S` (monkeypatched small) and other runs keep `AI_RUN_TIMEOUT_S`
-- [ ] index.html has no occurrence at all of `detail-term-reply` or `_cardTermQuickReply` (static check); the card Terminal tab still opens and renders (browser check)
+- [x] session-card reply timeout uses `AI_SESSION_TIMEOUT_S` (monkeypatched small) and other runs keep `AI_RUN_TIMEOUT_S` — tests/test_session_titles.py::test_card_continuation_gets_the_session_timeout; fresh runs keep the default (run_agent_process timeout None)
+- [ ] index.html has no occurrence at all of `detail-term-reply` or `_cardTermQuickReply` (static check); the card Terminal tab still opens and renders (browser check) — static part done (tests/test_session_titles.py::test_quick_reply_is_gone); browser part BLOCKED (see Manual)
 - [x] the agent's error result reaches the record on the worktree (project) path too — tests/test_session_titles.py::test_project_run_note_survives_and_codex_error_is_kept (run_agent captures it; the helper uses it as `error`)
-- [ ] `AI_SESSION_TIMEOUT_S` applies on the project path, and its timeout message names it
+- [x] `AI_SESSION_TIMEOUT_S` applies on the project path, and its timeout message names it — tests/test_session_titles.py::test_project_dispatch_continues_the_session_in_its_worktree (timeout passed); message `Timed out after {int(timeout)}s`
 
 ## Assumptions (sources)
 - The tab strip and its order key: `runner/templates/index.html` ≈L1114–1166, L1521–1585. The old vertical render is `git show 5f2c1ce^:runner/templates/index.html`, ≈L1105–1127 and L1489.
@@ -384,5 +384,5 @@ Tests:
 - [x] §5 D6 continuation failures record the agent's own error result (reply, retry, dispatch resume) — see the D6 tests above
 - [x] §5 D7 session-card replies and D3 resumes use the stall detector + `AI_SESSION_TIMEOUT_S` (4 h) — tests/test_session_titles.py::test_card_continuation_gets_the_session_timeout, ::test_project_dispatch_continues_the_session_in_its_worktree (timeout passed)
 - [x] §5 tests pass — included in the 30
-- [ ] Codex build inspection (fresh session) with no unresolved material findings
+- [x] Codex build inspection (fresh session) with no unresolved material findings — Codex inspection 17 APPROVED (cross_provider), `/private/tmp/claude-501/claudex-pvst/i17/claudex-5b86jv_c/result.json`; 16 REVISE rounds before it, all fixed (review log)
 - [ ] Commit; restart the live runner when idle
