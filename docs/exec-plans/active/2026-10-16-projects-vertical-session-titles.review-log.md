@@ -201,3 +201,9 @@
 - PVST-R10-03: a poll could publish a title normalized before a confirmed rename. → Under the issue locks, right before publishing, each entry gets the current override and any newer confirmed title, in place so the team caches agree.
 - Tests: 1 new (R10-01). R10-02 and R10-03 are interleavings covered by code review only.
 - Proof: 700 passed.
+
+## Codex build inspection 11 — REVISE (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i11/claudex-0bucmr4b/result.json` (253 s). 2 findings: 1 medium, 1 low. Both accepted.
+- PVST-R11-01 (medium): an archived record of an older owner could relabel a session another card owns. → Labels come only from records and jobs of the session's current owner in the `_card_sessions` map.
+- PVST-R11-02 (low): a removed project's order and open state persisted. → After an authoritative `/api/projects` load, both preferences are pruned to the listed keys, so a re-added project appears last and closed.
+- Tests: 1 new. `node --check` passes. Proof: 701 passed.

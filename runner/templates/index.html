@@ -1114,6 +1114,11 @@ function _projOpen() {  // the open projects; a missing or invalid value means n
   try { v = JSON.parse(_storageGet('agenticos.projects.open', '[]')); } catch (_) {}
   return new Set(Array.isArray(v) ? v : []);
 }
+function _projPrunePrefs(keys) {  // a removed project's order and open state go too: re-added = last, closed (R11-02)
+  const order = _projTabOrder(keys.map(key => ({ key })));
+  _storageSet('agenticos.projectTabs.order', JSON.stringify(order));
+  _storageSet('agenticos.projects.open', JSON.stringify([..._projOpen()].filter(k => keys.includes(k))));
+}
 function _projToggle(key) {
   const open = _projOpen();
   open.has(key) ? open.delete(key) : open.add(key);
@@ -1278,6 +1283,7 @@ async function loadProjects() {
   } catch (err) {
     _projectData = { projects: [], error: String(err) };
   }
+  if (_projectsLoaded && !_projectData.error) _projPrunePrefs((_projectData.projects || []).map(p => p.key));
   _renderProjects();
   const sel = document.getElementById('new-issue-project');  // an open form waiting on the list refills, keeping its choice
   if (_projectsLoaded && sel && [...sel.options].some(o => o.value === '__default__')) {

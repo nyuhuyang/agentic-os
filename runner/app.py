@@ -3728,6 +3728,7 @@ def _board_sessions() -> tuple[set, dict]:
     labels: dict = {}
     cache = _linear_cache()
     live: dict = {}
+    owners = _card_sessions(live_only=True)  # labels come only from the session's owning card (R11-01)
 
     def _issue(iid: str) -> dict:  # the live tracker issue, the local tracker included (R3-02)
         if iid not in live:
@@ -3738,6 +3739,8 @@ def _board_sessions() -> tuple[set, dict]:
         if not agent or not sid:
             continue
         ids.add((agent, sid))
+        if owners.get((agent, sid)) != r.get("linear_issue_id"):
+            continue  # an older (or archived) card's record of a session another card owns now
         issue = _issue(r["linear_issue_id"]) if r.get("linear_issue_id") else {}
         ident = r.get("issue_identifier") or issue.get("identifier")
         if ident:
@@ -3746,7 +3749,7 @@ def _board_sessions() -> tuple[set, dict]:
     for job in list(_running_jobs.values()):
         agent, sid = canonical_agent(job.get("agent")) or job.get("agent"), job.get("agent_session_id")
         iid = job.get("linear_issue_id")
-        if not agent or not sid or not iid:
+        if not agent or not sid or not iid or owners.get((agent, sid)) != iid:
             continue
         issue = _issue(iid)
         extra = job.get("record_extra") or {}
@@ -3756,7 +3759,6 @@ def _board_sessions() -> tuple[set, dict]:
     ids |= {(canonical_agent(a) or a, s) for a, s in _live_session_ids() if a and s}
     # A card label only while the session's newest owning card is live: a card emptied from the
     # trash leaves the session its own name (R10-01). Visibility (ids) is unaffected.
-    owners = _card_sessions(live_only=True)
     labels = {k: v for k, v in labels.items() if k in owners}
     return ids, labels
 

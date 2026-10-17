@@ -796,3 +796,18 @@ def test_a_deleted_cards_session_shows_its_own_name(cs, demo):
     assert client.post(f"/api/projects/demo/sessions/claude/{SID}/rename", json={"title": "Mine"}).status_code == 200
     rows = {r["id"]: r for r in pj.project_sessions(pj.get_project("demo"), *app_mod._board_sessions())}
     assert rows[SID]["title"] == "Mine" and "card_title" not in rows[SID]
+
+
+# ── Codex build inspection 11 (PVST-R11-01) ────────────────────────────────
+
+def test_label_comes_from_the_owning_card_even_after_an_old_record_is_archived(cs):
+    app_mod, mod, client, log, events, tmp = cs
+    import state_io
+    state_io.write_json_atomic(tmp / "tasks.json", {ISSUE: {"id": ISSUE, "identifier": "A-1", "state": "Done", "title": "a"},
+                                                    "iss-2": {"id": "iss-2", "identifier": "B-1", "state": "Todo", "title": "b"}})
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID, "issue_identifier": "A-1"})
+    write_log(log, {"run_id": "b", "agent": "claude", "status": "todo", "agent_session_id": SID,
+                    "linear_issue_id": "iss-2", "task_id": "T2", "issue_identifier": "B-1"})  # S now B's
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "archived", "agent_session_id": SID,
+                    "issue_identifier": "A-1"})  # A's old run archived afterwards
+    assert app_mod._board_sessions()[1][("claude", SID)]["label"] == "B-1"  # R11-01
