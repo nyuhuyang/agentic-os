@@ -180,3 +180,9 @@
 - PVST-R7-01: a first confirmation from the poll started its sync before the cache was published, so the sync saw no issue and was never retried. → The poll and the async refresh collect these syncs (`pending`) and start them only after the cache is published.
 - PVST-R7-02: an old watcher, and `_closing_live`, removed markers unconditionally. → `_clear_closing(key, token)` under `_CLOSING_LOCK` removes a marker only if it is still the inspected one (the pgid is the token) and its group is gone. A watcher whose marker was replaced stops; the newer run syncs at its own end.
 - Tests: 2 new. Proof: 695 passed.
+
+## Codex build inspection 8 — REVISE (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i8/claudex-rtw1rby9/result.json` (256 s). 2 findings: 1 high, 1 medium. Both accepted.
+- PVST-R8-01 (high): `_start_failed(binding=bound)` copied the whole original record, `issue_title` included. → Only binding keys are kept (`_BINDING_KEYS` whitelist).
+- PVST-R8-02 (medium): the retry's bound block always passed `reuse_only=True`, so a session card with no bound worktree could never start fresh. → `reuse_only=bool(bound.get("worktree"))`, as dispatch does. A truly removed bound worktree still fails closed (I6-10).
+- Tests: 2 new. Proof: 697 passed.

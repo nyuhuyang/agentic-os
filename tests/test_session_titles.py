@@ -719,3 +719,29 @@ def test_an_old_watcher_never_clears_a_newer_runs_marker(cs):
     finally:
         os.killpg(newer.pid, signal.SIGKILL)
         newer.wait()
+
+
+# ── Codex build inspection 8 (PVST-R8-01..02) ──────────────────────────────
+
+def test_retry_start_failure_record_keeps_no_inherited_title(cs, demo, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "project_key": "demo",
+                    "issue_identifier": "T-1", "confidential": True, "issue_title": "Secret deal",
+                    "source": "session", "session_project": "demo"})
+    monkeypatch.setattr(app_mod, "_records_unsafe", lambda: "outside the checkout")
+    monkeypatch.setattr(app_mod, "_push_linear_state_async", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no thread")))
+    r = client.post("/api/runs/a/retry", json={"reply": "x"})
+    assert r.status_code == 500
+    rec = records(log)[-1]
+    assert rec["status"] == "error" and "Secret deal" not in json.dumps(rec)  # R8-01
+    assert rec["project_key"] == "demo" and rec["issue_identifier"] == "T-1"
+
+
+def test_retry_of_a_session_card_without_a_worktree_starts_fresh(cs, demo, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "project_key": "demo",
+                    "issue_identifier": "T-1", "source": "session", "session_project": "demo"})  # session gone
+    seen = {}
+    monkeypatch.setattr(app_mod, "_run_project_ticket", lambda **kw: seen.update(kw))
+    assert client.post("/api/runs/a/retry", json={"reply": "x"}).status_code == 200
+    assert seen["reuse_only"] is False and seen["resume_session"] is None and seen["note"]  # R8-02

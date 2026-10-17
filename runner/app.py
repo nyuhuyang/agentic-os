@@ -4200,6 +4200,10 @@ def _sync_titles_soon(issue_id: str, title: str | None = None) -> None:
         logger.warning("session-name sync for %s skipped: maintenance", issue_id)
 
 
+_BINDING_KEYS = ("project_key", "issue_identifier", "confidential", "worktree", "branch", "base_sha",
+                 "source", "session_project")
+
+
 def _card_admitted(issue_id: str | None, gen: int) -> bool:
     """Admission for a queued card launch, under the issue lock: the card is still live and no
     reset happened since the request read its generation (R2, R4)."""
@@ -5269,7 +5273,8 @@ def api_run_retry(run_id: str):
                                 run_id=new_run_id, attempt=prev_attempt + 1, parent_run_id=run_id,
                                 linear_issue_id=linear_issue_id, agent=agent, model=_agent_model(agent, cfg),
                                 task_id=task_id, reset_generation=_launch_gen,
-                                extra=dict(binding) if binding is not None else None)
+                                # binding metadata only, never fields inherited from the record (R8-01)
+                                extra={k: binding[k] for k in _BINDING_KEYS if k in binding} if binding is not None else None)
         if linear_issue_id:
             with contextlib.suppress(Exception):
                 _push_linear_state_async(linear_issue_id, "review", gen=_launch_gen)
@@ -5311,7 +5316,8 @@ def api_run_retry(run_id: str):
                 agent=agent, prompt=prompt, title=original.get("prompt", "")[:80], run_id=new_run_id,
                 linear_issue_id=linear_issue_id, task_id=task_id, launch_gen=_launch_gen,
                 attempt=prev_attempt + 1, parent_run_id=run_id, resume_session=_lock_session_id,
-                reuse_only=True, skill=skill, confidential=bound.get("confidential"),
+                # a worktree that was never bound is created, not required (R8-02, as dispatch: I6-10)
+                reuse_only=bool(bound.get("worktree")), skill=skill, confidential=bound.get("confidential"),
                 ticket_hold=card_hold if bound.get("issue_identifier") else None,
                 timeout=AI_SESSION_TIMEOUT_S if card_session or (_lock_session_id and linear_issue_id) else None,
                 note=card_note)
