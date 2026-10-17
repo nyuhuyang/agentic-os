@@ -3349,6 +3349,9 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
             output, it, ot, model, sid, ok, error = _parse_project_output(agent, lines, stderr_s, code)
             agent_error, turn_failed = project_runs.pop_agent_failure(run_id)
             ok = ok and not turn_failed  # e.g. a Codex turn.failed with exit 0 (R4-03)
+            if ok and resume_session and not _has_reply(output):
+                ok = False  # a continuation that said nothing is no success (DSI-01)
+                error = error or f"resume of session {resume_session} failed (no reply)"
             if not ok and agent_error:
                 error = agent_error  # the agent's own reason, e.g. a usage limit or turn.failed (D6, DP-44)
             if timed_out:
@@ -4546,6 +4549,7 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
                     if end():
                         _record("cancelled", error="the card was removed or reset before its run started")
                         socketio.emit("run_logged", {"skill": skill, "run_id": new_run_id})
+                        _after_card_run(new_run_id, linear_issue_id, agent, sid)  # DSI-02
                     return
                 try:
                     cmd = _project_cmd(agent, eff, prompt, sid)  # the sandboxed CLI for a confidential project
@@ -4591,6 +4595,7 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
         if _end_job(new_run_id):
             _record("error", error=f"could not start: {exc}")
             _push_linear_state_async(linear_issue_id, "review", gen=launch_gen)
+        _sync_titles_soon(linear_issue_id)  # a title edit held back by this claim (DSI-02)
         return jsonify({"ok": False, "run_id": new_run_id, "error": f"could not start: {exc}"}), 500
     return jsonify(ok_body)
 
@@ -5309,6 +5314,8 @@ def api_run_retry(run_id: str):
         logger.exception("[retry] %s could not start", new_run_id)
         _release_session(new_run_id)
         card_hold.close()
+        if linear_issue_id:
+            _sync_titles_soon(linear_issue_id)  # a title edit held back by this claim (DSI-02)
         if published and not _end_job(new_run_id):
             return jsonify({"ok": False, "run_id": new_run_id, "error": "cancelled"}), 409
         if linear_issue_id and _linear_dispatched.get(linear_issue_id) == new_run_id:
@@ -5447,6 +5454,7 @@ def api_run_retry(run_id: str):
                                             linear_issue_id=linear_issue_id, agent=agent, task_id=task_id,
                                             reset_generation=_launch_gen)
                     socketio.emit("run_logged", {"skill": skill, "run_id": new_run_id})
+                    _after_card_run(new_run_id, linear_issue_id, agent, _lock_session_id)  # a title edit held back meanwhile (DSI-02)
                 return
             if card_note:
                 _session_note(new_run_id, card_note)

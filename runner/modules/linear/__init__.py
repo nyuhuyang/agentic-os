@@ -1032,6 +1032,7 @@ class LinearModule(AgenticModule):
                                                 run_id=run_id, linear_issue_id=issue_id, agent=backend, task_id=run_id,
                                                 reset_generation=launch_gen)
                         socketio.emit("run_logged", {"skill": selected_skill, "run_id": run_id})
+                        _after_card_run(run_id, issue_id, backend, resume_sid)  # a title edit held back meanwhile (DSI-02)
                     self.dispatched.pop(issue_id, None)
                     return
                 if resume_sid and is_entrypoint:

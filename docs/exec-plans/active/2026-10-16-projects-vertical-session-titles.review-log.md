@@ -225,3 +225,12 @@
 - PVST-R14-01: protocol-line fallback output (Claude's last stream-json line, or Codex's stdout) satisfied the "has output" check. → `_has_reply` treats output made only of typed JSON events as no reply. It gates the resumed dispatch, the session-card reply and card continuations on the retry path. Ceiling: a reply that is itself a typed JSON object counts as no reply.
 - Tests: 3 new. `test_quick_reply_resumes_the_same_session` now gives its fake agent a reply.
 - Proof: 708 passed.
+
+## Codex build inspection 15 — provider unavailable
+- `/private/tmp/claude-501/claudex-pvst/i15/claudex-jf1gui6p/result.json`: `provider_unavailable`, "You've hit your usage limit … try again at 3:06 PM." Per the standing rule, a DeepSeek read-only inspection follows (third-party; it does not replace the Codex pass).
+
+## DeepSeek build inspection dsi1 — third-party, REVISE
+- `/private/tmp/claude-501/claudex-pvst/dsi1/reply.txt`. The fingerprint changed during the run only because of the host's own log append, made after the "before" snapshot; DeepSeek wrote nothing. 2 medium findings. Both accepted.
+- DSI-01: the project helper accepted a resumed run with no reply. → `_has_reply` gates `resume_session` runs there too; failure: "resume of session … failed (no reply)".
+- DSI-02: queued runs dropped before launch skipped the run-end name sync, so a title edit held back by their claim was lost. → `_after_card_run` or `_sync_titles_soon` on the retry-worker drop, the session-worker drop, the dispatch drop, `_start_failed`, and the session worker's start failure.
+- Tests: 2 new. Proof: 710 passed.

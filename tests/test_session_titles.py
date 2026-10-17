@@ -872,3 +872,30 @@ def test_resumed_dispatch_with_no_reply_is_an_error(cs, monkeypatch, lines):
     issue = {"id": ISSUE, "identifier": "T-1", "title": "t", "description": ""}
     mod._dispatch_issue_counted(issue, {"agent": {"backend": "claude"}}, app_mod.socketio)
     assert len(procs) == 1 and records(log)[-1]["status"] == "error"  # R14-01
+
+
+# ── DeepSeek build inspection 1 (DSI-01..02) ───────────────────────────────
+
+def test_project_resume_with_no_reply_is_an_error(cs, demo, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    subprocess.run(["git", "-C", str(demo), "-c", "user.name=t", "-c", "user.email=t@example.com",
+                    "commit", "-q", "--allow-empty", "-m", "init"], check=True)  # a worktree needs a HEAD
+    monkeypatch.setattr(project_runs, "run_agent", lambda *a, **k: ([json.dumps({"type": "system", "subtype": "init",
+                                                                                "session_id": SID})], "", 0, False))
+    monkeypatch.setattr(app_mod, "_project_cmd", lambda *a: ["true"])
+    monkeypatch.setattr(project_runs, "post_run", lambda *a, **k: {})
+    out = app_mod._run_project_ticket(project_key="demo", ident="T-1", agent="claude", prompt="p", title="t",
+                                      run_id="pr", linear_issue_id=ISSUE, task_id="pr", launch_gen=0,
+                                      resume_session=SID)
+    assert out["status"] == "error" and "no reply" in out["error"]  # DSI-01
+
+
+def test_a_dropped_queued_retry_still_names_the_session(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    f = transcript(app_mod.ROOT)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    calls = []
+    monkeypatch.setattr(app_mod, "_card_admitted", lambda iid, gen: (calls.append(1), len(calls) == 1)[1])  # dropped at the worker
+    stub(app_mod, monkeypatch)
+    assert client.post("/api/runs/a/retry", json={"reply": "x"}).status_code == 200
+    assert records(log)[-1]["status"] == "cancelled" and custom_titles(f) == ["t"]  # DSI-02
