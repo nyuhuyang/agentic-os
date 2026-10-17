@@ -436,7 +436,7 @@ def test_project_run_note_survives_and_codex_error_is_kept(tmp_path):
     first = log_path.read_text().splitlines()[0]
     assert json.loads(first)["type"] == "agenticos-note"  # written after the log's "w" open (DP-39)
     assert any("new session" in p["line"] for p in events)
-    assert project_runs.AGENT_ERRORS.pop("pr1") == "quota exhausted"  # DP-44
+    assert project_runs.pop_agent_failure("pr1") == ("quota exhausted", True)  # DP-44; a failed turn even at exit 0 (R4-03)
 
 
 # ── Codex build inspection 1 (R1–R6) ───────────────────────────────────────
@@ -573,3 +573,40 @@ def test_a_card_never_continues_another_cards_session(cs, monkeypatch):
     procs = stub(app_mod, monkeypatch, [{"type": "result", "result": "done", "session_id": "s-new"}])
     assert client.post("/api/runs/a/retry", json={"reply": "x"}).status_code == 200
     assert not resumed(procs[0].args)  # R3-03: card A starts a new session instead
+
+
+# ── Codex build inspection 4 (PVST-R4-01..03) ──────────────────────────────
+
+def test_dispatch_queued_before_a_reset_never_runs(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    import reset_gen
+    gen = reset_gen.current(ISSUE)
+    reset_gen.bump(ISSUE)  # the user reset the card after the dispatch was asked for
+    procs = stub(app_mod, monkeypatch)
+    issue = {"id": ISSUE, "identifier": "T-1", "title": "t", "description": ""}
+    mod._dispatch_issue_counted(issue, {"agent": {"backend": "claude"}}, app_mod.socketio, launch_gen=gen)
+    assert procs == [] and not log.exists()  # R4-01: no launch, no record, no tracker change
+
+
+def test_persisted_intent_for_a_session_another_card_owns_is_void(cs):
+    app_mod, mod, client, log, events, tmp = cs
+    import reset_gen, state_io
+    state_io.write_json_atomic(tmp / "tasks.json", {ISSUE: {"id": ISSUE, "state": "Todo", "title": "t"},
+                                                    "iss-2": {"id": "iss-2", "state": "Todo", "title": "u"}})
+    intent = {"agent": "claude", "id": SID, "project_key": "demo", "gen": reset_gen.current(ISSUE)}
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "todo", "agent_session_id": SID, "resume_session": intent})
+    rec_a = records(log)[-1]
+    assert app_mod._valid_intent(rec_a) == intent
+    write_log(log, {"run_id": "b", "agent": "claude", "status": "todo", "agent_session_id": SID,
+                    "linear_issue_id": "iss-2", "task_id": "T2"})  # S bound to card B since
+    assert app_mod._valid_intent(rec_a) is None  # R4-02
+
+
+def test_continuation_with_a_failed_turn_at_exit_zero_is_an_error(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    transcript(app_mod.ROOT)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    stub(app_mod, monkeypatch, [{"type": "result", "is_error": True, "result": USAGE, "session_id": SID}], rc=0)
+    assert client.post("/api/runs/a/retry", json={"reply": "x"}).status_code == 200
+    rec = records(log)[-1]
+    assert rec["status"] == "error" and rec["error"] == USAGE  # R4-03

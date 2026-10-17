@@ -787,33 +787,36 @@ class LinearModule(AgenticModule):
         """Dispatch on a counted worker (the request that asked for it was admitted by the gate).
         `card_hold`: the card's lock, already reserved by the route; the dispatch keeps it."""
         from app import _start_counted
+        import reset_gen
+        launch_gen = reset_gen.current(issue["id"])  # when it was asked for: a reset before the worker runs wins (R4-01)
         try:
-            _start_counted(self._dispatch_issue, issue, cfg, self._socketio, previous_board_status, card_hold)
+            _start_counted(self._dispatch_issue, issue, cfg, self._socketio, previous_board_status, card_hold, launch_gen)
         except BaseException:
             if card_hold is not None:
                 card_hold.close()
             raise
 
     def _dispatch_issue(self, issue: dict, cfg: dict, socketio, previous_board_status: str | None = None,
-                        card_hold=None) -> None:
+                        card_hold=None, launch_gen: int | None = None) -> None:
         from app import _inflight_work, MaintenanceRefused
         try:
             with _inflight_work():  # counted until its record is written (BUILD-001)
-                self._dispatch_issue_counted(issue, cfg, socketio, previous_board_status, card_hold)
+                self._dispatch_issue_counted(issue, cfg, socketio, previous_board_status, card_hold, launch_gen)
         except MaintenanceRefused as exc:
             logger.warning("dispatch of %s refused: %s", issue.get("id"), exc)
             if card_hold is not None:
                 card_hold.close()
 
     def _dispatch_issue_counted(self, issue: dict, cfg: dict, socketio, previous_board_status: str | None = None,
-                                card_hold=None) -> None:
+                                card_hold=None, launch_gen: int | None = None) -> None:
         held = card_hold if card_hold is not None else contextlib.ExitStack()
         try:
-            self._dispatch_issue_held(issue, cfg, socketio, held, reserved=card_hold is not None)
+            self._dispatch_issue_held(issue, cfg, socketio, held, reserved=card_hold is not None, launch_gen=launch_gen)
         finally:
             held.close()  # every path, including early refusals, ends the card's reservation
 
-    def _dispatch_issue_held(self, issue: dict, cfg: dict, socketio, held: contextlib.ExitStack, reserved: bool) -> None:
+    def _dispatch_issue_held(self, issue: dict, cfg: dict, socketio, held: contextlib.ExitStack, reserved: bool,
+                             launch_gen: int | None = None) -> None:
         import subprocess
         from app import _running_jobs, _running_procs, _python_path, RUNNER, ROOT, _load_registry, _ai_command, _agent_model, _parse_agent_output, _extract_skill_name, _write_run_log, AI_RUN_TIMEOUT_S, _extract_real_errors, _registry_exec_env, _stream_dsh_run, _dsh_ok
         from app import (_RunClaim, _kill_and_reap, _write_run_log_retrying, _comment_quietly, _run_grouped,
@@ -828,7 +831,11 @@ class LinearModule(AgenticModule):
             logger.warning("dispatch of %s refused: an interactive terminal holds the card", issue_id)
             return
         import reset_gen
-        launch_gen = reset_gen.current(issue_id)
+        if launch_gen is None:
+            launch_gen = reset_gen.current(issue_id)
+        elif launch_gen != reset_gen.current(issue_id):  # reset after it was asked for, before it ran (R4-01)
+            logger.warning("dispatch of %s dropped: the card was reset before its worker started", issue_id)
+            return
 
         agent_cfg = cfg.get("agent", {})
         backend = (canonical_agent(issue.get("preferred_agent"))
@@ -1021,11 +1028,12 @@ class LinearModule(AgenticModule):
                     env=_registry_exec_env(backend, registry), on_proc=procs.append,
                     timeout=AI_SESSION_TIMEOUT_S if resume_sid else None)
                 import project_runs as _pr
-                agent_error = _pr.AGENT_ERRORS.pop(run_id, None)
+                agent_error, turn_failed = _pr.pop_agent_failure(run_id)
                 if backend == "dsh" and not is_entrypoint:
                     output = output or ""
                 elif resume_sid:
-                    ok = ok and bool(output)  # a resumed session keeps its real result: no silent review (DP-14)
+                    # a resumed session keeps its real result: no silent review (DP-14, R4-03)
+                    ok = ok and bool(output) and not turn_failed
                 else:
                     ok = True  # a fresh launch keeps the unconditional review status
                 dur = time.monotonic() - t0

@@ -153,3 +153,10 @@
 - PVST-R3-03: `_card_session` and the lock could pick a session another card now owns. → Both are validated against the `_card_sessions` newest-owner map; another card's session is never resumed.
 - Tests: 4 new. 2 dsh dispatch tests whose cards are not in any tracker now treat their cards as live.
 - Proof: 686 passed.
+
+## Codex build inspection 4 — REVISE (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i4/claudex-gqtf6dgb/result.json` (216 s). 3 medium findings. All accepted.
+- PVST-R4-01: dispatch read its generation inside the worker, so a reset queued before the worker started was adopted. → `_start_dispatch` captures the generation when the dispatch is asked for and passes it through; the worker drops the dispatch if the card was reset since.
+- PVST-R4-02: a persisted intent was accepted for a session another card now owns. → `_valid_intent` and the session-card admission both check the newest-owner map.
+- PVST-R4-03: a structured failure (Claude `is_error`, Codex `turn.failed`) at exit 0 was recorded as review. → `project_runs.pop_agent_failure` adds a terminal-failure flag. It fails the session-card reply, card continuations on the retry path, a resumed dispatch, and the project helper. A Codex `error` event alone stays diagnostic.
+- Tests: 3 new. Proof: 689 passed.

@@ -3328,7 +3328,8 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
                 sink.close()
             _running_procs.pop(run_id, None)
             output, it, ot, model, sid, ok, error = _parse_project_output(agent, lines, stderr_s, code)
-            agent_error = project_runs.AGENT_ERRORS.pop(run_id, None)
+            agent_error, turn_failed = project_runs.pop_agent_failure(run_id)
+            ok = ok and not turn_failed  # e.g. a Codex turn.failed with exit 0 (R4-03)
             if not ok and agent_error:
                 error = agent_error  # the agent's own reason, e.g. a usage limit or turn.failed (D6, DP-44)
             if timed_out:
@@ -3775,6 +3776,8 @@ def _valid_intent(rec: dict | None) -> dict | None:
         return None
     if _tracker_issue(issue_id) is None:  # the card is gone: no reply resumes through it (DP-45)
         return None
+    if _card_sessions(live_only=False).get((intent["agent"], intent["id"])) not in (None, issue_id):
+        return None  # the session now belongs to another card (R4-02)
     return intent if intent.get("gen") == reset_gen.current(issue_id) else None
 
 
@@ -4361,6 +4364,8 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
             return jsonify({"ok": False, "error": "this card no longer exists"}), 409
         admitted = (reset_gen.current(linear_issue_id) == intent["gen"]) if card_sourced \
             else _valid_intent(_intent_latest(linear_issue_id)) == intent
+        if _card_sessions(live_only=False).get((agent, sid)) not in (None, linear_issue_id):
+            admitted = False  # another card owns this session now (R4-02, R3-03)
         if not admitted:
             held.close()
             _release_session(new_run_id)
@@ -4468,7 +4473,8 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
                     output, it, ot, model, _new_sid, stderr_s, ok = run_agent_process(
                         new_run_id, cmd, stream=agent, cwd=target["cwd"], env=_project_exec_env(agent, eff),
                         on_proc=procs.append, timeout=AI_SESSION_TIMEOUT_S)
-                    agent_error = project_runs.AGENT_ERRORS.pop(new_run_id, None)
+                    agent_error, turn_failed = project_runs.pop_agent_failure(new_run_id)
+                    ok = ok and not turn_failed  # a reported failure fails the run, whatever the exit code (R4-03)
                     if not end():
                         return
                     # the agent's own reason first, e.g. a usage limit (D6)
@@ -5376,7 +5382,9 @@ def api_run_retry(run_id: str):
                                                skill_name=skill, registry=registry)
                     output, input_tokens, output_tokens, parsed_model, new_sid, stderr_s, ok = _dispatch_cmd(fallback_cmd, _stream)
 
-                agent_error = project_runs.AGENT_ERRORS.pop(new_run_id, None)
+                agent_error, turn_failed = project_runs.pop_agent_failure(new_run_id)
+                if card_session or strict:
+                    ok = ok and not turn_failed  # a continuation's reported failure fails it (R4-03)
                 error_s = _extract_real_errors(stderr_s)
                 if not ok and agent_error:
                     error_s = agent_error  # the agent's own reason first, e.g. a usage limit (D6)

@@ -340,6 +340,17 @@ def note_line(text: str) -> str:
 # run_id -> the agent's own error text (Claude is_error result, Codex turn.failed/error), set by
 # the stream readers and popped by the caller after the run (D6).
 AGENT_ERRORS: dict[str, str] = {}
+# run_ids whose agent reported a terminal failure of its turn (Claude is_error result, Codex
+# turn.failed): a failed run even when the process exits 0 (PVST-R4-03). A Codex `error` event
+# alone is diagnostic (e.g. a reconnect) and does not fail the run.
+AGENT_FAILED: set[str] = set()
+
+
+def pop_agent_failure(run_id: str) -> tuple[str | None, bool]:
+    """(the agent's own error text, whether its turn failed) for a finished run, cleared."""
+    failed = run_id in AGENT_FAILED
+    AGENT_FAILED.discard(run_id)
+    return AGENT_ERRORS.pop(run_id, None), failed
 
 
 def agent_error_of(fmt: str, line: str) -> str | None:
@@ -368,8 +379,11 @@ def agent_error_of(fmt: str, line: str) -> str | None:
 def note_agent_error(run_id: str, fmt: str, line: str) -> None:
     """Keep the agent's error for this run. A Codex turn.failed wins over an earlier error event."""
     msg = agent_error_of(fmt, line)
-    if msg and (run_id not in AGENT_ERRORS or '"turn.failed"' in line or fmt == "claude"):
+    terminal = fmt == "claude" or '"turn.failed"' in line
+    if msg and (run_id not in AGENT_ERRORS or terminal):
         AGENT_ERRORS[run_id] = msg
+    if msg and terminal:
+        AGENT_FAILED.add(run_id)
 
 
 def render_event(fmt: str, line: str) -> list[str]:
