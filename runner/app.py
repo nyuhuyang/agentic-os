@@ -4428,7 +4428,7 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
                                 error="withheld (error): run records are outside this checkout's ignored state/ or outputs/",
                                 run_id=new_run_id, attempt=attempt, parent_run_id=run_id, linear_issue_id=linear_issue_id,
                                 agent=agent, task_id=task_id, agent_session_id=sid, reset_generation=launch_gen,
-                                extra=record_extra)
+                                extra={k: v for k, v in record_extra.items() if k != "issue_title"})  # withheld too (R9-03)
         return jsonify({"ok": False, "run_id": new_run_id, "error": "confidential project: run records are not in a safe place"}), 409
     _linear_dispatched[linear_issue_id] = new_run_id
     try:
@@ -5233,7 +5233,8 @@ def api_run_retry(run_id: str):
                     in_ticket_wt = os.path.realpath(str(wt)) == os.path.realpath(target["cwd"])
             if project_key and not in_ticket_wt:
                 # main checkout or any other folder of the project: the session-card worker (§3.3)
-                transient = {"agent": agent, "id": sid, "project_key": project_key, "gen": reset_gen.current(linear_issue_id)}
+                # the generation this request read: a reset since then refuses it at admission (R9-01)
+                transient = {"agent": agent, "id": sid, "project_key": project_key, "gen": _launch_gen}
                 return _retry_session_card(run_id, original, transient, req_data, card_sourced=True)
             if not project_key and os.path.realpath(target["cwd"]) != os.path.realpath(str(ROOT)):
                 card_note, _lock_session_id = "new session: the card's session is in a different folder", None

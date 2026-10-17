@@ -186,3 +186,10 @@
 - PVST-R8-01 (high): `_start_failed(binding=bound)` copied the whole original record, `issue_title` included. → Only binding keys are kept (`_BINDING_KEYS` whitelist).
 - PVST-R8-02 (medium): the retry's bound block always passed `reuse_only=True`, so a session card with no bound worktree could never start fresh. → `reuse_only=bool(bound.get("worktree"))`, as dispatch does. A truly removed bound worktree still fails closed (I6-10).
 - Tests: 2 new. Proof: 697 passed.
+
+## Codex build inspection 9 — REVISE (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i9/claudex-8mvvh47h/result.json` (300 s). 3 findings: 1 high, 2 medium. All accepted.
+- PVST-R9-03 (high): the session-card refusal for unsafe record locations wrote `record_extra` with `issue_title`. → It is removed from that record.
+- PVST-R9-01 (medium): the transient intent re-read the generation. → It uses the request's `_launch_gen`, so a reset during the route's lookups refuses the request at admission.
+- PVST-R9-02 (medium): `set_card_title` cached only {id, title} when the cache was empty. → It publishes the whole stored issue, merged with any cached fields, to the cache and the team cache.
+- Tests: 2 new. Proof: 699 passed.

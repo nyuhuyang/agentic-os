@@ -1189,22 +1189,27 @@ class LinearModule(AgenticModule):
         the local override and the board change. Raises with nothing changed otherwise (DP-04)."""
         import reset_gen
         with reset_gen.issue_lock(issue_id):
+            stored = None
             if self._capability.get("type") == "linear":
                 client, _tc = self._linear_client()
                 confirmed = client.update_title(issue_id, title)  # title-only mutation (DP-42)
                 from app import _confirm_linear_title
                 _confirm_linear_title(issue_id, confirmed["title"], confirmed["updated_at"])
                 with contextlib.suppress(Exception):  # the local backup follows Linear
-                    self.get_local_tracker().update_issue(issue_id, title=title)
+                    stored = self.get_local_tracker().update_issue(issue_id, title=title)
                 self._remember_local_override(issue_id, {"title": title})  # a stale poll keeps it shown
-            elif not self.get_local_tracker().update_issue(issue_id, title=title):
-                raise ValueError("card not found")
-            cached = dict(self.issues_cache.get(issue_id) or {"id": issue_id})
+            else:
+                stored = self.get_local_tracker().update_issue(issue_id, title=title)
+                if not stored:
+                    raise ValueError("card not found")
+            # the whole issue, never a bare {id, title}: an empty cache after a restart keeps the
+            # card's identifier, state, labels and team (R9-02)
+            cached = {**(stored or {}), **(self.issues_cache.get(issue_id) or {})} or {"id": issue_id}
             cached["title"] = title
             self.issues_cache[issue_id] = cached
             tid = cached.get("team_id") or ""
-            if tid and issue_id in self._issues_by_team.get(tid, {}):
-                self._issues_by_team[tid][issue_id] = cached  # the team-filtered board too (DP-23)
+            if tid:
+                self._issues_by_team.setdefault(tid, {})[issue_id] = cached  # the team-filtered board too (DP-23)
         if self._socketio:
             self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
 

@@ -745,3 +745,38 @@ def test_retry_of_a_session_card_without_a_worktree_starts_fresh(cs, demo, monke
     monkeypatch.setattr(app_mod, "_run_project_ticket", lambda **kw: seen.update(kw))
     assert client.post("/api/runs/a/retry", json={"reply": "x"}).status_code == 200
     assert seen["reuse_only"] is False and seen["resume_session"] is None and seen["note"]  # R8-02
+
+
+# ── Codex build inspection 9 (PVST-R9-01..03) ──────────────────────────────
+
+def test_card_row_rename_with_an_empty_cache_keeps_the_card_metadata(cs, demo):
+    app_mod, mod, client, log, events, tmp = cs
+    import state_io
+    state_io.write_json_atomic(tmp / "tasks.json", {ISSUE: {"id": ISSUE, "identifier": "LOC-7", "state": "In Review",
+                                                            "title": "t", "labels": ["x"]}})
+    transcript(demo)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    mod.issues_cache.clear()  # a restart in local mode
+    assert client.post(f"/api/projects/demo/sessions/claude/{SID}/rename", json={"title": "New"}).status_code == 200
+    cached = mod.issues_cache[ISSUE]
+    assert cached["identifier"] == "LOC-7" and cached["state"] == "In Review" and cached["labels"] == ["x"]  # R9-02
+    assert app_mod._board_sessions()[1][("claude", SID)] == {"label": "LOC-7", "title": "New"}
+
+
+def test_retry_transient_intent_keeps_the_generation_the_request_read(cs, demo, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    import reset_gen
+    transcript(demo)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID,
+                    "project_key": "demo", "session_project": "demo"})
+    real_find = pj.find_session
+
+    def find_then_reset(agent, sid):  # the card is reset while the route resolves the session
+        out = real_find(agent, sid)
+        reset_gen.bump(ISSUE)
+        return out
+    monkeypatch.setattr(pj, "find_session", find_then_reset)
+    launched = []
+    monkeypatch.setattr(app_mod, "run_agent_process", lambda *a, **k: launched.append(1))
+    r = client.post("/api/runs/a/retry", json={"reply": "x"})
+    assert r.status_code == 409 and launched == []  # R9-01
