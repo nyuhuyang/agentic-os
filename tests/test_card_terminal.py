@@ -89,10 +89,11 @@ def test_quick_reply_resumes_the_same_session(harness, monkeypatch):
     on_disk(app_mod, "claude", SID)
     monkeypatch.setattr(app_mod, "_process_table", lambda: {})
     write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
-    procs = stub_launches(app_mod, monkeypatch, [{}])
+    from test_reset_gen import capture_launches
+    cmds = capture_launches(app_mod, monkeypatch, result={"type": "result", "result": "done", "session_id": SID})
     r = client.post("/api/runs/a/retry", json={"reply": "go ahead", "strict": True})
-    assert r.status_code == 200 and len(procs) == 1
-    assert "--resume" in procs[0].args and SID in procs[0].args and any("go ahead" in a for a in procs[0].args)
+    assert r.status_code == 200 and len(cmds) == 1  # a continuation must reply to count (R14-01)
+    assert "--resume" in cmds[0] and SID in cmds[0] and any("go ahead" in a for a in cmds[0])
     assert statuses(log, r.get_json()["run_id"]) == ["review"]
 
 

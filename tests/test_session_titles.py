@@ -850,3 +850,25 @@ def test_status_change_copy_withholds_a_confidential_title(cs, monkeypatch):
     copied = records(log)[-1]
     assert copied["status"] == "archived" and "issue_title" not in copied  # R13-01
     assert app_mod._sanitize_record({"issue_title": "x", "linear_issue_id": ISSUE}) == {"issue_title": "x", "linear_issue_id": ISSUE}
+
+
+# ── Codex build inspection 14 (PVST-R14-01) ────────────────────────────────
+
+def test_has_reply_ignores_protocol_fallback():
+    import app as app_mod
+    assert not app_mod._has_reply(json.dumps({"type": "system", "subtype": "init", "session_id": "s"}))
+    assert not app_mod._has_reply('{"type":"thread.started","thread_id":"t"}\n{"type":"turn.completed"}')
+    assert not app_mod._has_reply("") and app_mod._has_reply("Done: added the button.")
+
+
+@pytest.mark.parametrize("lines", [[{"type": "system", "subtype": "init", "session_id": SID}],
+                                   [{"type": "result", "result": "", "session_id": SID}]])
+def test_resumed_dispatch_with_no_reply_is_an_error(cs, monkeypatch, lines):
+    app_mod, mod, client, log, events, tmp = cs
+    transcript(app_mod.ROOT)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    monkeypatch.setattr(app_mod, "_run_grouped", lambda *a, **k: None)
+    procs = stub(app_mod, monkeypatch, lines, rc=0)
+    issue = {"id": ISSUE, "identifier": "T-1", "title": "t", "description": ""}
+    mod._dispatch_issue_counted(issue, {"agent": {"backend": "claude"}}, app_mod.socketio)
+    assert len(procs) == 1 and records(log)[-1]["status"] == "error"  # R14-01

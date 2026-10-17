@@ -219,3 +219,9 @@
 - Result: `/private/tmp/claude-501/claudex-pvst/i13/claudex-i1id2i0g/result.json` (324 s). 1 medium finding, accepted.
 - PVST-R13-01: the record-copying writers (`api_run_set_status`, `api_run_restore`, `_archive_stale_sent`) bypassed the `issue_title` withholding. → `_sanitize_record` applies to all of them, and to `_write_run_log` as the last gate. It uses the current sticky `_ticket_confidential` policy, not only the copied flag.
 - Tests: 1 new. Proof: 705 passed.
+
+## Codex build inspection 14 — REVISE (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i14/claudex-fbikudxt/result.json` (211 s). 1 medium finding, accepted.
+- PVST-R14-01: protocol-line fallback output (Claude's last stream-json line, or Codex's stdout) satisfied the "has output" check. → `_has_reply` treats output made only of typed JSON events as no reply. It gates the resumed dispatch, the session-card reply and card continuations on the retry path. Ceiling: a reply that is itself a typed JSON object counts as no reply.
+- Tests: 3 new. `test_quick_reply_resumes_the_same_session` now gives its fake agent a reply.
+- Proof: 708 passed.

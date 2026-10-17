@@ -4237,6 +4237,24 @@ def _card_admitted(issue_id: str | None, gen: int) -> bool:
         return _tracker_issue(issue_id) is not None and reset_gen.current(issue_id) == gen
 
 
+def _has_reply(output: str | None) -> bool:
+    """Whether a run's output is an actual reply, not the readers' fallback of raw protocol
+    lines (Claude: the last stream-json line; Codex: all of stdout) left when the agent said
+    nothing (R14-01). ponytail: protocol events all carry a "type"; a reply that is itself a JSON
+    object with a top-level "type" counts as no reply, the ceiling of this check."""
+    lines = [ln for ln in (output or "").splitlines() if ln.strip()]
+    if not lines:
+        return False
+    for ln in lines:
+        try:
+            ev = json.loads(ln)
+        except ValueError:
+            return True
+        if not (isinstance(ev, dict) and "type" in ev):
+            return True
+    return False
+
+
 def _session_note(run_id: str, text: str) -> None:
     """A runner note in a generic run's stream: why this run started a new session (DP-19/32)."""
     try:
@@ -4535,7 +4553,8 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
                         new_run_id, cmd, stream=agent, cwd=target["cwd"], env=_project_exec_env(agent, eff),
                         on_proc=procs.append, timeout=AI_SESSION_TIMEOUT_S)
                     agent_error, turn_failed = project_runs.pop_agent_failure(new_run_id)
-                    ok = ok and not turn_failed  # a reported failure fails the run, whatever the exit code (R4-03)
+                    # a reported failure, or no reply at all, fails the continuation (R4-03, R14-01)
+                    ok = ok and not turn_failed and _has_reply(output)
                     if not end():
                         return
                     # the agent's own reason first, e.g. a usage limit (D6)
@@ -5463,7 +5482,7 @@ def api_run_retry(run_id: str):
 
                 agent_error, turn_failed = project_runs.pop_agent_failure(new_run_id)
                 if card_session or strict:
-                    ok = ok and not turn_failed  # a continuation's reported failure fails it (R4-03)
+                    ok = ok and not turn_failed and _has_reply(output)  # a continuation must reply (R4-03, R14-01)
                 error_s = _extract_real_errors(stderr_s)
                 if not ok and agent_error:
                     error_s = agent_error  # the agent's own reason first, e.g. a usage limit (D6)
