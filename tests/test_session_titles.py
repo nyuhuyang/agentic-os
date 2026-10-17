@@ -658,3 +658,35 @@ def test_cancel_blocks_renames_while_its_group_exits(cs):
         with contextlib.suppress(ProcessLookupError):
             os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
+
+
+# ── Codex build inspection 6 (PVST-R6-01..02) ──────────────────────────────
+
+def test_a_closing_session_cannot_be_claimed_or_resumed(cs):
+    app_mod, mod, client, log, events, tmp = cs
+    proc = subprocess.Popen(["/bin/sh", "-c", "sleep 30"], start_new_session=True)
+    try:
+        app_mod._CLOSING_SESSIONS[("claude", SID)] = proc.pid
+        with pytest.raises(pj.SessionBusy):
+            app_mod._claim_session("claude", SID, "r2")  # R6-01: no confirmation overrides it
+        assert ("claude", SID) in app_mod._live_session_ids()
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+    deadline = time.monotonic() + 5
+    while app_mod._group_alive(proc.pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    app_mod._claim_session("claude", SID, "r3")  # gone: claimable again
+    assert app_mod._SESSION_CLAIMS["r3"] == ("claude", SID) and app_mod._CLOSING_SESSIONS == {}
+
+
+def test_first_linear_confirmation_names_the_cards_session(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    monkeypatch.setattr(mod, "_capability", {"available": True, "type": "linear"})
+    f = transcript(tmp / "elsewhere")
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    app_mod._sync_card_session_names(ISSUE)
+    assert custom_titles(f) == []  # no confirmed title yet: skipped (DP-46)
+    mod.issues_cache[ISSUE] = {"id": ISSUE, "title": "Linear title"}
+    app_mod._confirm_linear_title(ISSUE, "Linear title", "2026-10-17T03:00:00Z")  # the first poll after the run
+    assert custom_titles(f) == ["Linear title"]  # R6-02

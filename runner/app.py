@@ -3861,6 +3861,8 @@ def session_in_use(target: dict, own_run_id: str | None, own_finished_at: float 
     live |= {v for rid, v in list(_SESSION_CLAIMS.items()) if rid != own_run_id}  # by run_id key (STB-019)
     if key in live:
         return "it is open in a dashboard terminal or a running job"
+    if _closing_live(*key):
+        return "its last run's processes are still exiting"
     procs = _process_table()
     mine, grew = {os.getpid()}, True
     while grew:  # the runner and its descendants (our own runs and terminals) are not "elsewhere"
@@ -3964,8 +3966,13 @@ def _confirm_linear_title(issue_id: str, title: object, updated_at: object = "")
     stamp = updated_at if isinstance(updated_at, str) else ""
     with _title_sync_lock(issue_id):
         old = _LINEAR_TITLES.get(issue_id)
+        changed = (old is None or stamp >= old[1]) and (old is None or old[0] != title)
         if old is None or stamp >= old[1]:
             _LINEAR_TITLES[issue_id] = (title, stamp)
+    # A first or changed confirmation names the card's sessions now: a run that ended before any
+    # confirmation skipped them (R6-02). Outside the lock: the sync takes it itself.
+    if changed and issue_id in set(_card_sessions(live_only=False).values()):
+        _sync_titles_soon(issue_id, title)
 
 
 def _confirmed_title(issue_id: str) -> str | None:
@@ -4707,6 +4714,8 @@ _SESSION_CLAIMS: dict[str, tuple[str, str]] = {}  # run_id -> (agent, session_id
 def _claim_session(agent: str, sid: str | None, run_id: str) -> None:
     if sid and agent in ("claude", "codex"):
         with _projects.session_lock(agent, sid):
+            if _closing_live(agent, sid):  # unconditional: no confirmation overrides live processes (R6-01)
+                raise _projects.SessionBusy(f"session {sid} still has processes from its last run; try again shortly")
             _SESSION_CLAIMS[run_id] = (agent, sid)
 
 
@@ -4714,10 +4723,23 @@ def _release_session(run_id: str) -> None:
     _SESSION_CLAIMS.pop(run_id, None)
 
 
+def _closing_live(agent: str | None, sid: str | None) -> bool:
+    """A finished or stopped run of this session still has processes: it is occupied (R6-01)."""
+    key = (canonical_agent(agent) or agent, sid)
+    pgid = _CLOSING_SESSIONS.get(key)
+    if pgid is None:
+        return False
+    if _group_alive(pgid):
+        return True
+    _CLOSING_SESSIONS.pop(key, None)
+    return False
+
+
 def _live_session_ids() -> set[tuple[str, str]]:
     from runner.modules.pty import TERMINALS
     live = {(t.agent, t.session_id) for t in list(TERMINALS.values()) if t.alive and t.session_id}
     live |= {(j.get("agent"), j.get("agent_session_id")) for j in list(_running_jobs.values()) if j.get("agent_session_id")}
+    live |= {k for k in list(_CLOSING_SESSIONS) if _closing_live(*k)}  # leftover processes still write it (R6-01)
     return live | set(_SESSION_CLAIMS.values())
 
 

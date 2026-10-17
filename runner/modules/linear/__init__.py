@@ -1431,6 +1431,7 @@ class LinearModule(AgenticModule):
                         logger.warning("Linear create returned nothing for local %s", local_id)
                         return
                     n = _normalize_linear_issue(linear_issue)
+                    _note_linear_title(n)  # confirmed by Linear's create response, before the id swap (R6-02)
                     # The project label decides where the task runs: never lose it in the swap (B, R03).
                     n["labels"] = sorted(set(n["labels"]) | set(labels))
                     real_id = linear_issue["id"]

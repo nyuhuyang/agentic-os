@@ -168,3 +168,9 @@
   - `_end_job` (normal completion) installs the closing marker under the same lock before popping, like cancel and stall.
   - The project helper's final job removal does the same.
 - Tests: 2 new deterministic ones, with a surviving descendant and a TERM-ignoring group. Proof: 691 passed.
+
+## Codex build inspection 6 — REVISE (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i6/claudex-3rbyh0gf/result.json` (273 s). 2 medium findings. Both accepted.
+- PVST-R6-01: closing markers blocked only renames, not new continuations. → A live closing group now counts as occupied in `_live_session_ids` and `session_in_use`. `_claim_session` refuses it unconditionally under the session lock, and `confirm_in_use` cannot bypass it.
+- PVST-R6-02: ordinary card creation did not record Linear's confirmed title, and a later first confirmation never renamed the session. → The create response is recorded before the id swap. A first or changed confirmed title for a card with sessions starts a name sync, so a title changed in Linear itself is followed too.
+- Tests: 2 new. Proof: 693 passed.
