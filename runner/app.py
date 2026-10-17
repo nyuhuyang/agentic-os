@@ -1348,6 +1348,18 @@ _claude_usage_retry_at = 0.0
 _claude_usage_lock = threading.Lock()
 
 
+@functools.lru_cache(maxsize=1)
+def _claude_cli_user_agent() -> str:
+    """The User-Agent Claude Code sends: the usage API only offers reset grants to the CLI
+    surface. ponytail: version read once per runner process; a restart picks up CLI upgrades."""
+    try:
+        out = subprocess.run([_claude_bin(), "--version"], capture_output=True, text=True, timeout=5).stdout
+        version = re.match(r"\s*([0-9][\w.+-]*)", out or "").group(1)
+    except (OSError, subprocess.SubprocessError, AttributeError):
+        version = "2.1.302"
+    return f"claude-cli/{version} (external, cli)"
+
+
 def _fetch_claude_oauth_usage(timeout_s: float = 4.0) -> dict:
     """Read the authenticated Claude usage endpoint without persisting its token."""
     try:
@@ -1367,6 +1379,7 @@ def _fetch_claude_oauth_usage(timeout_s: float = 4.0) -> dict:
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
+                "User-Agent": _claude_cli_user_agent(),
             },
         )
         with urllib.request.urlopen(request_obj, timeout=timeout_s) as response:
@@ -1504,7 +1517,7 @@ def _claude_reset_card(block: object) -> dict:
         grants.append({"label": str(raw.get("label") or ""), "left": left, "total": total,
                        "expires_at": expires_at, "usable_now": bool(raw.get("usable_now"))})
     card = {
-        "title": next((g["label"] for g in grants if g["label"]), "Full reset"),
+        "title": "Full reset",  # grant labels are long promo names ("Claude Opus 5.5 launch: ...")
         "window_minutes": 0, "resets_at_unix": None, "pct": 0, "used_pct": None,
         "remaining_pct": None, "tokens": 0, "limit": 0, "sessions": 0,
         "value_suffix": " available", "quota_source": "official-claude",

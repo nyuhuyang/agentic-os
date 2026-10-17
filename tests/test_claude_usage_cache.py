@@ -66,3 +66,12 @@ def test_official_windows_put_the_reset_card_third(clock, monkeypatch):
     monkeypatch.setattr(app, "_fetch_claude_oauth_usage", lambda: usage)
     aux = app._load_claude_official_windows()["aux"]
     assert (aux["title"], aux["value"]) == ("Full reset", 1)
+
+
+def test_usage_request_identifies_as_the_cli(monkeypatch):
+    """Reset grants are offered to the claude_code_cli surface only (ineligible_reason "surface")."""
+    app._claude_cli_user_agent.cache_clear()
+    monkeypatch.setattr(app.subprocess, "run", lambda *a, **k: app.subprocess.CompletedProcess(
+        a[0], 0, stdout="2.1.302 (Claude Code)\n"))
+    assert app._claude_cli_user_agent() == "claude-cli/2.1.302 (external, cli)"
+    app._claude_cli_user_agent.cache_clear()
