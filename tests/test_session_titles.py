@@ -500,3 +500,28 @@ def test_refusal_record_of_a_confidential_project_withholds_the_title(cs, monkey
                        binding={"project_key": "demo", "issue_identifier": "T-1", "confidential": True})
     rec = records(log)[-1]
     assert "Secret deal" not in json.dumps(rec) and rec["project_key"] == "demo" and rec["confidential"] is True  # R1
+
+
+# ── Codex build inspection 2 (PVST-01..05) ─────────────────────────────────
+
+def test_retry_without_a_reply_continues_a_main_checkout_session(cs, demo, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    transcript(demo)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID,
+                    "project_key": "demo", "session_project": "demo"})
+    reset_route(client)
+    seen = []  # the agent launch only: the registry check still runs git (Popen) for real
+    monkeypatch.setattr(app_mod, "run_agent_process",
+                        lambda rid, cmd, **kw: (seen.append((cmd, kw.get("cwd"))), ("done", 0, 0, None, SID, "", True))[1])
+    r = client.post("/api/runs/a/retry", json={"reply": ""})  # the board's Retry sends no reply (PVST-02)
+    assert r.status_code == 200, r.get_json()
+    assert len(seen) == 1 and "--resume" in seen[0][0] and SID in seen[0][0] and str(seen[0][1]) == str(demo)
+    assert "resume_session" not in records(log)[-1]  # card-sourced: no persisted intent (DP-34)
+
+
+def test_recorded_title_is_only_a_confirmed_one(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    monkeypatch.setattr(mod, "_capability", {"available": True, "type": "linear"})
+    mod.issues_cache[ISSUE] = {"id": ISSUE, "title": "B unconfirmed"}  # a /local edit Linear never took
+    app_mod._confirm_linear_title(ISSUE, "A", "2026-10-17T00:00:00Z")
+    assert app_mod._issue_title_extra(ISSUE) == {"issue_title": "A"}  # PVST-03

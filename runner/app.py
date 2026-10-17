@@ -3978,7 +3978,9 @@ def _issue_title_extra(issue_id: str | None, conf=False) -> dict:
     prompt for a confidential run whose records may leak (DP-24)."""
     if not issue_id or (conf is not False and _records_unsafe()):
         return {}
-    title = (_tracker_issue(issue_id) or {}).get("title") or _confirmed_title(issue_id)
+    # only a confirmed title: a native rename may fall back to it later, so never an unconfirmed
+    # /local edit from the display cache (PVST-03)
+    title = _confirmed_title(issue_id)
     return {"issue_title": title} if isinstance(title, str) and title.strip() else {}
 
 
@@ -4133,20 +4135,24 @@ def _after_card_run(run_id: str, issue_id: str | None, agent: str | None, sid: s
                 if time.monotonic() > deadline:
                     logger.warning("session %s still has live processes; its name is not written", sid)
                     return
-                time.sleep(1)
+                time.sleep(0.2)
             _CLOSING_SESSIONS.pop(key, None)
         _sync_card_session_names(issue_id, ended=(kind, run_id, key))
 
-    try:
-        threading.Thread(target=_watch, daemon=True, name=f"title-sync-{run_id[:8]}").start()
+    try:  # a counted writer: maintenance and relocation wait for it (PVST-04)
+        _start_counted(_watch)
+    except MaintenanceRefused:
+        logger.warning("session-name sync for %s skipped: maintenance", run_id)
     except Exception:
         logger.exception("session-name sync for %s not started", run_id)
 
 
 def _sync_titles_soon(issue_id: str, title: str | None = None) -> None:
     """A confirmed title change: rename the card's idle sessions now, in the background."""
-    threading.Thread(target=_sync_card_session_names, args=(issue_id,), kwargs={"title": title},
-                     daemon=True, name=f"title-sync-{issue_id[:8]}").start()
+    try:  # a counted writer: maintenance and relocation wait for it (PVST-04)
+        _start_counted(_sync_card_session_names, issue_id, title=title)
+    except MaintenanceRefused:
+        logger.warning("session-name sync for %s skipped: maintenance", issue_id)
 
 
 def _card_admitted(issue_id: str | None, gen: int) -> bool:
@@ -4245,6 +4251,8 @@ def _to_board_locked(project, target: dict):
                        "session_project": project.key,  # survives a reset, unlike resume_session (SBI-010)
                        **_issue_title_extra(issue_id, conf)}
                 prompt, output, _ = _withheld(conf, latest.get("prompt", ""), latest.get("output", ""))
+                if conf is not False and _records_unsafe():
+                    rec.pop("issue_title", None)  # an inherited title is withheld too (PVST-01)
                 rec.pop("reset_gen", None)
                 run_id = latest.get("run_id") or str(uuid.uuid4())
                 _write_run_log(rec.get("skill") or "_prompt", "todo", rec.get("started_at") or now,
@@ -4289,6 +4297,8 @@ def _retry_session_card(run_id: str, original: dict, intent: dict, data: dict, c
     reply = (data.get("reply") or "").strip()
     attachments = data.get("attachments") or []
     prompt = (reply + _format_prompt_attachments(attachments)).strip()  # the reply only (§3.5)
+    if not prompt and card_sourced:  # a plain Retry of a card continuing its session: the task again (PVST-02)
+        prompt = (original.get("prompt") or "").strip()
     if not prompt:
         return jsonify({"ok": False, "error": "write a reply first"}), 400
     linear_issue_id = original["linear_issue_id"]
@@ -4413,11 +4423,14 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
 
     def _record(status: str, output: str = "", error: str = "", dur: float = 0.0, it=None, ot=None, model=None):
         p, o, e = _withheld(conf, prompt, output, error, status)
+        extra = record_extra
+        if conf is not False and _records_unsafe():  # decided at write time, like the prompt (PVST-01)
+            extra = {k: v for k, v in record_extra.items() if k != "issue_title"}
         _write_run_log_retrying(skill, status, started_at, dur, prompt=p, output=o, error=e, run_id=new_run_id,
                                 attempt=attempt, parent_run_id=run_id, linear_issue_id=linear_issue_id,
                                 input_tokens=it, output_tokens=ot, agent=agent, model=model or _agent_model(agent),
                                 task_id=task_id, token_cost_usd=_compute_token_cost(ot, it, model or _agent_model(agent)),
-                                agent_session_id=sid, reset_generation=launch_gen, extra=record_extra)
+                                agent_session_id=sid, reset_generation=launch_gen, extra=extra)
 
     def _close(status: str, output: str = "", error: str = "") -> None:
         body = project_runs.tracker_comment(
@@ -4463,6 +4476,7 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
                         return
                     _record("error", error=str(exc), dur=time.monotonic() - t0)
                     _close("error", error=str(exc))
+                    _after_card_run(new_run_id, linear_issue_id, agent, sid, procs[0].pid if procs else None)
         finally:
             _release_session(new_run_id)
             held.close()

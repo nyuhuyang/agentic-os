@@ -134,3 +134,14 @@
   - fallback-mechanics tests use `/run` cards (no tracker issue), the only cards that keep the fresh fallback;
   - the project ticket-lock test expects a new session for a session not in any store.
 - Proof: 680 passed.
+
+## Codex build inspection 2 — REVISE (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i2/claudex-ky80vxwe/result.json` (252 s). 5 findings: 1 high, 4 medium. All accepted.
+- PVST-01 (high): the session-card reply's `record_extra` and the to-board record copied from `latest` could still carry `issue_title` once records became unsafe. → It is dropped at write time under the confidential + unsafe rule, on both writers.
+- PVST-02 (medium): a card-sourced Retry with no reply got 400 "write a reply first". → A card-sourced Retry with no reply continues the session with the task prompt.
+- PVST-03 (medium): `issue_title` recorded the display-cache title, which can be an unconfirmed /local edit. → Only the confirmed title is recorded.
+- PVST-04 (medium): name syncs ran on raw threads, outside the maintenance count. → They go through `_start_counted`. The terminal-end trigger runs inside the audit's `_inflight_work`, so under maintenance neither runs.
+- PVST-05 (medium): the session-card worker's exception branch had no run-end sync. → Added.
+- Deviation: the closing-marker watcher polls every 0.2 s instead of every 1 s, so a counted watcher releases quickly.
+- Tests: 2 new. `test_retry_and_baseline_are_refused_before_any_state` now waits for its own run's counted sync before it switches maintenance on.
+- Proof: 682 passed.

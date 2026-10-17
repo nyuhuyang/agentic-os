@@ -1132,6 +1132,7 @@ def test_retry_and_baseline_are_refused_before_any_state(helper, monkeypatch):
     c = api(app_mod)
     monkeypatch.setattr(app_mod, "_BASELINES", {})
     jobs_before, n_events = dict(app_mod._running_jobs), len(events)
+    assert wait_for(lambda: c.get("/api/maintenance").get_json()["inflight"] == 0)  # the run's own name sync done
     app_mod._MAINTENANCE.set()
     try:
         r = c.post(f"/api/runs/{rid}/retry", json={"reply": "again"})

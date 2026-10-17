@@ -114,14 +114,15 @@ def _finalize(t: Terminal) -> bool:
         try:
             with _inflight_work():
                 record_interactive_ended(t.run_id, t.session_id)
+                # admitted like the audit: the card's session is named once the terminal's group
+                # is gone (DP-11); under maintenance neither runs (PVST-04)
+                with contextlib.suppress(Exception):
+                    issue_id = (_latest_record(t.run_id) or {}).get("linear_issue_id")
+                    _after_card_run(t.term_id, issue_id, t.agent, t.session_id, t.pid, kind="term")
         except MaintenanceRefused as exc:
             logger.warning("closure of %s not recorded: %s", t.term_id, exc)
         except Exception:
             logger.exception("closure audit for %s failed", t.term_id)
-        # the card's session is named after its title once the terminal's group is gone (DP-11)
-        with contextlib.suppress(Exception):
-            issue_id = (_latest_record(t.run_id) or {}).get("linear_issue_id")
-            _after_card_run(t.term_id, issue_id, t.agent, t.session_id, t.pid, kind="term")
     return True
 
 
