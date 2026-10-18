@@ -1017,3 +1017,12 @@ def test_a_quick_reply_to_the_latest_attempt_survives_a_status_copy_of_an_older_
     r = client.post("/api/runs/b/retry", json={"reply": "go on", "strict": True})
     assert r.status_code == 200, r.get_json()
     assert "--resume" in procs[0].args and s2 in procs[0].args
+
+
+# ── found by the browser check, 2026-10-18 ─────────────────────────────────
+
+def test_saving_the_editor_with_an_empty_state_never_wipes_the_card_state(cs):
+    app_mod, mod, client, log, events, tmp = cs
+    for route in (f"/api/linear/issues/local/{ISSUE}", f"/api/linear/issues/{ISSUE}"):
+        assert client.patch(route, json={"title": "Kept", "state_name": ""}).status_code == 200
+        assert tasks(tmp)[ISSUE]["state"] == "In Review" and tasks(tmp)[ISSUE]["title"] == "Kept"

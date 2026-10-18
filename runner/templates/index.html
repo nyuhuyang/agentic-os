@@ -3642,8 +3642,9 @@ async function _loadLinearIssueIntoModal(linear_issue_id, boardItem = null) {
     if (requestSeq !== _detailLinearLoadSeq || _detailLinearIssueId !== linear_issue_id || !_isModalOpen('detail-modal')) return;
     _detailLinearUpdatedAt = issue.updated_at || '';
 
-    // Populate state dropdown
-    _detailLinearStates = issue.team_states || [];
+    // Populate state dropdown; the local tracker has no team states: the board's own (none empty)
+    _detailLinearStates = (issue.team_states || []).length ? issue.team_states
+      : ['Backlog', 'Todo', 'In Progress', 'In Review', 'Done', 'Canceled'].map(name => ({ name }));
     const stateEl = document.getElementById('linear-edit-state');
     stateEl.innerHTML = '';
     _detailLinearStates.forEach(s => {

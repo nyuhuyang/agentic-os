@@ -1540,7 +1540,7 @@ class LinearModule(AgenticModule):
                 issue_id,
                 title=data.get("title"),
                 description=data.get("description"),
-                state_name=data.get("state_name"),
+                state_name=data.get("state_name") or None,  # "" (an empty state picker) never wipes the state
                 preferred_agent=preferred_agent,
             )
             # Only an authoritative local tracker renames sessions; in Linear mode this route is the
@@ -1605,7 +1605,7 @@ class LinearModule(AgenticModule):
                     issue_id,
                     title=data.get("title"),
                     description=data.get("description"),
-                    state_name=data.get("state_name"),
+                    state_name=data.get("state_name") or None,  # "" (an empty state picker) never wipes the state
                     preferred_agent=preferred_agent,
                 )
                 if issue:
