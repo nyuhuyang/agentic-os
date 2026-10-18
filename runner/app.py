@@ -3934,6 +3934,13 @@ def _withheld(conf, prompt: str, output: str = "", error: str = "", status: str 
     return prompt, output, error
 
 
+def _card_refusal(body: dict, status: int, **keys):
+    """A refusal that, when a live dashboard terminal holds the card, names it (`code`/`term_id`),
+    so the page can offer to end that session and continue; otherwise the body is unchanged."""
+    from runner.modules.pty import card_interactive
+    return jsonify(card_interactive(body, **keys)), status
+
+
 @app.route("/api/projects/<key>/sessions/<agent>/<sid>/to-board", methods=["POST"])
 def api_session_to_board(key: str, agent: str, sid: str):
     """Resume = put the session's card back in Todo with the intent to continue it (§2).
@@ -3948,7 +3955,7 @@ def api_session_to_board(key: str, agent: str, sid: str):
                 target = _projects.session_target(project, agent, sid, board_ids=board_ids)
                 if (agent, sid) in _live_session_ids() or any(
                         j.get("agent_session_id") == sid for j in list(_running_jobs.values())):
-                    return jsonify({"error": "still running"}), 409
+                    return _card_refusal({"error": "still running"}, 409, agent=agent, session_id=sid)
                 return _to_board_locked(project, target)
     except _projects.SessionNotFound as exc:
         return jsonify({"error": str(exc)}), 404
@@ -4301,17 +4308,20 @@ def _to_board_locked(project, target: dict):
     if issue_id:
         issue = _tracker_issue(issue_id) or {}
         latest = dict(_intent_latest(issue_id) or {})
-        if latest.get("status") == "running" or mod._issue_is_running(issue_id) or card_locked(issue, issue_id):
-            return jsonify({"error": "still running"}), 409  # after the card is known (STB-057)
         durable = _durable_binding(issue_id, latest.get("task_id")) or {}
         ident = durable.get("issue_identifier") or issue.get("identifier") or latest.get("issue_identifier")
+        holder = {"card_key": issue_id, "project_key": project.key, "ticket": ident}  # a terminal on any of its sessions
+        if latest.get("status") == "running" or mod._issue_is_running(issue_id):
+            return jsonify({"error": "still running"}), 409  # after the card is known (STB-057)
+        if card_locked(issue, issue_id):
+            return _card_refusal({"error": "still running"}, 409, **holder)
         known = [f[k] for f in (latest, durable) for k in ("confidential",) if k in f]
         conf = session_confidential(project, target["cwd"], issue_id, latest.get("task_id"), *known, sid=sid)
         with reset_gen.issue_lock(issue_id):
             try:
                 held = reserve_card(issue, issue_id)  # a concurrent drag/dispatch waits for us (STB-071)
             except _projects.ProjectError as exc:
-                return jsonify({"error": str(exc)}), 409
+                return _card_refusal({"error": str(exc)}, 409, **holder)
             with held:
                 previous = reset_gen.current(issue_id)
                 bumped = reset_gen.bump(issue_id)  # explicit: no PATCH body for _tracker_reset_route (STB-068)
@@ -4404,9 +4414,15 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
         target = _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])
     except _projects.ProjectError as exc:  # gone, moved outside the project, or unregistered
         return jsonify({"ok": False, "error": f"session not available: {exc}"}), 409
+    # a dashboard terminal on this card or session: the page offers to end it, not "send anyway"
+    holder = {"card_key": linear_issue_id or task_id, "project_key": project.key,
+              "ticket": original.get("issue_identifier"), "agent": agent, "session_id": sid}
     if not data.get("confirm_in_use"):
         why = session_in_use(target, None, _own_activity_end(linear_issue_id))
         if why:
+            from runner.modules.pty import card_terminal
+            if card_terminal(**holder):
+                return _card_refusal({"ok": False, "error": "an interactive terminal holds this card"}, 409, **holder)
             return jsonify({"ok": False, "in_use_elsewhere": why}), 409
     new_run_id = str(uuid.uuid4())
     started_at = datetime.now(timezone.utc).isoformat()
@@ -4421,7 +4437,7 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
         held = reserve_card(issue, linear_issue_id)  # the lock a drag takes; handed on, never re-taken (STB-079)
     except _projects.ProjectError as exc:
         _release_session(new_run_id)
-        return jsonify({"ok": False, "error": str(exc)}), 409
+        return _card_refusal({"ok": False, "error": str(exc)}, 409, **holder)
     with reset_gen.issue_lock(linear_issue_id):  # admission: a reset since the request began wins (SBI-007)
         if _tracker_issue(linear_issue_id) is None:  # deleted outside the dashboard: no generation bump (R2)
             held.close()
@@ -5279,6 +5295,11 @@ def api_run_retry(run_id: str):
                 if not req_data.get("confirm_in_use"):
                     why = session_in_use(target, None, _own_activity_end(linear_issue_id))
                     if why:
+                        from runner.modules.pty import card_terminal
+                        holder = {"card_key": linear_issue_id or task_id, "agent": agent, "session_id": sid}
+                        if card_terminal(**holder):  # the page offers to end it, not "send anyway"
+                            return _card_refusal({"ok": False, "error": "an interactive terminal holds this card"},
+                                                 409, **holder)
                         return jsonify({"ok": False, "in_use_elsewhere": why}), 409
                 _lock_session_id, card_session = sid, True
     try:  # before any tracker change: a session being renamed/removed/opened is refused (A, R02)
@@ -5328,8 +5349,11 @@ def api_run_retry(run_id: str):
     except _projects.ProjectError as exc:  # TicketLocked: an interactive terminal holds the card
         _release_session(new_run_id)
         card_hold.close()
-        status = 409 if isinstance(exc, _projects.TicketLocked) else 400
-        return jsonify({"ok": False, "error": str(exc)}), status
+        if isinstance(exc, _projects.TicketLocked):
+            return _card_refusal({"ok": False, "error": str(exc)}, 409, card_key=linear_issue_id or task_id,
+                                 project_key=(bound or {}).get("project_key"),
+                                 ticket=(bound or {}).get("issue_identifier"))
+        return jsonify({"ok": False, "error": str(exc)}), 400
     if linear_issue_id and not _card_admitted(linear_issue_id, _launch_gen):  # before any tracker change (R4)
         _release_session(new_run_id)
         card_hold.close()

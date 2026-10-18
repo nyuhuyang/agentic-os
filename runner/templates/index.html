@@ -554,6 +554,7 @@
   .detail-term-bar { display:flex; gap:6px; align-items:center; margin-bottom:6px; flex-wrap:wrap; }
   .detail-term-bar select { background:var(--surface); color:var(--text); border:1px solid var(--border); font:inherit; font-size:calc(11px * var(--fs)); }
   .detail-term-view { height:300px; background:#0d0d0d; }
+  .session-open-badge { color:var(--accent); border:1px solid var(--accent); border-radius:3px; padding:0 4px; font-size:calc(10px * var(--fs)); display:inline-block; }
   .waiting-badge { color:#111; background:var(--yellow, #d29922); border-radius:3px; padding:0 4px; font-size:calc(10px * var(--fs)); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; }
   .detail-footer { padding: 12px 20px; display: flex; gap: 8px; justify-content: flex-end; border-top: 1px solid var(--border); }
   .attach-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
@@ -836,6 +837,7 @@
     <div class="detail-header">
       <div class="state-badge" id="detail-state-badge">—</div>
       <div class="detail-skill" id="detail-skill">—</div>
+      <button class="detail-close" id="detail-end-session" style="display:none" onclick="_detailEndSession()" title="End this card's interactive session">End session</button>
       <button class="detail-close" onclick="closeDetailModal()">✕ Close</button>
     </div>
     <div class="detail-meta" id="detail-meta"></div>
@@ -1524,7 +1526,14 @@ document.getElementById('project-panel-content')?.addEventListener('click', (eve
 async function _resumeToBoard(btn) {
   const { project: key, resumeAgent: agent, resumeId: sid } = btn.dataset;
   btn.disabled = true;
-  const r = await _projectApi('POST', `/api/projects/${encodeURIComponent(key)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(sid)}/to-board`);
+  const seq = _detailModalLoadSeq;  // a card opened meanwhile is not replaced by this one (ICS-36)
+  const send = () => _projectApi('POST', `/api/projects/${encodeURIComponent(key)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(sid)}/to-board`);
+  let r = await send();
+  if (!r.ok && _isCardInteractive(r.data)) {  // the card's interactive session holds it: ask, end it, once more
+    const again = await _confirmEndThen(r.data, send);
+    if (!again) { btn.disabled = false; return; }  // declined: nothing changed
+    r = again;
+  }
   btn.disabled = false;
   if (!r.ok) {  // inline in the row, no alert
     _sessionEdit = { key, agent, id: sid, mode: 'resume', error: r.data.error || `HTTP ${r.status}` };
@@ -1534,6 +1543,7 @@ async function _resumeToBoard(btn) {
   _sessionEdit = null;
   _renderProjects();
   await refreshJobBoard(true);
+  if (seq !== _detailModalLoadSeq) return;  // the user opened another card meanwhile: the Todo card waits on the board
   await _openResumeReply(r.data.run_id);
 }
 
@@ -1996,6 +2006,22 @@ let _pendingBoardRefresh = false;
 let _optimisticBoardHoldUntil = 0;
 let _heldBoardRefreshTimer = null;
 let _optimisticLinearIssuePatches = {};
+// Live interactive card sessions, term_id -> card key, refreshed with the board (AC4).
+let _liveCardTerms = new Map();
+// A card terminal that still holds its card: live, or its cleanup failed (still owns the card, ICS-29).
+function _holdsCard(i) { return i.kind === 'resume' && !!i.card_key && (i.alive !== false || !!i.cleanup_failed); }
+function _cardHasSession(key) { return !!key && [..._liveCardTerms.values()].includes(key); }
+// The server's terminal list, or null when the socket is down or silent for `ms`: nothing waits on
+// a lost acknowledgement, and nothing is queued to run on a later reconnect (ICS-02).
+async function _termListBounded(ms = 1500) {
+  if (!socket.connected) return null;
+  return Promise.race([_cardTermList(), new Promise(r => setTimeout(() => r(null), ms))]);
+}
+async function _refreshLiveCardTerms() {  // never holds the board up: no answer = unchanged
+  const list = await _termListBounded();
+  if (list) _liveCardTerms = new Map(list.filter(i => _holdsCard(i))
+                                         .map(i => [i.term_id, i.card_key]));
+}
 let _detailLinearInitial = null;
 let _detailLinearUpdatedAt = '';
 
@@ -2087,15 +2113,56 @@ function _readBoardDragPayload(e) {
   return { kind: 'run', run_id: raw };
 }
 
+// A move to In Progress dispatches: only the dispatching PATCH is sent, awaited. It reserves the card
+// before any write and updates the local tracker itself, so a refusal changes nothing; a refusal by
+// the card's interactive session asks to end it and sends once more (plan 2026-10-17, R8/R9).
+async function _dispatchMove(issueId, fields) {
+  const send = () => _projectApi('PATCH', `/api/linear/issues/${encodeURIComponent(issueId)}`, fields);
+  let r = await send();
+  if (!r.ok && _isCardInteractive(r.data)) {
+    const again = await _confirmEndThen(r.data, send);
+    if (!again) return { ok: false, declined: true };
+    r = again;
+  }
+  return r;
+}
+function _boardStatusOf(issueId) {
+  const item = _boardItems.find(i => i.linear_issue_id === issueId);
+  return item ? (item._boardStatus || item.status) : '';
+}
+function _revertOptimisticMove(issueId, previous) {  // a refused or declined move: the card is shown where it was
+  delete _optimisticLinearIssuePatches[issueId];
+  if (previous) _renderBoardItems(_boardItems.map(i => i.linear_issue_id === issueId ? { ...i, status: previous, _boardStatus: previous } : i));
+  refreshJobBoard(true);
+}
 async function _moveLinearIssueToColumn(issueId, stateName) {
   if (!issueId || !stateName) return;
-  if (_linearStateToBoard(stateName) === 'in_progress') _sttCancelIssue(issueId);  // dragging to In Progress dispatches it
+  const target = _linearStateToBoard(stateName);
+  if (target === 'in_progress') {
+    const previous = _boardStatusOf(issueId), sttCutoff = _sttNewSeq();
+    _holdBoardRefresh();
+    _optimisticPatchLinearIssue(issueId, { state_name: stateName });
+    const r = await _dispatchMove(issueId, { state_name: stateName });
+    if (!r.ok) {  // refused or declined: the card goes back where it was (R3)
+      _revertOptimisticMove(issueId, previous);
+      if (!r.declined) alert(`Could not start it: ${(r.data || {}).error || 'HTTP ' + r.status}`);
+      return;
+    }
+    _sttCancelIssue(issueId, sttCutoff);  // it dispatched: dictation from before the drop ends (ICS-07)
+    if (_detailLinearIssueId === issueId && _isModalOpen('detail-modal')) {
+      const stateEl = document.getElementById('linear-edit-state');
+      if (stateEl) stateEl.value = stateName;
+      document.getElementById('detail-state-badge').innerHTML = _stateBadgeHtml(target);
+    }
+    return;
+  }
+  if (target === 'done' || target === 'cancelled' || target === 'todo') await _maybeEndCardSession(issueId);  // AC3
   _holdBoardRefresh();
   _optimisticPatchLinearIssue(issueId, { state_name: stateName });
   if (_detailLinearIssueId === issueId && _isModalOpen('detail-modal')) {
     const stateEl = document.getElementById('linear-edit-state');
     if (stateEl) stateEl.value = stateName;
-    document.getElementById('detail-state-badge').innerHTML = _stateBadgeHtml(_linearStateToBoard(stateName));
+    document.getElementById('detail-state-badge').innerHTML = _stateBadgeHtml(target);
   }
   fetch(`/api/linear/issues/local/${issueId}`, {
     method: 'PATCH',
@@ -2596,6 +2663,7 @@ function _buildColCard(run) {
     ${metaHtml}
     <div class="job-card-title">${_esc(issueTitle)}</div>
     ${state === 'in_review' && run.waiting ? `<div><span class="waiting-badge" title="${_esc(run.waiting)}">Waiting for you · ${_esc(run.waiting)}</span></div>` : ''}
+    ${_cardHasSession(run.linear_issue_id || run.task_id) ? '<div><span class="session-open-badge" title="An interactive session holds this card: open it to end the session">▣ session open</span></div>' : ''}
     ${prompt ? `<div class="job-card-prompt">${_esc(prompt)}</div>` : ''}
     ${statusLineHtml}
     <div class="job-card-footer">
@@ -2685,13 +2753,15 @@ async function setIssueAgent(issueId, currentAgent) {
   if (!issueId) return;
   const current = canonAgent(currentAgent);
   const next = current === 'claude' ? 'codex' : current === 'codex' ? 'dsh' : 'claude';
-  // Set agent and move to In Progress (server skips dispatch if already running)
-  _sttCancelIssue(issueId);
-  await fetch(`/api/linear/issues/${issueId}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ preferred_agent: next, state_name: 'In Progress' }),
-  });
+  // Set agent and move to In Progress (server skips dispatch if already running), through the same
+  // refusal handling as every dispatch: a card held by its interactive session asks first (ICS-06).
+  const sttCutoff = _sttNewSeq();
+  const r = await _dispatchMove(issueId, { preferred_agent: next, state_name: 'In Progress' });
+  if (!r.ok) {
+    if (!r.declined) alert(`Could not start it: ${(r.data || {}).error || 'HTTP ' + r.status}`);
+    return;
+  }
+  _sttCancelIssue(issueId, sttCutoff);  // it dispatched: dictation from before the click ends
   refreshJobBoard();
 }
 
@@ -2713,11 +2783,8 @@ async function setLinearIssuePreferredAgent(issueId, next) {
 async function startLinearIssue(issueId) {
   if (!issueId) return;
   try {
-    await fetch(`/api/linear/issues/${issueId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ state_name: 'In Progress' }),
-    });
+    const r = await _dispatchMove(issueId, { state_name: 'In Progress' });  // a held card asks first
+    if (!r.ok && !r.declined) console.error('startLinearIssue refused:', (r.data || {}).error);
     refreshJobBoard();
   } catch (err) {
     console.error('startLinearIssue failed:', err);
@@ -2730,17 +2797,25 @@ async function triggerLinearIssueWithAgent(issueId, agent, { refresh = true } = 
   const titleEl = document.getElementById('linear-edit-title');
   const descEl = document.getElementById('linear-edit-desc');
   const body = { preferred_agent: agentVal, state_name: 'In Progress' };
-  if (titleEl) body.title = titleEl.value;
-  if (descEl) body.description = descEl.value;
+  // the editor's text only when it is this card's: never another card's leftovers (ICS-10)
+  if (_detailLinearIssueId === issueId && _isModalOpen('detail-modal')) {
+    if (titleEl) body.title = titleEl.value;
+    if (descEl) body.description = descEl.value;
+  }
   const sttCutoff = _sttNewSeq();  // recordings started while the PATCH is in flight survive
   const draftKey = `agenticos.draft.linear.${_sttIssueId(issueId)}`;
   try {
-    const res = await fetch(`/api/linear/issues/${issueId}`, {
+    const send = async () => (await fetch(`/api/linear/issues/${issueId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    });
-    const data = await res.json();
+    })).json();
+    let data = await send();
+    if (!data.ok && _isCardInteractive(data)) {  // the card's interactive session holds it: ask, end it, once more
+      const again = await _confirmEndThen(data, send);
+      if (!again) return false;  // declined: nothing changed, draft and dictation kept
+      data = again;
+    }
     if (!data.ok) throw new Error(data.error || 'dispatch failed');
     // Compare content, not the raw draft JSON (loaders re-save it with a new saved_at). Keep only text
     // edited or dictated while the PATCH was in flight, stamped with the dispatched state and agent.
@@ -2787,6 +2862,7 @@ async function refreshJobBoard(force = false) {
     const fetches = [fetch('/api/runs?state=running'), fetch('/api/runs?limit=80'), fetch(`/api/linear/issues${teamParam}`),
                      fetch('/api/runs/latest-by-issue')];
     const results = await Promise.all(fetches);
+    await _refreshLiveCardTerms();
     const running = await results[0].json();
     const recent = await results[1].json();
     const linearIssues = results[2] ? await results[2].json() : [];
@@ -3022,6 +3098,7 @@ function renderTrash(runs) {
       <div class="trash-card-title">${_esc(r.title || r.prompt || 'Untitled')}</div>
       <div class="trash-card-meta">${_esc(r.when || '—')}</div>
       <div>${_stateBadgeHtml('cancelled')}</div>
+      ${_cardHasSession(r.linear_issue_id || String(r.run_id || '').replace(/^linear-/, '')) ? '<div><span class="session-open-badge" title="An interactive session holds this card: open it to end the session">▣ session open</span></div>' : ''}
     `;
     card.addEventListener('click', () => openDetailModal(r.run_id));
     frag.appendChild(card);
@@ -3029,6 +3106,7 @@ function renderTrash(runs) {
   container.replaceChildren(frag);
 }
 
+let _openTerminalFor = null;  // a run opened for its card's retained terminal: Terminal tab first
 let _detailResumeOk = false;  // the open card continues a session (session-to-board §5)
 let _detailResumeAgent = null;
 async function openDetailModal(run_id) {
@@ -3085,6 +3163,15 @@ async function openDetailModal(run_id) {
       return;
     }
     const issueId = run_id.slice(7);
+    if (_pendingNextRuns.has(issueId)) { await openDetailModal(_pendingNextRuns.get(issueId)); return; }  // its queued choice (ICS-19)
+    // e.g. a Cancelled card that kept its session, live or exited with its choice pending: open the
+    // session's run, Terminal first (ICS-15/23)
+    const held = ((await _termListBounded()) || []).find(i => i.kind === 'resume' && i.card_key === issueId && i.run_id);
+    if (held && requestSeq === _detailModalLoadSeq && _detailRunId === run_id) {
+      _openTerminalFor = held.run_id;
+      await openDetailModal(held.run_id);
+      return;
+    }
     if (requestSeq !== _detailModalLoadSeq || _detailRunId !== run_id || !_isModalOpen('detail-modal')) return;
     _detailLinearIssueId = _sttIssueId(issueId);
     document.getElementById('detail-meta').textContent = 'Linear issue';
@@ -3199,7 +3286,12 @@ async function openDetailModal(run_id) {
 
     const isReview = state === 'in_review';
     _cardTermBind(run_id, r, boardItem);
-    if (isReview || r.status === 'running' || state === 'in_progress') {  // C2: Terminal opens by default
+    const sessionOpen = _cardHasSession(_cardKey());  // an open interactive session: shown first, whatever the column (AC4)
+    document.getElementById('detail-end-session').style.display = sessionOpen ? '' : 'none';
+    // a queued next-state choice, or a retained session the card was redirected for, opens there too
+    const choicePending = _pendingNextRuns.has(_cardKey()) || _openTerminalFor === run_id;
+    if (_openTerminalFor === run_id) _openTerminalFor = null;
+    if (isReview || r.status === 'running' || state === 'in_progress' || sessionOpen || choicePending) {  // C2: Terminal opens by default
       switchOutputTab('terminal');
       _cardTermOpen();
     }
@@ -3289,22 +3381,19 @@ function _updateDetailRetryLock(preferredAgent, sessionLocked = false) {
 
 async function dispatchFromDetail(agent) {
   if (!_detailLinearIssueId) return;
-  const linearIssueId = _detailLinearIssueId;
-  _sttCancelIssue(linearIssueId);
-  // Local state + close modal immediately
-  fetch(`/api/linear/issues/local/${linearIssueId}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ state_name: 'In Progress', preferred_agent: agent }),
-  }).catch(() => {});
+  const linearIssueId = _detailLinearIssueId, seq = _detailModalLoadSeq, sttCutoff = _sttNewSeq();
+  // The dispatching PATCH alone, awaited: it reserves the card before any write and updates the local
+  // tracker itself; refused or declined, the card, its dictation and the modal stay as they were (ICS-03).
+  const r = await _dispatchMove(linearIssueId, { state_name: 'In Progress', preferred_agent: agent });
+  const same = seq === _detailModalLoadSeq && _detailLinearIssueId === linearIssueId;
+  if (!r.ok) {
+    if (!r.declined && same) document.getElementById('detail-term-status').textContent = `could not start: ${(r.data || {}).error || 'HTTP ' + r.status}`;
+    else if (!r.declined) alert(`Could not start it: ${(r.data || {}).error || 'HTTP ' + r.status}`);
+    return;
+  }
+  _sttCancelIssue(linearIssueId, sttCutoff);  // recordings started after the click survive (ICS-07)
   refreshJobBoard();
-  closeDetailModal();
-  // Fire-and-forget to backend (triggers dispatch)
-  fetch(`/api/linear/issues/${linearIssueId}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ state_name: 'In Progress', preferred_agent: agent }),
-  }).catch(err => console.error('Dispatch sync failed:', err));
+  if (same) closeDetailModal();
 }
 
 // A retry; a session card in use elsewhere asks once, then resends with confirmation (§4).
@@ -3312,6 +3401,10 @@ async function _postRetry(runId, body) {
   const send = async b => (await fetch(`/api/runs/${runId}/retry`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(b) })).json();
   let data = await send(body);
+  if (!data.ok && _isCardInteractive(data)) {  // the card's interactive session holds it: ask, end it, send once more
+    data = await _confirmEndThen(data, () => send(body));
+    if (!data) return null;
+  }
   if (!data.ok && data.in_use_elsewhere) {
     if (!confirm(`This session looks open elsewhere: ${data.in_use_elsewhere}.\n\nSend the reply anyway?`)) return null;
     data = await send({ ...body, confirm_in_use: true });
@@ -3324,29 +3417,42 @@ async function retryRun(run_id, agent = 'claude', reply = '', attachments = []) 
   const boardItem = _boardItemsByRunId[run_id] || null;
   const targetRunId = boardItem?.latest_run_id || run_id;
   const replyOwner = _isModalOpen('detail-modal') ? _currentReplyDraftKey() : '';
+  const seq = _detailModalLoadSeq, openRun = _isModalOpen('detail-modal') ? _detailRunId : null;
   const sttCutoff = _sttNewSeq();  // recordings started after this survive the retry
   if (targetRunId.startsWith('linear-')) { alert('No previous run to continue yet. Move the issue to In Progress first.'); return; }
   try {
     const data = await _postRetry(targetRunId, { agent, reply, attachments });
-    if (!data) return;  // the user kept it from a session open elsewhere
-    if (!data.ok) { alert('Retry failed: ' + (data.error || 'unknown')); return; }
+    if (!data) return false;  // the user kept it (an open session here or elsewhere): nothing changed
+    if (!data.ok) { alert('Retry failed: ' + (data.error || 'unknown')); return false; }
     if (replyOwner) _sttCancel(replyOwner, sttCutoff);
     _sttCancel(`agenticos.draft.reply.run.${run_id}`, sttCutoff);
     // Retry sends only the reply: leave description dictation alone.
     if (boardItem?.linear_issue_id) _sttCancel(`agenticos.draft.reply.linear.${boardItem.linear_issue_id}`, sttCutoff);
-    closeDetailModal();
+    // the modal this retry came from, only if it is still that card (ICS-04) and holds nothing newer
+    // than what was sent: text typed or attached while it waited stays there, unsent (ICS-47)
+    if (openRun && seq === _detailModalLoadSeq && _detailRunId === openRun) {
+      const now = (document.getElementById('detail-reply-input')?.value || '').trim();
+      if (now && now !== reply) _setDetailReplyStatus('Sent. The text below was added while it was sending and was not sent.');
+      else closeDetailModal();
+    }
     refreshJobBoard();
+    return true;
   } catch (err) {
     alert('Retry error: ' + err);
+    return false;
   }
 }
 
-function retryFromDetail(agent = 'claude') {
+async function retryFromDetail(agent = 'claude') {
   if (!_detailRunId) return;
   const reply = (document.getElementById('detail-reply-input')?.value || '').trim();
-  retryRun(_detailRunId, agent, reply, _replyAttachments);
-  _replyAttachments = [];
-  _renderAttachList('reply-attach-list', _replyAttachments);
+  const sent = _replyAttachments.slice();  // what this reply carries; files added while it waits are not
+  // the attachments stay until the reply is accepted: declined or refused, nothing is lost (R3); once
+  // accepted, only the sent ones go (ICS-47)
+  if (await retryRun(_detailRunId, agent, reply, sent)) {
+    _replyAttachments = _replyAttachments.filter(a => !sent.includes(a));
+    _renderAttachList('reply-attach-list', _replyAttachments);
+  }
 }
 
 async function approveRun() {
@@ -3354,14 +3460,15 @@ async function approveRun() {
   const boardItem = _boardItemsByRunId[_detailRunId] || null;
   const linearIssueId = boardItem?.linear_issue_id || _detailLinearIssueId;
   if (!linearIssueId) return;
-  const doneState = _detailDoneStateName();
+  const doneState = _detailDoneStateName(), seq = _detailModalLoadSeq, runId = _detailRunId;
+  await _maybeEndCardSession(linearIssueId);  // a move to Done: an open session may be ended too (AC3)
   // Local state update
   fetch(`/api/linear/issues/local/${linearIssueId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ state_name: doneState }),
   }).catch(() => {});
-  closeDetailModal();
+  if (seq === _detailModalLoadSeq && _detailRunId === runId) closeDetailModal();  // never another card's (ICS-04)
   refreshJobBoard();
   // Fire-and-forget to Linear
   fetch(`/api/linear/issues/${linearIssueId}`, {
@@ -3605,13 +3712,64 @@ async function saveLinearIssue() {
     return;
   }
   // The state goes only when it changed: a Todo state_name resets the card (SBR-006).
-  const fields = { title, description: desc, preferred_agent: _detailPreferredAgent, ...(stateChanged ? { state_name: nextState } : {}) };
+  // Everything this save writes is captured now: awaits below may see another card open (ICS-01).
+  const agent = _detailPreferredAgent, seq = _detailModalLoadSeq, sttCutoff = _sttNewSeq();
+  const same = () => seq === _detailModalLoadSeq && _detailLinearIssueId === issueId;
+  // text typed or dictated while this save waited is newer than what it sent: it stays (ICS-05)
+  const editedSince = () => document.getElementById('linear-edit-title').value !== title
+    || document.getElementById('linear-edit-desc').value !== desc
+    || document.getElementById('linear-edit-state').value !== nextState
+    || _detailPreferredAgent !== agent;  // every editable field (ICS-08)
+  const keepNewer = () => {
+    if (status) { status.textContent = 'Saved · your newer edits are kept unsaved'; status.style.color = ''; }
+    if (saveBtn) saveBtn.textContent = 'Save to Linear';
+  };
+  const fields = { title, description: desc, preferred_agent: agent, ...(stateChanged ? { state_name: nextState } : {}) };
+  const target = _linearStateToBoard(nextState);
+  if (stateChanged && target === 'in_progress') {
+    // Dispatching: the one authoritative PATCH, awaited; the draft, dictation and modal stay until it is
+    // accepted, so a refusal or a declined confirm loses nothing (R3, R8).
+    const previous = _boardStatusOf(issueId);
+    if (status) { status.textContent = 'starting…'; status.style.color = ''; }
+    _holdBoardRefresh();
+    _optimisticPatchLinearIssue(issueId, { title, state_name: nextState, preferred_agent: agent });
+    const r = await _dispatchMove(issueId, fields);
+    if (!r.ok) {
+      _revertOptimisticMove(issueId, previous);
+      if (same() && status) {
+        status.textContent = r.declined ? '' : `could not start: ${(r.data || {}).error || 'HTTP ' + r.status}`;
+        status.style.color = r.declined ? '' : 'var(--red)';
+      }
+      return;
+    }
+    // accepted: the rest of the edit through the local mirror, without the state (it is already set)
+    fetch(`/api/linear/issues/local/${issueId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, description: desc, preferred_agent: agent }),
+    }).catch(() => {});
+    _sttCancelIssue(issueId, sttCutoff);  // saving as In Progress dispatches; later recordings survive
+    if (!same()) return;  // another card is open now: its draft and modal are not this save's
+    if (editedSince()) { _detailLinearInitial = { title, description: desc, state: nextState, preferred_agent: agent }; keepNewer(); return; }
+    _clearLinearDraft();
+    _detailLinearInitial = { title, description: desc, state: nextState, preferred_agent: agent };
+    closeDetailModal({ flush: false });
+    return;
+  }
+  if (stateChanged && (target === 'done' || target === 'cancelled' || target === 'todo')) await _maybeEndCardSession(issueId);  // AC3
   _holdBoardRefresh();
   _optimisticPatchLinearIssue(issueId, {
     title,
     state_name: nextState,
-    preferred_agent: _detailPreferredAgent,
+    preferred_agent: agent,
   });
+  const newer = same() && editedSince();
+  if (!same() || newer) {  // another card opened, or newer edits arrived, during the confirm: save what was sent only
+    fetch(`/api/linear/issues/local/${issueId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fields) }).catch(() => {});
+    fetch(`/api/linear/issues/${issueId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fields) }).catch(() => {});
+    _sttCancelIssue(issueId, sttCutoff);
+    if (newer) { _detailLinearInitial = { title, description: desc, state: nextState, preferred_agent: agent }; keepNewer(); }
+    return;
+  }
   document.getElementById('detail-state-badge').innerHTML = _stateBadgeHtml(_linearStateToBoard(nextState));
   if (status) {
     status.textContent = 'Saved locally · syncing Linear…';
@@ -3631,9 +3789,8 @@ async function saveLinearIssue() {
     body: JSON.stringify(fields),
   }).catch(() => {});
   _clearLinearDraft();
-  if (stateChanged && _linearStateToBoard(nextState) === 'in_progress') _sttCancelIssue(issueId);  // saving as In Progress dispatches
-  else _sttCancel(_currentLinearDraftKey());
-  _detailLinearInitial = { title, description: desc, state: nextState, preferred_agent: _detailPreferredAgent };
+  _sttCancel(_currentLinearDraftKey(), sttCutoff);  // recordings started after the click survive (ICS-05)
+  _detailLinearInitial = { title, description: desc, state: nextState, preferred_agent: agent };
   if (stateChanged) {
     closeDetailModal({ flush: false });
   } else {
@@ -3690,6 +3847,8 @@ function _renderHistory(chain, currentRunId) {
 async function cancelLinearIssue() {
   if (!_detailLinearIssueId) return;
   const iid = _detailLinearIssueId;
+  await _maybeEndCardSession(iid);  // a move to Cancelled: an open session may be ended too (AC3)
+  if (_detailLinearIssueId !== iid) return cancelLinearIssueById(iid, '', { asked: true });  // another card opened meanwhile: leave its modal
   _holdBoardRefresh();
   _optimisticPatchLinearIssue(iid, { state_name: 'Canceled' });
   // Close modal immediately; network sync happens in the background.
@@ -3712,8 +3871,9 @@ async function cancelLinearIssue() {
   }, 50);
 }
 
-async function cancelLinearIssueById(issueId, runId = '') {
+async function cancelLinearIssueById(issueId, runId = '', { asked = false } = {}) {
   if (!issueId) return;
+  if (!asked) await _maybeEndCardSession(issueId);  // a move to Cancelled: an open session may be ended too (AC3)
   delete _runProgress[runId || ''];
   _holdBoardRefresh();
   _removeLinearIssueCards(issueId, runId);
@@ -4465,8 +4625,11 @@ function closeTab(tid) {
   if (t.status === 'live' && t.info.kind !== 'run' && !confirm('Close this terminal and kill its processes?')) return;
   socket.emit('term_close', { term_id: tid }, res => {
     if (res && res.error && !/unknown/.test(res.error)) { t.status = 'failed'; _renderTabStrip(); alert(res.error); return; }
-    // closing a card session ends it: offer its choice unless its exit already did (DR-01, UI35-02)
-    if (t.info.kind === 'resume') _offerCardNext(tid, (res && res.run_id) || t.info.run_id);
+    // closing a card session ends it: offer its choice unless its exit already did (DR-01, UI35-02); a
+    // terminal already gone offers it only if its end record says it is due (ICS-41)
+    const gone = res && res.error, ended = gone ? res.ended : null;
+    if (gone && (!ended || ended.superseded)) _suppressedTerms.add(tid);
+    if (t.info.kind === 'resume') _offerCardNext(tid, (ended && ended.run_id) || (res && res.run_id) || t.info.run_id, t.info.card_key);
     t.term.dispose(); t.el.remove(); _tabs.delete(tid);
     if (_activeTab === tid) { _activeTab = null; const next = _tabs.keys().next().value; if (next) activateTab(next); }
     _renderTabStrip();
@@ -4534,6 +4697,12 @@ socket.on('connect', () => {
   _sttLoadAliases();
   // A reload reattaches to the server's terminals; nothing new is opened automatically.
   socket.emit('term_list', {}, (list) => {
+    // A tab whose terminal ended while this page was away is dropped, with no choice: if it was due,
+    // the card offers it when opened (ICS-41).
+    const ids = new Set((list || []).map(i => i.term_id));
+    [..._tabs.values()].filter(t => t.info.kind !== 'run' && !ids.has(t.info.term_id)).forEach(t => {
+      _suppressedTerms.add(t.info.term_id); _dropTermViews(t.info.term_id);
+    });
     // Only terminals shown in the panel come back here; a card's terminal stays with its card (C2).
     (list || []).filter(info => info.in_panel !== false).forEach(info => _attachTab(info, false));
     if (!list || !list.length) {
@@ -4550,9 +4719,13 @@ socket.on('term_output', (d) => {
 });
 socket.on('term_exit', (d) => {
   const t = _tabs.get(d.term_id);
+  if (d.superseded) {  // an action ended it: no choice here, and none already shown or queued for it (ICS-37/44/49)
+    _suppressedTerms.add(d.term_id); _supersededTerms.add(d.term_id);
+    _withdrawCardChoice(d.term_id);
+  }
   if (t) { t.status = 'exited'; t.term.writeln(`\r\n[process exited${d.exit_code != null ? ' ' + d.exit_code : ''}]`); _renderTabStrip(); _tabEnded(t); }
 });
-function _tabEnded(t) { if (t.info.kind === 'resume') _offerCardNext(t.info.term_id, t.info.run_id); }
+function _tabEnded(t) { if (t.info.kind === 'resume') _offerCardNext(t.info.term_id, t.info.run_id, t.info.card_key); }
 
 socket.on('run_logged', () => { refreshJobBoard(); });
 
@@ -4574,6 +4747,7 @@ function _cardTermBind(runId, run, item) {
   document.getElementById('detail-term-next').style.display = 'none';
   document.getElementById('detail-term-interactive').style.display = 'none';
   document.getElementById('detail-term-end').style.display = 'none';
+  document.getElementById('detail-end-session').style.display = 'none';
 }
 function _cardKey() {
   const r = _cardTerm.run || {};
@@ -4606,6 +4780,7 @@ async function _cardTermOpen() {
   // an exited session stays on the server until its choice is applied: it is the pending choice (UI36-01)
   const ended = terms.find(i => i.alive === false);
   if (!_cardTermCurrent(gen)) return;
+  if (!live && _pendingNextRuns.has(key)) { await _cardTermShowQueued(key, gen); return; }  // newer than any retained one (ICS-42)
   if (!live && ended) {
     const owner = ended.run_id || _cardTerm.runId;
     if (await _cardTermUse(owner, gen) && _cardTerm.viewRunId === owner) _cardTermAttach(ended.term_id, gen);
@@ -4618,6 +4793,15 @@ async function _cardTermOpen() {
     return;
   }
   await _cardTermLoad(document.getElementById('detail-term-attempt').value || _cardTerm.runId);
+}
+// A queued next-state choice: its owning attempt is selected and loaded, and the choice is consumed
+// only once shown there (ICS-13/30/39/42). _cardTermLoad also consumes it when that attempt is picked.
+async function _cardTermShowQueued(key, gen) {
+  const pending = _pendingNextRuns.get(key);
+  if (!pending) return;
+  const sel = document.getElementById('detail-term-attempt');
+  if ([...sel.options].some(o => o.value === pending)) sel.value = pending;
+  await _cardTermLoad(pending);
 }
 async function _cardTermAttempts(gen) {
   let chain = [];
@@ -4676,6 +4860,8 @@ async function _cardTermLoad(runId) {
   if (data.finished) term.writeln(`\r\n[run ${data.status || 'finished'}${data.verify_badge ? ' · verify: ' + data.verify_badge : ''}]`);
   document.getElementById('detail-term-interactive').style.display = data.finished && data.resume_eligible ? '' : 'none';
   document.getElementById('detail-term-end').style.display = 'none';
+  const key = _cardKey();  // this attempt's queued choice, shown now that it is the one on screen (ICS-42)
+  if (_pendingNextRuns.get(key) === runId && _cardTerm.viewRunId === runId) { _pendingNextRuns.delete(key); _cardTermEnded(runId); }
 }
 function _cardTermInteractive() {
   const gen = _cardTerm.gen, attemptGen = _cardTerm.attemptGen, d = _cardTerm.data || {};
@@ -4701,25 +4887,118 @@ function _cardTermAttach(termId, gen) {
     if (!info || info.error) { _cardTermLoad(_cardTerm.runId); return; }
     document.getElementById('detail-term-status').textContent = info.alive === false ? 'session ended' : 'interactive session (holds this card)';
     if (info.alive === false) _cardTermEnded(_cardTerm.viewRunId);
+    else {  // a live session: End session in the card's header too, and the board's badge (AC4)
+      document.getElementById('detail-end-session').style.display = '';
+      if (info.card_key) _liveCardTerms.set(termId, info.card_key);
+    }
   });
   document.getElementById('detail-term-interactive').style.display = 'none';
   document.getElementById('detail-term-end').style.display = '';
 }
+// A standalone End session (the Terminal tab's or the header's). While it is unresolved it owns the
+// terminal's next-state choice (`_pendingCloses`): whichever confirms the close first — its
+// acknowledgement ("unknown terminal" counts: it is gone), the terminal's exit event, or the server's
+// list after a reconnect — completes it once, presenting the choice if the initiating view is still
+// current or queueing it for the card otherwise. Only an explicit failure releases it (ICS-14/17/20/21).
+const _pendingCloses = new Map();  // term_id -> complete(runId)
+function _closeStandalone(termId, key, owner, gen, onCurrent) {
+  const status = document.getElementById('detail-term-status');
+  if (!socket.connected) { status.textContent = 'not connected to the runner; try again'; return; }
+  if (!_pendingCloses.has(termId)) {
+    _pendingCloses.set(termId, runId => {
+      _pendingCloses.delete(termId);
+      const tab = _tabs.get(termId);  // also shown in the panel? drop that view too
+      if (tab) { tab.term.dispose(); tab.el.remove(); _tabs.delete(termId); _renderTabStrip(); }
+      _liveCardTerms.delete(termId);
+      if (_supersededTerms.has(termId)) return;  // someone's action ended it meanwhile: its choice is obsolete (ICS-44)
+      _suppressedTerms.delete(termId);  // this End is the user's own: its choice is due
+      if (_offeredTerms.has(termId)) return;  // its choice was already delivered
+      _offeredTerms.add(termId);
+      runId = runId || owner;
+      if (_cardTermCurrent(gen)) onCurrent(runId);
+      else _pendingNextRuns.set(key, runId);  // the user moved on: the choice waits for this card
+    });
+  }
+  socket.emit('term_close', { term_id: termId }, res => _settleStandalone(termId, gen, res));
+  setTimeout(() => {  // no confirmation yet: say so; completion still comes from the ack, exit or reconnect
+    if (_pendingCloses.has(termId) && _cardTermCurrent(gen)) status.textContent = 'ending the session…';
+  }, 15000);
+}
+// A standalone close's answer. "unknown terminal" proves the choice is due only when the server's end
+// record says the session ended without being superseded by someone's action (ICS-41).
+function _settleStandalone(termId, gen, res) {
+  const complete = _pendingCloses.get(termId);
+  if (!complete) return;  // already confirmed another way
+  const status = document.getElementById('detail-term-status');
+  if (res && res.error && !/unknown/.test(res.error)) {  // still live: nothing ended, End stays to retry
+    _pendingCloses.delete(termId);
+    if (_cardTermCurrent(gen)) status.textContent = res.error;
+    return;
+  }
+  if (res && res.error) {  // gone already: how it ended decides
+    const ended = res.ended;
+    if (!ended || ended.superseded) { _pendingCloses.delete(termId); _suppressedTerms.add(termId); _dropTermViews(termId); return; }
+    complete(ended.run_id);
+    return;
+  }
+  if (res && res.superseded) _supersededTerms.add(termId);  // an action ended it first (ICS-44)
+  complete(res && res.run_id);
+}
+// A confirmed superseded end: the card's next-state choice is obsolete wherever this page holds it —
+// shown in the open card, or queued for a later opening (ICS-49).
+function _withdrawCardChoice(termId) {
+  const key = (_tabs.get(termId) || {}).info?.card_key || _liveCardTerms.get(termId)
+    || ((_cardTerm.termId === termId || _cardTerm.endedTermId === termId) ? _cardKey() : null);
+  if (!key) return;
+  _pendingNextRuns.delete(key);
+  if (_cardKey() === key && _cardTerm.endedRunId) {
+    _cardTerm.endedRunId = null; _cardTerm.endedTermId = null;
+    document.getElementById('detail-term-next').style.display = 'none';
+    document.getElementById('detail-term-status').textContent = 'session ended for a new attempt';
+  }
+}
+function _dropTermViews(termId) {
+  const tab = _tabs.get(termId);
+  if (tab) { tab.term.dispose(); tab.el.remove(); _tabs.delete(termId); _renderTabStrip(); }
+  _liveCardTerms.delete(termId);
+}
+async function _reconcilePendingCloses() {  // after a reconnect: ask again; the answer says how it ended
+  for (const [termId] of [..._pendingCloses]) {
+    socket.emit('term_close', { term_id: termId }, res => _settleStandalone(termId, null, res));
+  }
+}
+socket.on('connect', () => { _reconcilePendingCloses(); });
 function _cardTermEnd() {
   const gen = _cardTerm.gen, termId = _cardTerm.termId, owner = _cardTerm.viewRunId || _cardTerm.runId;
   if (!termId) return;
-  socket.emit('term_close', { term_id: termId }, res => {
-    const tab = _tabs.get(termId);  // also shown in the panel? drop that view too
-    if (tab && !(res && res.error && !/unknown/.test(res.error))) { tab.term.dispose(); tab.el.remove(); _tabs.delete(termId); _renderTabStrip(); }
-    if (!_cardTermCurrent(gen)) return;
-    if (res && res.error && !/unknown/.test(res.error)) { document.getElementById('detail-term-status').textContent = res.error; return; }
-    _offerCardNext(termId, (res && res.run_id) || owner);  // the closed terminal's run, from the server (UI14-02); once (UI36-02)
+  _closeStandalone(termId, _cardKey(), owner, gen, runId => {
+    if (_cardTerm.termId === termId) _cardTermEnded(_cardTerm.viewRunId || runId);
+    else _promptCardNext(runId, _cardKey());
   });
 }
+// The header's End session: the Terminal tab's own End when it shows the session, else the same close
+// found by the card's key, with the same once-only next-state choice (AC4).
+async function _detailEndSession() {
+  if (_cardTerm.termId && _cardTerm.mode === 'interactive') { _cardTermEnd(); return; }
+  const key = _cardKey(), gen = _cardTerm.gen, btn = document.getElementById('detail-end-session');
+  const list = await _termListBounded();
+  if (!_cardTermCurrent(gen)) return;  // another card opened meanwhile: nothing was ended (ICS-09)
+  if (!list) { document.getElementById('detail-term-status').textContent = 'not connected to the runner; try again'; return; }
+  const live = list.find(i => _holdsCard(i) && i.card_key === key);
+  if (!live) { btn.style.display = 'none'; return; }
+  // the button stays until the close is confirmed, so a failed close can be retried (ICS-12)
+  _closeStandalone(live.term_id, key, live.run_id, gen, runId => { btn.style.display = 'none'; _promptCardNext(runId, key); });
+}
+// Next-state choices of sessions ended while their card was not on screen, by card key -> the run
+// that owned the session: shown, with that attempt selected, when the card's Terminal tab opens.
+const _pendingNextRuns = new Map();
 function _cardTermEnded(runId) {
   _cardTerm.endedRunId = runId || _cardTerm.viewRunId || _cardTerm.runId;  // the choice belongs to this run (UI12-03)
   _cardTerm.endedTermId = _cardTerm.termId;  // ... and keeps this exited terminal until it is applied (UI36-01)
   document.getElementById('detail-term-end').style.display = 'none';
+  document.getElementById('detail-end-session').style.display = 'none';
+  document.getElementById('detail-term-status').textContent = 'session ended';
+  if (_cardTerm.termId) _liveCardTerms.delete(_cardTerm.termId);
   // shown only while that run is the selected attempt (UI14-02)
   if ((_cardTerm.viewRunId || _cardTerm.runId) === _cardTerm.endedRunId) document.getElementById('detail-term-next').style.display = '';
 }
@@ -4761,11 +5040,62 @@ function _cardTermNext(next) {
 // otherwise by opening the card (DR-01, UI35-01/02).
 // ponytail: in-page only, so a reload before the tab is closed offers it once more
 const _offeredTerms = new Set();
-function _offerCardNext(termId, runId) {
-  if (!runId || _offeredTerms.has(termId)) return;
+// Ended for an action the user took (retry, move…): its choice is obsolete, but not delivered (ICS-26).
+const _suppressedTerms = new Set();
+// The server confirmed an action ended it (term_exit / close ack `superseded`): final, whoever asked (ICS-44).
+const _supersededTerms = new Set();
+function _offerCardNext(termId, runId, cardKey = null) {
+  const pending = _pendingCloses.get(termId);
+  if (pending) { pending(runId); return; }  // its standalone End owns the choice (ICS-21)
+  if (!runId || _offeredTerms.has(termId) || _suppressedTerms.has(termId)) return;
   _offeredTerms.add(termId);  // before any async work: the close ack and term_exit race (UI35-02)
   if (_cardTerm.termId === termId) _cardTermEnded(_cardTerm.viewRunId);
-  else _promptCardNext(runId);
+  else _promptCardNext(runId, cardKey);
+}
+// Ending a card's interactive session for an action the user is taking (retry, reply, Resume, a
+// move): its Mark done / Todo / Review choice is obsolete, so it is marked offered before the close,
+// whichever of term_exit and the close ack lands first (R4). Resolves true when the session ended.
+function _endCardSession(termId) {
+  return new Promise(resolve => {
+    if (!socket.connected) { resolve(false); return; }  // never queued for a later reconnect (ICS-02)
+    // suppressed, not delivered: a later standalone End session can still offer its choice (ICS-26)
+    _suppressedTerms.add(termId);
+    let settled = false;
+    const timer = setTimeout(() => {  // no acknowledgement: not ended as far as this action knows; if the close
+      if (settled) return;           // still completes later, its obsolete choice stays suppressed (ICS-16)
+      settled = true; resolve(false);
+    }, 15000);
+    socket.emit('term_close', { term_id: termId, superseded: true }, res => {  // every viewer drops its choice (ICS-37)
+      const failed = res && res.error && !/unknown/.test(res.error);
+      if (settled) { if (failed) _suppressedTerms.delete(termId); return; }  // a late failure: still live, unsuppressed
+      settled = true; clearTimeout(timer);
+      if (failed) { _suppressedTerms.delete(termId); resolve(false); return; }
+      const tab = _tabs.get(termId);  // also shown in the panel? drop that view too
+      if (tab) { tab.term.dispose(); tab.el.remove(); _tabs.delete(termId); _renderTabStrip(); }
+      if (_cardTerm.termId === termId) { _cardTerm.termId = null; document.getElementById('detail-term-end').style.display = 'none'; }
+      _liveCardTerms.delete(termId);
+      resolve(true);
+    });
+  });
+}
+// A refusal naming the interactive terminal that holds the card: ask, end it, and send once more.
+// Returns the resend's result, or null when the user declined or the session could not be ended.
+async function _confirmEndThen(body, resend) {
+  if (!confirm('An interactive session is open on this card. End it and continue?')) return null;
+  if (!await _endCardSession(body.term_id)) { alert('Could not end the interactive session; try End session in the card.'); return null; }
+  return resend();
+}
+function _isCardInteractive(body) { return !!(body && body.code === 'card_interactive' && body.term_id); }
+// Before a move to Done / Cancelled / Todo: a card holding a live session asks whether to end it too.
+// Declining (or a failed close) still moves the card and keeps the session (AC3).
+async function _maybeEndCardSession(cardKey) {
+  if (!cardKey) return 'none';
+  const list = await _termListBounded();  // unknown (socket down): the move goes ahead, any session kept
+  if (!list) return 'none';
+  const live = list.find(i => _holdsCard(i) && i.card_key === cardKey);
+  if (!live) return 'none';
+  if (!confirm('This card has an open interactive session. End it too?')) return 'kept';
+  return (await _endCardSession(live.term_id)) ? 'ended' : 'kept';
 }
 function _cardTermForget(termId) {  // the choice is applied: drop the exited terminal that kept it pending (UI36-01)
   if (!termId) return;
@@ -4777,10 +5107,17 @@ function _cardTermForget(termId) {  // the choice is applied: drop the exited te
     });
   });
 }
-async function _promptCardNext(runId) {  // a card's session closed from the panel: same choice as in the card (UI2-05)
+async function _promptCardNext(runId, cardKey = null) {  // a card's session closed from the panel: same choice as in the card (UI2-05)
+  // queued under the card's own key (the terminal's), the one its reopening looks up (ICS-28)
+  const item = _boardItemsByRunId[runId] || {};
+  const queue = () => _pendingNextRuns.set(cardKey || item.linear_issue_id || item.task_id || runId, runId);
   await openDetailModal(runId);
+  const gen = _cardTerm.gen;
+  // every step re-checks it is still this card: navigating away queues the choice instead (ICS-18)
+  if (_detailRunId !== runId || !_isModalOpen('detail-modal')) { queue(); return; }
   switchOutputTab('terminal');
   await _cardTermOpen();
+  if (!_cardTermCurrent(gen) || _detailRunId !== runId) { queue(); return; }
   _cardTermEnded(runId);
 }
 function _cardTermShowInPanel() {
@@ -4818,7 +5155,9 @@ socket.on('connect', () => {  // a reconnect rejoins the embedded session (UI-07
   if (_cardTerm.mode === 'interactive' && _cardTerm.termId) {
     const tid = _cardTerm.termId;
     socket.emit('term_attach', { term_id: tid }, info => {  // it may have exited while disconnected (UI35-01)
-      if (!info || info.alive !== false || _cardTerm.termId !== tid) return;
+      if (_cardTerm.termId !== tid) return;
+      if (info && info.error) { _cardTermLoad(_cardTerm.viewRunId || _cardTerm.runId); return; }  // gone: no choice proven due (ICS-41)
+      if (!info || info.alive !== false) return;
       if (_cardTerm.xterm) _cardTerm.xterm.writeln('\r\n[session exited]');
       _offerCardNext(tid, _cardTerm.viewRunId);
     });
@@ -5182,6 +5521,7 @@ async function onReplyFilesChange(input) {
       const reply = document.getElementById('detail-reply-input');
       if (reply) {
         reply.value += (reply.value ? '\n' : '') + path;
+        reply.dispatchEvent(new Event('input', { bubbles: true }));  // saved like typed text (ICS-47)
       }
     }
   }

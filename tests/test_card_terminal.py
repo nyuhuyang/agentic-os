@@ -483,3 +483,363 @@ def test_older_review_card_keeps_its_waiting_badge(harness):
     write_log(log, {"run_id": "old", "agent": "claude", "status": "review", "output": "Plan ready.\nShall I build it?"})
     latest = client.get("/api/runs/latest-by-issue").get_json()
     assert latest[ISSUE]["waiting"] == "Plan ready."  # REV31-02
+
+
+# ── Ending a card's interactive session (plan 2026-10-17-card-interactive-session-close) ──
+
+def _live_term(pty_mod, monkeypatch, term_id="live1", **kw):
+    t = pty_mod.Terminal(term_id=term_id, kind="resume", pid=1, alive=True, **kw)
+    monkeypatch.setitem(pty_mod.TERMINALS, term_id, t)
+    return t
+
+
+def test_card_bound_resume_ends_with_its_agent_and_unbound_keeps_a_shell(harness, monkeypatch):
+    app_mod, mod, client, log, events, tmp = harness
+    import runner.modules.pty as pty_mod
+    monkeypatch.setattr(pty_mod, "TERMINALS", {})
+    argvs = []
+    monkeypatch.setattr(pty_mod, "_spawn", lambda t, argv, env, cols, rows, sio: (argvs.append(argv), setattr(t, "pid", None)))
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    bound = pty_mod.open_terminal({"kind": "resume", "agent": "claude", "session_id": SID, "in_panel": False,
+                                   "run_id": "a"}, None)
+    assert "error" not in bound
+    assert argvs[-1][-1] == f"claude --resume {SID}"  # no "; exec $SHELL -l": the card unlocks on /exit (AC1)
+    unbound = pty_mod.open_terminal({"kind": "resume", "agent": "claude", "session_id": "not-a-card"}, None)
+    assert "error" not in unbound and "; exec " in argvs[-1][-1]
+
+
+def test_card_terminal_matches_card_ticket_or_session_and_only_live_ones(harness, monkeypatch):
+    import runner.modules.pty as pty_mod
+    monkeypatch.setattr(pty_mod, "TERMINALS", {})
+    _live_term(pty_mod, monkeypatch, "c", card_key="K1")
+    _live_term(pty_mod, monkeypatch, "t", project_key="demo", ticket="T-1")
+    _live_term(pty_mod, monkeypatch, "s", agent="claude", session_id="S1")
+    dead = _live_term(pty_mod, monkeypatch, "d", card_key="K2")
+    dead.alive = False
+    assert pty_mod.card_terminal(card_key="K1") == "c"
+    assert pty_mod.card_terminal(project_key="demo", ticket="T-1") == "t"
+    assert pty_mod.card_terminal(agent="claude", session_id="S1") == "s"
+    assert pty_mod.card_terminal(card_key="K2") is None and pty_mod.card_terminal(card_key="nope") is None
+    assert pty_mod.card_interactive({"error": "x"}, card_key="nope") == {"error": "x"}  # unchanged when nothing holds it
+
+
+@pytest.mark.parametrize("card", ["linear", "run"])
+def test_retry_refusal_names_the_holding_terminal_only_when_one_holds_it(harness, monkeypatch, card):
+    app_mod, mod, client, log, events, tmp = harness
+    import projects as pj
+    import runner.modules.pty as pty_mod
+    monkeypatch.setattr(pty_mod, "TERMINALS", {})
+    if card == "linear":
+        write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+        key = ISSUE
+    else:
+        write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID,
+                        "linear_issue_id": None, "task_id": "task-1"})
+        key = "task-1"
+    stub_launches(app_mod, monkeypatch, [{}])
+    with pj.card_lock(key):  # held by a running attempt: no terminal to offer (AC2, last sentence)
+        body = client.post("/api/runs/a/retry", json={}).get_json()
+        assert "code" not in body and "term_id" not in body
+        _live_term(pty_mod, monkeypatch, card_key=key)  # now the card's interactive terminal holds it
+        r = client.post("/api/runs/a/retry", json={"reply": "x", "strict": True})
+        assert r.status_code == 409 and r.get_json()["code"] == "card_interactive" and r.get_json()["term_id"] == "live1"
+
+
+def test_tracker_and_local_patch_refusals_name_the_holding_terminal(harness, monkeypatch):
+    app_mod, mod, client, log, events, tmp = harness
+    import projects as pj
+    import runner.modules.pty as pty_mod
+    monkeypatch.setattr(pty_mod, "TERMINALS", {})
+    with pj.card_lock(ISSUE):
+        _live_term(pty_mod, monkeypatch, card_key=ISSUE)
+        for url in (f"/api/linear/issues/local/{ISSUE}", f"/api/linear/issues/{ISSUE}"):
+            r = client.patch(url, json={"state_name": "In Progress"})
+            assert r.status_code == 409, url
+            assert r.get_json()["code"] == "card_interactive" and r.get_json()["term_id"] == "live1", url
+    assert tracker_state(tmp) == "In Review"  # the refused local write wrote nothing
+
+
+def test_failed_close_then_exit_frees_the_card_once(harness, monkeypatch):
+    app_mod, mod, client, log, events, tmp = harness
+    import projects as pj
+    import runner.modules.pty as pty_mod
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    t = pty_mod.Terminal(term_id="f1", kind="resume", run_id="a", session_id=SID, agent="claude", pid=1)
+    t.holds.enter_context(pj.card_lock(ISSUE))
+    monkeypatch.setitem(pty_mod.TERMINALS, "f1", t)
+    def boom(term):
+        raise RuntimeError("ps failed")
+    monkeypatch.setattr(pty_mod, "_kill_session", boom)
+    out = pty_mod.close_terminal("f1")
+    assert out["error"].startswith("cleanup failed") and pj.card_busy(None, None, ISSUE)  # still running: still held
+    sio = type("S", (), {"emit": lambda *a, **k: None})()
+    pty_mod._reader(t, sio)  # then the agent exits on its own, but its session still cannot be enumerated:
+    assert t.cleanup_failed and pj.card_busy(None, None, ISSUE)  # leftovers unproven gone: still held (ICS-25/27)
+    assert not pty_mod._finalize_lock.locked()
+    monkeypatch.setattr(pty_mod, "_kill_session", lambda term: None)  # enumeration works again
+    assert pty_mod.close_terminal("f1").get("ok")  # End session retried
+    assert not pj.card_busy(None, None, ISSUE)
+    assert len([r for r in records(log) if r.get("interactive_ended")]) == 1
+    assert not pty_mod._finalize_lock.locked()
+
+
+def test_exit_during_a_failed_close_frees_the_card_once_without_deadlock(harness, monkeypatch):
+    import threading
+    app_mod, mod, client, log, events, tmp = harness
+    import projects as pj
+    import runner.modules.pty as pty_mod
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    t = pty_mod.Terminal(term_id="f2", kind="resume", run_id="a", session_id=SID, agent="claude", pid=1)
+    t.holds.enter_context(pj.card_lock(ISSUE))
+    monkeypatch.setitem(pty_mod.TERMINALS, "f2", t)
+    sio = type("S", (), {"emit": lambda *a, **k: None})()
+    def exits_then_fails(term):
+        pty_mod._reader(term, sio)  # the reader ends while closing: it leaves finalizing to close
+        raise RuntimeError("ps failed")
+    monkeypatch.setattr(pty_mod, "_kill_session", exits_then_fails)
+    result = {}
+    th = threading.Thread(target=lambda: result.update(pty_mod.close_terminal("f2")), daemon=True)
+    th.start()
+    th.join(5)
+    assert not th.is_alive(), "close_terminal deadlocked"
+    assert result["error"].startswith("cleanup failed") and not pty_mod._finalize_lock.locked()
+    # the agent is gone but its session's leftovers are unverified: ownership stays, visibly (ICS-29)
+    assert pj.card_busy(None, None, ISSUE) and pty_mod.card_terminal(agent="claude", session_id=SID) == "f2"
+    monkeypatch.setattr(pty_mod, "_kill_session", lambda term: None)  # End session retried, cleanup works
+    assert pty_mod.close_terminal("f2").get("ok")
+    assert not pj.card_busy(None, None, ISSUE)
+    assert len([r for r in records(log) if r.get("interactive_ended")]) == 1
+
+
+def test_card_session_ends_when_its_agent_exits_despite_a_process_holding_the_pty(harness, monkeypatch):
+    """The agent exits but a background child keeps the PTY open (no EOF): the card is still freed,
+    the closure audited once, and the leftover child ended (AC1, ICS-22)."""
+    import os
+    import time
+    app_mod, mod, client, log, events, tmp = harness
+    import projects as pj
+    import runner.modules.pty as pty_mod
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    t = pty_mod.Terminal(term_id="bg1", kind="resume", run_id="a", session_id=SID, agent="claude", cwd=str(tmp))
+    t.holds.enter_context(pj.card_lock(ISSUE))
+    exits = []
+    sio = type("S", (), {"emit": lambda self, ev, data, **k: exits.append(ev) if ev == "term_exit" else None})()
+    pidfile = tmp / "bg.pid"
+    pty_mod._spawn(t, ["/bin/sh", "-c", f"sleep 30 & echo $! > {pidfile}; exit 0"], dict(os.environ), 80, 24, sio)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and ("term_exit" not in exits or pj.card_busy(None, None, ISSUE)):
+        time.sleep(0.1)
+    assert "term_exit" in exits and not t.alive and t.exit_code == 0
+    assert not pj.card_busy(None, None, ISSUE)
+    assert len([r for r in records(log) if r.get("interactive_ended")]) == 1
+    bg = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(bg, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(bg, 9)
+        raise AssertionError("the leftover background process outlived its agent")
+
+
+def test_card_session_ends_when_its_agent_exits_despite_a_chatty_leftover(harness, monkeypatch):
+    """A leftover keeps writing to the PTY every 100 ms: the agent's exit is still seen (ICS-24)."""
+    import os
+    import time
+    app_mod, mod, client, log, events, tmp = harness
+    import projects as pj
+    import runner.modules.pty as pty_mod
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    t = pty_mod.Terminal(term_id="bg2", kind="resume", run_id="a", session_id=SID, agent="claude", cwd=str(tmp))
+    t.holds.enter_context(pj.card_lock(ISSUE))
+    exits = []
+    sio = type("S", (), {"emit": lambda self, ev, data, **k: exits.append(ev) if ev == "term_exit" else None})()
+    pty_mod._spawn(t, ["/bin/sh", "-c", "(while :; do echo tick; sleep 0.1; done) & exit 0"], dict(os.environ), 80, 24, sio)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and "term_exit" not in exits:
+        time.sleep(0.1)
+    assert "term_exit" in exits and not pj.card_busy(None, None, ISSUE)
+
+
+def test_failed_leftover_cleanup_keeps_the_card_held_until_end_session(harness, monkeypatch):
+    """Leftovers that cannot be ended keep the terminal live and the card held; End session retries
+    the cleanup and then frees it (ICS-25)."""
+    import os
+    import time
+    app_mod, mod, client, log, events, tmp = harness
+    import projects as pj
+    import runner.modules.pty as pty_mod
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    t = pty_mod.Terminal(term_id="bg3", kind="resume", run_id="a", session_id=SID, agent="claude", cwd=str(tmp))
+    t.holds.enter_context(pj.card_lock(ISSUE))
+    monkeypatch.setitem(pty_mod.TERMINALS, "bg3", t)
+    real_kill = pty_mod._kill_session
+    def failing(term):
+        raise RuntimeError("ps failed")
+    monkeypatch.setattr(pty_mod, "_kill_session", failing)
+    sio = type("S", (), {"emit": lambda *a, **k: None})()
+    pty_mod._spawn(t, ["/bin/sh", "-c", "sleep 30 & exit 0"], dict(os.environ), 80, 24, sio)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not t.cleanup_failed:
+        time.sleep(0.1)
+    assert t.cleanup_failed and t.alive and pj.card_busy(None, None, ISSUE)
+    monkeypatch.setattr(pty_mod, "_kill_session", real_kill)
+    out = pty_mod.close_terminal("bg3")
+    assert out.get("ok") and not pj.card_busy(None, None, ISSUE)
+    assert len([r for r in records(log) if r.get("interactive_ended")]) == 1
+
+
+def test_eof_never_proves_a_card_sessions_leftovers_are_gone(harness, monkeypatch):
+    """The agent exits leaving a HUP-ignoring worker with redirected stdio: the PTY reaches EOF at
+    once, yet the worker is still ended before the card is freed (ICS-27)."""
+    import os
+    import time
+    app_mod, mod, client, log, events, tmp = harness
+    import projects as pj
+    import runner.modules.pty as pty_mod
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    t = pty_mod.Terminal(term_id="bg4", kind="resume", run_id="a", session_id=SID, agent="claude", cwd=str(tmp))
+    t.holds.enter_context(pj.card_lock(ISSUE))
+    exits = []
+    sio = type("S", (), {"emit": lambda self, ev, data, **k: exits.append(ev) if ev == "term_exit" else None})()
+    pidfile = tmp / "worker.pid"
+    script = f"(trap '' HUP; exec sleep 30) </dev/null >/dev/null 2>&1 & echo $! > {pidfile}; exit 0"
+    pty_mod._spawn(t, ["/bin/sh", "-c", script], dict(os.environ), 80, 24, sio)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and "term_exit" not in exits:
+        time.sleep(0.05)
+    assert "term_exit" in exits and not pj.card_busy(None, None, ISSUE)
+    worker = int(pidfile.read_text())
+    try:
+        os.kill(worker, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        os.kill(worker, 9)
+        raise AssertionError("the worker outlived its card session")
+
+
+def test_a_reader_ending_during_a_close_leaves_the_end_to_the_close(harness, monkeypatch):
+    """The reader ends while a close is in progress and that close then fails: the terminal is not
+    marked dead or finalized by anyone — it stays live, held and matched — and a retried close
+    ends it once (ICS-31/32/33)."""
+    app_mod, mod, client, log, events, tmp = harness
+    import projects as pj
+    import runner.modules.pty as pty_mod
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    t = pty_mod.Terminal(term_id="r1", kind="resume", run_id="a", session_id=SID, agent="claude", pid=1)
+    t.holds.enter_context(pj.card_lock(ISSUE))
+    monkeypatch.setitem(pty_mod.TERMINALS, "r1", t)
+    sio = type("S", (), {"emit": lambda *a, **k: None})()
+    t.closing = True                    # a close has begun ...
+    pty_mod._reader(t, sio)             # ... the reader ends meanwhile and steps aside
+    assert t.alive and not t.finalized and pj.card_busy(None, None, ISSUE)
+    monkeypatch.setattr(pty_mod, "_kill_session", lambda term: (_ for _ in ()).throw(RuntimeError("ps failed")))
+    t.closing = False
+    assert pty_mod.close_terminal("r1")["error"].startswith("cleanup failed")
+    assert t.alive and pj.card_busy(None, None, ISSUE) and pty_mod.card_terminal(card_key=None, agent="claude", session_id=SID) == "r1"
+    assert ("claude", SID) in app_mod._live_session_ids()  # session actions and renames stay blocked
+    monkeypatch.setattr(pty_mod, "_kill_session", lambda term: setattr(term, "alive", False))
+    assert pty_mod.close_terminal("r1").get("ok") and not pj.card_busy(None, None, ISSUE)
+    assert len([r for r in records(log) if r.get("interactive_ended")]) == 1
+
+
+def test_finalized_terminal_never_holds_and_superseded_close_says_so(harness, monkeypatch):
+    """A terminal finalized after a failed-then-successful cleanup no longer matches as the card's
+    holder (ICS-35); a close made for an action announces itself as superseded to every viewer (ICS-37)."""
+    app_mod, mod, client, log, events, tmp = harness
+    import projects as pj
+    import runner.modules.pty as pty_mod
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    t = pty_mod.Terminal(term_id="s1", kind="resume", run_id="a", session_id=SID, agent="claude", pid=1, card_key=ISSUE)
+    t.holds.enter_context(pj.card_lock(ISSUE))
+    monkeypatch.setitem(pty_mod.TERMINALS, "s1", t)
+    monkeypatch.setattr(pty_mod, "_kill_session", lambda term: (_ for _ in ()).throw(RuntimeError("ps failed")))
+    assert pty_mod.close_terminal("s1")["error"].startswith("cleanup failed") and t.cleanup_failed
+    monkeypatch.setattr(pty_mod, "_kill_session", lambda term: setattr(term, "alive", False))
+    sio = type("S", (), {"emit": lambda *a, **k: None})()
+    pty_mod._reader(t, sio)  # the agent then exits and the reader's own cleanup succeeds
+    assert t.finalized and not t.cleanup_failed and pty_mod.card_terminal(card_key=ISSUE) is None
+    emitted = []
+    monkeypatch.setattr(pty_mod, "_SOCKETIO", type("S", (), {"emit": lambda self, ev, data, **k: emitted.append((ev, data))})())
+    t2 = pty_mod.Terminal(term_id="s2", kind="shell", pid=None)
+    monkeypatch.setitem(pty_mod.TERMINALS, "s2", t2)
+    pty_mod.close_terminal("s2", superseded=True)
+    assert ("term_exit", {"term_id": "s2", "exit_code": None, "superseded": True}) in emitted
+
+
+def test_a_gone_terminal_says_how_it_ended_and_cleanups_never_overlap(harness, monkeypatch):
+    """A close that finds the terminal gone gets its end record (superseded or not), so a viewer that
+    missed the exit offers no obsolete choice (ICS-41); two cleanups of one terminal run one at a time
+    and close its descriptor once (ICS-40)."""
+    import threading
+    import time
+    app_mod, mod, client, log, events, tmp = harness
+    import runner.modules.pty as pty_mod
+    monkeypatch.setattr(pty_mod, "ENDED", {})
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    t = pty_mod.Terminal(term_id="e1", kind="resume", run_id="a", session_id=SID, agent="claude", pid=None)
+    monkeypatch.setitem(pty_mod.TERMINALS, "e1", t)
+    assert pty_mod.close_terminal("e1", superseded=True).get("ok")
+    assert pty_mod.close_terminal("e1") == {"error": "unknown terminal", "ended": {"run_id": "a", "superseded": True}}
+    assert pty_mod.close_terminal("never") == {"error": "unknown terminal"}
+    # serialized cleanup: the second caller waits for the first and finds the descriptor already closed
+    inside, overlaps = [], []
+    def slow(term):
+        overlaps.append(len(inside)); inside.append(1); time.sleep(0.2); inside.pop()
+    monkeypatch.setattr(pty_mod, "_kill_session_locked", slow)
+    t2 = pty_mod.Terminal(term_id="e2", kind="shell", pid=None)
+    ths = [threading.Thread(target=pty_mod._kill_session, args=(t2,)) for _ in range(2)]
+    [th.start() for th in ths]; [th.join(2) for th in ths]
+    assert overlaps == [0, 0]
+
+
+def test_a_failed_superseding_close_withdraws_its_intent(harness, monkeypatch):
+    """An action's close fails: the session is not marked superseded, so its later natural end still
+    offers the choice; a successful one says superseded in its acknowledgement (ICS-43/44)."""
+    app_mod, mod, client, log, events, tmp = harness
+    import runner.modules.pty as pty_mod
+    t = pty_mod.Terminal(term_id="w1", kind="shell", pid=None)
+    monkeypatch.setitem(pty_mod.TERMINALS, "w1", t)
+    monkeypatch.setattr(pty_mod, "_kill_session", lambda term: (_ for _ in ()).throw(RuntimeError("ps failed")))
+    assert pty_mod.close_terminal("w1", superseded=True)["error"].startswith("cleanup failed")
+    assert t.superseded is False
+    monkeypatch.setattr(pty_mod, "_kill_session", lambda term: setattr(term, "alive", False))
+    assert pty_mod.close_terminal("w1", superseded=True)["superseded"] is True
+
+
+def test_overlapping_superseding_closes_keep_the_successful_ones_intent(harness, monkeypatch):
+    """Two action closes overlap; the first fails, the second succeeds: the end is superseded in the
+    acknowledgement, the exit event and the end record (ICS-45)."""
+    app_mod, mod, client, log, events, tmp = harness
+    import runner.modules.pty as pty_mod
+    monkeypatch.setattr(pty_mod, "ENDED", {})
+    emitted = []
+    monkeypatch.setattr(pty_mod, "_SOCKETIO", type("S", (), {"emit": lambda self, ev, data, **k: emitted.append((ev, data))})())
+    t = pty_mod.Terminal(term_id="o1", kind="shell", pid=None)
+    monkeypatch.setitem(pty_mod.TERMINALS, "o1", t)
+    t.superseding += 1  # request B registered its intent and waits for the cleanup lock
+    monkeypatch.setattr(pty_mod, "_kill_session", lambda term: (_ for _ in ()).throw(RuntimeError("ps failed")))
+    assert pty_mod.close_terminal("o1", superseded=True)["error"].startswith("cleanup failed")  # request A fails
+    assert t.superseded  # A withdrew only its own intent; B's stands
+    monkeypatch.setattr(pty_mod, "_kill_session", lambda term: setattr(term, "alive", False))
+    ack = pty_mod.close_terminal("o1")  # B's cleanup now runs and succeeds (its intent is already counted)
+    assert ack["superseded"] is True and pty_mod.ENDED["o1"]["superseded"] is True
+    assert any(ev == "term_exit" and d["superseded"] is True for ev, d in emitted)
+
+
+def test_a_waiting_close_reuses_the_readers_confirmed_cleanup(harness, monkeypatch):
+    """The reader's cleanup succeeded first; a superseding close waiting on it does not repeat (and so
+    cannot fail) the cleanup: it succeeds and the end is announced superseded once (ICS-48)."""
+    app_mod, mod, client, log, events, tmp = harness
+    import runner.modules.pty as pty_mod
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    t = pty_mod.Terminal(term_id="c1", kind="resume", run_id="a", session_id=SID, agent="claude", pid=None)
+    monkeypatch.setitem(pty_mod.TERMINALS, "c1", t)
+    t.cleaned = True  # as left by the reader's successful cleanup
+    monkeypatch.setattr(pty_mod, "_kill_session", lambda term: (_ for _ in ()).throw(RuntimeError("ps failed")))
+    ack = pty_mod.close_terminal("c1", superseded=True)
+    assert ack.get("ok") and ack["superseded"] is True

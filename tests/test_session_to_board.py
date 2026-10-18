@@ -866,3 +866,24 @@ def test_empty_trash_survives_an_id_less_cache_entry(stb, monkeypatch):
     assert mod.issues_cache["x2"]["id"] == "x2"  # push_state never writes an id-less entry (SBI-019)
     r = client.post("/api/linear/trash/empty").get_json()
     assert r["archived"] == 2 and r["failed"] == {}
+
+
+def test_to_board_of_an_older_session_names_the_terminal_holding_its_card(stb, monkeypatch):
+    """Resume of session A while session B of the same card holds its live interactive terminal:
+    the refusal names B's terminal; a headless run keeps the plain refusal (plan 2026-10-17, R6)."""
+    app_mod, mod, client, log, tmp, proj, conf, launches = stb
+    import runner.modules.linear as linear_mod
+    import runner.modules.pty as pty_mod
+    write_log(log, {"run_id": "r0", "agent": "claude", "status": "review", "agent_session_id": SID},
+              {"run_id": "r1", "agent": "claude", "status": "review", "agent_session_id": "other"})
+    before = (log.read_text(), tasks(tmp))
+    monkeypatch.setattr(pty_mod, "TERMINALS", {})
+    monkeypatch.setattr(linear_mod, "card_locked", lambda issue, issue_id: True)  # B's terminal holds the card
+    monkeypatch.setitem(pty_mod.TERMINALS, "tB", pty_mod.Terminal(term_id="tB", kind="resume", pid=1, alive=True,
+                                                                  card_key=ISSUE, agent="claude", session_id="other"))
+    r = to_board(client)  # session A = SID
+    assert r.status_code == 409 and r.get_json() == {"error": "still running", "code": "card_interactive", "term_id": "tB"}
+    pty_mod.TERMINALS.clear()
+    app_mod._running_jobs["j"] = {"linear_issue_id": ISSUE, "state": "running", "agent": "claude"}
+    assert to_board(client).get_json() == {"error": "still running"}  # headless: unchanged
+    assert (log.read_text(), tasks(tmp)) == before

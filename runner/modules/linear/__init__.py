@@ -352,6 +352,16 @@ def _state_committed() -> None:
     g.tracker_state_committed = True
 
 
+def card_refusal(body: dict, issue: dict | None, issue_id: str) -> dict:
+    """`body` naming the live dashboard terminal that holds this card (`code`/`term_id`), by its card
+    key or its bound (project, ticket); unchanged when none does (a running attempt holds it)."""
+    from app import _durable_binding
+    from runner.modules.pty import card_interactive
+    bound = _durable_binding(linear_issue_id=issue_id) or {}
+    return card_interactive(body, card_key=issue_id, project_key=bound.get("project_key"),
+                            ticket=bound.get("issue_identifier") or (issue or {}).get("identifier"))
+
+
 def card_locked(issue: dict | None, issue_id: str) -> bool:
     """An interactive terminal (or a running attempt) holds this card's lock (C2)."""
     import projects
@@ -1520,7 +1530,9 @@ class LinearModule(AgenticModule):
             if data.get("state_name") and _is_linear_in_progress(data["state_name"]) and (
                     unsynced_local_id(issue_id) or card_locked(self.issues_cache.get(issue_id), issue_id)):
                 # the board writes this before its dispatching PATCH: a refused dispatch changes nothing (UI2-08)
-                return jsonify({"error": "this card cannot start now (not synced to Linear, or held by a terminal)"}), 409
+                return jsonify(card_refusal(
+                    {"error": "this card cannot start now (not synced to Linear, or held by a terminal)"},
+                    self.issues_cache.get(issue_id), issue_id)), 409
             local = self.get_local_tracker()
             preferred_agent = canonical_agent(data.get("preferred_agent"))
             self._remember_local_override(issue_id, data, preferred_agent)
@@ -1573,7 +1585,8 @@ class LinearModule(AgenticModule):
                 try:
                     box["hold"] = reserve_card(current, issue_id)
                 except projects.TicketLocked:
-                    return jsonify({"error": "an interactive terminal holds this card; close it first"}), 409
+                    return jsonify(card_refusal({"error": "an interactive terminal holds this card; close it first"},
+                                                current, issue_id)), 409
                 except projects.ProjectError as exc:  # e.g. an unknown project label: say so (FB3-01)
                     return jsonify({"error": str(exc)}), 400
             try:
