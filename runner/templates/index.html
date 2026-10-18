@@ -552,7 +552,9 @@
   .detail-output-tab-content .detail-section-body.error-panel { color:var(--red); }
   .detail-term-pinned { max-height:110px; overflow:auto; white-space:pre-wrap; border-left:2px solid var(--accent); padding:4px 8px; margin-bottom:6px; font-size:calc(11px * var(--fs)); }
   .detail-term-bar { display:flex; gap:6px; align-items:center; margin-bottom:6px; flex-wrap:wrap; }
-  .detail-term-bar select { background:var(--surface); color:var(--text); border:1px solid var(--border); font:inherit; font-size:calc(11px * var(--fs)); }
+  .detail-term-bar select, .detail-term-reply input { background:var(--surface); color:var(--text); border:1px solid var(--border); font:inherit; font-size:calc(11px * var(--fs)); }
+  .detail-term-reply { display:flex; gap:6px; margin-top:6px; }
+  .detail-term-reply input { flex:1; padding:4px 6px; }
   .detail-term-view { height:300px; background:#0d0d0d; }
   .session-open-badge { color:var(--accent); border:1px solid var(--accent); border-radius:3px; padding:0 4px; font-size:calc(10px * var(--fs)); display:inline-block; }
   .waiting-badge { color:#111; background:var(--yellow, #d29922); border-radius:3px; padding:0 4px; font-size:calc(10px * var(--fs)); max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; }
@@ -907,6 +909,10 @@
           <span class="session-meta" id="detail-term-status"></span>
         </div>
         <div class="detail-term-view" id="detail-term-view"></div>
+        <div class="detail-term-reply">
+          <input id="detail-term-reply" placeholder="Quick reply: continues this same session" onkeydown="if(event.key==='Enter'&&!event.isComposing){event.preventDefault();_cardTermQuickReply();}">
+          <button class="session-copy" id="detail-term-reply-send" onclick="_cardTermQuickReply()">Send</button>
+        </div>
         <div class="detail-term-bar" id="detail-term-next" style="display:none;margin-top:6px">
           <span>Interactive session ended. Next:</span>
           <button class="session-copy" onclick="_cardTermNext('done')">Mark done</button>
@@ -2921,6 +2927,7 @@ async function refreshJobBoard(force = false) {
     });
 
     _renderBoardItems(all);
+    _cardTermSyncLatest();  // the open card gained an attempt elsewhere? (QR-004)
   } catch (_) {}
 }
 
@@ -3286,6 +3293,8 @@ async function openDetailModal(run_id) {
 
     const isReview = state === 'in_review';
     _cardTermBind(run_id, r, boardItem);
+    const unsent = _unsentReplies.get(_cardKey());  // a quick reply that did not complete while this card was closed
+    if (unsent) { _unsentReplies.delete(_cardKey()); _showUnsent(unsent.text, unsent.reason); }
     const sessionOpen = _cardHasSession(_cardKey());  // an open interactive session: shown first, whatever the column (AC4)
     document.getElementById('detail-end-session').style.display = sessionOpen ? '' : 'none';
     // a queued next-state choice, or a retained session the card was redirected for, opens there too
@@ -4748,6 +4757,10 @@ function _cardTermBind(runId, run, item) {
   document.getElementById('detail-term-interactive').style.display = 'none';
   document.getElementById('detail-term-end').style.display = 'none';
   document.getElementById('detail-end-session').style.display = 'none';
+  document.getElementById('detail-term-reply').value = '';  // a reply typed for one card never goes to another (QR6)
+  _cardTerm.sendingReply = null;
+  _cardTerm.historyUnknown = false;
+  _cardTermReplyState();
 }
 function _cardKey() {
   const r = _cardTerm.run || {};
@@ -4804,14 +4817,22 @@ async function _cardTermShowQueued(key, gen) {
   await _cardTermLoad(pending);
 }
 async function _cardTermAttempts(gen) {
-  let chain = [];
+  let chain = [], ok = false;
   const issueId = (_cardTerm.run || {}).linear_issue_id;
   const histKey = issueId ? `linear-${issueId}` : _cardTerm.runId;  // the issue chain exists before the running attempt's record (UI3-09)
+  const seq = _cardTerm.historySeq = (_cardTerm.historySeq || 0) + 1;  // a newer request supersedes this one (QR-R3-003)
   try {
     const res = await fetch(`/api/runs/${encodeURIComponent(histKey)}/history`);
-    if (res.ok) chain = await res.json();
+    if (res.ok) { chain = await res.json(); ok = true; }
   } catch (_) {}
-  if (!_cardTermCurrent(gen)) return;
+  if (!_cardTermCurrent(gen) || seq !== _cardTerm.historySeq) return;
+  if (!ok) {  // any failed read, the first included: replies wait, and it is read again (QR-R4-003)
+    _cardTerm.historyUnknown = true;
+    setTimeout(() => { if (_cardTermCurrent(gen) && _cardTerm.historyUnknown) _cardTermSyncLatest(); }, 2000);
+    if (_cardTerm.latestRunId) { _cardTermReplyState(); return; }  // keep what is known
+  } else {
+    _cardTerm.historyUnknown = false;
+  }
   const sel = document.getElementById('detail-term-attempt');
   const runs = chain.filter(r => r.run_id && !r.interactive_ended).map(r => r.run_id);
   if (!runs.includes(_cardTerm.runId)) runs.push(_cardTerm.runId);
@@ -4821,20 +4842,38 @@ async function _cardTermAttempts(gen) {
   _cardTerm.latestRunId = latest;
   sel.style.display = runs.length > 1 ? '' : 'none';
 }
+// Metadata of the attempt on screen could not be read: read it again (the attached terminal stays), so
+// the reply box does not stay "Loading…" (QR-R3-004).
+function _cardTermRetryMeta(runId, gen, stale) {
+  setTimeout(async () => {
+    if (!_cardTermCurrent(gen) || _cardTerm.viewRunId !== runId || _cardTerm.data !== stale) return;
+    let data = { unknown: true };
+    try {
+      const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/events`);
+      if (res.ok) data = await res.json();
+    } catch (_) {}
+    if (!_cardTermCurrent(gen) || _cardTerm.viewRunId !== runId || _cardTerm.data !== stale) return;
+    _cardTerm.data = data;
+    _cardTermReplyState();
+    if (data.unknown) _cardTermRetryMeta(runId, gen, data);
+  }, 2000);
+}
 async function _cardTermUse(runId, gen) {
   // The attempt a view shows: selector, metadata, pinned message and reply eligibility follow it.
   _cardTerm.viewRunId = runId;
   const sel = document.getElementById('detail-term-attempt');
   if ([...sel.options].some(o => o.value === runId)) sel.value = runId;
-  let data = {};
+  let data = { unknown: true };  // a failed fetch leaves its state unknown (QR-R2-003)
   try {
     const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/events`);
     if (res.ok) data = await res.json();
   } catch (_) {}
   if (!_cardTermCurrent(gen) || _cardTerm.viewRunId !== runId) return false;
   _cardTerm.data = data;
+  if (data.unknown) _cardTermRetryMeta(runId, gen, data);
   const pinned = (data.last_message || '').trim();
   document.getElementById('detail-term-pinned').textContent = pinned ? pinned.split('\n').slice(-12).join('\n') : '';
+  _cardTermReplyState();
   return true;
 }
 async function _cardTermLoad(runId) {
@@ -4844,12 +4883,17 @@ async function _cardTermLoad(runId) {
   Object.assign(_cardTerm, { viewRunId: runId, pending: [], data: null, attemptGen: (_cardTerm.attemptGen || 0) + 1 });
   document.getElementById('detail-term-interactive').style.display = 'none';
   document.getElementById('detail-term-next').style.display = _cardTerm.endedRunId === runId ? '' : 'none';  // UI12-03, UI14-02
-  let data = { lines: [] };
+  _cardTermReplyState();  // no data yet: disabled until this attempt's state is known
+  let data = { lines: [], unknown: true };  // a failed fetch: state unknown, never "stopped" (QR-R2-003)
   try {
     const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/events`);
     if (res.ok) data = await res.json();
   } catch (_) {}
   if (!_cardTermCurrent(gen) || _cardTerm.xterm !== term || _cardTerm.viewRunId !== runId) return;
+  if (data.unknown) {
+    document.getElementById('detail-term-status').textContent = 'could not load this attempt; retrying…';
+    setTimeout(() => { if (_cardTermCurrent(gen) && _cardTerm.viewRunId === runId && _cardTerm.data === data) _cardTermLoad(runId); }, 2000);
+  }
   _cardTerm.data = data;
   term.reset();
   (data.lines || []).forEach(l => term.writeln(String(l).replace(/\n/g, '\r\n')));
@@ -4860,8 +4904,126 @@ async function _cardTermLoad(runId) {
   if (data.finished) term.writeln(`\r\n[run ${data.status || 'finished'}${data.verify_badge ? ' · verify: ' + data.verify_badge : ''}]`);
   document.getElementById('detail-term-interactive').style.display = data.finished && data.resume_eligible ? '' : 'none';
   document.getElementById('detail-term-end').style.display = 'none';
+  if (_pendingReplies.has(runId) && data.finished) _resolveReply(runId, data);  // its outcome (QR5)
+  _cardTermReplyState();
   const key = _cardKey();  // this attempt's queued choice, shown now that it is the one on screen (ICS-42)
   if (_pendingNextRuns.get(key) === runId && _cardTerm.viewRunId === runId) { _pendingNextRuns.delete(key); _cardTermEnded(runId); }
+}
+// Quick reply (QR1-QR6): one line that continues this card's own session, offered on the latest attempt
+// once it has stopped; its run streams here. Refusals go through the shared handling in _postRetry
+// (the card's interactive session: end it and continue; a session open elsewhere: ask once).
+// Quick replies sent and not yet resolved: run id -> {text, key}. Resolved when their run stops, whatever
+// attempt or card is on screen: a successful one is done; any other outcome gives its text back to its
+// card — at once if that card is open, else when it is next opened (QR5, QR-R4-002).
+const _pendingReplies = new Map();
+const _unsentReplies = new Map();  // card key -> {text, reason}: shown when that card opens
+function _resolveReply(runId, data) {
+  const p = _pendingReplies.get(runId);
+  if (!p || !data || data.unknown || data.finished !== true) return;
+  if (!data.status) return;  // launched, no job and no record yet: the pending check looks again (QR-005)
+  _pendingReplies.delete(runId);
+  const open = _isModalOpen('detail-modal') && _cardKey() === p.key;
+  const st = document.getElementById('detail-term-status');
+  if (data.status === 'review' || data.status === 'success') {
+    if (open && /continuing the same session/.test(st.textContent)) st.textContent = '';
+    return;
+  }
+  const reason = (data.error || data.last_message || data.status || '').trim().split('\n').pop();
+  if (open) _showUnsent(p.text, reason);
+  else _unsentReplies.set(p.key, { text: p.text, reason });
+}
+function _showUnsent(text, reason) {
+  const box = document.getElementById('detail-term-reply');
+  if (!box.value.trim()) box.value = text;
+  document.getElementById('detail-term-status').textContent = `reply not completed: ${reason}`;
+}
+// One outcome check per pending reply at a time; it keeps polling (every 3 s) until the outcome is known,
+// so a notification missed or never sent (a cancelled launch says only run_logged) cannot strand it (QR-R5-002).
+const _replyChecking = new Set();
+async function _checkReply(runId) {
+  if (!_pendingReplies.has(runId) || _replyChecking.has(runId)) return;
+  _replyChecking.add(runId);
+  let data = { unknown: true };
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/events`);
+    if (res.ok) data = await res.json();
+  } catch (_) {}
+  _replyChecking.delete(runId);
+  if (data.finished === true && !data.unknown) _resolveReply(runId, data);
+  if (_pendingReplies.has(runId)) setTimeout(() => _checkReply(runId), 3000);
+}
+socket.on('run_state_change', (d) => { if (d && d.state !== 'running' && _pendingReplies.has(d.run_id)) setTimeout(() => _checkReply(d.run_id), 300); });
+socket.on('connect', () => { for (const runId of _pendingReplies.keys()) _checkReply(runId); });  // missed while away
+// The open card gained an attempt elsewhere (another tab, a dispatch): its attempt list and reply
+// eligibility follow, so an older attempt is never offered as the latest (QR-004).
+function _cardTermSyncLatest() {
+  // from the card's own history, not the board: the board does not refresh while a card is open (QR-R2-001)
+  if (!_isModalOpen('detail-modal') || !_cardTerm.runId) return;
+  {
+    const gen = _cardTerm.gen;
+    _cardTermAttempts(gen).then(() => {
+      if (!_cardTermCurrent(gen)) return;
+      const sel = document.getElementById('detail-term-attempt'), viewed = _cardTerm.viewRunId;
+      if (viewed && [...sel.options].some(o => o.value === viewed)) sel.value = viewed;  // the attempt on screen stays selected
+      _cardTermReplyState();
+    });
+  }
+}
+function _cardTermReplyState() {
+  const input = document.getElementById('detail-term-reply'), btn = document.getElementById('detail-term-reply-send');
+  if (!input) return;
+  const viewed = _cardTerm.viewRunId || _cardTerm.runId, latest = _cardTerm.latestRunId || _cardTerm.runId;
+  const d = _cardTerm.data;
+  let why = '';
+  if (!_cardTerm.runId) why = 'No run on this card yet';
+  else if (_cardTerm.historyUnknown) why = 'Loading…';  // the latest attempt is not known (QR-R3-003)
+  else if (viewed !== latest) why = 'Viewing an earlier attempt — switch to the latest to reply';
+  else if (d && d.finished === false) why = 'The agent is working — reply when it stops';
+  else if (!d || d.unknown || d.finished !== true) why = 'Loading…';  // stopped must be known (QR-R2-003)
+  else if (d && d.finished && !d.status && _cardTerm.mode !== 'interactive') why = 'Starting…';  // launched, no record yet
+  else if (_cardTerm.sendingReply) why = 'Sending…';
+  input.disabled = btn.disabled = !!why;
+  input.placeholder = why || (_cardTerm.mode === 'interactive'
+    ? 'Quick reply: ends the open interactive session and continues it here'
+    : 'Quick reply: continues this same session');
+}
+async function _cardTermQuickReply() {
+  const gen = _cardTerm.gen, input = document.getElementById('detail-term-reply'), status = document.getElementById('detail-term-status');
+  const reply = input.value.trim(), runId = _cardTerm.runId, key = _cardKey();
+  const latestId = _cardTerm.latestRunId || runId;
+  if (!reply || !runId || input.disabled || (_cardTerm.viewRunId || runId) !== latestId) return;  // latest attempt only
+  const token = {};  // this send's own: a newer card's controls are never changed by it (QR-003)
+  _cardTerm.sendingReply = token; _cardTermReplyState();
+  status.textContent = 'sending…';
+  let data = null;
+  try { data = await _postRetry(latestId, { reply, strict: true }); }  // the same session, never a fresh one (QR2)
+  catch (err) { data = { ok: false, error: `connection failed: ${err}` }; }
+  finally {  // an accepted reply stays "sending" until its own attempt is on screen (QR-R6-003)
+    if (_cardTerm.sendingReply === token && !(data && data.ok)) _cardTerm.sendingReply = null;
+  }
+  // Its outcome belongs to its card, whatever is on screen now (QR-R5-001): an accepted reply is followed
+  // from here; a refused or declined one keeps its text for that card.
+  if (data && data.ok && data.run_id) { _pendingReplies.set(data.run_id, { text: reply, key }); _checkReply(data.run_id); }
+  refreshJobBoard(true);
+  if (!_cardTermCurrent(gen)) {  // the view changed meanwhile: nothing of another card changes
+    if (!(data && data.ok)) {  // a reply that did not go is kept for its card — shown now if it is open again (QR-R6-002)
+      const reason = (data && data.error) || 'not sent';
+      if (_isModalOpen('detail-modal') && _cardKey() === key) _showUnsent(reply, reason);
+      else _unsentReplies.set(key, { text: reply, reason });
+    }
+    return;
+  }
+  _cardTermReplyState();
+  if (!data) { status.textContent = ''; return; }  // declined: nothing sent, text kept (QR4)
+  if (!data.ok) { status.textContent = data.error || 'could not send'; return; }  // the server's reason, text kept (QR5)
+  if (input.value.trim() === reply) input.value = '';  // only what was sent goes (QR5)
+  status.textContent = 'continuing the same session…';
+  _cardTerm.runId = data.run_id;
+  _cardTerm.latestRunId = data.run_id;  // the previous attempt is no longer the latest, at once
+  await _cardTermAttempts(gen);
+  if (_cardTerm.sendingReply === token) _cardTerm.sendingReply = null;
+  if (_cardTermCurrent(gen)) _cardTermLoad(data.run_id);  // its run streams here (QR2); replies wait for its state
+  else _cardTermReplyState();
 }
 function _cardTermInteractive() {
   const gen = _cardTerm.gen, attemptGen = _cardTerm.attemptGen, d = _cardTerm.data || {};
@@ -4880,6 +5042,7 @@ function _cardTermInteractive() {
 function _cardTermAttach(termId, gen) {
   const term = _cardTermXterm('interactive');
   _cardTerm.termId = termId;
+  _cardTermReplyState();  // its placeholder says a quick reply would end this session
   term.onData(data => socket.emit('term_input', { term_id: termId, data }));
   term.onResize(({ cols, rows }) => socket.emit('term_resize', { term_id: termId, cols, rows }));
   socket.emit('term_attach', { term_id: termId }, info => {
@@ -5134,7 +5297,12 @@ socket.on('run_event', (d) => {
   if (_cardTerm.pending) _cardTerm.pending.push(d);
   else _cardTerm.xterm.writeln(String(d.line).replace(/\n/g, '\r\n'));
 });
+socket.on('run_logged', () => { _cardTermSyncLatest(); for (const runId of _pendingReplies.keys()) _checkReply(runId); });
+// notifications missed while disconnected: replies wait until the open card's history is read again (QR-R4-004)
+socket.on('disconnect', () => { if (_isModalOpen('detail-modal')) { _cardTerm.historyUnknown = true; _cardTermReplyState(); } });
+socket.on('connect', () => { _cardTermSyncLatest(); });  // a new attempt anywhere: the open card re-reads its own
 socket.on('run_state_change', (d) => {
+  if (d && d.state === 'running') _cardTermSyncLatest();
   const gen = _cardTerm.gen;
   if (_cardTerm.mode === 'run' && d.run_id === _cardTerm.viewRunId && d.state && d.state !== 'running') {
     setTimeout(() => { if (_cardTermCurrent(gen) && _cardTerm.mode === 'run' && _cardTerm.viewRunId === d.run_id) _cardTermLoad(d.run_id); }, 500);

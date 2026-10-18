@@ -168,8 +168,11 @@ def test_project_card_lock_refuses_quick_reply(harness, monkeypatch):
     with pj.ticket_lock("demo", "T-1"):
         assert client.post("/api/runs/a/retry", json={"reply": "x", "strict": True}).status_code == 409
     assert launched == [] and (log.read_text(), tracker_state(tmp)) == before
-    assert client.post("/api/runs/a/retry", json={"reply": "x", "strict": True}).status_code == 200
-    # SID is not in any session store here: a new session, said so (D3, R2)
+    # SID is not in any session store here. A quick reply (strict) never starts a new session: it is refused
+    # with the reason (plan 2026-10-18, QR2); the non-strict reply keeps the noted new session (D3, R2).
+    r = client.post("/api/runs/a/retry", json={"reply": "x", "strict": True})
+    assert r.status_code == 409 and "cannot continue this card's session" in r.get_json()["error"] and launched == []
+    assert client.post("/api/runs/a/retry", json={"reply": "x"}).status_code == 200
     assert launched[0]["ticket_hold"] is not None and launched[0]["resume_session"] is None and launched[0]["note"]
 
 

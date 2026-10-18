@@ -171,9 +171,13 @@ def test_issue_title_is_withheld_for_a_confidential_run_where_records_are_unsafe
     assert app_mod._issue_title_extra(ISSUE, None) == {} and app_mod._issue_title_extra(ISSUE, True) == {}
 
 
-def test_quick_reply_is_gone():
+def test_quick_reply_is_back_and_continues_the_same_session():
+    """Restored on the user's request 2026-10-18 (plan 2026-10-18-restore-quick-reply): the Terminal tab's
+    one-line reply continues the card's own session through the shared retry path (strict)."""
     html = (Path(__file__).resolve().parents[1] / "runner" / "templates" / "index.html").read_text()
-    assert "detail-term-reply" not in html and "_cardTermQuickReply" not in html
+    assert 'id="detail-term-reply"' in html and "async function _cardTermQuickReply" in html
+    body = html.split("async function _cardTermQuickReply", 1)[1].split("\nfunction ", 1)[0]
+    assert "_postRetry(latestId, { reply, strict: true })" in body  # same session; shared confirms
 
 
 # ── one task, one session ─────────────────────────────────────────────────
@@ -912,3 +916,104 @@ def test_a_dropped_queued_retry_still_names_the_session(cs, monkeypatch):
     stub(app_mod, monkeypatch)
     assert client.post("/api/runs/a/retry", json={"reply": "x"}).status_code == 200
     assert records(log)[-1]["status"] == "cancelled" and custom_titles(f) == ["t"]  # DSI-02
+
+
+def test_a_quick_reply_never_starts_a_new_session(cs, monkeypatch):
+    """strict (the Terminal tab's quick reply): when the card's session cannot be continued the reply is
+    refused with the reason, and nothing is launched; the Comment / Feedback reply keeps its noted
+    fresh-session fallback (plan 2026-10-18-restore-quick-reply, QR2)."""
+    app_mod, mod, client, log, events, tmp = cs
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    procs = stub(app_mod, monkeypatch, [{"type": "system", "subtype": "init", "session_id": SID},
+                                        {"type": "result", "result": "done", "session_id": SID}])
+    r = client.post("/api/runs/a/retry", json={"reply": "go on", "strict": True})  # no transcript: not resumable
+    assert r.status_code == 409 and "cannot continue this card's session" in r.get_json()["error"]
+    assert procs == []
+
+
+def test_a_quick_reply_answers_only_the_latest_attempt(cs, monkeypatch):
+    """Another tab started a newer attempt: a quick reply to the older one is refused, nothing launched;
+    the events of a finished run carry its recorded error (QR-001/004)."""
+    app_mod, mod, client, log, events, tmp = cs
+    transcript(app_mod.ROOT)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID},
+              {"run_id": "b", "agent": "claude", "status": "error", "agent_session_id": SID, "attempt": 1,
+               "parent_run_id": "a", "error": "You've hit your session limit"})
+    procs = stub(app_mod, monkeypatch, [{"type": "system", "subtype": "init", "session_id": SID},
+                                        {"type": "result", "result": "done", "session_id": SID}])
+    r = client.post("/api/runs/a/retry", json={"reply": "go on", "strict": True})
+    assert r.status_code == 409 and "newer attempt" in r.get_json()["error"] and procs == []
+    assert client.get("/api/runs/b/events").get_json()["error"] == "You've hit your session limit"
+
+
+def test_latest_attempt_follows_history_order_not_append_order(cs, monkeypatch):
+    """Marking older attempt A done appends A's record again; B is still the latest attempt, so a quick
+    reply to B is admitted and one to A is refused (QR-R2-002)."""
+    app_mod, mod, client, log, events, tmp = cs
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID,
+                    "started_at": "2026-10-18T01:00:00+00:00"},
+              {"run_id": "b", "agent": "claude", "status": "review", "agent_session_id": SID, "attempt": 1,
+               "parent_run_id": "a", "started_at": "2026-10-18T02:00:00+00:00"},
+              {"run_id": "a", "agent": "claude", "status": "success", "agent_session_id": SID,
+               "started_at": "2026-10-18T01:00:00+00:00",  # a persisted intent rides along (QR-R3-002)
+               "resume_session": {"agent": "claude", "id": SID, "project_key": "demo", "gen": 0}})
+    assert app_mod._newest_attempt(ISSUE, None) == "b"
+    r = client.post("/api/runs/a/retry", json={"reply": "x", "strict": True})
+    assert r.status_code == 409 and "newer attempt" in r.get_json()["error"]
+
+
+def test_a_quick_reply_never_resumes_a_replacement_session(cs, monkeypatch):
+    """The answered attempt used session S1, which another card now owns; the card's older session S0
+    would be substituted: a quick reply refuses instead of resuming S0 (QR-R3-001)."""
+    app_mod, mod, client, log, events, tmp = cs
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    older = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    monkeypatch.setattr(app_mod, "_card_sessions", lambda live_only=True: {("claude", SID): "another-card"})
+    monkeypatch.setattr(app_mod, "_card_session", lambda issue_id, agent: (older, None))
+    import os
+    old = tmp / "older.jsonl"
+    old.write_text("{}\n")
+    os.utime(old, (1_000_000_000, 1_000_000_000))  # long idle: not "in use elsewhere"
+    monkeypatch.setattr(app_mod._projects, "find_session",
+                        lambda agent, sid: {"agent": agent, "id": sid, "cwd": str(app_mod.ROOT), "path": old})
+    procs = stub(app_mod, monkeypatch, [{"type": "system", "subtype": "init", "session_id": older},
+                                        {"type": "result", "result": "done", "session_id": older}])
+    r = client.post("/api/runs/a/retry", json={"reply": "go on", "strict": True})
+    assert r.status_code == 409 and "not the one this attempt used" in r.get_json()["error"] and procs == []
+
+
+def test_a_quick_reply_is_rechecked_under_the_card_lock(cs, monkeypatch):
+    """A newer attempt appears between the first check and the card lock: the reply is still refused
+    and its claims released (QR-R4-001)."""
+    app_mod, mod, client, log, events, tmp = cs
+    transcript(app_mod.ROOT)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    calls = []
+    def newest(issue, task):
+        calls.append(1)
+        return "a" if len(calls) == 1 else "b"  # B finished after the first check
+    monkeypatch.setattr(app_mod, "_newest_attempt", newest)
+    procs = stub(app_mod, monkeypatch, [{"type": "system", "subtype": "init", "session_id": SID},
+                                        {"type": "result", "result": "done", "session_id": SID}])
+    r = client.post("/api/runs/a/retry", json={"reply": "go on", "strict": True})
+    assert r.status_code == 409 and "newer attempt" in r.get_json()["error"] and procs == [] and len(calls) >= 2
+    assert app_mod._SESSION_CLAIMS == {} or all(v != ("claude", SID) for v in app_mod._SESSION_CLAIMS.values())
+
+
+def test_a_quick_reply_to_the_latest_attempt_survives_a_status_copy_of_an_older_one(cs, monkeypatch):
+    """A used S1, B (newest) used S2; marking A done appends A again. A quick reply to B continues S2
+    (QR-R6-001)."""
+    app_mod, mod, client, log, events, tmp = cs
+    s1, s2 = "11111111-1111-1111-1111-111111111111", SID
+    transcript(app_mod.ROOT)  # S2's transcript (SID) is the resumable one
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": s1,
+                    "started_at": "2026-10-18T01:00:00+00:00"},
+              {"run_id": "b", "agent": "claude", "status": "review", "agent_session_id": s2, "attempt": 1,
+               "parent_run_id": "a", "started_at": "2026-10-18T02:00:00+00:00"},
+              {"run_id": "a", "agent": "claude", "status": "success", "agent_session_id": s1,
+               "started_at": "2026-10-18T01:00:00+00:00"})
+    procs = stub(app_mod, monkeypatch, [{"type": "system", "subtype": "init", "session_id": s2},
+                                        {"type": "result", "result": "done", "session_id": s2}])
+    r = client.post("/api/runs/b/retry", json={"reply": "go on", "strict": True})
+    assert r.status_code == 200, r.get_json()
+    assert "--resume" in procs[0].args and s2 in procs[0].args

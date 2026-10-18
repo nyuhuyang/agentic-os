@@ -4438,6 +4438,11 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
     except _projects.ProjectError as exc:
         _release_session(new_run_id)
         return _card_refusal({"ok": False, "error": str(exc)}, 409, **holder)
+    if data.get("strict") and _newest_attempt(linear_issue_id, task_id) not in (None, run_id):
+        # a quick reply, rechecked under the card's reservation: an attempt finished meanwhile (QR-R4-001)
+        held.close()
+        _release_session(new_run_id)
+        return jsonify({"ok": False, "error": "a newer attempt exists on this card; reply from the latest attempt"}), 409
     with reset_gen.issue_lock(linear_issue_id):  # admission: a reset since the request began wins (SBI-007)
         if _tracker_issue(linear_issue_id) is None:  # deleted outside the dashboard: no generation bump (R2)
             held.close()
@@ -4615,6 +4620,7 @@ def api_run_events(run_id: str):
                   "linear_issue_id", "task_id"):
             out[k] = rec.get(k)
         out["last_message"] = _assistant_text(rec)[-4000:]  # pinned at the top of the Terminal tab (C2)
+        out["error"] = rec.get("error") or ""  # the recorded reason (already withheld where records may leak)
         out["waiting"] = project_runs.waiting_question(_assistant_text(rec)) if rec.get("status") == "review" else None
         out["card_key"] = rec.get("linear_issue_id") or rec.get("task_id") or run_id
         project = None
@@ -5195,16 +5201,27 @@ def api_run_retry(run_id: str):
 
     # Build conversation context: include previous output + human feedback
     req_data = request.get_json(silent=True) or {}
+    # Quick reply (C2): continue exactly this session or fail; never a fresh session.
+    strict = bool(req_data.get("strict"))
+    _same_session = original.get("agent_session_id")  # the session the answered attempt used (QR-R3-001)
+    _not_same = jsonify({"ok": False, "error": "this card's current session is not the one this attempt used; "
+                                               "reply from the latest attempt or use Comment / Feedback"}), 409
+    if strict:
+        # a quick reply answers the card's latest attempt only, on every path, persisted intents included
+        # (QR-004, QR-R3-002)
+        _newest = _newest_attempt(linear_issue_id, task_id)
+        if _newest and _newest != run_id:
+            return jsonify({"ok": False, "error": "a newer attempt exists on this card; reply from the latest attempt"}), 409
     intent = _valid_intent(original)
     if intent and _projects.find_session(intent["agent"], intent["id"]) is None:
         # removed or archived (or a Codex thread without its rollout): the card starts fresh, with
         # the reason, through the ordinary admission below (R12-01)
         intent = None
     if intent:  # a session card: replaces the bound/_run_project_ticket block for it (STB-038)
+        if strict and _same_session and intent["id"] != _same_session:
+            return _not_same
         return _retry_session_card(run_id, original, intent, req_data)
     reply = (req_data.get("reply") or "").strip()
-    # Quick reply (C2): continue exactly this session or fail; never a fresh session.
-    strict = bool(req_data.get("strict"))
     attachments = req_data.get("attachments") or []
     prev_output = (original.get("output") or "").strip()
     attach_note = _format_prompt_attachments(attachments)
@@ -5248,6 +5265,10 @@ def api_run_retry(run_id: str):
                 agent_override, task_id, locked_agent,
             )
         agent = locked_agent
+    if strict and _same_session and _newest_attempt(linear_issue_id, task_id) == run_id:
+        # the answered attempt is the card's newest by history order: its own session is the card's
+        # current one, whatever an appended status copy of an older attempt left last (QR-R6-001)
+        _lock_session_id = _same_session
     if strict and not _lock_session_id:
         return jsonify({"ok": False, "error": "no resumable session for this card; use Retry instead"}), 409
     if strict and original.get("agent_session_id") and original["agent_session_id"] != _lock_session_id:
@@ -5288,6 +5309,8 @@ def api_run_retry(run_id: str):
                 # main checkout or any other folder of the project: the session-card worker (§3.3)
                 # the generation this request read: a reset since then refuses it at admission (R9-01)
                 transient = {"agent": agent, "id": sid, "project_key": project_key, "gen": _launch_gen}
+                if strict and _same_session and sid != _same_session:
+                    return _not_same  # never a replacement session for a quick reply (QR-R3-001)
                 return _retry_session_card(run_id, original, transient, req_data, card_sourced=True)
             if not project_key and os.path.realpath(target["cwd"]) != os.path.realpath(str(ROOT)):
                 card_note, _lock_session_id = "new session: the card's session is in a different folder", None
@@ -5354,6 +5377,23 @@ def api_run_retry(run_id: str):
                                  project_key=(bound or {}).get("project_key"),
                                  ticket=(bound or {}).get("issue_identifier"))
         return jsonify({"ok": False, "error": str(exc)}), 400
+    if strict and _newest_attempt(linear_issue_id, task_id) not in (None, run_id):
+        # rechecked under the card's lock: an attempt finished meanwhile makes this one stale (QR-R4-001)
+        _release_session(new_run_id)
+        card_hold.close()
+        return jsonify({"ok": False, "error": "a newer attempt exists on this card; reply from the latest attempt"}), 409
+    if strict and _same_session and _lock_session_id and _lock_session_id != _same_session:
+        _release_session(new_run_id)  # the card's session was swapped for another one (QR-R3-001)
+        card_hold.close()
+        return _not_same
+    if strict and card_note and not _lock_session_id:
+        # A quick reply promises the same session: when the card's session cannot be continued it says
+        # why instead of quietly starting a new one (the Comment / Feedback reply does that, noted). After
+        # the card's lock, so an open interactive session is still offered "end it and continue".
+        _release_session(new_run_id)
+        card_hold.close()
+        return jsonify({"ok": False, "error": card_note.replace("new session: ", "cannot continue this card's session: ", 1)
+                        + " — use Comment / Feedback to start a new one"}), 409
     if linear_issue_id and not _card_admitted(linear_issue_id, _launch_gen):  # before any tracker change (R4)
         _release_session(new_run_id)
         card_hold.close()
@@ -5570,6 +5610,29 @@ def api_run_retry(run_id: str):
     except Exception as e:  # the job is published but no worker runs: finish it here (RWS-015)
         return _start_failed(e, published=True)
     return jsonify({"ok": True, "run_id": new_run_id, "skill": skill, "attempt": prev_attempt + 1, "agent": agent})
+
+
+def _newest_attempt(linear_issue_id: str | None, task_id: str | None) -> str | None:
+    """The card's newest attempt, ordered as its history (and the page's attempt list) orders them:
+    each run's latest record, running attempts included, archived runs and closure audits excluded,
+    oldest -> newest by started_at (QR-R2-002)."""
+    if not (linear_issue_id or task_id):
+        return None
+    latest: dict[str, dict] = {}
+    for r in _all_records():
+        if r.get("run_id"):
+            latest[r["run_id"]] = r
+    for rid, job in list(_running_jobs.items()):
+        if rid not in latest:
+            rec = job.get("record") or {}
+            latest[rid] = {"run_id": rid, "status": "running", "started_at": job.get("started_at", ""),
+                           "linear_issue_id": job.get("linear_issue_id"), "task_id": rec.get("task_id") or rid}
+    mine = [r for r in latest.values()
+            if r.get("status") != "archived" and not r.get("interactive_ended")
+            and ((linear_issue_id and r.get("linear_issue_id") == linear_issue_id)
+                 or (not linear_issue_id and r.get("task_id") == task_id))]
+    mine.sort(key=lambda r: r.get("started_at", ""))
+    return mine[-1]["run_id"] if mine else None
 
 
 @app.route("/api/runs/<run_id>/history")
