@@ -245,3 +245,19 @@
 - Result: `/private/tmp/claude-501/claudex-pvst/i17/claudex-5b86jv_c/result.json` (141 s). No material unresolved defects. Reviewer limit: static review against the plan.
 - Build inspection totals: 17 Codex rounds (16 REVISE, all findings fixed) plus 1 DeepSeek third-party round (DSI-01..02, fixed). Final suite: 711 passed.
 - The plan stays active: the manual browser checks are BLOCKED in this environment (no Chrome extension; DevTools attach "Not allowed"), and two acceptance items are PARTIAL (see the plan).
+
+## Verification (2026-10-18/19)
+- Live :8510 restarted on the user's request 2026-10-17 and checked in Chrome: projects stacked vertically, with card labels on sessions.
+- The Chrome extension was then unavailable, and the managed Chrome refuses DevTools. So the remaining manual checks ran in Playwright's bundled Chromium against an isolated runner (:8599: fake claude, local tracker, fixture stores).
+- Results:
+  - panel A1–A15: all pass;
+  - session names B1–B9: all pass, after correcting a test-script slip that had clicked the wrong card;
+  - one task, one session C1: passes.
+- Found and fixed in `f56e69f`: in local-tracker mode, the card editor's state dropdown had no options, so Save sent \`state_name: ""\`, wiped the card's state, and the card vanished from the board. Pre-existing, outside this plan.
+  - Server: an empty state means no change.
+  - Editor: in local mode the dropdown offers the board's states.
+- New evidence tests:
+  - the Linear editor route renames the session, and an unconfirmed edit does not;
+  - a real-process continuation outlives the scaled run cap and stops at the session ceiling.
+- D5 (remove quick reply) was superseded by the user on 2026-10-18 (\`docs/exec-plans/completed/2026-10-18-restore-quick-reply.md\`).
+- Proof: 739 passed.

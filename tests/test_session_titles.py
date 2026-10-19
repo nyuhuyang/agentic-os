@@ -1026,3 +1026,70 @@ def test_saving_the_editor_with_an_empty_state_never_wipes_the_card_state(cs):
     for route in (f"/api/linear/issues/local/{ISSUE}", f"/api/linear/issues/{ISSUE}"):
         assert client.patch(route, json={"title": "Kept", "state_name": ""}).status_code == 200
         assert tasks(tmp)[ISSUE]["state"] == "In Review" and tasks(tmp)[ISSUE]["title"] == "Kept"
+
+
+# ── remaining plan evidence, 2026-10-19 ────────────────────────────────────
+
+def _linear_mode(mod, monkeypatch, client_cls):
+    import types, runner.modules.linear as lin
+    monkeypatch.setitem(sys.modules, "linear_client", types.SimpleNamespace(LinearClient=client_cls))
+    monkeypatch.setattr(lin, "_linear_api_key_from_cfg", lambda tc: "k")
+    monkeypatch.setattr(mod, "_capability", {"available": True, "type": "linear"})
+
+
+def test_linear_editor_title_save_renames_the_session_and_a_failed_one_does_not(cs, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    stored = {"title": "t", "updated_at": "2026-10-19T00:00:00Z"}
+
+    class Client:
+        accept = True
+        def __init__(self, *a, **k): pass
+        def fetch_issue(self, i): return {"id": i, "identifier": "T-1", "description": "", "state": "In Review", **stored}
+        def update_issue(self, i, title=None, **kw):
+            if Client.accept and title is not None:
+                stored.update(title=title, updated_at="2026-10-19T00:00:0%dZ" % len(title))
+        def update_issue_state(self, i, s): return True
+    _linear_mode(mod, monkeypatch, Client)
+    f = transcript(tmp / "elsewhere")
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    # the editor sends the /local mirror and the Linear route in parallel: only the Linear one renames (DP-10)
+    assert client.patch(f"/api/linear/issues/local/{ISSUE}", json={"title": "Linear new"}).status_code == 200
+    assert custom_titles(f) == []
+    assert client.patch(f"/api/linear/issues/{ISSUE}", json={"title": "Linear new"}).status_code == 200
+    assert custom_titles(f) == ["Linear new"]
+    Client.accept = False  # Linear refuses the next edit
+    client.patch(f"/api/linear/issues/local/{ISSUE}", json={"title": "Never confirmed"})
+    client.patch(f"/api/linear/issues/{ISSUE}", json={"title": "Never confirmed"})
+    assert custom_titles(f) == ["Linear new"]  # an unconfirmed title is never written natively
+
+
+LONG_AGENT = r'''
+import json, sys, time
+sid = sys.argv[1]
+print(json.dumps({"type": "system", "subtype": "init", "session_id": sid}), flush=True)
+for i in range(int(sys.argv[2])):
+    time.sleep(0.5)
+    print(json.dumps({"type": "assistant", "session_id": sid, "message": {"content": [{"type": "text", "text": f"step {i}"}]}}), flush=True)
+print(json.dumps({"type": "result", "result": "finished", "session_id": sid}), flush=True)
+'''
+
+
+@pytest.mark.parametrize("steps,session_cap,expect", [(6, 8, "review"), (40, 2, "timeout")])
+def test_card_continuation_outlives_the_run_cap_and_stops_at_the_session_ceiling(cs, monkeypatch, tmp_path, steps, session_cap, expect):
+    """D7 end to end with a real process: the 30-minute cap (scaled to 1 s) no longer ends a
+    continuation that keeps streaming; the session ceiling (scaled) does."""
+    app_mod, mod, client, log, events, tmp = cs
+    script = tmp_path / "long_agent.py"
+    script.write_text(LONG_AGENT)
+    transcript(app_mod.ROOT)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
+    monkeypatch.setattr(app_mod, "AI_RUN_TIMEOUT_S", 1)
+    monkeypatch.setattr(app_mod, "AI_SESSION_TIMEOUT_S", session_cap)
+    monkeypatch.setattr(app_mod, "_build_resume_cmd", lambda agent, sid, prompt: [sys.executable, str(script), sid, str(steps)])
+    assert client.post("/api/runs/a/retry", json={"reply": "keep going"}).status_code == 200
+    rec = records(log)[-1]
+    assert rec["status"] == expect
+    if expect == "timeout":
+        assert rec["error"] == f"Timed out after {session_cap}s"
+    else:
+        assert rec["duration_s"] > 1  # ran past the (scaled) run cap
