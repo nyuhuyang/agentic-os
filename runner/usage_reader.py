@@ -1541,7 +1541,12 @@ def context_usage(agent: str, path: Path | None, model: str | None = None) -> di
         if agent == "claude":
             window = CTX_1M if (model or "").endswith("[1m]") or used > DEFAULT_CTX else DEFAULT_CTX
         pct = min(100, round(used * 100 / window)) if window else None
-        return {"used": used, "window": window, "pct": pct}
+        out = {"used": used, "window": window, "pct": pct}
+        if agent == "dsh":
+            # dsh's step_end sums every attempt of the step, so a retried attempt that reported
+            # usage counts twice; its stream has no per-call usage (CTX-009). An upper bound.
+            out["approx"] = True
+        return out
     return None
 
 

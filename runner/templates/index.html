@@ -2574,10 +2574,12 @@ function _fmtCtxTok(n) {
 
 function _ctxHtml(c) {
   if (!c || c.used == null) return '';
-  if (c.pct == null) return ` &nbsp;·&nbsp; Context: <span>${_fmtCtxTok(c.used)} used</span>`;
+  const approx = c.approx ? '~' : '';
+  const tip = c.approx ? ' title="Upper bound: DeepSeek reports per-step totals, so a retried call counts twice"' : '';
+  if (c.pct == null) return ` &nbsp;·&nbsp; Context: <span${tip}>${approx}${_fmtCtxTok(c.used)} used</span>`;
   const colour = c.pct >= 95 ? 'var(--red)' : c.pct >= 80 ? 'var(--yellow)' : '';
-  const pct = `<span${colour ? ` style="color:${colour}"` : ''}>${c.pct}%</span>`;
-  return ` &nbsp;·&nbsp; Context: ${pct} (<span>${_fmtCtxTok(c.used)} / ${_fmtCtxTok(c.window)}</span>)`;
+  const pct = `<span${colour ? ` style="color:${colour}"` : ''}${tip}>${approx}${c.pct}%</span>`;
+  return ` &nbsp;·&nbsp; Context: ${pct} (<span>${approx}${_fmtCtxTok(c.used)} / ${_fmtCtxTok(c.window)}</span>)`;
 }
 
 async function _refreshDetailCtx(runId) {

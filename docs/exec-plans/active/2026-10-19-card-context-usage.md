@@ -27,6 +27,7 @@ While the modal is open, the value keeps refreshing.
 - **D1 Placement.** The detail modal's meta line reads Started · Duration · Model · **Context** · ID. It is visible on every tab, next to the model, which is what defines the window. Board cards are left alone: one file read per card on every board refresh would be a cost the user didn't ask for.
 - **D2 Source.** The agent's own session store comes first, so interactive PTY continuations are counted. The run stream log is the fallback for Claude and the only source for dsh.
 - **D3 Definition.** Context is the prompt-side tokens of the last main-thread call. Output tokens are excluded, as in Claude Code's status line. Sidechain (subagent) calls are excluded because they use a separate context.
+- **D3a dsh is an upper bound** (CTX-009, inspection 1). dsh's `step_end` usage sums every attempt of a step. Its stream carries no per-call usage, and its session store is zstd-compressed, which the runner's Python 3.12 can't read without a new dependency. A retried attempt that reported usage therefore counts twice. When an attempt reports no usage, dsh omits the step's usage entirely, so most retries are not counted twice. dsh results carry `approx: true`, and the UI prefixes `~` with an explanatory tooltip.
 - **D4 Window.** The window is inferred, with no config key. A wrong guess only skews the percent; the used figure stays exact.
 - **D5 Dedicated route.** Context gets its own route instead of riding on the progress endpoints (CTX-001). The issue-progress endpoint only resolves running jobs, and the progress builder persists its payload.
 - **D6 Init model from an incremental scan** (CTX-006). The model is read from the stream log with a per-path `(size, offset, model)` cache that scans only the bytes appended since the last call. The init line can therefore never drop out of view.
@@ -59,6 +60,7 @@ While the modal is open, the value keeps refreshing.
 
 - [x] Add `session_file(agent, sid) -> Path | None`, path-only, which never reads file contents (CTX-003).
 - [x] Claude branch of `session_file`: the same checks as `find_session` (`_SESSION_ID`, `CLAUDE_PROJECTS` is a dir, `<dir>/<sid>.jsonl` is a regular file and not a symlink, it resolves inside the store), with no `_claude_summary` call.
+- [x] When the same id exists under several project folders (e.g. an old and a new checkout), the Claude branch of `session_file` returns the copy with the newest mtime (CTX-008).
 - [x] Codex branch of `session_file`: return `find_session("codex", sid)["path"]` or None. That function reads the DB row and stats the rollout only.
 
 ### API: `runner/app.py`
@@ -121,6 +123,11 @@ While the modal is open, the value keeps refreshing.
 - [x] `stream_model` test: bytes appended since the last call are scanned incrementally.
 - [x] `stream_model` test: a truncated or replaced file resets the cache.
 - [x] `session_file` test: it returns the confined Claude path without calling `_claude_summary`.
+- [x] `session_file` test: with a duplicate session id, the newest copy wins (CTX-008). Live check: run 614ee14a now shows 6%, not 24%.
+- [x] dsh test: results carry `approx: true`; a retried-step aggregate is flagged as an upper bound (CTX-009).
+- [x] UI: `_ctxHtml` prefixes `~` and adds a tooltip when `approx` is set.
+- [x] Full suite re-run after the inspection-1 fixes: 763 passed.
+- [ ] Fresh Codex reinspection after the inspection-1 fixes.
 - [x] `session_file` test: it refuses a symlinked transcript.
 - [x] `session_file` test: it refuses an invalid sid.
 - [x] Route test: a completed record with a Claude session returns `context`.

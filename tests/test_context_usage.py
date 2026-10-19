@@ -85,7 +85,14 @@ def test_codex_missing_window_keeps_used(tmp_path):
 
 def test_dsh_step_end(tmp_path):
     f = jl(tmp_path / "s.jsonl", step_end(537, 12_032, 11))
-    assert ur.context_usage("dsh", f) == {"used": 12_580, "window": 1_000_000, "pct": 1}
+    assert ur.context_usage("dsh", f) == {"used": 12_580, "window": 1_000_000, "pct": 1, "approx": True}
+
+
+def test_dsh_retried_step_is_marked_upper_bound(tmp_path):
+    # a step whose rejected attempt reported usage: dsh sums both attempts into step_end (CTX-009)
+    f = jl(tmp_path / "s.jsonl", step_end(400_000), step_end(800_000))
+    c = ur.context_usage("dsh", f)
+    assert c["used"] == 800_000 and c["approx"] is True
 
 
 def test_no_usage_missing_file_malformed(tmp_path):
@@ -145,6 +152,15 @@ def test_session_file_claude_path_only(monkeypatch):
     t = jl(pj.CLAUDE_PROJECTS / "-x-proj" / f"{SID}.jsonl", asst(0, 1))
     monkeypatch.setattr(pj, "_claude_summary", lambda *a: pytest.fail("must not scan the transcript"))
     assert pj.session_file("claude", SID) == t
+
+
+def test_session_file_duplicate_id_newest_copy_wins():
+    old = jl(pj.CLAUDE_PROJECTS / "-a-old-checkout" / f"{SID}.jsonl", asst(0, 240_000))
+    new = jl(pj.CLAUDE_PROJECTS / "-b-new-checkout" / f"{SID}.jsonl", asst(0, 62_000))
+    os.utime(old, (1_000_000, 1_000_000))
+    assert pj.session_file("claude", SID) == new
+    os.utime(new, (500_000, 500_000))
+    assert pj.session_file("claude", SID) == old
 
 
 def test_session_file_refuses_symlink(tmp_path):
@@ -209,7 +225,7 @@ def test_route_project_dsh_deterministic_stream(ctx):
     app_mod, _, client, log, *_ = ctx
     jl(app_mod._claude_stream_log_path("r4"), step_end(100, 900))
     write_log(log, {"run_id": "r4", "status": "done", "agent": "deepseek"})  # legacy id -> dsh
-    assert get_ctx(client, "r4") == {"used": 1_000, "window": 1_000_000, "pct": 0}
+    assert get_ctx(client, "r4") == {"used": 1_000, "window": 1_000_000, "pct": 0, "approx": True}
 
 
 def test_route_error_is_null(ctx, monkeypatch):

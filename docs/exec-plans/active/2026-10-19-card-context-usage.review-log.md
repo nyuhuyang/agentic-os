@@ -48,3 +48,8 @@
 ## Build (Claude)
 - Pre-build base d767441. Suite 761 passed. Browser checks passed (isolated runner :8599, Playwright Chromium; script /private/tmp/claude-501/ctx-verify/check_ctx.py).
 - Build fix: _tail_lines default arg bound at def time; now reads CTX_TAIL_BYTES at call time.
+
+## Inspection 1 — Codex (fresh): REVISE
+- Result: /private/tmp/claude-501/claudex-ctx/i1/claudex-9wa9zsl9/result.json, assurance=cross_provider.
+- CTX-008 (medium) accepted: session_file picked the first duplicate transcript (old checkout's folder). Fix: the newest-mtime confined copy wins. Real run 614ee14a: 24% → 6%.
+- CTX-009 (medium) accepted in part: dsh step_end sums the attempts. There is no per-call source in the stream; the zstd session store can't be read without a new dependency. Fix: dsh results are flagged approx (an upper bound), and the UI shows ~NN% with a tooltip. D3a recorded in the plan. A double count happens only when a failed attempt itself reported usage (otherwise dsh omits the step's usage).

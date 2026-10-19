@@ -1734,11 +1734,10 @@ def session_file(agent: str, sid: str) -> Path | None:
     if agent != "claude" or not isinstance(sid, str) or not _SESSION_ID.match(sid) or not CLAUDE_PROJECTS.is_dir():
         return None
     store = CLAUDE_PROJECTS.resolve()
-    for d in CLAUDE_PROJECTS.iterdir():
-        f = d / f"{sid}.jsonl"
-        if d.is_dir() and f.is_file() and not f.is_symlink() and f.resolve().is_relative_to(store):
-            return f
-    return None
+    found = [f for d in CLAUDE_PROJECTS.iterdir() for f in [d / f"{sid}.jsonl"]
+             if d.is_dir() and f.is_file() and not f.is_symlink() and f.resolve().is_relative_to(store)]
+    # the same id can sit under an old and a new checkout's folder: the one written last is live (CTX-008)
+    return max(found, key=lambda f: (f.stat().st_mtime_ns, str(f)), default=None)
 
 
 def session_name_text(title: object) -> str:
