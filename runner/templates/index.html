@@ -1086,6 +1086,11 @@ function initPaceMarkers() {
 
 // ── Projects (Phase 1: read-only session view) ─────────────────────────────
 let _projectData = { projects: [] };
+// A project shows as its folder's name, exactly; the registry key is internal.
+function _projName(key) {
+  const p = (_projectData.projects || []).find(x => x.key === key);
+  return (p && p.name) || key;
+}
 let _projectsLoaded = false;  // the new-task form waits on it for its default project (UI2-07)
 let _newIssuePendingProject = null;  // a saved draft project while the list is still loading (UI3-06)
 
@@ -1152,11 +1157,11 @@ function _renderProjectsInto(el) {
   const head = p => `draggable="true" tabindex="0" data-phead="${_esc(p.key)}" title="Click to open or close · drag or Alt+↑/↓ to reorder"`;
   el.innerHTML = `<div class="project-toolbar">${add}</div>` + _projTabOrder(ps).map(k => {
     const p = byKey[k];
-    if (p.error) return `<div class="project-section"><div class="project-head project-error" ${head(p)}>${_esc(p.key)} — ${_esc(p.error)} ${removeBtn(p)}</div></div>`;
+    if (p.error) return `<div class="project-section"><div class="project-head project-error" ${head(p)}>${_esc(p.name || p.key)} — ${_esc(p.error)} ${removeBtn(p)}</div></div>`;
     const isOpen = open.has(p.key);
     const rows = (p.sessions || []).map(s => _sessionRow(p.key, s)).join('') || '<div class="session-empty">No sessions in this project yet.</div>';
     return `<div class="project-section">
-      <div class="project-head" ${head(p)} aria-expanded="${isOpen}">${isOpen ? '▾' : '▸'} <b>${_esc(p.key)}</b> ${badges(p)}
+      <div class="project-head" ${head(p)} aria-expanded="${isOpen}">${isOpen ? '▾' : '▸'} <b>${_esc(p.name || p.key)}</b> ${badges(p)}
         <span class="session-meta">${(p.sessions || []).length} sessions</span>
         <button class="session-copy" data-open-terminal="${_esc(p.key)}">Open terminal</button>
         ${(p.entry || {}).verify ? `<button class="session-copy" data-proj-action="baseline" data-key="${_esc(p.key)}" title="${_esc(p.entry.verify)} — on a clean copy of HEAD">Run tests</button>` : ''}
@@ -1174,7 +1179,7 @@ function _sessionRow(key, s) {
   const ids = `data-key="${_esc(key)}" data-sagent="${_esc(s.agent)}" data-sid="${_esc(s.id)}"`;
   const err = ed && ed.error ? `<span class="session-meta" style="color:${ed.mode === 'note' ? 'var(--text-dim)' : 'var(--red)'}">${_esc(ed.error)}</span>` : '';
   // A board-launched session shows its card identifier first, e.g. "AGE-102 · title" (§9).
-  let title = `<span class="session-title" title="${_esc(s.cwd)}">${s.label ? `<b>${_esc(s.label)}</b> · ` : ''}${_esc(s.card_title || s.title)}</span>`;
+  let title = `<span class="session-title" title="${_esc(s.label ? `${s.label} · ${s.cwd}` : s.cwd)}">${_esc(s.card_title || s.title)}</span>`;
   // One Resume (§6): the session's card goes back to Todo and its reply opens.
   let actions = `<button class="session-copy" data-resume-agent="${_esc(s.agent)}" data-resume-id="${_esc(s.id)}" data-project="${_esc(key)}"
           title="Put this session's card in Todo and write the next reply (${_esc(s.resume)})">Resume</button>
@@ -2689,7 +2694,7 @@ function _buildColCard(run) {
     ? `<span class="verify-badge" title="Open this card's live terminal view" onclick="event.stopPropagation();openCardTerminal('${_esc(run.latest_run_id)}')">▤ Terminal</span>`
     : '');
   const projectHtml = (run.issue_project || run.project_key)
-    ? `<span class="verify-badge" title="Runs in a worktree of this project">${_esc(run.issue_project || run.project_key)}</span>` : '';
+    ? `<span class="verify-badge" title="Runs in a worktree of this project">${_esc(_projName(run.issue_project || run.project_key))}</span>` : '';
   const syncHtml = run.unsynced ? '<span class="verify-badge" title="Not synced to Linear yet; it can be dispatched once it has its Linear id">syncing…</span>' : '';
   const metaHtml = metaModelHtml || metaAgentHtml || verifyHtml || projectHtml || syncHtml
     ? `<div class="job-card-meta">${metaModelHtml}${metaAgentHtml}${projectHtml}${syncHtml}${verifyHtml}</div>` : '';
@@ -5603,7 +5608,7 @@ function _fillNewIssueProjects(saved) {
   const keys = (_projectData.projects || []).filter(p => !p.error).map(p => p.key);
   const fallback = keys.includes(DEFAULT_PROJECT_KEY) ? DEFAULT_PROJECT_KEY : '';
   const pick = saved !== null && saved !== undefined && (saved === '' || keys.includes(saved)) ? saved : fallback;
-  sel.innerHTML = keys.map(k => `<option value="${_esc(k)}">${_esc(k)}</option>`).join('')
+  sel.innerHTML = keys.map(k => `<option value="${_esc(k)}">${_esc(_projName(k))}</option>`).join('')
     + '<option value="">No project (runner root)</option>';
   sel.value = pick;
   _newIssueProjectHint();

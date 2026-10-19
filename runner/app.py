@@ -4650,13 +4650,16 @@ def api_projects():
     board_ids, labels = _board_sessions()  # board-launched headless sessions, with their card ids (§9)
     for key, p in reg.items():
         try:  # one project's reader failure never hides the others
-            out.append({"key": key, "kind": p.kind, "confidential": p.confidential, "no_push": p.no_push,
+            out.append({"key": key, "name": p.path.name, "kind": p.kind, "confidential": p.confidential, "no_push": p.no_push,
                         "note": p.note, "entry": raw.get(key), "baseline": _BASELINES.get(key),
                         "sessions": _projects.project_sessions(p, board_ids, labels),
                         "memory": _projects.claude_memory_names(p)})
         except Exception as exc:
             out.append({"key": key, "error": f"session readers failed: {exc}", "entry": raw.get(key)})
     out += [{"key": key, "error": msg, "entry": raw.get(key)} for key, msg in errors.items()]
+    for row in out:  # the folder's own name is what the panel shows; the key stays internal
+        path = (row.get("entry") or {}).get("path") if isinstance(row.get("entry"), dict) else None
+        row.setdefault("name", Path(path).expanduser().name if isinstance(path, str) and path else row["key"])
     return jsonify({"projects": out, "registry_hash": registry_hash})
 
 

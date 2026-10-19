@@ -134,6 +134,23 @@ def test_api_projects_reports_sessions_and_bad_entries(env, monkeypatch):
     assert "not a git repository" in by_key["broken"]["error"]
 
 
+def test_api_projects_name_is_the_folder_name(env, monkeypatch):
+    """The panel shows the folder's own name, never the registry key (Demo_app is not demo)."""
+    root, _ = env
+    import app as app_mod
+    import subprocess
+    folder = root / "Demo_app"
+    subprocess.run(["git", "init", "-q", str(folder)], check=True)
+    reg = root / "projects.yaml"
+    reg.write_text(f"projects:\n  demo:\n    path: {folder}\n    verify: 'true'\n"
+                   f"  gone:\n    path: {root}/Gone_Folder\n    verify: 'true'\n")
+    monkeypatch.setattr(pj, "REGISTRY_PATH", reg)
+    r = app_mod.app.test_client().get("/api/projects", headers={"X-AgenticOS-Token": app_mod.REQUEST_TOKEN})
+    by_key = {p["key"]: p for p in r.get_json()["projects"]}
+    assert by_key["demo"]["name"] == "Demo_app"
+    assert by_key["gone"]["name"] == "Gone_Folder"  # an entry that failed to load still shows its folder
+
+
 def test_valid_json_of_wrong_shape_degrades(env):
     root, project = env
     d = root / "claude" / pj._slug(PROJ)
