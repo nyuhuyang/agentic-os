@@ -57,3 +57,7 @@
 ## Inspection 2 — Codex (fresh): REVISE (low only)
 - Result: /private/tmp/claude-501/claudex-ctx/i2/claudex-lrqxghum/result.json, assurance=cross_provider.
 - CTX-010 (low) accepted: _tail_lines dropped a whole first line when the tail began exactly on a line boundary. Fix: read one byte early and cut at the first newline. Test added.
+
+## Inspection 3 — Codex (fresh): REVISE (low only)
+- Result: /private/tmp/claude-501/claudex-ctx/i3/claudex-05jucqal/result.json, assurance=cross_provider.
+- CTX-011 (low) accepted: str.splitlines split JSON text at U+2028/U+2029/U+0085. Fix: split on physical LF bytes (both _tail_lines and stream_model). Test added; suite 765 passed.

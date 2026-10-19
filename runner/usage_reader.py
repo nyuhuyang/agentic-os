@@ -1477,7 +1477,8 @@ def _tail_lines(path: Path, limit: int | None = None) -> list[str]:
     if start:
         cut = data.find(b"\n")  # drop everything up to the first newline: a partial line,
         data = data[cut + 1:] if cut >= 0 else b""  # or just that extra byte when the tail starts a line
-    return data.decode("utf-8", errors="ignore").splitlines()[::-1]
+    # physical LF only: str.splitlines would also break JSON strings at U+2028/U+2029/U+0085 (CTX-011)
+    return [ln.decode("utf-8", errors="ignore") for ln in data.split(b"\n") if ln.strip()][::-1]
 
 
 def _tok(*values) -> int | None:
@@ -1568,7 +1569,7 @@ def stream_model(path: Path | None) -> str | None:
         except OSError:
             return None
         end = data.rfind(b"\n") + 1  # only whole lines; a partial last line is read next time
-        for raw in data[:end].splitlines():
+        for raw in data[:end].split(b"\n"):
             if b'"subtype":"init"' not in raw and b'"subtype": "init"' not in raw:
                 continue
             with contextlib.suppress(ValueError):

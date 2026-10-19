@@ -127,6 +127,14 @@ def test_tail_starting_exactly_on_a_line_keeps_it(tmp_path):
     assert json.loads(lines[-1]) == {"type": "user"}  # one byte less: that line is partial and dropped
 
 
+def test_unicode_line_separators_inside_json_text(tmp_path):
+    newest = asst(0, 77_000)
+    newest["message"]["content"] = [{"type": "text", "text": "a\u2028b\u2029c\u0085d"}]
+    f = tmp_path / "t.jsonl"
+    f.write_text(json.dumps(asst(0, 1_000)) + "\n" + json.dumps(newest, ensure_ascii=False) + "\n", encoding="utf-8")
+    assert ur.context_usage("claude", f)["used"] == 77_000
+
+
 # ── stream_model ──────────────────────────────────────────────────────────────
 
 def test_stream_model_newest_init_and_far_back(tmp_path):

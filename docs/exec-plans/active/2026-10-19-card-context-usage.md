@@ -129,7 +129,10 @@ While the modal is open, the value keeps refreshing.
 - [x] Full suite re-run after the inspection-1 fixes: 763 passed.
 - [x] Fresh Codex reinspection after the inspection-1 fixes: inspection 2 confirmed CTX-008/009 and raised only CTX-010 (low).
 - [x] Tail test: a tail that starts exactly on a line boundary keeps that line (CTX-010).
-- [ ] Fresh Codex reinspection after the CTX-010 fix.
+- [x] Fresh Codex reinspection after the CTX-010 fix: inspection 3 raised only CTX-011 (low).
+- [x] Parser test: U+2028/U+2029/U+0085 inside JSON text do not split a record (CTX-011).
+- [x] Full suite after the CTX-010/011 fixes: 765 passed.
+- [ ] Fresh Codex reinspection after the CTX-011 fix.
 - [x] `session_file` test: it refuses a symlinked transcript.
 - [x] `session_file` test: it refuses an invalid sid.
 - [x] Route test: a completed record with a Claude session returns `context`.
