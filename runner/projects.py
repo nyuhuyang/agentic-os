@@ -1725,6 +1725,22 @@ def find_session(agent: str, sid: str) -> dict | None:
             "title": _codex_title(*texts), "native_title": texts[0] or None}
 
 
+def session_file(agent: str, sid: str) -> Path | None:
+    """The transcript/rollout of a runner-known session, path only: find_session's store
+    confinement without reading the file (a poll target; CTX-003)."""
+    if agent == "codex":
+        found = find_session(agent, sid)  # DB row + a stat, no file scan
+        return found["path"] if found else None
+    if agent != "claude" or not isinstance(sid, str) or not _SESSION_ID.match(sid) or not CLAUDE_PROJECTS.is_dir():
+        return None
+    store = CLAUDE_PROJECTS.resolve()
+    for d in CLAUDE_PROJECTS.iterdir():
+        f = d / f"{sid}.jsonl"
+        if d.is_dir() and f.is_file() and not f.is_symlink() and f.resolve().is_relative_to(store):
+            return f
+    return None
+
+
 def session_name_text(title: object) -> str:
     """A card title as a session name: control characters as spaces, whitespace collapsed,
     at most 200 characters; '' when nothing is left (§Definitions)."""

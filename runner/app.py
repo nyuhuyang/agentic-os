@@ -5015,6 +5015,44 @@ def api_run_detail(run_id: str):
     return jsonify({"error": "not found"}), 404
 
 
+def _run_context(run_id: str) -> dict | None:
+    """Context-window usage {used, window, pct} of a run's agent session, or None (card ctx%)."""
+    try:
+        rec = _running_jobs.get(run_id)
+        if rec is None:
+            rec = next((r for r in reversed(_all_records()) if r.get("run_id") == run_id), None)
+        if not rec:
+            return None
+        agent = canonical_agent(rec.get("agent"))
+        sid = rec.get("agent_session_id") or (_SESSION_CLAIMS.get(run_id) or (None, None))[1]
+        stream = None
+        prog = _run_progress_path(run_id)
+        if prog.exists():
+            saved = json.loads(prog.read_text(encoding="utf-8")).get("stream_log")
+            stream = _checkout_path(saved) if saved else None
+        if stream is None or not stream.exists():
+            stream = _claude_stream_log_path(run_id)
+        stream = stream if stream.exists() else None
+        if agent == "dsh":
+            return usage_reader.context_usage("dsh", stream)
+        if agent not in ("claude", "codex"):
+            return None
+        model = _OBSERVED_MODELS.get(run_id) or (usage_reader.stream_model(stream) if agent == "claude" else None) \
+            or rec.get("model")
+        found = _projects.session_file(agent, sid) if sid else None
+        usage = usage_reader.context_usage(agent, found, model) if found else None
+        if usage is None and agent == "claude":
+            usage = usage_reader.context_usage("claude", stream, model)
+        return usage
+    except Exception:
+        return None
+
+
+@app.route("/api/runs/<run_id>/context")
+def api_run_context(run_id: str):
+    return jsonify({"context": _run_context(run_id)})
+
+
 @app.route("/api/runs/<run_id>/progress")
 def api_run_progress(run_id: str):
     issue_id = request.args.get("linear_issue_id") or None

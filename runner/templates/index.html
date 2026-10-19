@@ -2556,10 +2556,39 @@ async function _refreshDetailProgress(runId, issueId = '') {
   } catch (_) {}
 }
 
-function _startDetailProgressPoll(runId, issueId = '') {
+function _startDetailProgressPoll(runId, issueId = '', withProgress = true) {
   _stopDetailProgressPoll();
-  _refreshDetailProgress(runId, issueId);
-  _detailProgressTimer = setInterval(() => _refreshDetailProgress(runId, issueId), 3000);
+  if (withProgress) _refreshDetailProgress(runId, issueId);
+  _detailProgressTimer = setInterval(() => {
+    if (withProgress) _refreshDetailProgress(runId, issueId);
+    _refreshDetailCtx(runId);
+  }, 3000);
+}
+
+// Context-window usage of the card's agent session, on the detail meta line (CTX D1).
+function _fmtCtxTok(n) {
+  if (n < 1000) return String(n);
+  if (n < 1e6) return `${Math.round(n / 1000)}k`;
+  return `${+(n / 1e6).toFixed(1)}M`;
+}
+
+function _ctxHtml(c) {
+  if (!c || c.used == null) return '';
+  if (c.pct == null) return ` &nbsp;·&nbsp; Context: <span>${_fmtCtxTok(c.used)} used</span>`;
+  const colour = c.pct >= 95 ? 'var(--red)' : c.pct >= 80 ? 'var(--yellow)' : '';
+  const pct = `<span${colour ? ` style="color:${colour}"` : ''}>${c.pct}%</span>`;
+  return ` &nbsp;·&nbsp; Context: ${pct} (<span>${_fmtCtxTok(c.used)} / ${_fmtCtxTok(c.window)}</span>)`;
+}
+
+async function _refreshDetailCtx(runId) {
+  if (!runId || runId.startsWith('linear-')) return;
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/context`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const el = document.getElementById('detail-ctx');
+    if (el && _detailRunId === runId && _isModalOpen('detail-modal')) el.innerHTML = _ctxHtml(data.context);
+  } catch (_) {}
 }
 
 function _buildColCard(run) {
@@ -3232,7 +3261,7 @@ async function openDetailModal(run_id) {
     const modelLabel = _displayModelLabel(r) || _displayModelLabel(boardItem);
     const modelMeta = modelLabel ? ` &nbsp;·&nbsp; Model: <span>${_esc(modelLabel)}</span>` : '';
     document.getElementById('detail-meta').innerHTML =
-      `Started: <span>${_esc(started)}</span> &nbsp;·&nbsp; Duration: <span>${_esc(dur)}</span>${modelMeta} &nbsp;·&nbsp; ID: <span style="font-family:monospace;font-size:calc(10px * var(--fs))">${_esc(run_id)}</span>`;
+      `Started: <span>${_esc(started)}</span> &nbsp;·&nbsp; Duration: <span>${_esc(dur)}</span>${modelMeta}<span id="detail-ctx"></span> &nbsp;·&nbsp; ID: <span style="font-family:monospace;font-size:calc(10px * var(--fs))">${_esc(run_id)}</span>`;
 
     const prompt = (r.prompt || '').trim();
     const promptEl = document.getElementById('detail-prompt');
@@ -3250,8 +3279,9 @@ async function openDetailModal(run_id) {
     errorEl.textContent = errorRaw || '';
     errorEl.classList.toggle('empty', !errorRaw);
 
-    if (hasLog) {
-      _startDetailProgressPoll(run_id, r.linear_issue_id || '');
+    _refreshDetailCtx(run_id);
+    if (hasLog || !run_id.startsWith('linear-')) {
+      _startDetailProgressPoll(run_id, r.linear_issue_id || '', hasLog);  // ctx% refreshes even with no log (CTX-007)
     }
 
     const path = (r.output_path || '').trim();
