@@ -1,6 +1,7 @@
 ---
-status: in-progress
+status: completed
 created: 2026-10-16
+completed: 2026-10-19
 ---
 
 # Projects stacked vertically; one task, one session, named by the card title

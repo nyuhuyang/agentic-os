@@ -261,3 +261,8 @@
   - a real-process continuation outlives the scaled run cap and stops at the session ceiling.
 - D5 (remove quick reply) was superseded by the user on 2026-10-18 (\`docs/exec-plans/completed/2026-10-18-restore-quick-reply.md\`).
 - Proof: 739 passed.
+
+## Codex inspection 18 (the post-approval fix f56e69f and its tests, base 06b2d7c) — APPROVED (cross_provider)
+- Result: `/private/tmp/claude-501/claudex-pvst/i18/claudex-8s31qxee/result.json` (110 s). No material unresolved defects.
+- The live runner restarts by itself once idle: a watcher waits until no job is running and no terminal is open. Right now the running job is the session coordinating this plan.
+- All checklist items are `[x]`, with D5 marked superseded. Plan completed 2026-10-19.
