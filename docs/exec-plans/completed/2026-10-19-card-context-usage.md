@@ -1,6 +1,7 @@
 ---
-status: in-progress
+status: completed
 created: 2026-10-19
+completed: 2026-10-19
 ---
 
 # Card detail: show the agent's context usage (ctx%)
@@ -132,7 +133,8 @@ While the modal is open, the value keeps refreshing.
 - [x] Fresh Codex reinspection after the CTX-010 fix: inspection 3 raised only CTX-011 (low).
 - [x] Parser test: U+2028/U+2029/U+0085 inside JSON text do not split a record (CTX-011).
 - [x] Full suite after the CTX-010/011 fixes: 765 passed.
-- [ ] Fresh Codex reinspection after the CTX-011 fix.
+- [x] Fresh Codex reinspection after the CTX-011 fix: inspection 4 APPROVED (cross_provider).
+- [x] Browser checks re-run on final HEAD 75053d8: all pass, and dsh renders `~40%` with its tooltip.
 - [x] `session_file` test: it refuses a symlinked transcript.
 - [x] `session_file` test: it refuses an invalid sid.
 - [x] Route test: a completed record with a Claude session returns `context`.
@@ -157,7 +159,7 @@ While the modal is open, the value keeps refreshing.
 - [x] The full suite has been run.
 - [x] The browser checks have been run.
 - [x] Committed (no push).
-- [ ] A fresh Codex inspection approved the change.
-- [ ] The live runner was restarted once idle.
-- [ ] The plan is moved to `docs/exec-plans/completed/`.
-- [ ] The review log is moved to `docs/exec-plans/completed/`.
+- [x] A fresh Codex inspection approved the change (inspection 4).
+- [x] The live runner restart is armed for when it goes idle. The idle watcher (`/private/tmp/claude-501/pvst-verify/restart_when_idle.sh`, log `/private/tmp/claude-501/ctx-verify/restart_when_idle.log`) is running. Its only running job is this coordinating session, so the restart happens when the session ends.
+- [x] The plan is moved to `docs/exec-plans/completed/`.
+- [x] The review log is moved to `docs/exec-plans/completed/`.

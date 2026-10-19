@@ -61,3 +61,9 @@
 ## Inspection 3 — Codex (fresh): REVISE (low only)
 - Result: /private/tmp/claude-501/claudex-ctx/i3/claudex-05jucqal/result.json, assurance=cross_provider.
 - CTX-011 (low) accepted: str.splitlines split JSON text at U+2028/U+2029/U+0085. Fix: split on physical LF bytes (both _tail_lines and stream_model). Test added; suite 765 passed.
+
+## Inspection 4 — Codex (fresh): APPROVED
+- Result: /private/tmp/claude-501/claudex-ctx/i4/claudex-e11lx6yc/result.json, assurance=cross_provider, no findings.
+- Limitations accepted in the plan: the 2 MB usage tail, inferred Claude windows, approximate dsh usage.
+- Final browser re-run on 75053d8 passed. Live restart watcher armed (pid 80481).
+- Rounds used: 4 plan reviews, 4 inspections; 4 fix rounds (CTX-008..011). Authorship: all code by Claude; all inspections by Codex.
