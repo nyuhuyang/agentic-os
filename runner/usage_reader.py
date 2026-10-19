@@ -1469,15 +1469,15 @@ def _tail_lines(path: Path, limit: int | None = None) -> list[str]:
     try:
         with open(path, "rb") as f:
             size = f.seek(0, os.SEEK_END)
-            start = max(0, size - limit)
+            start = max(0, size - limit - 1)  # one byte early: is the tail's first line whole?
             f.seek(start)
             data = f.read()
     except OSError:
         return []
-    lines = data.decode("utf-8", errors="ignore").splitlines()
-    if start and lines:
-        lines = lines[1:]  # a read starting mid-file begins with a partial line
-    return lines[::-1]
+    if start:
+        cut = data.find(b"\n")  # drop everything up to the first newline: a partial line,
+        data = data[cut + 1:] if cut >= 0 else b""  # or just that extra byte when the tail starts a line
+    return data.decode("utf-8", errors="ignore").splitlines()[::-1]
 
 
 def _tok(*values) -> int | None:

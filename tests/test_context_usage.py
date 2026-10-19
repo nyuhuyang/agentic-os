@@ -118,6 +118,15 @@ def test_tail_limit_and_partial_line(tmp_path, monkeypatch):
     assert all(json.loads(x) for x in lines)  # the partial first line was dropped
 
 
+def test_tail_starting_exactly_on_a_line_keeps_it(tmp_path):
+    first = json.dumps(asst(0, 4_000)) + "\n"
+    f = jl(tmp_path / "t.jsonl", {"type": "user", "pad": "p" * 50}, asst(0, 4_000), {"type": "user"})
+    limit = f.stat().st_size - len(json.dumps({"type": "user", "pad": "p" * 50}) + "\n")
+    assert ur._tail_lines(f, limit)[-1] == first.strip()  # the tail begins on a whole usage line
+    lines = ur._tail_lines(f, limit - 1)
+    assert json.loads(lines[-1]) == {"type": "user"}  # one byte less: that line is partial and dropped
+
+
 # ── stream_model ──────────────────────────────────────────────────────────────
 
 def test_stream_model_newest_init_and_far_back(tmp_path):

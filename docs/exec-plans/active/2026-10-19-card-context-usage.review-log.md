@@ -53,3 +53,7 @@
 - Result: /private/tmp/claude-501/claudex-ctx/i1/claudex-9wa9zsl9/result.json, assurance=cross_provider.
 - CTX-008 (medium) accepted: session_file picked the first duplicate transcript (old checkout's folder). Fix: the newest-mtime confined copy wins. Real run 614ee14a: 24% → 6%.
 - CTX-009 (medium) accepted in part: dsh step_end sums the attempts. There is no per-call source in the stream; the zstd session store can't be read without a new dependency. Fix: dsh results are flagged approx (an upper bound), and the UI shows ~NN% with a tooltip. D3a recorded in the plan. A double count happens only when a failed attempt itself reported usage (otherwise dsh omits the step's usage).
+
+## Inspection 2 — Codex (fresh): REVISE (low only)
+- Result: /private/tmp/claude-501/claudex-ctx/i2/claudex-lrqxghum/result.json, assurance=cross_provider.
+- CTX-010 (low) accepted: _tail_lines dropped a whole first line when the tail began exactly on a line boundary. Fix: read one byte early and cut at the first newline. Test added.

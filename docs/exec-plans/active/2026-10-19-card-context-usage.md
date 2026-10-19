@@ -127,7 +127,9 @@ While the modal is open, the value keeps refreshing.
 - [x] dsh test: results carry `approx: true`; a retried-step aggregate is flagged as an upper bound (CTX-009).
 - [x] UI: `_ctxHtml` prefixes `~` and adds a tooltip when `approx` is set.
 - [x] Full suite re-run after the inspection-1 fixes: 763 passed.
-- [ ] Fresh Codex reinspection after the inspection-1 fixes.
+- [x] Fresh Codex reinspection after the inspection-1 fixes: inspection 2 confirmed CTX-008/009 and raised only CTX-010 (low).
+- [x] Tail test: a tail that starts exactly on a line boundary keeps that line (CTX-010).
+- [ ] Fresh Codex reinspection after the CTX-010 fix.
 - [x] `session_file` test: it refuses a symlinked transcript.
 - [x] `session_file` test: it refuses an invalid sid.
 - [x] Route test: a completed record with a Claude session returns `context`.
