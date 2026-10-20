@@ -3376,6 +3376,9 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
                 result["interactive_tab_open"] = tab_open
                 if tab_open and result.get("verify_badge") == "main checkout changed":
                     result["verify_badge"] = "main checkout changed (interactive tab open)"
+                result.update(_merge_when_last(project, ident, job, eligible=status == "review"
+                                               and not job.get("cancelled")
+                                               and result.get("verify_badge") in (None, "pass", "no check")))
     except (_projects.ProjectError, project_runs.ProjectRunError) as exc:
         status, error = "error", str(exc)
     except Exception as exc:
@@ -3428,6 +3431,38 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
             _running_jobs.pop(run_id, None)
         # after the record and the job's removal; the group was reaped by run_agent (§2 triggers)
         _after_card_run(run_id, linear_issue_id, agent, sid or resume_session, agent_pgid[0])
+
+
+_PENDING_MERGES: dict[str, list[str]] = {}  # project key -> tickets waiting for its other runs (AGE-111)
+
+
+def _merge_when_last(project, ident: str, job: dict, eligible: bool) -> dict:
+    """Merge finished ticket branches into the project's main checkout (AGE-111), only once no
+    other run of the project is still before its closing fingerprint: a merge under it would
+    read as that run changing the main checkout. Until then a ticket waits in _PENDING_MERGES
+    and the project's last finishing run merges it.
+    ponytail: the queue is in memory; a runner restart drops it (the branches stay, merge by hand)."""
+    if not project.auto_merge:
+        return {}
+    with _JOB_LOCK:
+        job["merge_checked"] = True
+        if eligible:
+            _PENDING_MERGES.setdefault(project.key, []).append(ident)
+        busy = any(j is not job and j.get("project_key") == project.key and not j.get("merge_checked")
+                   for j in _running_jobs.values())
+        todo = [] if busy else list(dict.fromkeys(_PENDING_MERGES.pop(project.key, [])))
+    if busy:
+        return {"merge": "waiting for this project's other runs"} if eligible else {}
+    out: dict = {}
+    for t in todo:
+        try:
+            out["merged_head"] = _projects.merge_into_checkout(project, t)
+            out.setdefault("merged", []).append(t)
+        except _projects.ProjectError as exc:
+            out.setdefault("merge_error", {})[t] = str(exc)[:500]
+    if ident in out.get("merge_error", {}):
+        out["verify_badge"] = "merge failed"
+    return out
 
 
 def _reset_key(records: list[dict], task_id: str) -> str:

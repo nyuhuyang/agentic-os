@@ -298,6 +298,36 @@ def test_runner_commit_includes_edit_not_seed(repo):
     assert pj.committed_seeds(p, wt, info["base_sha"]) == []
 
 
+def test_merge_into_checkout(repo):
+    """AGE-111: a clean branch lands in the main checkout; the user's unrelated edit survives."""
+    p, wt, info = make(repo)
+    (wt / "new.txt").write_text("agent work\n")
+    pj.runner_commit(p, wt, "T-1: work")
+    (repo / "sub" / "keep.txt").write_text("user edit\n")  # uncommitted, untouched by the branch
+    head = pj.merge_into_checkout(p, "T-1")
+    assert (repo / "new.txt").read_text() == "agent work\n" and (repo / "sub" / "keep.txt").read_text() == "user edit\n"
+    assert head == subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+
+@pytest.mark.parametrize("dirty", [False, True])
+def test_merge_into_checkout_refuses_without_touching_it(repo, dirty):
+    """A conflict (or a local edit the merge would overwrite) leaves the checkout as it was."""
+    p, wt, info = make(repo)
+    (wt / "tracked.txt").write_text("agent\n")
+    pj.runner_commit(p, wt, "T-1: work")
+    if dirty:
+        (repo / "tracked.txt").write_text("user, uncommitted\n")
+    else:
+        (repo / "tracked.txt").write_text("user\n")
+        git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "user")
+    before = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout
+    with pytest.raises(pj.ProjectError):
+        pj.merge_into_checkout(p, "T-1")
+    assert subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout == before
+    assert (repo / "tracked.txt").read_text() == ("user, uncommitted\n" if dirty else "user\n")
+    assert not (repo / ".git" / "MERGE_HEAD").exists()
+
+
 def test_runner_commit_nothing_to_commit(repo):
     p, wt, _ = make(repo)
     assert pj.runner_commit(p, wt, "T-1: nothing") is None
