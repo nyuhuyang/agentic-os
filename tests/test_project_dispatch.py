@@ -552,14 +552,14 @@ def test_runner_commit_refused_after_branch_switch(helper):
     assert other == rec["base_sha"] and "main_checkout_changed" in rec
 
 
-def test_uncommitted_work_never_shows_a_pass(helper):
-    """I5-11: verify passing on uncommitted files is not a green card."""
+def test_uncommitted_work_is_committed_by_the_runner(helper):
+    """AGE-111: an agent that forgets to commit still leaves its work on the branch."""
     app_mod, run, records, state, *_ = helper
     state["mode"] = "uncommitted"
     run(agent="claude")
     rec = records()[-1]
-    assert rec["verify"]["status"] == "pass" and rec["verify_badge"] == "uncommitted changes"
-    assert rec["uncommitted"] == ["feature.txt"]
+    assert rec["runner_commit"] and rec["uncommitted"] == []
+    assert rec["verify"]["status"] == "pass" and rec["verify_badge"] == "pass"
 
 
 def test_seed_committed_by_verify_is_caught(helper):

@@ -591,7 +591,7 @@ def run_agent(argv: list[str], cwd: str, env: dict, run_id: str, agent: str, tim
 def post_run(project: projects.Project, binding: dict, agent: str, title: str,
              fingerprint_before: str, exclude: set[str], on_start=None,
              stopped: Callable[[], bool] = lambda: False, start_sha: str | None = None) -> dict:
-    """Runner commit (sandboxed Codex, branch checked first), uncommitted check, verify, then
+    """Runner commit of leftover changes (any agent, branch checked first), uncommitted check, verify, then
     binding + seed-history checks after verify (it may run git too), shortstat, and the closing
     fingerprint last, also on failure (I4-05, I5-10/11/14). `on_start` gets the verify process
     so a cancel can kill it; `stopped()` skips verify after a cancel. Returns additive
@@ -601,9 +601,10 @@ def post_run(project: projects.Project, binding: dict, agent: str, title: str,
     seeds, dirty, verify = [], [], None
     changed_nothing = False  # this run (from start_sha) left no commit and no change (§7)
     try:
-        if is_sandboxed_codex(agent, project):
-            result["runner_commit"] = projects.runner_commit(project, wt, f"{binding['issue_identifier']}: {title}"[:200])
         dirty = projects.uncommitted(project, wt)
+        if dirty:  # any agent: leftover work lands on the branch, never stranded in the worktree (AGE-111)
+            result["runner_commit"] = projects.runner_commit(project, wt, f"{binding['issue_identifier']}: {title}"[:200])
+            dirty = projects.uncommitted(project, wt)
         result["uncommitted"] = dirty[:50]
         if start_sha:  # before verify: its own artifacts never count as this run's change (STB-081)
             confine = projects.confine_for(project, wt)

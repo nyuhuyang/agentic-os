@@ -352,7 +352,6 @@ def test_session_card_terminal_opens_in_the_session_folder(stb):
     ("", [], "timeout", False, "timeout"),
     ("", [], None, True, "main checkout changed"),
     ("abc", [], None, False, "no check"),           # changed files, no check: neutral
-    ("", ["a.py"], None, False, "uncommitted changes"),
 ])
 def test_badge_for_a_run_that_changed_nothing(monkeypatch, tmp_path, commits, dirty, verify, changed, expected):
     import project_runs as pr
