@@ -1232,14 +1232,23 @@ def merge_into_checkout(project: Project, ident: str, rev: str | None = None) ->
     with _MERGE_LOCK:
         if _git(root, "symbolic-ref", "-q", "HEAD", check=False, confine=confine).returncode:
             raise ProjectError(f"{root} is on a detached HEAD; merge {branch} by hand")
-        if _git(root, "merge-tree", "--write-tree", "HEAD", target, check=False, confine=confine).returncode:
+        busy = _git_operation(root, confine)  # before touching it: never merge into a paused rebase etc. (CM-009)
+        if busy:
+            raise ProjectError(f"{root} has {busy} in progress; merge {branch} by hand after finishing it")
+        pre = _git(root, "merge-tree", "--write-tree", "HEAD", target, check=False, confine=confine)
+        if pre.returncode:
             raise ProjectError(f"{branch} conflicts with {root}; merge it by hand")
-        # --commit --no-squash: a branch.<name>.mergeOptions default can never leave it half done (CM-005)
-        _git(root, "merge", "--no-edit", "--no-verify", "--no-gpg-sign", "--commit", "--no-squash", "-q",
+        tree = pre.stdout.split("\n", 1)[0].strip()
+        current = _git(root, "symbolic-ref", "--short", "HEAD", confine=confine).stdout.strip()
+        # Exactly the merge the preflight checked: no inherited branch.<name>.mergeOptions
+        # (-s ours, --no-commit, --squash) and no autostash of the user's edits (CM-005/007/008).
+        _git(root, "-c", f"branch.{current}.mergeOptions=", "-c", "merge.autoStash=false", "merge",
+             "--no-edit", "--no-verify", "--no-gpg-sign", "--commit", "--no-squash", "--no-autostash", "-q",
              "-m", f"Merge branch '{branch}'", target, confine=confine, timeout=COMMIT_TIMEOUT_S, env=_identity_env(root))
-        if _git_operation(root, confine) or _git(root, "merge-base", "--is-ancestor", target, "HEAD",
-                                                 check=False, confine=confine).returncode:
-            raise ProjectError(f"{branch} did not merge into {root} cleanly; finish or abort it by hand")
+        if (_git_operation(root, confine)
+                or _git(root, "merge-base", "--is-ancestor", target, "HEAD", check=False, confine=confine).returncode
+                or _git(root, "rev-parse", "HEAD^{tree}", confine=confine).stdout.strip() != tree):
+            raise ProjectError(f"{branch} did not merge into {root} as checked; inspect it by hand")
         return _git(root, "rev-parse", "HEAD", confine=confine).stdout.strip()
 
 

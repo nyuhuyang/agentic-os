@@ -49,5 +49,8 @@ The user asked for two things (2026-10-21):
   - CM-004: a manual merge also counts session-card agents working in the main checkout, which register under the merge gate.
   - CM-005: `--commit --no-squash`, plus a post-merge check that the commit landed.
   - CM-006: a failed status is cached as neutral.
+- [x] Inspection 3 fixes:
+  - the merge clears inherited mergeOptions, never autostashes, refuses a target mid-operation, and verifies the merged tree (CM-007/008/009);
+  - the manual merge counts runner-root jobs when the project is the runner's checkout, and jobs still retiring (CM-010/011).
 - [ ] Fresh Codex inspection approved.
 - [ ] Archive.

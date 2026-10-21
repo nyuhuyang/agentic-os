@@ -1986,6 +1986,7 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
         f.write(json.dumps(record) + "\n")
     _runs_cache.clear()  # invalidate so next board refresh sees the new record
     _FINALIZING.discard(run_id)  # its record is on disk: shutdown need not wait for it (SBR-010)
+    _RETIRING.pop(run_id, None)
     if audit:  # history only: no task/job state, it is not an execution (UI3-02)
         return run_id
 
@@ -2891,6 +2892,9 @@ def _register_proc(run_id: str, proc) -> bool:
 # Runs whose worker won _end_job and has not written its record yet; shutdown waits for them.
 # Added by _end_job, removed by _write_run_log once the run's record is on disk (SBR-010).
 _FINALIZING: set[str] = set()
+# Jobs retired from _running_jobs whose record is not on disk yet (their process group may still
+# be stopping): a manual merge still counts them as activity (CM-011). Same lifetime as _FINALIZING.
+_RETIRING: dict[str, dict] = {}
 
 
 def _end_job(run_id: str) -> bool:
@@ -2902,6 +2906,7 @@ def _end_job(run_id: str) -> bool:
         _running_procs.pop(run_id, None)
         if job is not None:
             _FINALIZING.add(run_id)
+            _RETIRING[run_id] = job
     return job is not None
 
 
@@ -2914,6 +2919,8 @@ def _cancel_generic(run_id: str, error: str) -> dict | None:
         _mark_job_closing(run_id)  # before the job leaves the live set: no rename slips in (R3)
         job = _running_jobs.pop(run_id, None)
         proc = _running_procs.pop(run_id, None) if job is not None else None
+        if job is not None:
+            _RETIRING[run_id] = job  # until its record is written, after the group is gone (CM-011)
     if job is None:
         return None
     if proc is not None:
@@ -3239,15 +3246,19 @@ def _merge_gate(key: str) -> threading.Lock:
         return _MERGE_GATES.setdefault(key, threading.Lock())
 
 
-def _project_runs_open(key: str, job: dict | None, sessions: bool = False) -> bool:
+def _project_runs_open(key: str, job: dict | None, sessions: bool = False, runner_root: bool = False) -> bool:
     """Another run of this project is still before its closing fingerprint: a merge now would
     read as that run changing the main checkout. Caller holds _JOB_LOCK.
     Used under _merge_gate, which a new run's opening fingerprint also takes (SC-019)."""
-    return any(j is not job and not j.get("merge_checked")
-               and (j.get("project_key") == key
-                    # an agent working in the main checkout itself (a session card, no project_key) (CM-004)
-                    or (sessions and (j.get("record_extra") or {}).get("session_project") == key))
-               for j in _running_jobs.values())
+    def here(j):
+        extra = j.get("record_extra") or {}
+        return (j.get("project_key") == key
+                # an agent working in the main checkout itself (a session card, no project_key) (CM-004)
+                or (sessions and extra.get("session_project") == key)
+                # a runner-root job (free prompt, generic retry, unbound dispatch) when the project IS the runner's checkout (CM-010)
+                or (runner_root and not j.get("project_key") and not extra.get("session_project")))
+    jobs = list(_running_jobs.values()) + (list(_RETIRING.values()) if sessions else [])  # retiring: still stopping (CM-011)
+    return any(j is not job and not j.get("merge_checked") and here(j) for j in jobs)
 
 
 @contextlib.contextmanager
@@ -4790,8 +4801,9 @@ def _manual_merge(project, ident: str) -> str:
     Refused while another run of the project is open: a merge now would read as that run
     changing the main checkout. Caller holds the ticket lock."""
     with _merge_gate(project.key):
+        runner_root = os.path.realpath(project.path) == os.path.realpath(_PROTO)
         with _JOB_LOCK:
-            opened = _project_runs_open(project.key, None, sessions=True)
+            opened = _project_runs_open(project.key, None, sessions=True, runner_root=runner_root)
         if opened:
             raise _projects.ProjectError("another run of this project is in progress; merge after it finishes")
         eff = _effective_project(project, ident)

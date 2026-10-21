@@ -438,3 +438,56 @@ def test_failing_status_is_cached_as_neutral(repo, monkeypatch):
     cache = {}
     assert [pj.commit_state(project, c, cache) for c in (root, root / "src")] == [None, None]
     assert len(calls) == 1
+
+
+# ── Inspection fixes (CM-007..011) ───────────────────────────────────────────
+
+def _branch_ahead_and_main_diverged(project, root):
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    pj.commit_checkout(project, wt, "branch work")
+    (root / "m.txt").write_text("m\n"); git(root, "add", "-A"); git(root, "commit", "-qm", "diverge")
+    return wt
+
+
+def test_merge_ignores_an_inherited_ours_strategy(repo):
+    project, root = repo
+    _branch_ahead_and_main_diverged(project, root)
+    git(root, "config", "branch.main.mergeOptions", "-s ours")
+    pj.merge_into_checkout(project, "T-1")
+    assert (root / "w.txt").read_text() == "w\n"  # the branch's change really landed (CM-007)
+
+
+def test_merge_never_autostashes_overlapping_user_edits(repo):
+    project, root = repo
+    wt = _wt(project)
+    (wt / "a.txt").write_text("branch\n")
+    pj.commit_checkout(project, wt, "branch edits a.txt")
+    git(root, "config", "merge.autoStash", "true")
+    (root / "a.txt").write_text("my uncommitted edit\n")
+    head = git(root, "rev-parse", "HEAD")
+    with pytest.raises(pj.ProjectError):
+        pj.merge_into_checkout(project, "T-1")
+    assert git(root, "rev-parse", "HEAD") == head and (root / "a.txt").read_text() == "my uncommitted edit\n"  # (CM-008)
+
+
+def test_merge_refused_into_a_checkout_mid_operation(repo):
+    project, root = repo
+    _branch_ahead_and_main_diverged(project, root)
+    (Path(git(root, "rev-parse", "--absolute-git-dir")) / "rebase-merge").mkdir()
+    head = git(root, "rev-parse", "HEAD")
+    with pytest.raises(pj.ProjectError, match="rebase"):
+        pj.merge_into_checkout(project, "T-1")
+    assert git(root, "rev-parse", "HEAD") == head  # refused before anything ran (CM-009)
+
+
+def test_activity_counts_runner_root_jobs_and_retiring_ones(monkeypatch):
+    import app as app_mod
+    monkeypatch.setattr(app_mod, "_running_jobs", {"free": {"skill": "_prompt"}})  # a /run job in the runner root
+    monkeypatch.setattr(app_mod, "_RETIRING", {})
+    assert not app_mod._project_runs_open("os", None, sessions=True)
+    assert app_mod._project_runs_open("os", None, sessions=True, runner_root=True)  # (CM-010)
+    monkeypatch.setattr(app_mod, "_running_jobs", {})
+    monkeypatch.setattr(app_mod, "_RETIRING", {"c": {"record_extra": {"session_project": "os"}}})  # cancelled, still stopping
+    assert app_mod._project_runs_open("os", None, sessions=True)  # (CM-011)
+    assert not app_mod._project_runs_open("os", None)  # the auto-merge drain is unchanged
