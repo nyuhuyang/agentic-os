@@ -2186,7 +2186,7 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
         record.update({k: v for k, v in extra.items() if k not in record})  # additive fields only
     limit_reset = None if audit else project_runs.LIMIT_RESETS.pop(run_id, None)
     # stopped by a usage limit (not by the user): continue its session once the limit resets (AGE-115)
-    continue_at = limit_reset + AUTO_CONTINUE_GRACE_S if limit_reset and agent_session_id \
+    continue_at = max(limit_reset, time.time()) + AUTO_CONTINUE_GRACE_S if limit_reset and agent_session_id \
         and status in ("error", "review") else None
     if continue_at:
         record["auto_continue_at"] = datetime.fromtimestamp(continue_at, timezone.utc).isoformat()
@@ -2228,7 +2228,7 @@ def _auto_continue_path() -> Path:
 
 
 def _schedule_auto_continue(run_id: str, at: float) -> None:
-    """AGE-115: headless `claude -p` exits when it hits a usage limit, so nothing is left waiting
+    """AGE-115: headless `claude -p` / `codex exec` exit when they hit a usage limit, so nothing is left waiting
     for the reset the way an interactive session does: the runner waits and continues it."""
     with json_transaction(_auto_continue_path()) as pending:
         pending[run_id] = at
