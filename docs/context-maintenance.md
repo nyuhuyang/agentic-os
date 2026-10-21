@@ -7,6 +7,7 @@
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- AGE-117 card detail Log/Error tabs: Log now reads the run's own stream log (plain-text replay) for finished runs too, by run id; Error adds verify fail, merge_error and stderr tail. `py_compile` + `node --check` pass; test-client check on copies of 2 real runs returned 19 / 165 log lines and the stderr tail — 2026-10-21
 - Multi-project dispatch Phases 0–3: 265 pytest pass. Live: browser request checks (token/Host/Origin), project panel, terminal tabs (3 projects, reload, close), and sandboxed verify baselines (one R project 0 fail / 1031 pass; KB from the launchd context) — 2026-10-14
 - STT two-pass (Browser STT live → `gpt-transcribe` + `gpt-6-luna` polish) built per `docs/exec-plans/completed/2026-10-14-stt-two-pass.md`: 65 pytest + 5 node tests pass; live `/api/stt` via launchd 4.0 s; headless Chrome smoke (fake mic) 17/17. A real-mic manual check is still pending — 2026-10-14
 - Claude quota cards now display `remaining_pct` on initial render and live refresh; focused Jinja and Node checks cover live/missing Claude values and unaffected Codex/Gemini display, and `.venv/bin/python3 -m py_compile runner/*.py` passes — 2026-09-24

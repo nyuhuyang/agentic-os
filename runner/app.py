@@ -962,15 +962,6 @@ def _stream_text_run(
     return "\n".join(collected), stderr_s
 
 
-def _tail_text_stream(path: Path, max_lines: int = 80) -> list[dict]:
-    """Return recent lines from a plain-text stream log as events."""
-    events = []
-    for line in _tail_text_lines(path, max_lines):
-        if line.strip():
-            events.append({"ts": "", "text": line, "role": "runner"})
-    return events
-
-
 def _tail_codex_session(path: Path, max_events: int = 40) -> list[dict]:
     events: list[dict] = []
     for line in _tail_text_lines(path, 240):
@@ -1089,6 +1080,10 @@ def _find_recent_codex_session_for_issue(issue: dict) -> Path | None:
     return None
 
 
+LOG_TAB_LINES = 400
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def _build_progress_payload(run_id: str, *, issue_id: str | None = None) -> dict:
     job = dict(_running_jobs.get(run_id) or {})
     proc = _running_procs.get(run_id)
@@ -1119,16 +1114,12 @@ def _build_progress_payload(run_id: str, *, issue_id: str | None = None) -> dict
             session_path = _checkout_path(saved_stream)
     events = _tail_codex_session(session_path) if session_path else []
     if not events:
-        prog_path = _run_progress_path(run_id)
-        if prog_path.exists():
-            try:
-                sl = json.loads(prog_path.read_text(encoding="utf-8")).get("stream_log")
-                if sl:
-                    events = _tail_text_stream(_checkout_path(sl))
-                    if events and status == "unknown":
-                        status = "running"
-            except Exception:
-                pass
+        # The run's own stream log, rendered like the Terminal replay but as plain text: every
+        # run has one, finished ones included, with or without a progress file (AGE-117).
+        lines = _replay_lines(run_id, job.get("agent"))[-LOG_TAB_LINES:]
+        events = [{"ts": "", "text": _ANSI_RE.sub("", ln), "role": "runner"} for ln in lines]
+        if events and status == "unknown":
+            status = "finished"
     payload = {
         "ok": True,
         "run_id": run_id,
@@ -5062,6 +5053,8 @@ def api_run_detail(run_id: str):
             if rid == run_id:
                 r["run_id"] = rid
                 r.setdefault("output_path", "")
+                stderr = (read_json(_stream_meta_path(rid)) or {}).get("stderr_tail") or []
+                r["stderr_tail"] = [e.get("line", "") if isinstance(e, dict) else str(e) for e in stderr]  # Error tab (AGE-117)
                 intent = _valid_intent(r) if r.get("status") != "running" else None
                 r["resume_ok"] = bool(intent)  # precomputed for the reply UI (§1, STB-084)
                 if intent:

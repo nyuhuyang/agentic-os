@@ -3277,19 +3277,28 @@ async function openDetailModal(run_id) {
 
     const output = (r.output || '').trim();
     const errorRaw = (r.error || '').trim();
-    const hasLog = !!r.log_path || r.status === 'running' || state === 'in_progress';
     const outputEl = document.getElementById('detail-output');
     outputEl.textContent = output || '(no output)';
     outputEl.classList.toggle('empty', !output);
 
+    // Every failure source of the run, not only the agent's own error text (AGE-117)
+    const v = r.verify && typeof r.verify === 'object' ? r.verify : null;
+    const errorText = [
+      errorRaw,
+      v && v.status && v.status !== 'pass' ? `verify: ${v.status}${v.exit != null ? ` (exit ${v.exit})` : ''}` : '',
+      r.merge_error ? `merge: ${typeof r.merge_error === 'object' ? Object.values(r.merge_error).join('\n') : r.merge_error}` : '',
+      (r.stderr_tail || []).length ? `stderr:\n${r.stderr_tail.join('\n')}` : '',
+    ].filter(Boolean).join('\n\n');
     const errorEl = document.getElementById('detail-error');
-    errorEl.textContent = errorRaw || '';
-    errorEl.classList.toggle('empty', !errorRaw);
+    errorEl.textContent = errorText || '(no errors)';
+    errorEl.classList.toggle('empty', !errorText);
 
     _refreshDetailCtx(run_id);
-    if (hasLog || !run_id.startsWith('linear-')) {
-      _startDetailProgressPoll(run_id, r.linear_issue_id || '', hasLog);  // ctx% refreshes even with no log (CTX-007)
-    }
+    // The Log is the run's own stream log: fetched once when finished, polled while live (AGE-117).
+    // By run id, not issue id: the issue route serves the card's virtual run, not this one.
+    const live = r.status === 'running' || state === 'in_progress';
+    if (!live) _refreshDetailProgress(run_id);
+    _startDetailProgressPoll(run_id, '', live);  // ctx% refreshes even with no log (CTX-007)
 
     const path = (r.output_path || '').trim();
     if (path) {
