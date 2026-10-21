@@ -13,3 +13,4 @@
 - Inspection 8 (CM-025..026): fixed. The registry checkout map handles a bad entry by skipping only that entry; _BASELINE_RUNS counts Run-tests activity (taken under the merge gate, held until verify is reaped) and blocks a manual merge.
 - Inspection 9 (CM-027..028): CM-028 fixed (_checkout_gate by the real cwd). CM-027 is OPEN, pending the user's decision: the CLI verify and run_skill.py run outside the dashboard process and are not part of merge admission.
 - CM-027: the user chose "先这样" (2026-10-21). Recorded as a known limitation; not fixed.
+- Inspection 10: APPROVED (cross_provider, no findings). Archived.

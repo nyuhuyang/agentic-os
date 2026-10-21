@@ -1,6 +1,7 @@
 ---
-status: in-progress
+status: completed
 created: 2026-10-21
+completed: 2026-10-21
 ---
 
 # Session Commit: colour by state, and commit & merge on worktree rows
@@ -68,5 +69,5 @@ The user asked for two things (2026-10-21):
 - [x] Inspection 8 fixes: per-entry registry map (CM-025); running baselines block manual merges and register under the gate (CM-026).
 - [x] Inspection 9 fix: resume tabs take the gate of the checkout they actually run in (CM-028).
 - [x] CM-027: shared interprocess admission for CLI `projects.py verify` and `run_skill.py`. — N/A: on 2026-10-21 the user chose "先这样". Known limitation: a CLI verify run started by hand is invisible to a dashboard Commit & merge.
-- [ ] Fresh Codex inspection approved.
-- [ ] Archive.
+- [x] Fresh Codex inspection approved: inspection 10, cross_provider, no findings.
+- [x] Archive.
