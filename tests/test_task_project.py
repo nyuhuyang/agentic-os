@@ -301,3 +301,68 @@ def test_committed_reset_keeps_its_generation_when_the_refresh_fails(reg, monkey
     before = reset_gen.current("lin-8")
     assert client.patch("/api/linear/issues/lin-8", json={"state_name": "Todo"}).status_code == 500
     assert reset_gen.current("lin-8") == before + 1  # Linear took Todo: the reset stands (UI14-03)
+
+
+class TeamsClient(FakeClient):
+    """FakeClient whose fetch_teams answers come from a list, one per call; create records the team."""
+    def __init__(self, calls, answers):
+        super().__init__(True, calls)
+        self.answers = answers
+
+    def fetch_teams(self):
+        return self.answers.pop(0)
+
+    def create_issue(self, team_id, title, desc, label_ids=None):
+        self.calls.append(("create_team", team_id))
+        return super().create_issue(team_id, title, desc, label_ids)
+
+
+def _all_teams(reg, monkeypatch, answers):
+    """Linear mode with "All Teams" selected (empty tracker.team_id, as the dashboard stores it)."""
+    (app_mod, mod, client, log, events, tmp), _ = reg
+    import linear_client
+    import runner.modules.linear as lin
+    calls = []
+    monkeypatch.setattr(linear_client, "LinearClient", TeamsClient(calls, answers))
+    monkeypatch.setattr(lin, "_linear_api_key_from_cfg", lambda tc: "key")
+    monkeypatch.setattr(lin, "_load_workflow_config", lambda: {"tracker": {"kind": "linear", "team_id": ""}})
+    monkeypatch.setattr(lin, "_post_linear_comment_raw", lambda *a: None)
+    monkeypatch.setattr(lin, "record_id_alias", lambda *a: None)
+    monkeypatch.setattr(mod, "_capability", {"available": True, "type": "linear"})
+    return mod, client, calls, (lambda: tasks(tmp))
+
+
+ONE = [{"id": "age", "key": "AGE", "name": "Agenticos"}]
+
+
+def test_all_teams_creates_in_the_viewers_only_team(reg, monkeypatch):
+    mod, client, calls, stored = _all_teams(reg, monkeypatch, [ONE])
+    r = client.post("/api/linear/issues", json={"title": "t", "team_id": ""})
+    assert r.status_code == 200 and ("create_team", "age") in calls  # AGE-122
+    assert client.post("/api/linear/issues", json={"title": "t", "team_id": "picked"}).status_code == 200
+    assert ("create_team", "picked") in calls  # a selected team still wins, no lookup (answers exhausted)
+
+
+def test_all_teams_with_several_teams_refuses_and_creates_nothing(reg, monkeypatch):
+    mod, client, calls, stored = _all_teams(reg, monkeypatch, [ONE + [{"id": "ml", "key": "ML4", "name": "ml4t"}]])
+    before = stored()
+    r = client.post("/api/linear/issues", json={"title": "t"})
+    assert r.status_code == 400 and "Select a team" in r.get_json()["error"] and "2 teams" in r.get_json()["error"]
+    assert stored() == before and not calls
+
+
+def test_failed_team_lookup_refuses_then_recovers(reg, monkeypatch):
+    mod, client, calls, stored = _all_teams(reg, monkeypatch, [[], ONE])
+    before = stored()
+    r = client.post("/api/linear/issues", json={"title": "t"})
+    assert r.status_code == 400 and "Could not read" in r.get_json()["error"] and stored() == before
+    assert client.post("/api/linear/issues", json={"title": "t"}).status_code == 200 and ("create_team", "age") in calls
+
+
+def test_stale_team_cache_is_never_used_to_create(reg, monkeypatch):
+    mod, client, calls, stored = _all_teams(reg, monkeypatch, [[]])
+    monkeypatch.setattr(mod, "_teams_cache", [{"id": "stale", "key": "OLD", "name": "old"}])
+    monkeypatch.setattr(mod, "_teams_last_refreshed", 0)
+    before = stored()
+    r = client.post("/api/linear/issues", json={"title": "t"})
+    assert r.status_code == 400 and "Could not read" in r.get_json()["error"] and stored() == before and not calls

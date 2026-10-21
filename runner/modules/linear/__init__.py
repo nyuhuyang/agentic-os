@@ -1175,6 +1175,20 @@ class LinearModule(AgenticModule):
         from linear_client import LinearClient
         return LinearClient(ak, tc.get("project_slug", "")), tc
 
+    def _create_team_id(self, client, requested: str = "") -> tuple[str, str]:
+        """(team id, error) for a new Linear issue: the request's team, else tracker.team_id, else the
+        viewer's only team. "All Teams" stores an empty tracker.team_id, so without the last step nothing
+        could be created (AGE-122). Fresh lookup, not the poller's cache: a stale team is never chosen."""
+        tid = (requested or "").strip() or _load_workflow_config().get("tracker", {}).get("team_id", "")
+        if tid:
+            return tid, ""
+        teams = client.fetch_teams()
+        if len(teams) == 1:
+            return teams[0]["id"], ""
+        if not teams:  # fetch_teams returns [] on any Linear error too
+            return "", "Could not read your Linear teams; select a team on the Job Board or try again"
+        return "", f"Select a team on the Job Board to create a task (you belong to {len(teams)} teams)"
+
     def _ensure_linear_project(self, issue: dict, project_key: str) -> None:
         """A project ticket with no Linear Project goes into its project's one at dispatch (STB §10).
         Best effort: a Linear error is logged and the dispatch continues (STB-085)."""
@@ -1256,8 +1270,9 @@ class LinearModule(AgenticModule):
         tid = tc.get("team_id", "")
         if self._capability.get("type") == "linear":
             client, tc = self._linear_client()
+            tid, err = self._create_team_id(client, tid)
             if not tid:
-                raise RuntimeError("tracker.team_id is required")
+                raise RuntimeError(err)
             label_ids = []
             for name in labels:  # every label or no issue (STB-041)
                 label_id = client.ensure_label(tid, name)
@@ -1442,8 +1457,11 @@ class LinearModule(AgenticModule):
             ak = _linear_api_key_from_cfg(tc)
             if not ak:
                 return jsonify({"error": "Linear not configured"}), 503
+            from linear_client import LinearClient
+            client = LinearClient(ak, tc.get("project_slug", ""))
+            tid, err = self._create_team_id(client, tid)
             if not tid:
-                return jsonify({"error": "team_id required"}), 400
+                return jsonify({"error": err}), 400
             # Local-first: write to local tracker immediately, return to client, sync Linear in background
             local = self.get_local_tracker()
             local_issue = local.create_issue(title, desc, preferred_agent=pa, team_id=tid, labels=labels)
@@ -1456,8 +1474,6 @@ class LinearModule(AgenticModule):
 
             def _bg_sync_to_linear():
                 try:
-                    from linear_client import LinearClient
-                    client = LinearClient(ak, tc.get("project_slug", ""))
                     label_ids = []
                     for name in labels:  # every label or no issue: a task must never lose its project (UI-01)
                         label_id = client.ensure_label(tid, name)
