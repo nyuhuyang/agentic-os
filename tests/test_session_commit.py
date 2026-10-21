@@ -259,3 +259,53 @@ def test_checkout_path_with_quotes_and_backslash_works_sandboxed(tmp_path, monke
     assert pj.commit_checkout(project, root, "quoted path")["committed"]
     with pytest.raises(pj.ProjectError, match="control"):
         pj.sandbox_profile([Path("/tmp/bad\nname")])
+
+
+# ── Commit button colour (commit_state) ──────────────────────────────────────
+
+def test_commit_state_main_checkout_dirty_then_clean(repo):
+    project, root = repo
+    assert pj.commit_state(project, root) == {"state": "clean", "files": 0, "ahead": 0}
+    (root / "a.txt").write_text("c\n")
+    assert pj.commit_state(project, root / "src") == {"state": "dirty", "files": 1, "ahead": 0}
+
+
+def test_commit_state_worktree_unmerged_then_merged(repo):
+    project, root = repo
+    with pj.ticket_lock("alpha", "T-1"):
+        wt = Path(pj.create_worktree(project, "T-1")["worktree"])
+    (wt / "w.txt").write_text("w\n")
+    assert pj.commit_state(project, wt)["state"] == "dirty"
+    pj.commit_checkout(project, wt, "agent work")
+    assert pj.commit_state(project, wt) == {"state": "unmerged", "files": 0, "ahead": 1}
+    pj.merge_into_checkout(project, "T-1")
+    assert pj.commit_state(project, wt) == {"state": "clean", "files": 0, "ahead": 0}
+
+
+def test_commit_state_foreign_folder_is_neutral(repo, tmp_path):
+    project, _ = repo
+    other = tmp_path / "other"
+    other.mkdir()
+    git(other, "init", "-q")
+    assert pj.commit_state(project, other) is None
+    assert pj.commit_state(project, tmp_path) is None  # not a git checkout at all
+
+
+def test_api_projects_rows_carry_commit_state(repo, tmp_path, monkeypatch):
+    project, root = repo
+    import app as app_mod
+    reg = tmp_path / "projects.yaml"
+    reg.write_text(f"projects:\n  alpha:\n    path: {root}\n    verify: 'true'\n")
+    monkeypatch.setattr(pj, "REGISTRY_PATH", reg)
+    d = pj.CLAUDE_PROJECTS / pj._slug(str(root))
+    d.mkdir(parents=True)
+    for sid in ("s1", "s2"):  # two sessions, one checkout: one status
+        (d / f"{sid}.jsonl").write_text(json.dumps({"type": "user", "cwd": str(root), "entrypoint": "cli",
+                                                    "message": {"role": "user", "content": "hi"}}) + "\n")
+    (root / "a.txt").write_text("c\n")
+    calls = []
+    real = pj.commit_state
+    monkeypatch.setattr(pj, "commit_state", lambda p, cwd: calls.append(cwd) or real(p, cwd))
+    r = app_mod.app.test_client().get("/api/projects", headers={"X-AgenticOS-Token": app_mod.REQUEST_TOKEN})
+    rows = next(p for p in r.get_json()["projects"] if p["key"] == "alpha")["sessions"]
+    assert {s["commit_state"]["state"] for s in rows} == {"dirty"} and len(calls) == 1

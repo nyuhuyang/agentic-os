@@ -4564,7 +4564,7 @@ def api_projects():
         try:  # one project's reader failure never hides the others
             out.append({"key": key, "name": p.path.name, "kind": p.kind, "confidential": p.confidential, "no_push": p.no_push,
                         "note": p.note, "entry": raw.get(key), "baseline": _BASELINES.get(key),
-                        "sessions": _projects.project_sessions(p, board_ids, labels),
+                        "sessions": _with_commit_state(p, _projects.project_sessions(p, board_ids, labels)),
                         "memory": _projects.claude_memory_names(p)})
         except Exception as exc:
             out.append({"key": key, "error": f"session readers failed: {exc}", "entry": raw.get(key)})
@@ -4778,6 +4778,20 @@ def _rename_card_session(key: str, agent: str, sid: str, issue_id: str, title: o
     busy = _sync_card_session_names(issue_id, title=clean)
     return jsonify({"ok": True, "title": clean, "card": True,
                     "pending": (canonical_agent(agent) or agent, sid) in busy})
+
+
+def _with_commit_state(project, sessions: list[dict]) -> list[dict]:
+    """Each row's Commit colour: one read-only status per checkout, shared by its sessions."""
+    seen: dict = {}
+    for s in sessions:
+        cwd = s.get("cwd") or ""
+        if cwd not in seen:
+            try:
+                seen[cwd] = _projects.commit_state(project, cwd) if cwd else None
+            except Exception:  # an unreadable checkout: the button stays neutral, the panel still loads
+                seen[cwd] = None
+        s["commit_state"] = seen[cwd]
+    return sessions
 
 
 @app.route("/api/projects/<key>/sessions/<agent>/<sid>/commit", methods=["POST"])

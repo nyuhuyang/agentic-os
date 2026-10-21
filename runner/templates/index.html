@@ -378,6 +378,8 @@
   .session-row { display: flex; gap: 10px; align-items: center; padding: 3px 0; font-size: calc(12px * var(--fs)); }
   .session-agent { font-size: calc(10px * var(--fs)); padding: 1px 4px; border-radius: 3px; border: 1px solid var(--border); }
   .session-agent.codex { color: var(--green); } .session-agent.claude { color: var(--accent); }
+  .session-copy.commit-todo { color: var(--green); border-color: var(--green); }
+  .session-copy.commit-clean { color: var(--text-dim); border-color: var(--border); opacity: .6; }
   .session-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .session-meta { color: var(--text-dim); font-size: calc(11px * var(--fs)); margin-left: auto; white-space: nowrap; }
   .session-copy { background: none; border: 1px solid var(--border); color: var(--text-dim); border-radius: 3px; cursor: pointer; font-family: inherit; font-size: calc(10px * var(--fs)); }
@@ -1173,6 +1175,18 @@ function _renderProjectsInto(el) {
 
 // Rename / Remove on a session row (A): inline, never a modal dialog.
 let _sessionEdit = null;  // {key, agent, id, mode: 'rename' | 'remove', error, busy}
+// Commit colour: green = something left to do (uncommitted changes, or commits not yet in main);
+// grey = nothing to commit and already merged into main.
+function _commitClass(c) {
+  return !c ? '' : c.state === 'clean' ? 'commit-clean' : 'commit-todo';
+}
+function _commitTitle(c) {
+  const base = 'Commit every change in this session\'s folder (local only, never pushed)';
+  if (!c) return base;
+  if (c.state === 'dirty') return `${c.files} uncommitted file${c.files === 1 ? '' : 's'} · ${base}`;
+  if (c.state === 'unmerged') return `Nothing to commit; ${c.ahead} commit${c.ahead === 1 ? '' : 's'} not yet merged into main`;
+  return 'Nothing to commit; already merged into main';
+}
 function _sessionRow(key, s) {
   const ed = _sessionEdit && _sessionEdit.key === key && _sessionEdit.agent === s.agent && _sessionEdit.id === s.id ? _sessionEdit : null;
   const ids = `data-key="${_esc(key)}" data-sagent="${_esc(s.agent)}" data-sid="${_esc(s.id)}"`;
@@ -1182,7 +1196,7 @@ function _sessionRow(key, s) {
   // One Resume (§6): the session's card goes back to Todo and its reply opens.
   let actions = `<button class="session-copy" data-resume-agent="${_esc(s.agent)}" data-resume-id="${_esc(s.id)}" data-project="${_esc(key)}"
           title="Put this session's card in Todo and write the next reply (${_esc(s.resume)})">Resume</button>
-        <button class="session-copy" data-saction="commit" ${ids} title="Commit every change in this session's folder (local only, never pushed)">Commit</button>
+        <button class="session-copy ${_commitClass(s.commit_state)}" data-saction="commit" ${ids} title="${_esc(_commitTitle(s.commit_state))}">Commit</button>
         <button class="session-copy" data-saction="rename" ${ids}>Rename</button>
         <button class="session-copy" data-saction="remove" ${ids}>Remove</button>`;
   if (ed && ed.mode === 'rename') {

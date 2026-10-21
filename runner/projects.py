@@ -1171,6 +1171,31 @@ def branch_head(project: Project, ident: str) -> str:
                 confine=confine_for(project, project.path)).stdout.strip()
 
 
+def commit_state(project: Project, cwd: str | Path) -> dict | None:
+    """What the session row's Commit button reflects, read-only: {state, files, ahead}.
+    dirty = uncommitted changes; unmerged = a clean worktree whose agent/<id> has commits the
+    main checkout's HEAD lacks; clean = nothing to commit and nothing left to merge. None when
+    the folder is not this project's checkout or worktree (the button stays neutral)."""
+    top = _git(Path(cwd), "rev-parse", "--show-toplevel", check=False)
+    if top.returncode:
+        return None
+    repo = Path(top.stdout.strip()).resolve()
+    ident = None
+    if repo != project.path.resolve():
+        try:
+            ident = ticket_from_worktree(project, repo)
+        except ProjectError:
+            return None
+    files = len(readonly_status(repo))  # write-nothing sandbox: status can run clean filters (SC-011)
+    if files:
+        return {"state": "dirty", "files": files, "ahead": 0}
+    ahead = 0
+    if ident:
+        r = _git(project.path, "rev-list", "--count", f"HEAD..refs/heads/agent/{ident}", check=False)
+        ahead = int(r.stdout.strip() or 0) if r.returncode == 0 else 0
+    return {"state": "unmerged" if ahead else "clean", "files": 0, "ahead": ahead}
+
+
 def check_queued_merge(project: Project, ident: str, sha: str) -> None:
     """A queued (ticket, verified sha) is still that ticket's work: its binding exists and its
     branch still contains the sha. Cleanup or a replaced branch refuses the merge (SC-009).
