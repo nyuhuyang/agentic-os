@@ -13,7 +13,7 @@ tracker:
   - Duplicate
   kind: linear
   project_slug: baa38c65341e
-  team_id: 76114694-9541-434c-8600-762735c3bd88
+  team_id: ''
   terminal_states:
   - Done
   - Canceled
