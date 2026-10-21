@@ -1,6 +1,7 @@
 ---
-status: in-progress
+status: completed
 created: 2026-10-21
+completed: 2026-10-21
 ---
 
 # Projects panel: a manual Commit button on each session row
@@ -78,6 +79,6 @@ Each session row gets a **Commit** button between Resume and Rename. Clicking it
 - [x] Inspection 6 fixes: requeue when a run opened during the wait (SC-016); single-flight commit editor (SC-017).
 - [x] Inspection 7 fix: the open-run re-check covers every entry and requeues the rest (SC-018).
 - [x] Inspection 8 fix: the per-project merge gate makes the check and merge atomic against run admission (SC-019).
-- [ ] Fresh Codex inspection approved.
-- [ ] Restart the live runner when it is idle.
-- [ ] Archive the plan and its log.
+- [x] Fresh Codex inspection approved: inspection 9, cross_provider, no findings.
+- [x] Restart the live runner when it is idle. The idle-restart watcher is armed (`/private/tmp/claude-501/pvst-verify/restart_when_idle.sh`).
+- [x] Archive the plan and its log.

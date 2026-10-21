@@ -42,3 +42,8 @@
 
 ## Inspection 8 — Codex (fresh): REVISE
 - SC-019 (med) accepted; closes the SC-016/018 follow-up. A per-project _merge_gate is held by the drain from its no-open-runs check to the end of the merge (including any wait on the global _MERGE_LOCK), and a new run takes it around its opening fingerprint. Lock order is ticket, then gate, on both sides. Test: a run admitted while a merge is blocked fingerprints only after the merge ends.
+
+## Inspection 9 — Codex (fresh): APPROVED
+- cross_provider, no findings.
+- Inspections: 9. Findings fixed: SC-001..019. All code by Claude; every inspection by a fresh Codex session.
+- Scope grew beyond the button: the AGE-111 merge queue now merges the verified sha, re-validates entries under their own lock and policy, waits for a finalizing ticket, and is atomic against run admission through a per-project gate.
