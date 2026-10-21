@@ -89,11 +89,11 @@ class Project:
 _GIT_HARDENING = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
 
 
-def sandbox_profile(writable: list[Path]) -> str:
-    """macOS sandbox-exec profile: no network, writes only under `writable` and temp dirs."""
-    tmp = {Path("/private/tmp"), Path(os.path.realpath(tempfile.gettempdir()))}
+def sandbox_profile(writable: list[Path], temp: bool = True) -> str:
+    """macOS sandbox-exec profile: no network, writes only under `writable` and (temp) temp dirs."""
+    tmp = {Path("/private/tmp"), Path(os.path.realpath(tempfile.gettempdir()))} if temp else set()
     roots = sorted({str(Path(os.path.realpath(p))) for p in [*writable, *tmp]})
-    allow = " ".join(f'(subpath "{r}")' for r in roots)
+    allow = " ".join(f'(subpath "{r}")' for r in roots) or '(literal "/dev/null")'
     # allow-default keeps git, shells and test runtimes working; the denials close the routes
     # by which sandboxed code asks something outside the sandbox to act for it.
     # ponytail: deny-list, not deny-default; spike (g2) probes `open URL`, osascript and
@@ -105,8 +105,22 @@ def sandbox_profile(writable: list[Path]) -> str:
             f'(allow file-write* {allow} (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/fd/"))')
 
 
-def sandbox_prefix(writable: list[Path]) -> list[str]:
-    return ["/usr/bin/sandbox-exec", "-p", sandbox_profile(writable)]
+def sandbox_prefix(writable: list[Path], temp: bool = True) -> list[str]:
+    return ["/usr/bin/sandbox-exec", "-p", sandbox_profile(writable, temp)]
+
+
+def readonly_status(cwd: Path) -> list[str]:
+    """`uncommitted` under a write-nothing sandbox: no writable roots, not even temp. A clean
+    filter that status runs can neither touch the checkout nor its git dir (SC-011)."""
+    argv = [*sandbox_prefix([], temp=False), "git", *_GIT_HARDENING, "-C", str(cwd), "--no-optional-locks",
+            "status", "--porcelain", "-z", "--untracked-files=all"]
+    try:
+        code, out, err = _run_bounded(argv, GIT_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise ProjectError(f"git status timed out in {cwd}") from None
+    if code != 0:
+        raise ProjectError(f"git status failed in {cwd}: {err.decode(errors='replace').strip()}")
+    return _porcelain_paths(out)
 
 
 GIT_TIMEOUT_S = 120
@@ -1213,7 +1227,7 @@ def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry
         if busy:  # git add -A would mark conflicts resolved and commit their markers (SC-003)
             raise ProjectError(f"{repo} has {busy} in progress; finish or abort it by hand first")
         branch = _git(repo, "symbolic-ref", "--short", "HEAD", confine=confine).stdout.strip()
-        files = uncommitted(project, repo, confine=confine)
+        files = readonly_status(repo)  # preview and count: nothing writable (SC-011)
         out = {"repo": str(repo), "branch": branch, "files": files}
         if dry_run or not files:
             return {**out, "committed": None}

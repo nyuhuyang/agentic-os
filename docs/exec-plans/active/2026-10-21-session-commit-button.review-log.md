@@ -20,3 +20,7 @@
 ## Inspection 3 — Codex (fresh): REVISE
 - SC-008 (high) accepted: uncommitted() takes an explicit confine, and commit_checkout passes its unconditional sandbox, so the preview's status (which can run clean filters) is confined too. Test asserts every status call is confined.
 - SC-009 (med) accepted: before merging a queued (ticket, sha), the drain takes that ticket's lock (except its own, already held) and check_queued_merge confirms the binding still exists and agent/<ticket> still contains the sha. Cleanup or a replaced branch refuses the merge (merge_error). Tests: cleanup and replacement refused; the drain checks every entry.
+
+## Inspection 4 — Codex (fresh): REVISE
+- SC-010 (med) accepted: the drain waits up to 120 s for another ticket's lock (its run is still finalizing) via _wait_ticket_lock. Only the acquire is retried. On timeout the entry is kept in the queue for the project's next run, not dropped. Test: a held lock is waited for, then kept.
+- SC-011 (med) accepted: readonly_status runs git status in a write-nothing sandbox (no writable roots, not even temp), used for the preview and the count. Only confirmed staging and commit are writable. Test: a clean filter's side-effect files are not created by the preview.

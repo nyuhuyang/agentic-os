@@ -3226,6 +3226,24 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
 _PENDING_MERGES: dict[str, list[tuple[str, str]]] = {}  # project key -> (ticket, verified sha) waiting for its other runs (AGE-111)
 
 
+@contextlib.contextmanager
+def _wait_ticket_lock(key: str, ident: str, timeout: float = 120.0):
+    """Another finished ticket's lock, waiting for its run's finalization (log, tracker comment)
+    to release it. No deadlock: only one run drains the queue, and a finalizing holder never
+    needs the drainer's lock. Raises TicketLocked after `timeout` (SC-010)."""
+    end = time.monotonic() + timeout
+    with contextlib.ExitStack() as stack:
+        while True:  # only the acquire is retried, never the caller's body
+            try:
+                stack.enter_context(_projects.ticket_lock(key, ident))
+                break
+            except _projects.TicketLocked:
+                if time.monotonic() >= end:
+                    raise
+                time.sleep(0.5)
+        yield
+
+
 def _merge_when_last(project, ident: str, job: dict, eligible: bool) -> dict:
     """Merge finished ticket branches into the project's main checkout (AGE-111), only once no
     other run of the project is still before its closing fingerprint: a merge under it would
@@ -3256,10 +3274,14 @@ def _merge_when_last(project, ident: str, job: dict, eligible: bool) -> dict:
         try:
             # another ticket's entry: re-check it under its own lock, since it may have been cleaned
             # up or re-run since it queued (SC-009); ours is held by this run already
-            with contextlib.nullcontext() if t == ident else _projects.ticket_lock(project.key, t):
+            with contextlib.nullcontext() if t == ident else _wait_ticket_lock(project.key, t):
                 _projects.check_queued_merge(project, t, sha)
                 out["merged_head"] = _projects.merge_into_checkout(project, t, sha)
             out.setdefault("merged", []).append(t)
+        except _projects.TicketLocked:
+            with _JOB_LOCK:  # its run is still finishing: keep it for the project's next run (SC-010)
+                _PENDING_MERGES.setdefault(project.key, []).append((t, sha))
+            out.setdefault("merge", f"{t} still finishing; it merges with this project's next run")
         except _projects.ProjectError as exc:
             out.setdefault("merge_error", {})[t] = str(exc)[:500]
     if ident in out.get("merge_error", {}):

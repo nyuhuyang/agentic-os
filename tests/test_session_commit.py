@@ -180,22 +180,23 @@ def test_commit_is_always_sandboxed(repo, monkeypatch):
     project, root = repo
     seen = []
     real = pj.sandbox_prefix
-    monkeypatch.setattr(pj, "sandbox_prefix", lambda writable: seen.append(list(writable)) or real(writable))
+    monkeypatch.setattr(pj, "sandbox_prefix", lambda writable, temp=True: seen.append(list(writable)) or real(writable, temp))
     (root / "a.txt").write_text("c\n")
     assert not project.confidential and pj.commit_checkout(project, root, "msg")["committed"]
-    assert seen and all(root.resolve() in w for w in seen)
+    assert [] in seen  # the status: nothing writable
+    assert any(root.resolve() in w for w in seen)  # staging and commit: the checkout
 
 
 def test_preview_status_is_sandboxed_too(repo, monkeypatch):
-    """Status can run clean filters: the preview's status is confined like the commit (SC-008)."""
+    """Status can run clean filters: the preview's status runs in a write-nothing sandbox (SC-008/011)."""
     project, root = repo
-    calls = []
-    real = pj._git_bytes
-    monkeypatch.setattr(pj, "_git_bytes", lambda cwd, *a, confine=None, **k: calls.append((a, confine)) or real(cwd, *a, confine=confine, **k))
+    argvs = []
+    real = pj._run_bounded
+    monkeypatch.setattr(pj, "_run_bounded", lambda argv, *a, **k: argvs.append(argv) or real(argv, *a, **k))
     (root / "a.txt").write_text("c\n")
     pj.commit_checkout(project, root, dry_run=True)
-    status = [c for a, c in calls if "status" in a]
-    assert status and all(c and root.resolve() in c for c in status)
+    status = [a for a in argvs if "status" in a]
+    assert status and all(a[0] == "/usr/bin/sandbox-exec" and "(subpath" not in a[2] for a in status)
 
 
 def test_route_holds_the_lifecycle_lock(repo, tmp_path, monkeypatch):
@@ -222,3 +223,21 @@ def test_route_holds_the_lifecycle_lock(repo, tmp_path, monkeypatch):
     h = {"X-AgenticOS-Token": app_mod.REQUEST_TOKEN}
     r = app_mod.app.test_client().post("/api/projects/alpha/sessions/claude/s1/commit", json={"dry_run": True}, headers=h)
     assert r.status_code == 200 and seen["locked"] is True
+
+
+def test_preview_runs_a_clean_filter_with_nothing_writable(repo):
+    """A clean filter run by the preview's status cannot write the checkout or git dir (SC-011)."""
+    project, root = repo
+    marker = root / "preview-wrote"
+    git(root, "config", "filter.spy.clean", f"touch {marker}; touch {root}/.git/spy; cat")
+    (root / ".gitattributes").write_text("a.txt filter=spy\n")
+    git(root, "add", ".gitattributes"); git(root, "commit", "-qm", "attrs")
+    marker.unlink(missing_ok=True); (root / ".git" / "spy").unlink(missing_ok=True)  # setup ran the filter
+    import os
+    os.utime(root / "a.txt", (1, 1))  # stat-dirty: status re-reads it through the filter
+    (root / "a.txt").write_text("changed\n")
+    try:
+        pj.commit_checkout(project, root, dry_run=True)
+    except pj.ProjectError:
+        pass  # a filter that fails under the read-only sandbox may fail the preview: still nothing written
+    assert not marker.exists() and not (root / ".git" / "spy").exists()

@@ -325,6 +325,25 @@ def test_merge_waits_for_the_projects_other_runs(helper, monkeypatch):
     assert app_mod._merge_when_last(SimpleNamespace(key="demo", auto_merge=False), "T-3", b, eligible=True) == {}
 
 
+def test_queued_merge_waits_for_a_finalizing_ticket_then_keeps_it(helper, monkeypatch):
+    """SC-010: a queued ticket whose run still holds its lock is waited for, and kept (not dropped) on timeout."""
+    app_mod, *_ = helper
+    p = SimpleNamespace(key="demo", auto_merge=True)
+    merged = []
+    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t, sha=None: merged.append(t) or "sha")
+    monkeypatch.setattr(pj, "branch_head", lambda project, t: f"head-of-{t}")
+    monkeypatch.setattr(pj, "check_queued_merge", lambda project, t, sha: None)
+    monkeypatch.setattr(app_mod, "_PENDING_MERGES", {"demo": [("T-1", "head-of-T-1")]})
+    b = {"project_key": "demo"}
+    monkeypatch.setattr(app_mod, "_running_jobs", {"b": b})
+    real = app_mod._wait_ticket_lock
+    monkeypatch.setattr(app_mod, "_wait_ticket_lock", lambda key, t: real(key, t, timeout=0.6))
+    with pj.ticket_lock("demo", "T-1"):  # T-1's run is still finalizing
+        out = app_mod._merge_when_last(p, "T-2", b, eligible=True)
+    assert merged == ["T-2"] and "T-1 still finishing" in out["merge"]
+    assert app_mod._PENDING_MERGES["demo"] == [("T-1", "head-of-T-1")]  # kept for the next run
+
+
 def test_background_writer_is_gone_before_verify(helper, tmp_path):
     app_mod, run, records, state, *_ = helper
     marker = tmp_path / "late-write"
