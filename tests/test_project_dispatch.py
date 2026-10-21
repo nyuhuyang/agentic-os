@@ -510,7 +510,7 @@ def test_streaming_run_is_not_stalled_but_a_silent_one_is(helper, monkeypatch):
     """I5-07: streamed agent events count as progress; a stalled project run keeps its binding."""
     from runner.modules.stall_detection import check_once
     app_mod, run, records, state, *_ = helper
-    monkeypatch.setattr(app_mod, "STALL_TIMEOUT_S", 0.8)
+    monkeypatch.setattr(app_mod, "STALL_TIMEOUT_S", 2.0)  # > a loaded machine's commit + verify gap; silent sleeps 30 s
     for mode, ident, want in (("stream", "T-1", "review"), ("silent", "T-2", "stalled")):
         state["mode"] = mode
         t = threading.Thread(target=run, kwargs={"ident": ident, "run_id": f"run-{mode}"})
