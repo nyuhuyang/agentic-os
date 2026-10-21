@@ -2454,8 +2454,15 @@ def run_agent_process(run_id: str, cmd: list[str], *, stream: str, timeout: floa
     It never claims, records or pushes the tracker: run completion stays with the caller.
     Returns (output, input_tokens, output_tokens, model, session_id, stderr, ok)."""
     timeout = AI_RUN_TIMEOUT_S if timeout is None else timeout
-    proc = subprocess.Popen(cmd, cwd=str(cwd or ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            start_new_session=True)  # its own group, so a timeout or cancel ends descendants too
+    with _JOB_LOCK:
+        _LAUNCHING[run_id] = _running_jobs.get(run_id) or {}  # cleared by the handshake (CM-017)
+    try:
+        proc = subprocess.Popen(cmd, cwd=str(cwd or ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                start_new_session=True)  # its own group, so a timeout or cancel ends descendants too
+    except BaseException:
+        with _JOB_LOCK:
+            _LAUNCHING.pop(run_id, None)
+        raise
     if not _register_proc(run_id, proc):  # cancelled/stalled meanwhile, or shutting down: proc is already dead
         raise _RunEnded("runner is shutting down" if _SHUTTING_DOWN.is_set() else run_id)
     try:
@@ -2881,20 +2888,27 @@ def _register_proc(run_id: str, proc) -> bool:
             live = True
         else:
             live = False
-    if live:
-        if old is not None and old is not proc:
-            _kill_group(old)  # the previous attempt's leftovers end with it (RWS-005)
-        return True
-    _kill_and_reap(proc)
-    return False
+    try:
+        if live:
+            if old is not None and old is not proc:
+                _kill_group(old)  # the previous attempt's leftovers end with it (RWS-005)
+            return True
+        _kill_and_reap(proc)
+        return False
+    finally:
+        with _JOB_LOCK:
+            _LAUNCHING.pop(run_id, None)  # published (a live job again) or killed (CM-017)
 
 
 # Runs whose worker won _end_job and has not written its record yet; shutdown waits for them.
 # Added by _end_job, removed by _write_run_log once the run's record is on disk (SBR-010).
 _FINALIZING: set[str] = set()
-# Jobs retired from _running_jobs whose record is not on disk yet (their process group may still
-# be stopping): a manual merge still counts them as activity (CM-011). Same lifetime as _FINALIZING.
+# Jobs a cancel or stall retired while their process group may still be stopping: a manual merge
+# still counts them as activity until that path has stopped them and written the record (CM-011).
 _RETIRING: dict[str, dict] = {}
+# Runs between Popen and the _register_proc handshake: a cancel in that gap sees no process, so
+# the child is activity until the handshake publishes or kills it (CM-017).
+_LAUNCHING: dict[str, dict] = {}
 
 
 def _end_job(run_id: str) -> bool:
@@ -2905,8 +2919,7 @@ def _end_job(run_id: str) -> bool:
         job = _running_jobs.pop(run_id, None)
         _running_procs.pop(run_id, None)
         if job is not None:
-            _FINALIZING.add(run_id)
-            _RETIRING[run_id] = job
+            _FINALIZING.add(run_id)  # its process has ended: not activity (only cancel/stall retire live groups, CM-019)
     return job is not None
 
 
@@ -3242,11 +3255,13 @@ _MERGE_GATES_GUARD = threading.Lock()
 
 
 def _merge_gate(key: str) -> threading.Lock:
-    """Per-project gate: a queued merge holds it from its "no other run is open" check to the end
-    of the merge (including any wait on the global merge lock); a run takes it around its opening
-    fingerprint, so no run can start fingerprinting in between (SC-019). Lock order: ticket -> gate."""
+    """Per-checkout gate: a queued or manual merge holds it from its "no other run is open" check to
+    the end of the merge (including any wait on the global merge lock); a run takes it around its
+    opening fingerprint or job publish, so none can start in between (SC-019, CM-013). Keyed by the
+    checkout, so two registrations of one folder share it (CM-018). Lock order: ticket -> gate."""
+    gate_id = _registry_checkouts().get(key) or f"key:{key}"
     with _MERGE_GATES_GUARD:
-        return _MERGE_GATES.setdefault(key, threading.Lock())
+        return _MERGE_GATES.setdefault(gate_id, threading.Lock())
 
 
 _ROOT_ACTIVE = 0  # runner-root work that is not a job, e.g. a Linear routing call (CM-013); under _JOB_LOCK
@@ -3255,24 +3270,36 @@ _ROOT_ACTIVE = 0  # runner-root work that is not a job, e.g. a Linear routing ca
 _ROOT_KEY_CACHE: dict = {}
 
 
-def _runner_root_key() -> str | None:
-    """The registered project whose folder is the runner's own checkout, if any. Reads only the
-    registry file (no git, no validation: this runs on every job publish), cached by its mtime."""
+def _registry_checkouts() -> dict[str, str]:
+    """key -> real checkout path, from the registry file only (no git, no validation: this runs on
+    every job publish and merge check), cached by its mtime."""
     path = _projects.REGISTRY_PATH
     try:
         stamp = (str(path), path.stat().st_mtime_ns)
     except OSError:
-        return None
+        return {}
     if _ROOT_KEY_CACHE.get("stamp") != stamp:
-        root, key = os.path.realpath(_PROTO), None
+        out: dict[str, str] = {}
         with contextlib.suppress(Exception):
             for k, entry in _projects.raw_entries(_projects._read_registry_bytes(path)).items():
                 raw = entry.get("path") if isinstance(entry, dict) else None
-                if isinstance(raw, str) and os.path.realpath(os.path.expanduser(raw)) == root:
-                    key = k
-                    break
-        _ROOT_KEY_CACHE.update(stamp=stamp, key=key)
-    return _ROOT_KEY_CACHE["key"]
+                if isinstance(raw, str) and raw:
+                    out[k] = os.path.realpath(os.path.expanduser(raw))
+        _ROOT_KEY_CACHE.update(stamp=stamp, paths=out)
+    return _ROOT_KEY_CACHE["paths"]
+
+
+def _same_checkout_keys(key: str) -> set[str]:
+    """Every registered key that names the same checkout as `key` (CM-018), `key` included."""
+    paths = _registry_checkouts()
+    mine = paths.get(key)
+    return {key} | ({k for k, p in paths.items() if p == mine} if mine else set())
+
+
+def _runner_root_key() -> str | None:
+    """A registered project whose folder is the runner's own checkout, if any."""
+    root = os.path.realpath(_PROTO)
+    return next((k for k, p in _registry_checkouts().items() if p == root), None)
 
 
 def _runner_root_gate():
@@ -3306,14 +3333,17 @@ def _project_runs_open(key: str, job: dict | None, sessions: bool = False, runne
     """Another run of this project is still before its closing fingerprint: a merge now would
     read as that run changing the main checkout. Caller holds _JOB_LOCK.
     Used under _merge_gate, which a new run's opening fingerprint also takes (SC-019)."""
+    keys = _same_checkout_keys(key)  # every registration of this checkout (CM-018)
+
     def here(j):
         extra = j.get("record_extra") or {}
-        return (j.get("project_key") == key
+        return (j.get("project_key") in keys
                 # an agent working in the main checkout itself (a session card, no project_key) (CM-004)
-                or (sessions and extra.get("session_project") == key)
+                or (sessions and extra.get("session_project") in keys)
                 # a runner-root job (free prompt, generic retry, unbound dispatch) when the project IS the runner's checkout (CM-010)
                 or (runner_root and not j.get("project_key") and not extra.get("session_project")))
-    jobs = list(_running_jobs.values()) + (list(_RETIRING.values()) if sessions else [])  # retiring: still stopping (CM-011)
+    # retiring: still stopping (CM-011); launching: between Popen and its handshake (CM-017)
+    jobs = list(_running_jobs.values()) + (list(_RETIRING.values()) + list(_LAUNCHING.values()) if sessions else [])
     if runner_root and _ROOT_ACTIVE:
         return True
     return any(j is not job and not j.get("merge_checked") and here(j) for j in jobs)

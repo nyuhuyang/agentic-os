@@ -54,5 +54,11 @@ The user asked for two things (2026-10-21):
   - the manual merge counts runner-root jobs when the project is the runner's checkout, and jobs still retiring (CM-010/011).
 - [x] Inspection 4 fixes: the mergeOptions key comes from the full ref (CM-012); a stalled job stays in _RETIRING while it is killed, and the cancel/stall paths always clear it (CM-014).
 - [x] CM-013: every runner-root launch (/run, generic retry, unbound Linear dispatch and its routing call) takes the project merge gate before it publishes its job, so none can start mid-merge when the project is the runner's own checkout. Done after the user said "做": `_publish_job` publishes these jobs under that gate, and `_root_activity` counts a routing call while it runs. The runner-root lookup reads only the registry file. Tests added; the suite passed (831).
+- [x] Inspection 5 fixes:
+  - `--strategy=ort` (CM-015);
+  - `--no-overwrite-ignore` (CM-016);
+  - a launch-gap marker until the Popen handshake (CM-017);
+  - gates and activity keyed by checkout (CM-018);
+  - normal completions are no longer retiring activity (CM-019).
 - [ ] Fresh Codex inspection approved.
 - [ ] Archive.

@@ -564,3 +564,58 @@ def test_runner_root_key_reads_the_file_only(tmp_path, monkeypatch):
     monkeypatch.setattr(pj, "_git", lambda *a, **k: pytest.fail("no git on the publish path"))
     monkeypatch.setattr(pj, "load_registry", lambda *a, **k: pytest.fail("no full registry load"))
     assert app_mod._runner_root_key() == "self"
+
+
+# ── Inspection fixes (CM-015..019) ───────────────────────────────────────────
+
+def test_merge_ignores_pull_twohead_ours(repo):
+    project, root = repo
+    _branch_ahead_and_main_diverged(project, root)
+    git(root, "config", "pull.twohead", "ours")
+    pj.merge_into_checkout(project, "T-1")
+    assert (root / "w.txt").read_text() == "w\n"  # (CM-015)
+
+
+def test_merge_never_overwrites_an_ignored_local_file(repo):
+    project, root = repo
+    (root / ".gitignore").write_text(".env\n"); git(root, "add", "-A"); git(root, "commit", "-qm", "ignore .env")
+    wt = _wt(project)
+    (wt / ".env").write_text("from the branch\n")
+    git(wt, "add", "-f", ".env"); git(wt, "commit", "-qm", "branch tracks .env")
+    (root / ".env").write_text("MY_SECRET=1\n")  # ignored, local only
+    head = git(root, "rev-parse", "HEAD")
+    with pytest.raises(pj.ProjectError):
+        pj.merge_into_checkout(project, "T-1")
+    assert (root / ".env").read_text() == "MY_SECRET=1\n" and git(root, "rev-parse", "HEAD") == head  # (CM-016)
+
+
+def test_launch_gap_counts_as_activity_until_the_handshake(monkeypatch):
+    import app as app_mod
+    monkeypatch.setattr(app_mod, "_running_jobs", {})
+    monkeypatch.setattr(app_mod, "_RETIRING", {})
+    monkeypatch.setattr(app_mod, "_LAUNCHING", {"r": {"record_extra": {"session_project": "os"}}})  # Popen done, not registered
+    assert app_mod._project_runs_open("os", None, sessions=True)
+    killed = []
+    monkeypatch.setattr(app_mod, "_kill_and_reap", lambda proc: killed.append(proc))
+    assert app_mod._register_proc("r", object()) is False  # the run was cancelled in the gap: child killed
+    assert killed and app_mod._LAUNCHING == {} and not app_mod._project_runs_open("os", None, sessions=True)  # (CM-017)
+
+
+def test_two_registrations_of_one_checkout_share_gate_and_activity(tmp_path, monkeypatch):
+    import app as app_mod
+    reg = tmp_path / "projects.yaml"
+    reg.write_text(f"projects:\n  a:\n    path: {tmp_path}/same\n  b:\n    path: {tmp_path}/same/\n  c:\n    path: {tmp_path}/other\n")
+    (tmp_path / "same").mkdir(); (tmp_path / "other").mkdir()
+    monkeypatch.setattr(pj, "REGISTRY_PATH", reg)
+    monkeypatch.setattr(app_mod, "_ROOT_KEY_CACHE", {})
+    assert app_mod._merge_gate("a") is app_mod._merge_gate("b") and app_mod._merge_gate("a") is not app_mod._merge_gate("c")
+    monkeypatch.setattr(app_mod, "_running_jobs", {"j": {"project_key": "b"}})
+    assert app_mod._project_runs_open("a", None) and not app_mod._project_runs_open("c", None)  # (CM-018)
+
+
+def test_normal_completion_never_blocks_merges(monkeypatch):
+    import app as app_mod
+    monkeypatch.setattr(app_mod, "_running_jobs", {"r": {"record_extra": {"session_project": "os"}}})
+    monkeypatch.setattr(app_mod, "_RETIRING", {})
+    assert app_mod._end_job("r") and app_mod._RETIRING == {}  # its process has ended: not activity (CM-019)
+    app_mod._FINALIZING.discard("r")

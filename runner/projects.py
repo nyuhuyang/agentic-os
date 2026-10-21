@@ -1243,7 +1243,10 @@ def merge_into_checkout(project: Project, ident: str, rev: str | None = None) ->
         current = _git(root, "symbolic-ref", "HEAD", confine=confine).stdout.strip().removeprefix("refs/heads/")
         # Exactly the merge the preflight checked: no inherited branch.<name>.mergeOptions
         # (-s ours, --no-commit, --squash) and no autostash of the user's edits (CM-005/007/008).
+        # --strategy=ort: what merge-tree checked, never pull.twohead's choice (CM-015);
+        # --no-overwrite-ignore: an ignored local file (.env) is never replaced by a tracked one (CM-016)
         _git(root, "-c", f"branch.{current}.mergeOptions=", "-c", "merge.autoStash=false", "merge",
+             "--strategy=ort", "--no-overwrite-ignore",
              "--no-edit", "--no-verify", "--no-gpg-sign", "--commit", "--no-squash", "--no-autostash", "-q",
              "-m", f"Merge branch '{branch}'", target, confine=confine, timeout=COMMIT_TIMEOUT_S, env=_identity_env(root))
         if (_git_operation(root, confine)
