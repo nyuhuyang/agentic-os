@@ -1,6 +1,7 @@
 """Manual Commit on a session row (plan 2026-10-21-session-commit-button). Fixture repos only."""
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -684,3 +685,32 @@ def test_agent_tab_in_the_main_checkout_blocks_a_manual_merge(repo, monkeypatch)
     assert "interactive agent tab" in out["merge_error"] and not (root / "w.txt").exists()  # (CM-024)
     tab.alive, tab.cleaned = False, True  # its processes are proven gone
     assert pj.commit_checkout(project, wt, "", merger=lambda i: app_mod._manual_merge(project, i))["merged_head"]
+
+
+def test_one_malformed_registry_path_never_hides_the_others(tmp_path, monkeypatch):
+    import app as app_mod
+    real = os.path.realpath
+
+    def picky(p, *a, **k):
+        if "bad" in str(p):
+            raise ValueError("embedded null byte")
+        return real(p, *a, **k)
+
+    reg = tmp_path / "projects.yaml"
+    reg.write_text(f"projects:\n  bad:\n    path: /x/bad\n  self:\n    path: {app_mod._PROTO}\n")
+    monkeypatch.setattr(pj, "REGISTRY_PATH", reg)
+    monkeypatch.setattr(app_mod, "_ROOT_KEY_CACHE", {})
+    monkeypatch.setattr(app_mod.os.path, "realpath", picky)
+    assert app_mod._runner_root_key() == "self"  # (CM-025)
+
+
+def test_running_baseline_blocks_a_manual_merge(repo, monkeypatch):
+    project, root = repo
+    import app as app_mod
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    monkeypatch.setattr(app_mod, "_running_jobs", {})
+    monkeypatch.setattr(app_mod, "_ticket_confidential", lambda *a: False)
+    monkeypatch.setattr(app_mod, "_BASELINE_RUNS", {"alpha": 1})  # Run tests in flight
+    out = pj.commit_checkout(project, wt, "m", merger=lambda i: app_mod._manual_merge(project, i))
+    assert "tests are running" in out["merge_error"] and not (root / "w.txt").exists()  # (CM-026)

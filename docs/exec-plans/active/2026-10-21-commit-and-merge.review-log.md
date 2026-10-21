@@ -10,3 +10,4 @@
 - Inspection 5 (CM-015..019): all fixed. ort strategy, no-overwrite-ignore, a launch-gap marker, checkout-keyed gates and activity, and _end_job no longer retires. Suite: 836 passed.
 - Inspection 6 (CM-020..022): all fixed. A launch is refused when the job has ended, and the marker carries the live job; the group is killed after a successful generic run; checkout aliasing only for the manual merge (it had stranded the per-key queue). Suite: 838 passed.
 - Inspection 7 (CM-023..024): fixed. _run_grouped kills the group on success; interactive_agents_in blocks a manual merge while an agent (resume) tab works in the main checkout, and resume tabs spawn under the checkout's merge gate.
+- Inspection 8 (CM-025..026): fixed. The registry checkout map handles a bad entry by skipping only that entry; _BASELINE_RUNS counts Run-tests activity (taken under the merge gate, held until verify is reaped) and blocks a manual merge.

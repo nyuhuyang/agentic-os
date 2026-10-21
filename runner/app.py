@@ -3285,10 +3285,13 @@ def _registry_checkouts() -> dict[str, str]:
         return {}
     if _ROOT_KEY_CACHE.get("stamp") != stamp:
         out: dict[str, str] = {}
+        entries: dict = {}
         with contextlib.suppress(Exception):
-            for k, entry in _projects.raw_entries(_projects._read_registry_bytes(path)).items():
-                raw = entry.get("path") if isinstance(entry, dict) else None
-                if isinstance(raw, str) and raw:
+            entries = _projects.raw_entries(_projects._read_registry_bytes(path))
+        for k, entry in entries.items():  # one bad entry never hides the others (CM-025)
+            raw = entry.get("path") if isinstance(entry, dict) else None
+            if isinstance(raw, str) and raw:
+                with contextlib.suppress(Exception):
                     out[k] = os.path.realpath(os.path.expanduser(raw))
         _ROOT_KEY_CACHE.update(stamp=stamp, paths=out)
     return _ROOT_KEY_CACHE["paths"]
@@ -4760,6 +4763,9 @@ _BASELINES: dict[str, dict] = {}  # key -> last baseline (memory only; the tail 
 _BASELINE_LOCK = threading.Lock()
 
 
+_BASELINE_RUNS: dict[str, int] = {}  # project key -> baselines in flight; under _JOB_LOCK (CM-026)
+
+
 @_counted
 def _run_baseline(key: str) -> None:
     result: dict = {"state": "done", "finished_at": None}
@@ -4770,13 +4776,21 @@ def _run_baseline(key: str) -> None:
                 raise _projects.ProjectError(f"{key}: no verify command configured")
             ident = f"BASELINE-{int(time.time() * 1000)}"
             with _projects.ticket_lock(key, ident):
-                info = _projects.create_worktree(project, ident)
-                if info["reused"]:  # never verify or delete a worktree this call did not create (REGUI-003)
-                    raise _projects.ProjectError(f"{key}/{ident} already existed; left untouched")
+                # its verify can read the main checkout ({root}): activity for a manual merge from
+                # admission (under the checkout's gate) until its process group is reaped (CM-026)
+                with _merge_gate(key), _JOB_LOCK:
+                    _BASELINE_RUNS[key] = _BASELINE_RUNS.get(key, 0) + 1
                 try:
-                    result.update(_projects.run_verify(project, Path(info["worktree"])))
+                    info = _projects.create_worktree(project, ident)
+                    if info["reused"]:  # never verify or delete a worktree this call did not create (REGUI-003)
+                        raise _projects.ProjectError(f"{key}/{ident} already existed; left untouched")
+                    try:
+                        result.update(_projects.run_verify(project, Path(info["worktree"])))
+                    finally:
+                        _projects.remove_worktree(project, ident)
                 finally:
-                    _projects.remove_worktree(project, ident)
+                    with _JOB_LOCK:
+                        _BASELINE_RUNS[key] -= 1
             # ponytail: the one-off lock file stays (only the shared project lock is held here, so
             # unlinking could split a lock another holder shares, SAP-009); remove clears it.
     except Exception as exc:
@@ -4899,8 +4913,11 @@ def _manual_merge(project, ident: str) -> str:
         runner_root = os.path.realpath(project.path) == os.path.realpath(_PROTO)
         with _JOB_LOCK:
             opened = _project_runs_open(project.key, None, sessions=True, runner_root=runner_root)
+            testing = any(_BASELINE_RUNS.get(k) for k in _same_checkout_keys(project.key))
         if opened:
             raise _projects.ProjectError("another run of this project is in progress; merge after it finishes")
+        if testing:  # Run tests can be reading the main checkout (CM-026)
+            raise _projects.ProjectError("this project's tests are running; merge after they finish")
         from runner.modules.pty import interactive_agents_in
         if interactive_agents_in(project.path):  # an agent tab in the main checkout (CM-024)
             raise _projects.ProjectError("an interactive agent tab is open in the main checkout; close it, then merge")
