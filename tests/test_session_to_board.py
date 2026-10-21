@@ -381,6 +381,10 @@ def test_observed_model_and_cost():
     assert app_mod._parse_project_output("claude", [result], "", 0)[3] == "claude-opus-5-5[1m]"  # modelUsage
     assert app_mod._compute_token_cost(1_000_000, 0, "claude-opus-5-5[1m]") == 20.0
     assert app_mod._compute_token_cost(1_000_000, 0, "gpt-5.4-mini") == app_mod._DEFAULT_PRICE  # no prefix match
+    # Codex counts cache hits inside input_tokens; only uncached input is kept (AGE-116)
+    done = json.dumps({"type": "turn.completed",
+                       "usage": {"input_tokens": 7_307_325, "cached_input_tokens": 7_073_920, "output_tokens": 52_783}})
+    assert app_mod._parse_agent_output("codex", done)[1:3] == (233_405, 52_783)
 
 
 # ── §9 board-launched sessions ───────────────────────────────────────────────

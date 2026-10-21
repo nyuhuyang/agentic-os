@@ -7,6 +7,7 @@
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- AGE-116 Codex cost: `turn.completed` input_tokens now excludes `cached_input_tokens` (matches Claude's uncached semantic), so `token_cost_usd` no longer prices re-sent context. The AGE-110 3-paper deep ingest read $22.08 = 7.36M tokens × $3 default with 96.8% cache hits; same usage now $0.86. Codex runs on the ChatGPT plan, so neither is billed cash. 128 pytest pass; isolated runner on 8599 with fake codex recorded input 233405 / cost 0.858564 — 2026-10-21
 - AGE-117 card detail: Log tab removed (Terminal replay shows the same, copyable), with its `/api/runs/<id>/progress` and `/api/linear/issues/<id>/progress` routes and their Codex-session helpers; Error tab adds verify fail, merge_error and stderr tail. 782 pytest pass, `node --check` passes; isolated runner on 8599: tabs Output/Error/Terminal, stderr tail in run detail, progress route 404 — 2026-10-21
 - Multi-project dispatch Phases 0–3: 265 pytest pass. Live: browser request checks (token/Host/Origin), project panel, terminal tabs (3 projects, reload, close), and sandboxed verify baselines (one R project 0 fail / 1031 pass; KB from the launchd context) — 2026-10-14
 - STT two-pass (Browser STT live → `gpt-transcribe` + `gpt-6-luna` polish) built per `docs/exec-plans/completed/2026-10-14-stt-two-pass.md`: 65 pytest + 5 node tests pass; live `/api/stt` via launchd 4.0 s; headless Chrome smoke (fake mic) 17/17. A real-mic manual check is still pending — 2026-10-14
