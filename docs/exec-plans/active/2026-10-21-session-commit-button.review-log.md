@@ -31,3 +31,7 @@
 - SC-014 (med) accepted: the preview and commit responses apply only to the editor object that sent them; a failure restores that editor's own preview.
 - SC-015 (low) accepted: sandbox paths are escaped as profile string literals; control characters are refused. Test: a checkout named My "app" \x previews and commits sandboxed.
 - Browser recheck of the commit flow passed (Enter commits; errors=[]).
+
+## Inspection 6 — Codex (fresh): REVISE
+- SC-016 (med) accepted in part: after the lock wait, the drain re-checks under _JOB_LOCK whether another project run has opened. If so, the entry is requeued, not merged. This brings the window back to the original AGE-111 milliseconds. FOLLOW-UP: a per-project admission gate closing that residual window, noted as a ponytail comment on _project_runs_open.
+- SC-017 (med) accepted: a single commit request per editor (a pending flag; the button is disabled and shows "Committing…"; repeated Enter is ignored), and the typed message is kept on failure. Browser check: double-click plus Enter gave exactly one commit, and the row showed its sha.

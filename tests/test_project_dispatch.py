@@ -1,5 +1,6 @@
 """Phase 2: project-bound dispatch — argv policy, comment gate, location guard, the launch helper."""
 
+import contextlib
 import json
 import os
 import subprocess
@@ -340,7 +341,7 @@ def test_queued_merge_waits_for_a_finalizing_ticket_then_keeps_it(helper, monkey
     monkeypatch.setattr(app_mod, "_wait_ticket_lock", lambda key, t: real(key, t, timeout=0.6))
     with pj.ticket_lock("demo", "T-1"):  # T-1's run is still finalizing
         out = app_mod._merge_when_last(p, "T-2", b, eligible=True)
-    assert merged == ["T-2"] and "T-1 still finishing" in out["merge"]
+    assert merged == ["T-2"] and "T-1 waits for this project's next run" in out["merge"]
     assert app_mod._PENDING_MERGES["demo"] == [("T-1", "head-of-T-1")]  # kept for the next run
 
 
@@ -375,6 +376,32 @@ def test_queued_merge_uses_each_tickets_own_policy_and_newest_entry(helper, monk
     with pj.ticket_lock("demo", "T-1"):
         app_mod._merge_when_last(p, "T-3", b2, eligible=True)
     assert app_mod._PENDING_MERGES["demo"] == [("T-1", "new")]
+
+
+def test_queued_merge_deferred_when_a_run_starts_during_the_wait(helper, monkeypatch):
+    """SC-016: a run admitted while the drain waited keeps the queued entry from merging under it."""
+    app_mod, *_ = helper
+    p = SimpleNamespace(key="demo", auto_merge=True, confidential=False)
+    merged = []
+    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t, sha=None: merged.append(t) or "sha")
+    monkeypatch.setattr(pj, "branch_head", lambda project, t: f"head-of-{t}")
+    monkeypatch.setattr(pj, "check_queued_merge", lambda project, t, sha: None)
+    monkeypatch.setattr(app_mod, "_PENDING_MERGES", {"demo": [("T-1", "v1")]})
+    b = {"project_key": "demo"}
+    jobs = {"b": b}
+    monkeypatch.setattr(app_mod, "_running_jobs", jobs)
+    real = app_mod._wait_ticket_lock
+
+    @contextlib.contextmanager
+    def admitting(key, t):
+        jobs["c"] = {"project_key": "demo"}  # a new run takes its fingerprint during the wait
+        with real(key, t, timeout=0.3):
+            yield
+
+    monkeypatch.setattr(app_mod, "_wait_ticket_lock", admitting)
+    out = app_mod._merge_when_last(p, "T-2", b, eligible=True)
+    assert "T-1" not in merged and app_mod._PENDING_MERGES["demo"] == [("T-1", "v1")]
+    assert "waits for this project's next run" in out["merge"]
 
 
 def test_background_writer_is_gone_before_verify(helper, tmp_path):
