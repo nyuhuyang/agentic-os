@@ -14,6 +14,7 @@
 #                     links dereferenced; each must be ignored by a committed .gitignore
 #   confidential      true => agents run sandboxed and only template comments reach Linear
 #   no_push           true => the dispatch prompt forbids push/deploy
+#   auto_merge        default true: a successful run's branch is merged into this checkout
 #   note              free text shown in the dashboard (the dashboard rewrites this file and
 #                     drops # comments, so keep remarks here)
 #

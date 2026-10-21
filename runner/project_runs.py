@@ -104,6 +104,9 @@ def project_prompt(prompt: str, project: projects.Project, binding: dict, agent:
         rules.append("Leave your changes uncommitted; the runner commits them on this branch after you finish.")
     else:
         rules.append("Commit your work on this branch. Do not switch branches.")
+    if project.auto_merge:
+        rules.append(f"When you finish, the runner merges this branch into {project.path}; "
+                     "do not ask the user to merge or copy files there.")
     if project.no_push:
         rules.append("Do not push, deploy or publish anything.")
     rules.append("Never edit files outside this worktree.")

@@ -8,6 +8,7 @@ import textwrap
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -284,6 +285,38 @@ def test_sandboxed_codex_gets_a_runner_commit_without_the_seed(helper):
     names = subprocess.run(["git", "-C", rec["worktree"], "show", "--name-only", "--format=", rec["runner_commit"]],
                            capture_output=True, text=True).stdout.split()
     assert names == ["feature.txt"]
+
+
+def test_successful_run_is_merged_into_the_main_checkout(helper):
+    """AGE-111: the user sees a finished ticket in the main checkout without merging by hand."""
+    app_mod, run, records, state, *_, repo, write_registry = helper
+    run()
+    rec = records()[-1]
+    assert rec["merged"] == ["T-1"] and rec["verify_badge"] == "pass"
+    assert (repo / "feature.txt").read_text() == "done"
+
+
+def test_failed_run_is_not_merged(helper, monkeypatch):
+    app_mod, run, records, state, *_, repo, write_registry = helper
+    state["mode"] = "silent"
+    monkeypatch.setattr(app_mod, "AI_RUN_TIMEOUT_S", 1)
+    run()
+    rec = records()[-1]
+    assert "merged" not in rec and not (repo / "feature.txt").exists()
+
+
+def test_merge_waits_for_the_projects_other_runs(helper, monkeypatch):
+    """A merge under another run would read as that run changing the main checkout."""
+    app_mod, *_ = helper
+    p = SimpleNamespace(key="demo", auto_merge=True)
+    merged = []
+    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t: merged.append(t) or "sha")
+    a, b = {"project_key": "demo"}, {"project_key": "demo"}
+    monkeypatch.setattr(app_mod, "_running_jobs", {"a": a, "b": b, "c": {"project_key": "other"}})
+    assert app_mod._merge_when_last(p, "T-1", a, eligible=True) == {"merge": "waiting for this project's other runs"}
+    assert merged == []
+    assert app_mod._merge_when_last(p, "T-2", b, eligible=True) == {"merged_head": "sha", "merged": ["T-1", "T-2"]}
+    assert app_mod._merge_when_last(SimpleNamespace(key="demo", auto_merge=False), "T-3", b, eligible=True) == {}
 
 
 def test_background_writer_is_gone_before_verify(helper, tmp_path):

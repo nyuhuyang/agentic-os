@@ -40,7 +40,8 @@ _PROTO = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = Path(os.environ.get("AGENTIC_OS_PROJECTS", str(_PROTO / "projects.yaml")))
 WORKTREE_ROOT = Path(os.environ.get("AGENTIC_OS_WORKTREES", "~/.agentic-os/worktrees")).expanduser()
 
-_FIELDS = {"path", "kind", "verify", "env", "confidential", "no_push", "seed", "verify_timeout_s", "note"}
+_FIELDS = {"path", "kind", "verify", "env", "confidential", "no_push", "seed", "verify_timeout_s", "note",
+           "auto_merge"}
 _IDENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DEFAULT_VERIFY_TIMEOUT_S = 600
 TAIL_CHARS = 4000
@@ -80,6 +81,7 @@ class Project:
     seed: tuple = ()
     verify_timeout_s: int = DEFAULT_VERIFY_TIMEOUT_S
     note: str = ""
+    auto_merge: bool = True
 
 
 # An agent can write the shared git config (e.g. core.fsmonitor -> a script in its
@@ -259,7 +261,7 @@ def _parse_project(key: str, entry: object) -> Project:
     return Project(
         key=key, path=root, verify=(verify or "").strip(), kind=str(entry.get("kind") or ""),
         env=env, confidential=bool(entry.get("confidential", False)),
-        no_push=bool(entry.get("no_push", False)),
+        no_push=bool(entry.get("no_push", False)), auto_merge=bool(entry.get("auto_merge", True)),
         seed=tuple(_seed_path(root, s, key) for s in seeds), verify_timeout_s=timeout, note=note,
     )
 
@@ -1126,12 +1128,39 @@ def runner_commit(project: Project, wt: Path, message: str) -> str | None:
     _git(wt, "add", "-A", confine=confine, timeout=COMMIT_TIMEOUT_S)
     if _git(wt, "diff", "--cached", "--quiet", "--no-ext-diff", check=False, confine=confine).returncode == 0:
         return None
-    env = None
-    if not _git(wt, "config", "user.email", check=False).stdout.strip():
-        env = {**os.environ, "GIT_AUTHOR_NAME": "AgenticOS", "GIT_AUTHOR_EMAIL": "agentic-os@localhost",
-               "GIT_COMMITTER_NAME": "AgenticOS", "GIT_COMMITTER_EMAIL": "agentic-os@localhost"}
-    _git(wt, "commit", "--no-verify", "--no-gpg-sign", "-q", "-m", message, confine=confine, timeout=COMMIT_TIMEOUT_S, env=env)
+    _git(wt, "commit", "--no-verify", "--no-gpg-sign", "-q", "-m", message, confine=confine, timeout=COMMIT_TIMEOUT_S,
+         env=_identity_env(wt))
     return _git(wt, "rev-parse", "HEAD").stdout.strip()
+
+
+def _identity_env(cwd: Path) -> dict | None:
+    """A fallback committer when the repo has none configured."""
+    if _git(cwd, "config", "user.email", check=False).stdout.strip():
+        return None
+    return {**os.environ, "GIT_AUTHOR_NAME": "AgenticOS", "GIT_AUTHOR_EMAIL": "agentic-os@localhost",
+            "GIT_COMMITTER_NAME": "AgenticOS", "GIT_COMMITTER_EMAIL": "agentic-os@localhost"}
+
+
+_MERGE_LOCK = threading.Lock()  # ponytail: one per process; runs of different projects rarely finish at once
+
+
+def merge_into_checkout(project: Project, ident: str) -> str:
+    """Merge agent/<ident> into the branch the main checkout has checked out (AGE-111).
+
+    Only a conflict-free merge is made: merge-tree checks first, so no merge is ever left
+    half done and no `merge --abort` can touch the user's own uncommitted edits. Git itself
+    refuses when the merge would overwrite a local change. Returns the checkout's new HEAD."""
+    branch = f"agent/{_check_ident(ident)}"
+    root = project.path
+    confine = confine_for(project, root)
+    with _MERGE_LOCK:
+        if _git(root, "symbolic-ref", "-q", "HEAD", check=False, confine=confine).returncode:
+            raise ProjectError(f"{root} is on a detached HEAD; merge {branch} by hand")
+        if _git(root, "merge-tree", "--write-tree", "HEAD", branch, check=False, confine=confine).returncode:
+            raise ProjectError(f"{branch} conflicts with {root}; merge it by hand")
+        _git(root, "merge", "--no-edit", "--no-verify", "--no-gpg-sign", "-q", branch, confine=confine,
+             timeout=COMMIT_TIMEOUT_S, env=_identity_env(root))
+        return _git(root, "rev-parse", "HEAD", confine=confine).stdout.strip()
 
 
 def committed_seeds(project: Project, wt: Path, base: str) -> list[str]:
