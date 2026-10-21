@@ -246,6 +246,9 @@
   .agent-badge.none   { color: var(--text-dim); border-color: var(--border); background: rgba(255,255,255,0.04); }
   .agent-badge:hover { opacity: .75; }
   .agent-badge.locked { cursor: default; opacity: .45; }
+  .agent-badge.card-model { text-transform: none; font-weight: 600; }
+  .agent-badge.card-model.is-model { text-transform: uppercase; }
+  .agent-badge.card-model.running { font-weight: 800; }
   .agent-badge.active { opacity: 1; box-shadow: 0 0 0 1px rgba(255,255,255,.08) inset; }
   .todo-agent-toggle { display: inline-flex; gap: 4px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
   .todo-run-btn { background: transparent; border: 1px solid var(--border); color: var(--text-dim); font-size: calc(10px * var(--fs)); padding: 2px 7px; border-radius: 3px; cursor: pointer; font-family: inherit; letter-spacing: .4px; transition: all .15s; }
@@ -2481,7 +2484,7 @@ function _modelBadgeHtml(modelLabel, running = false, onClick = '') {
   const label = (modelLabel || '').trim();
   if (!label) return '';
   const clickAttr = onClick ? ` onclick="${_esc(onClick)}"` : '';
-  return `<span class="model-badge${running ? ' running' : ''}"${clickAttr}>MODEL · ${_esc(label)}</span>`;
+  return `<span class="model-badge${running ? ' running' : ''}"${clickAttr}>${_esc(label)}</span>`;
 }
 
 // Canonical agent ids. Legacy ids in old run records and tickets are aliased on read only.
@@ -2502,6 +2505,10 @@ function _normalizeAgentName(agent) {
 function _agentLocksRetry(rawAgent) {
   const value = (rawAgent || '').trim().toLowerCase();
   return !!value && value !== 'deepseek';
+}
+
+function _agentName(agent) {
+  return { claude: 'Claude', codex: 'Codex', dsh: 'DeepSeek' }[agent] || '';
 }
 
 function _agentLabel(agent) {
@@ -2647,8 +2654,6 @@ function _buildColCard(run) {
   const attemptHtml = attempt > 0 ? `<span class="job-card-attempt">↺${attempt}</span> ` : '';
   const tokensHtml = (run.input_tokens || run.output_tokens)
     ? `<span style="font-size:calc(10px * var(--fs));color:var(--text-dim)">${_fmt((run.input_tokens||0)+(run.output_tokens||0))} tok</span>` : '';
-  const modelLabel = _displayModelLabel(run);
-  const modelBadge = _modelBadgeHtml(modelLabel, isRunning);
   const runAgent = _normalizeAgentName(run.agent);
   const preferredAgent = _normalizeAgentName(run.preferred_agent);
   const badgeAgent = runAgent || preferredAgent;
@@ -2670,8 +2675,13 @@ function _buildColCard(run) {
       ? `onclick="event.stopPropagation();triggerLinearIssueWithAgent('${_esc(run.linear_issue_id)}','${_esc(badgeAgent)}')"`
       : `onclick="event.stopPropagation();setIssueAgent('${_esc(run.linear_issue_id)}','${_esc(preferredAgent || badgeAgent)}')"`);
   const showRunCancel = isRunning || isInProgress;
-  const agentBadge = run._is_linear_issue
-    ? `<span class="agent-badge ${_esc(paClass)}${agentLocked ? ' locked' : ''}" title="${_esc(badgeTitle)}" ${agentBadgeClick}>${_esc(paLabel)}</span>`
+  // One badge: the model name in the agent's colour, or the agent's name when no model is recorded (D1).
+  const rawModel = (run.model || '').trim();
+  const shownModel = rawModel && rawModel !== 'codex' ? rawModel : '';
+  const badgeText = shownModel || _agentName(badgeAgent);
+  const agentBadge = badgeText
+    ? `<span class="agent-badge card-model ${_esc(paClass)}${shownModel ? ' is-model' : ''}${isRunning ? ' running' : ''}${run._is_linear_issue && agentLocked ? ' locked' : ''}"`
+      + (run._is_linear_issue ? ` title="${_esc(badgeTitle)}" ${agentBadgeClick}` : ` title="${_esc(paLabel)}"`) + `>${_esc(badgeText)}</span>`
     : '';
   const hasAssignedAgent = AGENT_IDS.includes(preferredAgent);
   const todoAgentToggle = run.resume_ok && state === 'todo'  // continue the session: open its reply (STB-053)
@@ -2685,23 +2695,19 @@ function _buildColCard(run) {
     : '';
   const issueLabel = run.skill || run.identifier || '?';
   const issueTitle = run.title || prompt || '';
-  const metaAgentHtml = run._is_linear_issue ? agentBadge : '';
-  const metaModelHtml = isRunning ? '' : modelBadge;
+  const metaModelHtml = isRunning ? '' : agentBadge;  // idle: meta row; running: id row (D2)
   // Decision 8: project runs end in review with a verify badge (pass / fail / timeout / seed committed / main checkout changed)
-  const verifyHtml = (run.verify_badge
-    ? `<span class="verify-badge ${run.verify_badge === 'pass' ? 'ok' : run.verify_badge === 'no check' ? 'none' : 'bad'}" title="project ${_esc(run.project_key || '')}">verify: ${_esc(run.verify_badge)}</span>`
-    : '') + (run.latest_run_id
-    ? `<span class="verify-badge" title="Open this card's live terminal view" onclick="event.stopPropagation();openCardTerminal('${_esc(run.latest_run_id)}')">▤ Terminal</span>`
-    : '');
+  const warning = _cardWarning(run);  // only a failed last step or the closing safety check (D3)
+  const verifyHtml = warning ? `<span class="verify-badge bad" title="project ${_esc(run.project_key || '')}">${_esc(warning)}</span>` : '';
   const projectHtml = (run.issue_project || run.project_key)
     ? `<span class="verify-badge" title="Runs in a worktree of this project">${_esc(_projName(run.issue_project || run.project_key))}</span>` : '';
   const syncHtml = run.unsynced ? '<span class="verify-badge" title="Not synced to Linear yet; it can be dispatched once it has its Linear id">syncing…</span>' : '';
-  const metaHtml = metaModelHtml || metaAgentHtml || verifyHtml || projectHtml || syncHtml
-    ? `<div class="job-card-meta">${metaModelHtml}${metaAgentHtml}${projectHtml}${syncHtml}${verifyHtml}</div>` : '';
+  const metaHtml = metaModelHtml || verifyHtml || projectHtml || syncHtml
+    ? `<div class="job-card-meta">${metaModelHtml}${projectHtml}${syncHtml}${verifyHtml}</div>` : '';
   const footerControlsHtml = run._is_linear_issue && state === 'todo' ? todoAgentToggle : '';
 
   card.innerHTML = `
-    <div class="job-card-id">${attemptHtml}${_esc(issueLabel)}${isRunning ? ` ${modelBadge}` : ''}</div>
+    <div class="job-card-id">${attemptHtml}${_esc(issueLabel)}${isRunning && agentBadge ? ` ${agentBadge}` : ''}</div>
     ${metaHtml}
     <div class="job-card-title">${_esc(issueTitle)}</div>
     ${state === 'in_review' && run.waiting ? `<div><span class="waiting-badge" title="${_esc(run.waiting)}">Waiting for you · ${_esc(run.waiting)}</span></div>` : ''}
@@ -2751,30 +2757,6 @@ function _buildColCard(run) {
         refreshJobBoard();
       }
     });
-  }
-  if (canRetry && !run.resume_ok) {  // a session card has only its reply box: no empty strict resume (STB-083)
-    // Session lock: once a run has completed, the locked agent continues its session; the others
-    // stay offered as a switch to a new session (AGE-113). A todo reset clears the lock.
-    const sessionLocked = _agentLocksRetry(run.agent) && state !== 'todo' && state !== 'running' && state !== 'unknown';
-    const lockedAgent = sessionLocked ? canonAgent(run.agent) : null;
-    const preferredAgent = lockedAgent || canonAgent(run.preferred_agent || run.agent) || null;
-
-    const group = document.createElement('div');
-    group.className = 'job-btn-group';
-    const _cardAgents = [
-      { key: 'claude',        label: '↺ Claude',   cls: 'retry-claude' },
-      { key: 'codex',         label: '↺ Codex',    cls: 'retry-codex' },
-      { key: 'dsh',           label: '↺ DeepSeek', cls: 'retry-dsh' },
-    ];
-    for (const { key, label, cls } of _cardAgents) {
-      const btn = document.createElement('button');
-      btn.className = `job-btn ${cls}${preferredAgent === key ? ' selected' : ''}`;
-      btn.textContent = label;
-      btn.title = _retryTitle(key, preferredAgent, sessionLocked);
-      btn.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, key); };
-      group.appendChild(btn);
-    }
-    card.appendChild(group);
   }
   card.addEventListener('click', (e) => {
     if (e.target.classList.contains('job-btn') || e.target.classList.contains('cancel-btn') || e.target.classList.contains('job-card-dismiss')) return;
@@ -2945,12 +2927,14 @@ async function refreshJobBoard(force = false) {
         when: latest?.when || '',
         duration: latest?.duration || '',
         attempt: latest?.attempt || 0,
-        model: _displayModelLabel(latest),
+        model: latest?.model || '',  // raw: the card falls back to the agent name, never a guessed model (R3)
         agent: latest?.agent || '',
         preferred_agent: issue.preferred_agent || '',
         input_tokens: latest?.input_tokens || 0,
         output_tokens: latest?.output_tokens || 0,
         verify_badge: latest?.verify_badge || '',
+        ...(latest && 'main_checkout_changed' in latest ? { main_checkout_changed: latest.main_checkout_changed } : {}),
+        interactive_tab_open: !!latest?.interactive_tab_open,
         project_key: latest?.project_key || '',
         issue_project: _projectFromLabels(issue.labels),
         waiting: latest?.waiting || '',
@@ -2974,8 +2958,21 @@ function _projectFromLabels(labels) {
   return '';
 }
 
+// The one outcome a card shows: a failed last step (merge) or the closing main-checkout check.
+// Verify results and other outcomes stay in the detail view and the terminal log (D3).
+function _cardWarning(run) {
+  const vb = run.verify_badge || '';
+  if (vb === 'merge failed') return vb;
+  if ('main_checkout_changed' in run) {
+    if (run.main_checkout_changed === null) return 'main checkout unchecked';
+    if (run.main_checkout_changed === true) return run.interactive_tab_open ? 'main checkout changed (interactive tab open)' : 'main checkout changed';
+    return '';
+  }
+  return vb.startsWith('main checkout') ? vb : '';  // a record from before the field existed
+}
+
 function _verifyRank(run) {
-  return run.verify_badge && run.verify_badge !== 'pass' && run.verify_badge !== 'no check' ? 0 : 1;
+  return _cardWarning(run) ? 0 : 1;
 }
 
 // A session card's controls open its reply instead of dispatching it (session-to-board §5).
@@ -3268,7 +3265,8 @@ async function openDetailModal(run_id) {
     const started = r.started_at ? new Date(r.started_at).toLocaleString() : '—';
     const dur = r.duration_s != null ? `${r.duration_s}s` : '—';
     const modelLabel = _displayModelLabel(r) || _displayModelLabel(boardItem);
-    const modelMeta = modelLabel ? ` &nbsp;·&nbsp; Model: <span>${_esc(modelLabel)}</span>` : '';
+    const modelMeta = (modelLabel ? ` &nbsp;·&nbsp; Model: <span>${_esc(modelLabel)}</span>` : '')
+      + (r.verify_badge ? ` &nbsp;·&nbsp; Verify: <span>${_esc(r.verify_badge)}</span>` : '');  // the card shows only final-step problems (D3)
     document.getElementById('detail-meta').innerHTML =
       `Started: <span>${_esc(started)}</span> &nbsp;·&nbsp; Duration: <span>${_esc(dur)}</span>${modelMeta}<span id="detail-ctx"></span> &nbsp;·&nbsp; ID: <span style="font-family:monospace;font-size:calc(10px * var(--fs))">${_esc(run_id)}</span>`;
 
@@ -4795,9 +4793,6 @@ socket.on('run_logged', () => { refreshJobBoard(); });
 // found on the server by its card key, so a reload never loses it (UI-07).
 let _cardTerm = { gen: 0, runId: null, run: null, item: null, data: null, xterm: null, fit: null, mode: null, termId: null, viewRunId: null, pending: null };
 
-function openCardTerminal(runId) {
-  openDetailModal(runId).then(() => { switchOutputTab('terminal'); _cardTermOpen(); });
-}
 function _cardTermBind(runId, run, item) {
   _cardTermDetach();
   Object.assign(_cardTerm, { gen: _cardTerm.gen + 1, runId, run, item, data: null, viewRunId: null, latestRunId: null, endedRunId: null, endedTermId: null });

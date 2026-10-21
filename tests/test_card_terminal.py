@@ -458,6 +458,23 @@ def test_latest_run_per_issue_beyond_the_recent_window(harness):
     assert latest[ISSUE]["run_id"] == "old" and latest[ISSUE]["agent_session_id"] == SID  # REV23-01
 
 
+def test_latest_by_issue_carries_card_badge_fields(harness):
+    """An older card keeps its model and closing-check warning (board-card-declutter R1/D4)."""
+    app_mod, mod, client, log, events, tmp = harness
+    write_log(log, {"run_id": "w", "agent": "codex", "status": "review", "model": "gpt-6.1-sol",
+                    "verify_badge": "seed committed", "main_checkout_changed": None, "interactive_tab_open": True})
+    got = client.get("/api/runs/latest-by-issue").get_json()[ISSUE]
+    assert (got["model"], got["verify_badge"], got["interactive_tab_open"]) == ("gpt-6.1-sol", "seed committed", True)
+    assert "main_checkout_changed" in got and got["main_checkout_changed"] is None  # null = unchecked, kept
+
+
+def test_latest_by_issue_omits_an_absent_closing_check(harness):
+    app_mod, mod, client, log, events, tmp = harness
+    write_log(log, {"run_id": "legacy", "agent": "claude", "status": "review", "verify_badge": "main checkout changed"})
+    got = client.get("/api/runs/latest-by-issue").get_json()[ISSUE]
+    assert "main_checkout_changed" not in got and got["verify_badge"] == "main checkout changed"
+
+
 def test_timed_out_linear_dispatch_stays_resumable(harness, monkeypatch):
     app_mod, mod, client, log, events, tmp = harness
     import subprocess
