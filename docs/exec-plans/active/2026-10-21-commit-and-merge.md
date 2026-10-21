@@ -67,6 +67,6 @@ The user asked for two things (2026-10-21):
 - [x] Inspection 7 fixes: the routing helper kills its group on success (CM-023); agent tabs in the main checkout block manual merges and spawn under the merge gate (CM-024).
 - [x] Inspection 8 fixes: per-entry registry map (CM-025); running baselines block manual merges and register under the gate (CM-026).
 - [x] Inspection 9 fix: resume tabs take the gate of the checkout they actually run in (CM-028).
-- [ ] CM-027: shared interprocess admission for CLI `projects.py verify` and `run_skill.py`. — BLOCKED: awaiting the user's decision (recommended: record it as a known limitation).
+- [x] CM-027: shared interprocess admission for CLI `projects.py verify` and `run_skill.py`. — N/A: on 2026-10-21 the user chose "先这样". Known limitation: a CLI verify run started by hand is invisible to a dashboard Commit & merge.
 - [ ] Fresh Codex inspection approved.
 - [ ] Archive.
