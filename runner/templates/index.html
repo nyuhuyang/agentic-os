@@ -2753,11 +2753,11 @@ function _buildColCard(run) {
     });
   }
   if (canRetry && !run.resume_ok) {  // a session card has only its reply box: no empty strict resume (STB-083)
-    const preferredAgent = canonAgent(run.preferred_agent || run.agent) || null;
-    // Session lock: if agent_session_id exists and status is not todo, dim non-locked agents
-    // Lock to run.agent once a run has completed (todo reset clears the lock visually)
+    // Session lock: once a run has completed, the locked agent continues its session; the others
+    // stay offered as a switch to a new session (AGE-113). A todo reset clears the lock.
     const sessionLocked = _agentLocksRetry(run.agent) && state !== 'todo' && state !== 'running' && state !== 'unknown';
     const lockedAgent = sessionLocked ? canonAgent(run.agent) : null;
+    const preferredAgent = lockedAgent || canonAgent(run.preferred_agent || run.agent) || null;
 
     const group = document.createElement('div');
     group.className = 'job-btn-group';
@@ -2767,11 +2767,10 @@ function _buildColCard(run) {
       { key: 'dsh',           label: '↺ DeepSeek', cls: 'retry-dsh' },
     ];
     for (const { key, label, cls } of _cardAgents) {
-      if (sessionLocked && lockedAgent !== key) continue; // hide non-locked agents
       const btn = document.createElement('button');
       btn.className = `job-btn ${cls}${preferredAgent === key ? ' selected' : ''}`;
       btn.textContent = label;
-      btn.title = preferredAgent === key ? 'Preferred agent for retry' : `Retry with ${label.replace('↺ ', '')}`;
+      btn.title = _retryTitle(key, preferredAgent, sessionLocked);
       btn.onclick = (e) => { e.stopPropagation(); retryRun(run.run_id, key); };
       group.appendChild(btn);
     }
@@ -3152,6 +3151,7 @@ function renderTrash(runs) {
 let _openTerminalFor = null;  // a run opened for its card's retained terminal: Terminal tab first
 let _detailResumeOk = false;  // the open card continues a session (session-to-board §5)
 let _detailResumeAgent = null;
+let _detailLockedAgent = null;  // the agent whose session the open card continues; the others switch (AGE-113)
 async function openDetailModal(run_id) {
   if (!run_id) return;
   const requestSeq = ++_detailModalLoadSeq;
@@ -3194,6 +3194,7 @@ async function openDetailModal(run_id) {
   _setDetailReplyValue('');
   _setDetailReplyStatus('');
   _detailResumeOk = false;
+  _detailLockedAgent = null;
   document.getElementById('detail-session-note').style.display = 'none';
   _replyAttachments = [];
   _renderAttachList('reply-attach-list', _replyAttachments);
@@ -3234,7 +3235,8 @@ async function openDetailModal(run_id) {
     if (isInReviewVirtual) {
       const lockedAgent = (boardItem?.agent || '').toLowerCase() || null;
       const prefAgent = (boardItem?.preferred_agent || lockedAgent || '').toLowerCase() || null;
-      _updateDetailRetryLock(prefAgent, _agentLocksRetry(lockedAgent));
+      _detailLockedAgent = _agentLocksRetry(lockedAgent) ? canonAgent(lockedAgent) : null;
+      _updateDetailRetryLock(prefAgent);
     }
     document.getElementById('detail-approve-btn').style.display = isInReviewVirtual ? '' : 'none';
     if (_linearConfigured) _loadLinearIssueIntoModal(issueId, boardItem);
@@ -3316,7 +3318,10 @@ async function openDetailModal(run_id) {
     document.getElementById('detail-retry-group').style.display = canRetry ? 'inline-flex' : 'none';
     if (canRetry) {
       if (_detailResumeOk) _updateDetailRetryLock(r.resume_agent, true);
-      else _updateDetailRetryLock(r.preferred_agent || r.agent || null, _agentLocksRetry(r.agent));
+      else {
+        _detailLockedAgent = _agentLocksRetry(r.agent) && state !== 'todo' ? canonAgent(r.agent) : null;
+        _updateDetailRetryLock(r.preferred_agent || r.agent || null);
+      }
     }
     const note = document.getElementById('detail-session-note');
     if (_detailResumeOk) {
@@ -3405,7 +3410,8 @@ function closeDetailModal({ flush = true } = {}) {
 }
 
 function _updateDetailRetryLock(preferredAgent, sessionLocked = false) {
-  if (_detailResumeOk) { preferredAgent = _detailResumeAgent; sessionLocked = true; }  // a session card: its agent only (STB-015)
+  if (_detailResumeOk) { preferredAgent = _detailResumeAgent; sessionLocked = true; }  // a session card: its agent continues, others switch (AGE-113)
+  else if (_detailLockedAgent) { preferredAgent = _detailLockedAgent; sessionLocked = true; }
   preferredAgent = canonAgent(preferredAgent) || null;
   const retryGroup = document.getElementById('detail-retry-group');
   if (!retryGroup || retryGroup.style.display === 'none') return;
@@ -3414,15 +3420,21 @@ function _updateDetailRetryLock(preferredAgent, sessionLocked = false) {
     'codex':        document.getElementById('detail-retry-codex'),
     'dsh':          document.getElementById('detail-retry-dsh'),
   };
-  const _labels = { 'claude': 'Claude', 'codex': 'Codex', 'dsh': 'DeepSeek' };
   for (const [agent, btn] of Object.entries(_detailBtns)) {
     if (!btn) continue;
-    const isLocked = sessionLocked && agent !== preferredAgent;
-    btn.style.display = isLocked ? 'none' : '';
+    btn.style.display = '';  // the other agents stay offered: a switch (AGE-113)
     btn.classList.remove('agent-locked-out');
-    btn.classList.toggle('selected', !isLocked && preferredAgent === agent);
-    btn.title = preferredAgent === agent ? 'Preferred agent for retry' : `Retry with ${_labels[agent] || agent}`;
+    btn.classList.toggle('selected', preferredAgent === agent);
+    btn.title = _retryTitle(agent, preferredAgent, sessionLocked);
   }
+}
+
+function _retryTitle(agent, current, sessionLocked) {
+  const name = { claude: 'Claude', codex: 'Codex', dsh: 'DeepSeek' }[agent] || agent;
+  if (agent === current) return sessionLocked ? `Continue this ${name} session` : 'Preferred agent for retry';
+  return sessionLocked && current
+    ? `Switch to ${name}: a new ${name} session that gets the previous output and your reply`
+    : `Retry with ${name}`;
 }
 
 async function dispatchFromDetail(agent) {

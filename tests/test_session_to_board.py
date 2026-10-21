@@ -200,7 +200,8 @@ def test_reply_continues_the_same_session_in_its_folder_and_again_from_done(stb)
 def test_reply_rules_agent_empty_and_reset(stb):
     app_mod, mod, client, log, tmp, proj, conf, launches = stb
     rid, issue_id = _new_card(client, log)
-    assert client.post(f"/api/runs/{rid}/retry", json={"reply": "x", "agent": "codex"}).status_code == 409
+    # a quick reply keeps its agent; a non-strict one switches (AGE-113, tests/test_switch_agent.py)
+    assert client.post(f"/api/runs/{rid}/retry", json={"reply": "x", "agent": "codex", "strict": True}).status_code == 409
     assert client.post(f"/api/runs/{rid}/retry", json={"reply": " "}).status_code == 400
     # a drag back to Todo voids the intent: the next retry is today's path (Decision 11)
     client.patch(f"/api/linear/issues/local/{issue_id}", json={"state_name": "Todo"})

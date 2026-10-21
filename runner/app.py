@@ -4379,12 +4379,17 @@ def _retry_session_card(run_id: str, original: dict, intent: dict, data: dict, c
     from runner.modules.linear import reserve_card
     agent, sid = intent["agent"], intent["id"]
     body_agent = canonical_agent(data.get("agent"))
+    switch_to = None  # another agent picked explicitly: a new session of it in this folder (AGE-113)
     if body_agent and body_agent != agent:
-        return jsonify({"ok": False, "error": f"this card continues a {agent} session"}), 409
+        if data.get("strict"):  # a quick reply promises the same session
+            return jsonify({"ok": False, "error": f"this card continues a {agent} session"}), 409
+        switch_to = body_agent
     reply = (data.get("reply") or "").strip()
     attachments = data.get("attachments") or []
     prompt = (reply + _format_prompt_attachments(attachments)).strip()  # the reply only (§3.5)
-    if not prompt and card_sourced:  # a plain Retry of a card continuing its session: the task again (PVST-02)
+    if switch_to:
+        prompt = _handoff_prompt(original, reply, attachments, (agent, sid))
+    elif not prompt and card_sourced:  # a plain Retry of a card continuing its session: the task again (PVST-02)
         prompt = (original.get("prompt") or "").strip()
     if not prompt:
         return jsonify({"ok": False, "error": "write a reply first"}), 400
@@ -4395,7 +4400,7 @@ def _retry_session_card(run_id: str, original: dict, intent: dict, data: dict, c
     try:
         plock.enter_context(_projects.project_lock(intent["project_key"]))
         return _retry_session_card_held(run_id, original, intent, data, reply, attachments, prompt,
-                                        linear_issue_id, task_id, plock, card_sourced)
+                                        linear_issue_id, task_id, plock, card_sourced, switch_to)
     except _projects.ProjectError as exc:
         return jsonify({"ok": False, "error": f"session not available: {exc}"}), 409
     finally:
@@ -4404,11 +4409,13 @@ def _retry_session_card(run_id: str, original: dict, intent: dict, data: dict, c
 
 
 def _retry_session_card_held(run_id, original, intent, data, reply, attachments, prompt, linear_issue_id,
-                             task_id, plock, card_sourced=False):
+                             task_id, plock, card_sourced=False, switch_to=None):
     """_retry_session_card under the project's lifecycle hold; a generic launch hands `plock`
-    to its worker (plock.handed), which keeps it through launch and record."""
+    to its worker (plock.handed), which keeps it through launch and record. switch_to: the agent
+    that runs instead, in a new session; the intent's session then only locates the folder."""
     from runner.modules.linear import reserve_card
     agent, sid = intent["agent"], intent["id"]
+    run_agent, run_sid = (switch_to, None) if switch_to else (agent, sid)  # who runs, resuming what
     try:
         project = _projects.get_project(intent["project_key"], _projects.load_registry(errors={}))
         target = _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])
@@ -4417,7 +4424,7 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
     # a dashboard terminal on this card or session: the page offers to end it, not "send anyway"
     holder = {"card_key": linear_issue_id or task_id, "project_key": project.key,
               "ticket": original.get("issue_identifier"), "agent": agent, "session_id": sid}
-    if not data.get("confirm_in_use"):
+    if not data.get("confirm_in_use") and not switch_to:  # a switch leaves that session alone
         why = session_in_use(target, None, _own_activity_end(linear_issue_id))
         if why:
             from runner.modules.pty import card_terminal
@@ -4429,7 +4436,7 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
     launch_gen = intent["gen"]  # the validated intent's, never a reset's that raced in (SBI-007)
     attempt = original.get("attempt", 0) + 1
     try:
-        _claim_session(agent, sid, new_run_id)
+        _claim_session(run_agent, run_sid, new_run_id)
     except _projects.SessionBusy as exc:
         return jsonify({"ok": False, "error": str(exc)}), 409
     issue = _tracker_issue(linear_issue_id) or {}
@@ -4464,9 +4471,9 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
         conf = _sticky(conf, _ticket_confidential(project.key, durable["issue_identifier"], linear_issue_id, task_id))
     binding = {"project_key": project.key, "confidential": conf}
     # A card-sourced continuation persists no intent: the next reply finds the session again
-    # through _card_session (DP-34).
+    # through _card_session (DP-34). Nor does a switch: the next reply continues the new session.
     record_extra = {"issue_identifier": ident, "source": "session", "session_project": project.key,
-                    **({} if card_sourced else {"resume_session": intent}), **binding,
+                    **({} if card_sourced or switch_to else {"resume_session": intent}), **binding,
                     **_issue_title_extra(linear_issue_id, conf)}
     wt_ident = durable.get("issue_identifier") if durable.get("project_key") == project.key else None
     in_worktree = bool(wt_ident) and os.path.realpath(_projects.worktree_path(project, wt_ident)) == os.path.realpath(target["cwd"])
@@ -4476,7 +4483,7 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
         _write_run_log_retrying("_prompt", "error", started_at, 0.0, prompt=_WITHHELD_PROMPT,
                                 error="withheld (error): run records are outside this checkout's ignored state/ or outputs/",
                                 run_id=new_run_id, attempt=attempt, parent_run_id=run_id, linear_issue_id=linear_issue_id,
-                                agent=agent, task_id=task_id, agent_session_id=sid, reset_generation=launch_gen,
+                                agent=run_agent, task_id=task_id, agent_session_id=run_sid, reset_generation=launch_gen,
                                 extra={k: v for k, v in record_extra.items() if k != "issue_title"})  # withheld too (R9-03)
         return jsonify({"ok": False, "run_id": new_run_id, "error": "confidential project: run records are not in a safe place"}), 409
     _linear_dispatched[linear_issue_id] = new_run_id
@@ -4492,14 +4499,14 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
         fallback=lambda: _linear_comment_body(title="Human Feedback", feedback=reply, attachments=attachments))
     if body:
         _comment_quietly(_post_linear_comment, linear_issue_id, body)
-    ok_body = {"ok": True, "run_id": new_run_id, "skill": original.get("skill") or "_prompt", "attempt": attempt, "agent": agent}
+    ok_body = {"ok": True, "run_id": new_run_id, "skill": original.get("skill") or "_prompt", "attempt": attempt, "agent": run_agent}
     if in_worktree:
         try:
             _start_counted(_run_project_ticket,
-                project_key=project.key, ident=wt_ident, agent=agent, prompt=prompt,
+                project_key=project.key, ident=wt_ident, agent=run_agent, prompt=prompt,
                 title=(original.get("prompt") or "")[:80], run_id=new_run_id, linear_issue_id=linear_issue_id,
                 task_id=task_id, launch_gen=launch_gen, attempt=attempt, parent_run_id=run_id,
-                resume_session=sid, reuse_only=True, skill=original.get("skill") or "_prompt",
+                resume_session=run_sid, reuse_only=True, skill=original.get("skill") or "_prompt",
                 confidential=conf, ticket_hold=held, record_extra=record_extra,
                 timeout=AI_SESSION_TIMEOUT_S)  # a session continuation: stall detector + 4 h (D7)
         except Exception as exc:
@@ -4513,24 +4520,25 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
     _running_jobs[new_run_id] = {
         "run_id": new_run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running",
         "last_progress_at": time.monotonic(), "linear_issue_id": linear_issue_id, "launch_gen": launch_gen,
-        "agent": agent, "agent_session_id": sid, "model": _agent_model(agent),
+        "agent": run_agent, "agent_session_id": run_sid, "model": _agent_model(run_agent),
         # no top-level project_key: cancel, stall and shutdown use the generic path (SBR-005)
-        "record": {"attempt": attempt, "parent_run_id": run_id, "agent": agent, "model": _agent_model(agent),
+        "record": {"attempt": attempt, "parent_run_id": run_id, "agent": run_agent, "model": _agent_model(run_agent),
                    "task_id": task_id, "reset_generation": launch_gen},
         "record_extra": record_extra,
     }
     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "running", "skill": skill})
 
-    def _record(status: str, output: str = "", error: str = "", dur: float = 0.0, it=None, ot=None, model=None):
+    def _record(status: str, output: str = "", error: str = "", dur: float = 0.0, it=None, ot=None, model=None,
+                new_sid=None):
         p, o, e = _withheld(conf, prompt, output, error, status)
         extra = record_extra
         if conf is not False and _records_unsafe():  # decided at write time, like the prompt (PVST-01)
             extra = {k: v for k, v in record_extra.items() if k != "issue_title"}
         _write_run_log_retrying(skill, status, started_at, dur, prompt=p, output=o, error=e, run_id=new_run_id,
                                 attempt=attempt, parent_run_id=run_id, linear_issue_id=linear_issue_id,
-                                input_tokens=it, output_tokens=ot, agent=agent, model=model or _agent_model(agent),
-                                task_id=task_id, token_cost_usd=_compute_token_cost(ot, it, model or _agent_model(agent)),
-                                agent_session_id=sid, reset_generation=launch_gen, extra=extra)
+                                input_tokens=it, output_tokens=ot, agent=run_agent, model=model or _agent_model(run_agent),
+                                task_id=task_id, token_cost_usd=_compute_token_cost(ot, it, model or _agent_model(run_agent)),
+                                agent_session_id=run_sid or new_sid, reset_generation=launch_gen, extra=extra)
 
     def _close(status: str, output: str = "", error: str = "") -> None:
         body = project_runs.tracker_comment(
@@ -4553,12 +4561,12 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
                     if end():
                         _record("cancelled", error="the card was removed or reset before its run started")
                         socketio.emit("run_logged", {"skill": skill, "run_id": new_run_id})
-                        _after_card_run(new_run_id, linear_issue_id, agent, sid)  # DSI-02
+                        _after_card_run(new_run_id, linear_issue_id, run_agent, run_sid)  # DSI-02
                     return
                 try:
-                    cmd = _project_cmd(agent, eff, prompt, sid)  # the sandboxed CLI for a confidential project
+                    cmd = _project_cmd(run_agent, eff, prompt, run_sid)  # the sandboxed CLI for a confidential project
                     output, it, ot, model, _new_sid, stderr_s, ok = run_agent_process(
-                        new_run_id, cmd, stream=agent, cwd=target["cwd"], env=_project_exec_env(agent, eff),
+                        new_run_id, cmd, stream=run_agent, cwd=target["cwd"], env=_project_exec_env(run_agent, eff),
                         on_proc=procs.append, timeout=AI_SESSION_TIMEOUT_S)
                     agent_error, turn_failed = project_runs.pop_agent_failure(new_run_id)
                     # a reported failure, or no reply at all, fails the continuation (R4-03, R14-01)
@@ -4566,25 +4574,25 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
                     if not end():
                         return
                     # the agent's own reason first, e.g. a usage limit (D6)
-                    error = "" if ok else (agent_error or _extract_real_errors(stderr_s) or f"resume of session {sid} failed")
+                    error = "" if ok else (agent_error or _extract_real_errors(stderr_s) or (f"resume of session {sid} failed" if run_sid else f"{run_agent} run failed"))
                     status = "review" if ok else "error"  # strict: a failed continuation is an error
-                    _record(status, output or "", error, time.monotonic() - t0, it, ot, model)
+                    _record(status, output or "", error, time.monotonic() - t0, it, ot, model, _new_sid)
                     _close(status, output or "", error)
-                    _after_card_run(new_run_id, linear_issue_id, agent, sid, procs[0].pid if procs else None)
+                    _after_card_run(new_run_id, linear_issue_id, run_agent, run_sid or _new_sid, procs[0].pid if procs else None)
                 except subprocess.TimeoutExpired:
                     _kill_and_reap(procs[0] if procs else None)
                     if not end():
                         return
                     _record("timeout", error=f"Timed out after {AI_SESSION_TIMEOUT_S}s", dur=time.monotonic() - t0)
                     _close("timeout", error="timeout")
-                    _after_card_run(new_run_id, linear_issue_id, agent, sid, procs[0].pid if procs else None)
+                    _after_card_run(new_run_id, linear_issue_id, run_agent, run_sid, procs[0].pid if procs else None)
                 except Exception as exc:
                     _kill_and_reap(procs[0] if procs else None)
                     if not end():
                         return
                     _record("error", error=str(exc), dur=time.monotonic() - t0)
                     _close("error", error=str(exc))
-                    _after_card_run(new_run_id, linear_issue_id, agent, sid, procs[0].pid if procs else None)
+                    _after_card_run(new_run_id, linear_issue_id, run_agent, run_sid, procs[0].pid if procs else None)
         finally:
             _release_session(new_run_id)
             held.close()
@@ -5206,6 +5214,34 @@ def record_interactive_ended(run_id: str, session_id: str | None) -> str | None:
     return new_id
 
 
+def _handoff_prompt(original: dict, reply: str, attachments: list,
+                    switched_from: tuple[str, str | None] | None = None) -> str:
+    """A new session's prompt: the task, the previous attempt's output and the reply. On a switch of
+    agent (AGE-113), also where the previous agent's whole conversation is, for the new one to read."""
+    original_prompt = original.get("prompt", "")
+    prev_output = (original.get("output") or "").strip()
+    attach_note = _format_prompt_attachments(attachments)
+    if reply and prev_output:
+        prompt = (
+            f"Original task:\n{original_prompt}\n\n"
+            f"Previous attempt output:\n{prev_output}\n\n"
+            f"[Human feedback]: {reply}{attach_note}\n\n"
+            f"Please continue or revise based on the feedback above."
+        )
+    elif reply:
+        prompt = f"[Human feedback]: {reply}{attach_note}\n\n{original_prompt}"
+    elif attach_note:
+        prompt = f"[Human feedback]:{attach_note}\n\n{original_prompt}"
+    else:
+        prompt = original_prompt
+    if switched_from:
+        old_agent, old_sid = switched_from
+        path = _projects.session_file(old_agent, old_sid) if old_sid else None
+        prompt += (f"\n\n[Agent switch]: this task was being worked on by {old_agent}; you take over from here."
+                   + (f" Its full conversation is in {path} (JSONL); read it if you need more context." if path else ""))
+    return prompt
+
+
 @app.route("/api/runs/<run_id>/retry", methods=["POST"])
 def api_run_retry(run_id: str):
     if not RUN_LOG.exists():
@@ -5228,7 +5264,6 @@ def api_run_retry(run_id: str):
         return jsonify({"error": "not found"}), 404
 
     skill = original.get("skill", "")
-    original_prompt = original.get("prompt", "")
     prev_attempt = original.get("attempt", 0)
     linear_issue_id = original.get("linear_issue_id")
     # task_id chains back to root so all attempts share a common ancestry key
@@ -5264,21 +5299,7 @@ def api_run_retry(run_id: str):
         return _retry_session_card(run_id, original, intent, req_data)
     reply = (req_data.get("reply") or "").strip()
     attachments = req_data.get("attachments") or []
-    prev_output = (original.get("output") or "").strip()
-    attach_note = _format_prompt_attachments(attachments)
-    if reply and prev_output:
-        prompt = (
-            f"Original task:\n{original_prompt}\n\n"
-            f"Previous attempt output:\n{prev_output}\n\n"
-            f"[Human feedback]: {reply}{attach_note}\n\n"
-            f"Please continue or revise based on the feedback above."
-        )
-    elif reply:
-        prompt = f"[Human feedback]: {reply}{attach_note}\n\n{original_prompt}"
-    elif attach_note:
-        prompt = f"[Human feedback]:{attach_note}\n\n{original_prompt}"
-    else:
-        prompt = original_prompt
+    prompt = _handoff_prompt(original, reply, attachments)
 
     # Guard: reject if already running
     if run_id in _running_procs or any(j.get("skill") == skill for j in _running_jobs.values()):
@@ -5294,18 +5315,19 @@ def api_run_retry(run_id: str):
     agent = (agent_override or preferred_agent or canonical_agent(original.get("agent"))
              or canonical_agent(cfg.get("agent", {}).get("backend")) or "claude")
 
-    # Agent lock: if task is in flight (in_progress / in_review), enforce same agent
+    # Agent lock: if task is in flight (in_progress / in_review), enforce same agent, unless the
+    # user explicitly picks another one: a switch, e.g. when an agent's usage runs out (AGE-113).
     _task_lock = _get_task_agent_lock(task_id)
     _lock_session_id: str | None = None
+    switch_from: str | None = None  # the locked agent being switched away from
     if _task_lock:
         locked_agent = _task_lock["agent"]
         _lock_session_id = _task_lock.get("agent_session_id")
-        if agent_override and agent_override != locked_agent:
-            logger.warning(
-                "[retry] agent_override=%s rejected; task %s locked to %s",
-                agent_override, task_id, locked_agent,
-            )
-        agent = locked_agent
+        if agent_override and agent_override != locked_agent and not strict:  # a quick reply never switches
+            switch_from = locked_agent
+        else:
+            agent = locked_agent
+    sess_agent = switch_from or agent  # whose session routes this retry to its folder
     if strict and _same_session and _newest_attempt(linear_issue_id, task_id) == run_id:
         # the answered attempt is the card's newest by history order: its own session is the card's
         # current one, whatever an appended status copy of an older attempt left last (QR-R6-001)
@@ -5327,16 +5349,16 @@ def api_run_retry(run_id: str):
     card_session = False  # this retry continues the card's session: strict, 4 h ceiling (DP-35, D7)
     card_note: str | None = None  # why it starts a new session instead (§4)
     is_entry = bool(entry.get("schedule_eligible") and entry.get("entrypoint"))
-    if linear_issue_id and agent in _SESSION_AGENTS and is_entry:
+    if linear_issue_id and sess_agent in _SESSION_AGENTS and is_entry:
         card_note = "new session: skill has its own entrypoint"
-    elif linear_issue_id and agent in _SESSION_AGENTS:
-        if _lock_session_id and _card_sessions(live_only=False).get((agent, _lock_session_id)) not in (None, linear_issue_id):
+    elif linear_issue_id and sess_agent in _SESSION_AGENTS:
+        if _lock_session_id and _card_sessions(live_only=False).get((sess_agent, _lock_session_id)) not in (None, linear_issue_id):
             _lock_session_id = None  # the lock's session now belongs to another card (R3-03)
-        sid = _lock_session_id or (_card_session(linear_issue_id, agent) or (None, None))[0]
-        target = _projects.find_session(agent, sid) if sid else None
+        sid = _lock_session_id or (_card_session(linear_issue_id, sess_agent) or (None, None))[0]
+        target = _projects.find_session(sess_agent, sid) if sid else None
         project_key = (bound or {}).get("project_key") or original.get("session_project")
         if not sid:
-            card_note = "new session: " + (_resumable_card_session(linear_issue_id, agent, None)[1] or "no session yet")
+            card_note = "new session: " + (_resumable_card_session(linear_issue_id, sess_agent, None)[1] or "no session yet")
         elif not target:  # removed or archived: a new session, said so, never a doomed resume (R2)
             card_note, _lock_session_id = "new session: the card's session was removed or archived", None
         else:
@@ -5349,14 +5371,14 @@ def api_run_retry(run_id: str):
             if project_key and not in_ticket_wt:
                 # main checkout or any other folder of the project: the session-card worker (§3.3)
                 # the generation this request read: a reset since then refuses it at admission (R9-01)
-                transient = {"agent": agent, "id": sid, "project_key": project_key, "gen": _launch_gen}
+                transient = {"agent": sess_agent, "id": sid, "project_key": project_key, "gen": _launch_gen}
                 if strict and _same_session and sid != _same_session:
                     return _not_same  # never a replacement session for a quick reply (QR-R3-001)
                 return _retry_session_card(run_id, original, transient, req_data, card_sourced=True)
             if not project_key and os.path.realpath(target["cwd"]) != os.path.realpath(str(ROOT)):
                 card_note, _lock_session_id = "new session: the card's session is in a different folder", None
             else:
-                if not req_data.get("confirm_in_use"):
+                if not req_data.get("confirm_in_use") and not switch_from:  # a switch leaves that session alone
                     why = session_in_use(target, None, _own_activity_end(linear_issue_id))
                     if why:
                         from runner.modules.pty import card_terminal
@@ -5366,6 +5388,9 @@ def api_run_retry(run_id: str):
                                                  409, **holder)
                         return jsonify({"ok": False, "in_use_elsewhere": why}), 409
                 _lock_session_id, card_session = sid, True
+    if switch_from:  # a new session of the chosen agent, in the folder chosen above, told what came before
+        prompt = _handoff_prompt(original, reply, attachments, (switch_from, _lock_session_id))
+        card_note, _lock_session_id, card_session = f"new session: switched from {switch_from}", None, False
     try:  # before any tracker change: a session being renamed/removed/opened is refused (A, R02)
         _claim_session(agent, _lock_session_id, new_run_id)
     except _projects.SessionBusy as exc:
