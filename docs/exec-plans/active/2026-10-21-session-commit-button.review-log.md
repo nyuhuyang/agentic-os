@@ -12,3 +12,7 @@
 - SC-003 (med) accepted: _git_operation refuses MERGE_HEAD, CHERRY_PICK_HEAD, REVERT_HEAD, rebase-merge/apply, and unmerged entries.
 - SC-004 (low) accepted: uncommitted() uses --no-optional-locks.
 - SC-005 (low) accepted: _porcelain_paths consumes the rename/copy source token (shared with the post-run dirty check).
+
+## Inspection 2 — Codex (fresh): REVISE
+- SC-006 (high) accepted: manual commits now always run git sandboxed (writes confined to the repo and its common git dir), whatever the policy. No confidentiality snapshot can go stale, and the route's policy read is removed.
+- SC-007 (med) accepted at the source: _merge_when_last queues (ticket, verified sha) read under the ticket lock, and merge_into_checkout merges that exact sha (validated hex) with a "Merge branch 'agent/X'" message. A later commit on the branch (manual Commit or terminal) never rides in on an earlier verification. A head-read failure is recorded as merge failed.

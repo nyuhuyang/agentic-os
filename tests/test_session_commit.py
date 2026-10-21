@@ -175,11 +175,22 @@ def test_staged_rename_counts_once(repo):
     assert pj.commit_checkout(project, root, dry_run=True)["files"] == ["renamed.txt"]
 
 
-def test_route_uses_sticky_confidentiality_and_the_lifecycle_lock(repo, tmp_path, monkeypatch):
+def test_commit_is_always_sandboxed(repo, monkeypatch):
+    """Not confidential in the registry, still confined: no stale policy can leave git unconfined (SC-006)."""
+    project, root = repo
+    seen = []
+    real = pj.sandbox_prefix
+    monkeypatch.setattr(pj, "sandbox_prefix", lambda writable: seen.append(list(writable)) or real(writable))
+    (root / "a.txt").write_text("c\n")
+    assert not project.confidential and pj.commit_checkout(project, root, "msg")["committed"]
+    assert seen and all(root.resolve() in w for w in seen)
+
+
+def test_route_holds_the_lifecycle_lock(repo, tmp_path, monkeypatch):
     project, root = repo
     import app as app_mod
     reg = tmp_path / "projects.yaml"
-    reg.write_text(f"projects:\n  alpha:\n    path: {root}\n    verify: 'true'\n")  # not confidential in the registry
+    reg.write_text(f"projects:\n  alpha:\n    path: {root}\n    verify: 'true'\n")
     monkeypatch.setattr(pj, "REGISTRY_PATH", reg)
     d = pj.CLAUDE_PROJECTS / pj._slug(str(root))
     d.mkdir(parents=True)
@@ -188,14 +199,14 @@ def test_route_uses_sticky_confidentiality_and_the_lifecycle_lock(repo, tmp_path
     seen = {}
 
     def fake_commit(p, cwd, message, dry_run=False):
-        seen["confidential"] = p.confidential
-        with pytest.raises(pj.ProjectBusy):  # the shared lifecycle lock is held: exclusive edits wait
+        try:
             with pj.project_lock("alpha", exclusive=True, blocking=False):
-                pass
+                seen["locked"] = False
+        except pj.ProjectBusy:
+            seen["locked"] = True  # exclusive edits (path / confidential / remove) wait (SC-002)
         return {"repo": str(root), "branch": "main", "files": [], "committed": None}
 
     monkeypatch.setattr(pj, "commit_checkout", fake_commit)
-    monkeypatch.setattr(app_mod, "session_confidential", lambda *a, **k: None)  # unknown policy
     h = {"X-AgenticOS-Token": app_mod.REQUEST_TOKEN}
     r = app_mod.app.test_client().post("/api/projects/alpha/sessions/claude/s1/commit", json={"dry_run": True}, headers=h)
-    assert r.status_code == 200 and seen["confidential"] is True  # unknown = confidential (SC-001)
+    assert r.status_code == 200 and seen["locked"] is True

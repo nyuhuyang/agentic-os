@@ -309,6 +309,20 @@ def test_merge_into_checkout(repo):
     assert head == subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
 
 
+def test_merge_into_checkout_merges_the_verified_commit_not_the_branch_tip(repo):
+    """A queued merge takes the sha read at verification; a later commit on the branch stays out (SC-007)."""
+    p, wt, info = make(repo)
+    (wt / "verified.txt").write_text("v\n")
+    pj.runner_commit(p, wt, "T-1: verified")
+    verified = pj.branch_head(p, "T-1")
+    (wt / "later.txt").write_text("l\n")
+    pj.runner_commit(p, wt, "T-1: later, unverified")
+    pj.merge_into_checkout(p, "T-1", verified)
+    assert (repo / "verified.txt").exists() and not (repo / "later.txt").exists()
+    with pytest.raises(pj.ProjectError, match="commit id"):
+        pj.merge_into_checkout(p, "T-1", "HEAD~1")
+
+
 @pytest.mark.parametrize("dirty", [False, True])
 def test_merge_into_checkout_refuses_without_touching_it(repo, dirty):
     """A conflict (or a local edit the merge would overwrite) leaves the checkout as it was."""

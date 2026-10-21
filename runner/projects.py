@@ -1144,22 +1144,31 @@ def _identity_env(cwd: Path) -> dict | None:
 _MERGE_LOCK = threading.Lock()  # ponytail: one per process; runs of different projects rarely finish at once
 
 
-def merge_into_checkout(project: Project, ident: str) -> str:
+def branch_head(project: Project, ident: str) -> str:
+    """The commit agent/<ident> points at now: what a queued merge must merge (SC-007)."""
+    return _git(project.path, "rev-parse", "--verify", f"refs/heads/agent/{_check_ident(ident)}^{{commit}}",
+                confine=confine_for(project, project.path)).stdout.strip()
+
+
+def merge_into_checkout(project: Project, ident: str, rev: str | None = None) -> str:
     """Merge agent/<ident> into the branch the main checkout has checked out (AGE-111).
 
     Only a conflict-free merge is made: merge-tree checks first, so no merge is ever left
     half done and no `merge --abort` can touch the user's own uncommitted edits. Git itself
     refuses when the merge would overwrite a local change. Returns the checkout's new HEAD."""
     branch = f"agent/{_check_ident(ident)}"
+    if rev is not None and not re.fullmatch(r"[0-9a-f]{40}([0-9a-f]{24})?", rev):
+        raise ProjectError(f"not a commit id: {rev!r}")
+    target = rev or branch  # rev: the commit that passed verification, not whatever the branch holds now
     root = project.path
     confine = confine_for(project, root)
     with _MERGE_LOCK:
         if _git(root, "symbolic-ref", "-q", "HEAD", check=False, confine=confine).returncode:
             raise ProjectError(f"{root} is on a detached HEAD; merge {branch} by hand")
-        if _git(root, "merge-tree", "--write-tree", "HEAD", branch, check=False, confine=confine).returncode:
+        if _git(root, "merge-tree", "--write-tree", "HEAD", target, check=False, confine=confine).returncode:
             raise ProjectError(f"{branch} conflicts with {root}; merge it by hand")
-        _git(root, "merge", "--no-edit", "--no-verify", "--no-gpg-sign", "-q", branch, confine=confine,
-             timeout=COMMIT_TIMEOUT_S, env=_identity_env(root))
+        _git(root, "merge", "--no-edit", "--no-verify", "--no-gpg-sign", "-q", "-m", f"Merge branch '{branch}'",
+             target, confine=confine, timeout=COMMIT_TIMEOUT_S, env=_identity_env(root))
         return _git(root, "rev-parse", "HEAD", confine=confine).stdout.strip()
 
 
@@ -1177,7 +1186,10 @@ def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry
     msg = message.strip() if isinstance(message, str) else ""
     if not dry_run and not msg:
         raise ProjectError("a commit message is required")
-    confine = confine_for(project, repo)
+    # Always sandboxed, whatever the policy says: staging can run repo-configured clean filters,
+    # and a policy read before the ticket lock could be stale by the time git runs (SC-006).
+    common = _git(project.path, "rev-parse", "--git-common-dir").stdout.strip()
+    confine = [(project.path / common).resolve(), repo]
     with contextlib.ExitStack() as stack:
         if ident:
             stack.enter_context(ticket_lock(project.key, ident))  # a run, verify or terminal owns it now

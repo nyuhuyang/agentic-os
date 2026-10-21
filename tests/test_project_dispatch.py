@@ -311,12 +311,14 @@ def test_merge_waits_for_the_projects_other_runs(helper, monkeypatch):
     app_mod, *_ = helper
     p = SimpleNamespace(key="demo", auto_merge=True)
     merged = []
-    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t: merged.append(t) or "sha")
+    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t, sha=None: merged.append((t, sha)) or "sha")
+    monkeypatch.setattr(pj, "branch_head", lambda project, t: f"head-of-{t}")
     a, b = {"project_key": "demo"}, {"project_key": "demo"}
     monkeypatch.setattr(app_mod, "_running_jobs", {"a": a, "b": b, "c": {"project_key": "other"}})
     assert app_mod._merge_when_last(p, "T-1", a, eligible=True) == {"merge": "waiting for this project's other runs"}
     assert merged == []
     assert app_mod._merge_when_last(p, "T-2", b, eligible=True) == {"merged_head": "sha", "merged": ["T-1", "T-2"]}
+    assert merged == [("T-1", "head-of-T-1"), ("T-2", "head-of-T-2")]  # the verified commits, not branch tips (SC-007)
     assert app_mod._merge_when_last(SimpleNamespace(key="demo", auto_merge=False), "T-3", b, eligible=True) == {}
 
 

@@ -3223,7 +3223,7 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
         _after_card_run(run_id, linear_issue_id, agent, sid or resume_session, agent_pgid[0])
 
 
-_PENDING_MERGES: dict[str, list[str]] = {}  # project key -> tickets waiting for its other runs (AGE-111)
+_PENDING_MERGES: dict[str, list[tuple[str, str]]] = {}  # project key -> (ticket, verified sha) waiting for its other runs (AGE-111)
 
 
 def _merge_when_last(project, ident: str, job: dict, eligible: bool) -> dict:
@@ -3234,19 +3234,27 @@ def _merge_when_last(project, ident: str, job: dict, eligible: bool) -> dict:
     ponytail: the queue is in memory; a runner restart drops it (the branches stay, merge by hand)."""
     if not project.auto_merge:
         return {}
+    # The commit that passed verification, read under this ticket's lock: a later commit on the
+    # branch (a manual Commit, a terminal) never rides in on this verification (SC-007).
+    head, head_error = None, None
+    if eligible:
+        try:
+            head = _projects.branch_head(project, ident)
+        except _projects.ProjectError as exc:
+            head_error = str(exc)[:500]
     with _JOB_LOCK:
         job["merge_checked"] = True
-        if eligible:
-            _PENDING_MERGES.setdefault(project.key, []).append(ident)
+        if head:
+            _PENDING_MERGES.setdefault(project.key, []).append((ident, head))
         busy = any(j is not job and j.get("project_key") == project.key and not j.get("merge_checked")
                    for j in _running_jobs.values())
-        todo = [] if busy else list(dict.fromkeys(_PENDING_MERGES.pop(project.key, [])))
+        todo = [] if busy else list(dict(_PENDING_MERGES.pop(project.key, [])).items())  # newest sha per ticket
+    out: dict = {"merge_error": {ident: head_error}, "verify_badge": "merge failed"} if head_error else {}
     if busy:
-        return {"merge": "waiting for this project's other runs"} if eligible else {}
-    out: dict = {}
-    for t in todo:
+        return out or ({"merge": "waiting for this project's other runs"} if eligible else {})
+    for t, sha in todo:
         try:
-            out["merged_head"] = _projects.merge_into_checkout(project, t)
+            out["merged_head"] = _projects.merge_into_checkout(project, t, sha)
             out.setdefault("merged", []).append(t)
         except _projects.ProjectError as exc:
             out.setdefault("merge_error", {})[t] = str(exc)[:500]
@@ -4722,9 +4730,7 @@ def api_session_commit(key: str, agent: str, sid: str):
         with _projects.project_lock(key):
             project = _projects.get_project(key, _projects.load_registry(errors={}))
             target = _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])
-            # sticky policy: registry, ticket sidecar/bindings and this session's history; unknown = confidential (SC-001)
-            if session_confidential(project, target["cwd"], sid=sid) is not False:
-                project = dataclasses.replace(project, confidential=True)
+            # commit_checkout always runs git sandboxed, so no policy snapshot can go stale (SC-001/006)
             result = _projects.commit_checkout(project, target["cwd"], body.get("message"),
                                                dry_run=bool(body.get("dry_run")))
     except _projects.SessionNotFound as exc:
