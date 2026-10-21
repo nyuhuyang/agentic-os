@@ -1199,6 +1199,13 @@ function _sessionRow(key, s) {
         <button class="session-copy ${_commitClass(s.commit_state)}" data-saction="commit" ${ids} title="${_esc(_commitTitle(s.commit_state))}">Commit</button>
         <button class="session-copy" data-saction="rename" ${ids}>Rename</button>
         <button class="session-copy" data-saction="remove" ${ids}>Remove</button>`;
+  if (ed && ed.mode === 'note' && ed.conflict) {
+    // A conflict needs a decision, not a merge: the session's own agent merges main into its branch,
+    // resolves it and runs the tests; its reply opens prefilled for the user to read and send.
+    actions = `<button class="session-copy commit-todo" data-resume-agent="${_esc(s.agent)}" data-resume-id="${_esc(s.id)}" data-project="${_esc(key)}"
+        data-prefill="conflict" data-branch="${_esc(ed.branch || '')}" data-into="${_esc(ed.into || 'main')}"
+        title="Send this session's card back to its agent to merge ${_esc(ed.into || 'main')} in and resolve the conflict">Resolve with agent</button>` + actions;
+  }
   if (ed && ed.mode === 'rename') {
     // the name the row shows: a card's session is renamed by renaming the card (D2, DP-16)
     title = `<input class="session-rename" ${ids} value="${_esc(s.card_title || s.title)}" maxlength="200" style="flex:1;font:inherit"
@@ -1276,7 +1283,8 @@ async function _sessionSubmit(el, mode) {
     if (r.data.merged_head) parts.push(`merged into ${r.data.into || 'the main checkout'} (${r.data.merged_head.slice(0, 7)})`);
     if (r.data.merge_error) parts.push(`not merged: ${r.data.merge_error}`);
     const note = parts.join(' · ') || 'nothing to commit';
-    _sessionEdit = { key, agent: sagent, id: sid, mode: 'note', error: note };
+    const conflict = /conflicts with/.test(r.data.merge_error || '');  // only the agent can settle it: offer that (see _sessionRow)
+    _sessionEdit = { key, agent: sagent, id: sid, mode: 'note', error: note, conflict, branch: r.data.branch, into: r.data.into };
     loadProjects(); return;
   }
   // a busy card session: the card is renamed now, the session when it is idle (§3)
@@ -1623,6 +1631,16 @@ async function _resumeToBoard(btn) {
   await refreshJobBoard(true);
   if (seq !== _detailModalLoadSeq) return;  // the user opened another card meanwhile: the Todo card waits on the board
   await _openResumeReply(r.data.run_id);
+  if (btn.dataset.prefill === 'conflict') {
+    const box = document.getElementById('detail-reply-input');
+    if (box && !box.value.trim()) {  // never over a draft the user already has
+      const into = btn.dataset.into || 'main', branch = btn.dataset.branch || 'this branch';
+      box.value = `Merge \`${into}\` into ${branch} and resolve the merge conflicts. Where both sides changed the same code, `
+        + `keep ${into}'s version and re-apply this ticket's intent on top of it. Run the project's tests, then commit the merge. `
+        + `Do not push. When you finish, ${branch} should merge into ${into} without conflicts.`;
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
 }
 
 // Project drag and drop (native HTML5) and keyboard reorder: Alt+↑/↓ on a focused head.
