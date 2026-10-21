@@ -12,9 +12,11 @@ import collections
 import contextlib
 import json
 import os
+import re
 import subprocess
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -355,6 +357,9 @@ AGENT_ERRORS: dict[str, str] = {}
 # turn.failed): a failed run even when the process exits 0 (PVST-R4-03). A Codex `error` event
 # alone is diagnostic (e.g. a reconnect) and does not fail the run.
 AGENT_FAILED: set[str] = set()
+# run_id -> epoch seconds when the agent's usage limit resets (Claude rate_limit_event "rejected", Codex "try again at")
+# seen in the run's stream. Popped by _write_run_log, which schedules the auto-continue (AGE-115).
+LIMIT_RESETS: dict[str, float] = {}
 
 
 # run_ids whose agent produced reply content (Claude: a non-empty result or assistant text;
@@ -424,11 +429,51 @@ def agent_error_of(fmt: str, line: str) -> str | None:
     return str(msg).strip()[:2000] if msg else None
 
 
+def limit_reset_of(fmt: str, line: str) -> float | None:
+    """When the usage limit this stdout line reports as hit resets (epoch seconds), if it does:
+    a Claude rate_limit_event "rejected", or a Codex error / turn.failed "usage limit" message."""
+    if fmt == "codex" and "usage limit" in line:
+        return codex_reset_of(agent_error_of(fmt, line) or "")
+    if fmt != "claude" or '"rejected"' not in line:
+        return None
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        return None
+    info = ev.get("rate_limit_info") if isinstance(ev, dict) and ev.get("type") == "rate_limit_event" else None
+    at = info.get("resetsAt") if isinstance(info, dict) and info.get("status") == "rejected" else None
+    return float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else None
+
+
+# Codex CLI: "You've hit your usage limit. … or try again at 3:15 PM." (today, local time) or
+# "… try again at Oct 22nd, 2026 3:15 PM." (format_retry_timestamp in codex-rs).
+_CODEX_RETRY_AT = re.compile(r"try again at (?:([A-Z][a-z]{2}) (\d{1,2})(?:st|nd|rd|th), (\d{4}) )?(\d{1,2}:\d{2} [AP]M)",
+                             re.IGNORECASE)
+
+
+def codex_reset_of(msg: str, now: datetime | None = None) -> float | None:
+    """The local reset time a Codex usage-limit message names (epoch seconds), if it names one.
+    ponytail: "try again later" (no time) is not continued; a fixed back-off if that shows up."""
+    m = _CODEX_RETRY_AT.search(msg) if "usage limit" in msg else None
+    if not m:
+        return None
+    mon, day, year, clock = m.groups()
+    try:
+        t = datetime.strptime(clock.upper(), "%I:%M %p").time()
+        d = datetime.strptime(f"{mon} {day} {year}", "%b %d %Y").date() if mon else (now or datetime.now()).date()
+    except ValueError:
+        return None
+    return datetime.combine(d, t).timestamp()  # naive = local time, as Codex printed it
+
+
 def note_agent_error(run_id: str, fmt: str, line: str) -> None:
     """Keep the agent's error for this run (a Codex turn.failed wins over an earlier error
-    event), and note whether it replied at all (R16-01)."""
+    event), and note whether it replied at all (R16-01) and when a hit usage limit resets."""
     if run_id not in REPLIED and is_reply(fmt, line):
         REPLIED.add(run_id)
+    reset = limit_reset_of(fmt, line)
+    if reset:
+        LIMIT_RESETS[run_id] = reset
     msg = agent_error_of(fmt, line)
     terminal = fmt == "claude" or '"turn.failed"' in line
     if msg and (run_id not in AGENT_ERRORS or terminal):
