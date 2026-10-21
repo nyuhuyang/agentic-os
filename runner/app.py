@@ -2455,7 +2455,10 @@ def run_agent_process(run_id: str, cmd: list[str], *, stream: str, timeout: floa
     Returns (output, input_tokens, output_tokens, model, session_id, stderr, ok)."""
     timeout = AI_RUN_TIMEOUT_S if timeout is None else timeout
     with _JOB_LOCK:
-        _LAUNCHING[run_id] = _running_jobs.get(run_id) or {}  # cleared by the handshake (CM-017)
+        live = _running_jobs.get(run_id)
+        if live is None or _SHUTTING_DOWN.is_set():  # ended (cancel/stall) before launch: start nothing (CM-020)
+            raise _RunEnded("runner is shutting down" if _SHUTTING_DOWN.is_set() else run_id)
+        _LAUNCHING[run_id] = live  # the live job's identity, until the handshake publishes or kills (CM-017)
     try:
         proc = subprocess.Popen(cmd, cwd=str(cwd or ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 start_new_session=True)  # its own group, so a timeout or cancel ends descendants too
@@ -2488,6 +2491,7 @@ def run_agent_process(run_id: str, cmd: list[str], *, stream: str, timeout: floa
     except BaseException:  # any failure after launch ends this process's group (RWS-008)
         _kill_and_reap(proc)
         raise
+    _kill_group(proc)  # success too: a background writer the agent left must not outlive its run (CM-021)
     return out, it, ot, pm, sid, err, ok
 
 
@@ -3333,7 +3337,9 @@ def _project_runs_open(key: str, job: dict | None, sessions: bool = False, runne
     """Another run of this project is still before its closing fingerprint: a merge now would
     read as that run changing the main checkout. Caller holds _JOB_LOCK.
     Used under _merge_gate, which a new run's opening fingerprint also takes (SC-019)."""
-    keys = _same_checkout_keys(key)  # every registration of this checkout (CM-018)
+    # every registration of this checkout for a manual merge (CM-018); the auto-drain stays per key,
+    # like its queue, so one registration's queued merge is never stranded by another's run (CM-022)
+    keys = _same_checkout_keys(key) if sessions else {key}
 
     def here(j):
         extra = j.get("record_extra") or {}

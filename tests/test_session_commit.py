@@ -610,7 +610,8 @@ def test_two_registrations_of_one_checkout_share_gate_and_activity(tmp_path, mon
     monkeypatch.setattr(app_mod, "_ROOT_KEY_CACHE", {})
     assert app_mod._merge_gate("a") is app_mod._merge_gate("b") and app_mod._merge_gate("a") is not app_mod._merge_gate("c")
     monkeypatch.setattr(app_mod, "_running_jobs", {"j": {"project_key": "b"}})
-    assert app_mod._project_runs_open("a", None) and not app_mod._project_runs_open("c", None)  # (CM-018)
+    assert app_mod._project_runs_open("a", None, sessions=True) and not app_mod._project_runs_open("c", None, sessions=True)  # (CM-018)
+    assert not app_mod._project_runs_open("a", None)  # the auto-drain stays per key, like its queue (CM-022)
 
 
 def test_normal_completion_never_blocks_merges(monkeypatch):
@@ -619,3 +620,34 @@ def test_normal_completion_never_blocks_merges(monkeypatch):
     monkeypatch.setattr(app_mod, "_RETIRING", {})
     assert app_mod._end_job("r") and app_mod._RETIRING == {}  # its process has ended: not activity (CM-019)
     app_mod._FINALIZING.discard("r")
+
+
+def test_no_launch_for_a_run_that_already_ended(monkeypatch):
+    import app as app_mod
+    monkeypatch.setattr(app_mod, "_running_jobs", {})
+    monkeypatch.setattr(app_mod.subprocess, "Popen", lambda *a, **k: pytest.fail("must not launch"))
+    with pytest.raises(app_mod._RunEnded):
+        app_mod.run_agent_process("gone", ["true"], stream="text")
+    assert "gone" not in app_mod._LAUNCHING  # (CM-020)
+
+
+def test_successful_run_leaves_no_background_writer(tmp_path, monkeypatch):
+    import os, time
+    import app as app_mod
+    monkeypatch.setattr(app_mod, "RUN_PROGRESS_DIR", tmp_path)
+    monkeypatch.setattr(app_mod, "_running_jobs", {"ok": {"skill": "_prompt"}})
+    monkeypatch.setattr(app_mod, "_running_procs", {})
+    pidfile = tmp_path / "bg.pid"
+    cmd = ["/bin/sh", "-c", f"(sleep 30 >/dev/null 2>&1 </dev/null & echo $! > {pidfile}); echo done"]
+    out = app_mod.run_agent_process("ok", cmd, stream="text", timeout=20)
+    assert out[-1] is True
+    pid = int(pidfile.read_text())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(pid, 9)
+        pytest.fail("the background writer outlived its run")  # (CM-021)

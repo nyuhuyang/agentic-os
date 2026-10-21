@@ -60,5 +60,9 @@ The user asked for two things (2026-10-21):
   - a launch-gap marker until the Popen handshake (CM-017);
   - gates and activity keyed by checkout (CM-018);
   - normal completions are no longer retiring activity (CM-019).
+- [x] Inspection 6 fixes:
+  - no launch for an ended run, and the marker carries the live job (CM-020);
+  - successful generic runs kill leftover descendants (CM-021);
+  - checkout aliasing for the manual merge only (CM-022).
 - [ ] Fresh Codex inspection approved.
 - [ ] Archive.
