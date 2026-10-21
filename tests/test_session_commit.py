@@ -491,3 +491,26 @@ def test_activity_counts_runner_root_jobs_and_retiring_ones(monkeypatch):
     monkeypatch.setattr(app_mod, "_RETIRING", {"c": {"record_extra": {"session_project": "os"}}})  # cancelled, still stopping
     assert app_mod._project_runs_open("os", None, sessions=True)  # (CM-011)
     assert not app_mod._project_runs_open("os", None)  # the auto-merge drain is unchanged
+
+
+def test_merge_options_cleared_even_with_a_same_named_main_tag(repo):
+    project, root = repo
+    _branch_ahead_and_main_diverged(project, root)
+    git(root, "tag", "main", "HEAD~1")  # makes `symbolic-ref --short HEAD` say heads/main
+    git(root, "config", "branch.main.mergeOptions", "-s ours")
+    pj.merge_into_checkout(project, "T-1")
+    assert (root / "w.txt").read_text() == "w\n"  # (CM-012)
+
+
+def test_stalled_job_counts_as_activity_until_it_is_stopped(monkeypatch):
+    import app as app_mod
+    from runner.modules import stall_detection as sd
+    seen = []
+    job = {"record_extra": {"session_project": "os"}}
+    monkeypatch.setattr(app_mod, "_running_jobs", {"r": job})
+    monkeypatch.setattr(app_mod, "_running_procs", {"r": object()})
+    monkeypatch.setattr(app_mod, "_RETIRING", {})
+    monkeypatch.setattr(app_mod, "_kill_group", lambda proc, *a: seen.append(app_mod._project_runs_open("os", None, sessions=True)))
+    monkeypatch.setattr(app_mod, "_write_owner_record", lambda *a, **k: None)
+    sd._stall(app_mod, type("S", (), {"emit": lambda *a, **k: None})(), "r", job)
+    assert seen == [True] and app_mod._RETIRING == {}  # counted while being killed, gone after (CM-014)

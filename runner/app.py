@@ -2923,16 +2923,19 @@ def _cancel_generic(run_id: str, error: str) -> dict | None:
             _RETIRING[run_id] = job  # until its record is written, after the group is gone (CM-011)
     if job is None:
         return None
-    if proc is not None:
-        _kill_group(proc, signal.SIGTERM)
-        with contextlib.suppress(Exception):
-            proc.wait(timeout=5)
-        # Unconditional: a descendant ignoring SIGTERM outlives a leader that exited promptly (WS-002).
-        # ponytail: the group id could in theory be reused within the grace; same ceiling as _terminate_group.
-        _kill_group(proc)
-        with contextlib.suppress(Exception):
-            proc.wait(timeout=5)
-    _write_owner_record(run_id, job, "cancelled", error, proc=proc)
+    try:
+        if proc is not None:
+            _kill_group(proc, signal.SIGTERM)
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=5)
+            # Unconditional: a descendant ignoring SIGTERM outlives a leader that exited promptly (WS-002).
+            # ponytail: the group id could in theory be reused within the grace; same ceiling as _terminate_group.
+            _kill_group(proc)
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=5)
+        _write_owner_record(run_id, job, "cancelled", error, proc=proc)
+    finally:
+        _RETIRING.pop(run_id, None)  # stopped and recorded (or the record failed): never blocks merges forever
     return job
 
 

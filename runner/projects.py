@@ -1239,7 +1239,8 @@ def merge_into_checkout(project: Project, ident: str, rev: str | None = None) ->
         if pre.returncode:
             raise ProjectError(f"{branch} conflicts with {root}; merge it by hand")
         tree = pre.stdout.split("\n", 1)[0].strip()
-        current = _git(root, "symbolic-ref", "--short", "HEAD", confine=confine).stdout.strip()
+        # the full ref, minus exactly refs/heads/: --short can say heads/main when a tag main exists (CM-012)
+        current = _git(root, "symbolic-ref", "HEAD", confine=confine).stdout.strip().removeprefix("refs/heads/")
         # Exactly the merge the preflight checked: no inherited branch.<name>.mergeOptions
         # (-s ours, --no-commit, --squash) and no autostash of the user's edits (CM-005/007/008).
         _git(root, "-c", f"branch.{current}.mergeOptions=", "-c", "merge.autoStash=false", "merge",
