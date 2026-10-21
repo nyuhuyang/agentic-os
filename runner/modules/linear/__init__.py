@@ -906,6 +906,14 @@ class LinearModule(AgenticModule):
                     self._refuse_resume(issue, run_id, backend, launch_gen, refused,
                                         binding={"project_key": project_key, "issue_identifier": ident, "confidential": conf})
                     return
+            prompt = f"{issue.get('identifier', '')}: {issue.get('title', '')}\n\n" \
+                     f"{_strip_issue_metadata(issue.get('description') or '')}"
+            if not resume_sid:  # the card went on with another agent: a new session told its history (AGE-114 D4)
+                from app import _handoff_prompt, _latest_card_session_record
+                latest = _latest_card_session_record(issue_id) or {}
+                other = canonical_agent(latest.get("agent"))
+                if other and other != backend:
+                    prompt = _handoff_prompt(latest, "", [], other, task=prompt)
             self.dispatched[issue_id] = run_id
             try:
                 self.push_state(issue_id, "running", gen=launch_gen)
@@ -919,8 +927,7 @@ class LinearModule(AgenticModule):
                     project_key=project_key, ident=bound.get("issue_identifier") or issue.get("identifier") or issue_id,
                     agent=backend, confidential=bound.get("confidential"),
                     reuse_only=bool(bound.get("worktree")),  # a bound worktree is never silently recreated (I6-10)
-                    prompt=f"{issue.get('identifier', '')}: {issue.get('title', '')}\n\n"
-                           f"{_strip_issue_metadata(issue.get('description') or '')}",
+                    prompt=prompt,
                     title=issue.get("title", ""), run_id=run_id, linear_issue_id=issue_id,
                     task_id=run_id, launch_gen=launch_gen,
                     # the route's reservation goes on only if it is this very ticket's lock; otherwise
@@ -976,14 +983,16 @@ class LinearModule(AgenticModule):
                 selected_skill = prev_skill if prev_skill in registry else "_prompt"  # no routing call (DP-28)
             else:
                 try:
-                    result = _run_grouped(  # its own group: a routing timeout ends descendants too (RWS-016)
-                        # persist=False: the routing call leaves no session in the agent's store (DP-28)
-                        _ai_command(backend, routing_prompt, output_format="text", persist=False),
-                        60,
-                        cwd=str(ROOT),
-                        env=_registry_exec_env(backend, registry),
-                        text=True,
-                    )
+                    from app import _root_activity
+                    with _root_activity():  # the routing agent runs in the runner root: no merge under it (CM-013)
+                        result = _run_grouped(  # its own group: a routing timeout ends descendants too (RWS-016)
+                            # persist=False: the routing call leaves no session in the agent's store (DP-28)
+                            _ai_command(backend, routing_prompt, output_format="text", persist=False),
+                            60,
+                            cwd=str(ROOT),
+                            env=_registry_exec_env(backend, registry),
+                            text=True,
+                        )
                     selected_skill = _extract_skill_name(result.stdout or "", registry)
                 except Exception:
                     selected_skill = "_prompt"
@@ -1013,7 +1022,8 @@ class LinearModule(AgenticModule):
                 with contextlib.suppress(Exception):
                     self._mark_issue_review(issue_id, gen=launch_gen)
                 return
-            _running_jobs[run_id] = {
+            from app import _publish_job
+            _publish_job(run_id, {  # under the runner checkout's merge gate (CM-013)
                 "run_id": run_id,
                 "skill": selected_skill,
                 "started_at": started_at,
@@ -1026,7 +1036,7 @@ class LinearModule(AgenticModule):
                 "agent": backend,
                 **({"agent_session_id": resume_sid} if resume_sid else {}),  # live while it runs (DP-15)
                 "record_extra": card_extra,
-            }
+            })
             entry = registry.get(selected_skill, {})
             is_entrypoint = bool(entry.get("schedule_eligible") and entry.get("entrypoint"))
             end = _RunClaim(run_id)  # cancel/stall may end the run first; then they own its side effects

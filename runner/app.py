@@ -704,38 +704,6 @@ def _write_run_progress_json(run_id: str, payload: dict) -> str:
     return str(path)
 
 
-def _tail_text_lines(path: Path, max_lines: int = 160) -> list[str]:
-    try:
-        return path.read_text(encoding="utf-8", errors="replace").splitlines()[-max_lines:]
-    except Exception:
-        return []
-
-
-def _extract_text_from_codex_item(item: dict) -> str:
-    payload = item.get("payload") or {}
-    if item.get("type") == "event_msg":
-        return str(payload.get("message") or "").strip()
-    if item.get("type") != "response_item":
-        return ""
-    typ = payload.get("type")
-    if typ == "message":
-        parts: list[str] = []
-        for part in payload.get("content") or []:
-            if isinstance(part, dict):
-                text = part.get("text") or part.get("output_text") or ""
-                if text:
-                    parts.append(str(text))
-        return "\n".join(parts).strip()
-    if typ == "function_call":
-        name = payload.get("name") or "tool"
-        return f"[tool] {name}"
-    if typ == "function_call_output":
-        output = str(payload.get("output") or "").strip()
-        first = " ".join(output.split())[:240]
-        return f"[tool output] {first}" if first else ""
-    return ""
-
-
 def _pipe_fd(pipe) -> int | None:
     try:
         return pipe.fileno()
@@ -960,186 +928,6 @@ def _stream_text_run(
 
     stderr_s = _read_both(proc, _reader, stop, timeout, run_id)
     return "\n".join(collected), stderr_s
-
-
-def _tail_text_stream(path: Path, max_lines: int = 80) -> list[dict]:
-    """Return recent lines from a plain-text stream log as events."""
-    events = []
-    for line in _tail_text_lines(path, max_lines):
-        if line.strip():
-            events.append({"ts": "", "text": line, "role": "runner"})
-    return events
-
-
-def _tail_codex_session(path: Path, max_events: int = 40) -> list[dict]:
-    events: list[dict] = []
-    for line in _tail_text_lines(path, 240):
-        try:
-            item = json.loads(line)
-        except Exception:
-            continue
-        text = _extract_text_from_codex_item(item)
-        if not text:
-            continue
-        events.append({
-            "ts": item.get("timestamp", ""),
-            "kind": item.get("type", ""),
-            "text": text[-2000:],
-        })
-    return events[-max_events:]
-
-
-def _session_from_pid(pid: int | None) -> Path | None:
-    if not pid:
-        return None
-    try:
-        proc = subprocess.run(["lsof", "-p", str(pid)], capture_output=True, text=True, timeout=5)
-    except Exception:
-        return None
-    for line in proc.stdout.splitlines():
-        if "/.codex/sessions/" not in line or not line.rstrip().endswith(".jsonl"):
-            continue
-        path = Path(line.split()[-1])
-        if path.exists():
-            return path
-    return None
-
-
-def _find_codex_process_for_issue(issue: dict) -> tuple[int | None, Path | None]:
-    needle_parts = [
-        str(issue.get("identifier") or ""),
-        str(issue.get("title") or ""),
-    ]
-    needles = [n for n in needle_parts if n]
-    if not needles:
-        return None, None
-    try:
-        proc = subprocess.run(["ps", "-axo", "pid,command"], capture_output=True, text=True, timeout=5)
-    except Exception:
-        return None, None
-    for line in proc.stdout.splitlines():
-        if "codex exec" not in line:
-            continue
-        if not any(n in line for n in needles):
-            continue
-        pid_s = line.strip().split(maxsplit=1)[0]
-        try:
-            pid = int(pid_s)
-        except ValueError:
-            continue
-        return pid, _session_from_pid(pid)
-    return None, None
-
-
-def _file_contains_needles(path: Path, needles: list[str]) -> bool:
-    try:
-        with path.open("rb") as f:
-            head = f.read(200_000)
-            try:
-                f.seek(max(0, path.stat().st_size - 200_000))
-            except OSError:
-                pass
-            tail = f.read(200_000)
-        text = (head + b"\n" + tail).decode("utf-8", errors="ignore")
-    except Exception:
-        return False
-    return any(n and n in text for n in needles)
-
-
-def _find_recent_codex_session_for_issue(issue: dict) -> Path | None:
-    needles = [
-        str(issue.get("identifier") or ""),
-        str(issue.get("title") or ""),
-    ]
-    needles = [n for n in needles if n]
-    if not needles:
-        return None
-    root = Path.home() / ".codex" / "sessions"
-    try:
-        paths = sorted(root.glob("**/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    except Exception:
-        return None
-    issue_ts = 0.0
-    for field in ("updated_at", "created_at"):
-        raw = issue.get(field)
-        if not raw:
-            continue
-        try:
-            issue_ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).timestamp()
-            break
-        except Exception:
-            pass
-
-    def _session_start(path: Path) -> float:
-        match = re.search(r"rollout-(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})", path.name)
-        if not match:
-            return 0.0
-        day, hh, mm, ss = match.groups()
-        try:
-            local_dt = datetime.strptime(f"{day} {hh}:{mm}:{ss}", "%Y-%m-%d %H:%M:%S").astimezone()
-            return local_dt.timestamp()
-        except Exception:
-            return 0.0
-
-    if issue_ts:
-        paths = [p for p in paths if _session_start(p) >= issue_ts - 300]
-    for path in paths[:25]:
-        if _file_contains_needles(path, needles):
-            return path
-    return None
-
-
-def _build_progress_payload(run_id: str, *, issue_id: str | None = None) -> dict:
-    job = dict(_running_jobs.get(run_id) or {})
-    proc = _running_procs.get(run_id)
-    pid = proc.pid if proc else job.get("pid")
-    session_path = _session_from_pid(pid)
-    status = "running" if job else "unknown"
-
-    if issue_id and not session_path:
-        issue = _linear_cache().get(issue_id) or {}
-        pid, session_path = _find_codex_process_for_issue(issue)
-        if pid:
-            status = "detached"
-        if not session_path:
-            session_path = _find_recent_codex_session_for_issue(issue)
-            if session_path:
-                status = "session"
-
-    if not session_path:
-        existing_progress = {}
-        progress_path = _run_progress_path(run_id)
-        if progress_path.exists():
-            try:
-                existing_progress = json.loads(progress_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        saved_stream = existing_progress.get("stream_log")
-        if saved_stream:
-            session_path = _checkout_path(saved_stream)
-    events = _tail_codex_session(session_path) if session_path else []
-    if not events:
-        prog_path = _run_progress_path(run_id)
-        if prog_path.exists():
-            try:
-                sl = json.loads(prog_path.read_text(encoding="utf-8")).get("stream_log")
-                if sl:
-                    events = _tail_text_stream(_checkout_path(sl))
-                    if events and status == "unknown":
-                        status = "running"
-            except Exception:
-                pass
-    payload = {
-        "ok": True,
-        "run_id": run_id,
-        "linear_issue_id": issue_id or job.get("linear_issue_id"),
-        "status": status,
-        "pid": pid,
-        "session_path": str(session_path) if session_path else "",
-        "events": events,
-    }
-    payload["log_path"] = _write_run_progress_json(run_id, payload)
-    return payload
 
 
 def _shorten_pulse(text: str, limit: int = 96) -> str:
@@ -2184,6 +1972,8 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
         record["reset_gen"] = reset_generation  # the generation this run launched under (Decision 11)
     if extra:
         record.update({k: v for k, v in extra.items() if k not in record})  # additive fields only
+    if record.get("reply") and str(prompt).startswith("[withheld"):
+        record["reply"] = ""  # the human turn is the prompt's text: withheld with it (AGE-114)
     limit_reset = None if audit else project_runs.LIMIT_RESETS.pop(run_id, None)
     # stopped by a usage limit (not by the user): continue its session once the limit resets (AGE-115)
     continue_at = max(limit_reset, time.time()) + AUTO_CONTINUE_GRACE_S if limit_reset and agent_session_id \
@@ -2204,6 +1994,7 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
     if continue_at:
         _schedule_auto_continue(run_id, continue_at)
     _FINALIZING.discard(run_id)  # its record is on disk: shutdown need not wait for it (SBR-010)
+    _RETIRING.pop(run_id, None)
     if audit:  # history only: no task/job state, it is not an execution (UI3-02)
         return run_id
 
@@ -2398,7 +2189,7 @@ def _ai_cli(agent: str) -> list[str]:
     # default: claude
     claude_bin = _PROTO / ".venv" / "bin" / "claude"
     bin_str = str(claude_bin) if claude_bin.exists() else "claude"
-    return [bin_str, "-p", "--verbose", "--permission-mode", "bypassPermissions"]
+    return [bin_str, "-p", "--verbose", "--permission-mode", "bypassPermissions", *project_runs.CLAUDE_SETTINGS]
 
 
 def _load_skill_md(skill_name: str | None, registry: dict[str, dict]) -> str:
@@ -2498,6 +2289,11 @@ def _parse_agent_output(agent: str, stdout_s: str) -> tuple[str, int | None, int
                 elif ev_type == "turn.completed":
                     usage = ev.get("usage", {})
                     input_tokens = usage.get("input_tokens")
+                    if input_tokens is not None:
+                        # Codex counts cache hits inside input_tokens; Claude reports them apart.
+                        # Drop them so both mean uncached input and cost is not priced off
+                        # re-sent context (a 3-paper ingest: 7.3M "input", 96.8% cached → $22).
+                        input_tokens = max(0, input_tokens - (usage.get("cached_input_tokens") or 0))
                     output_tokens = usage.get("output_tokens")
             except Exception:
                 pass
@@ -2717,8 +2513,18 @@ def run_agent_process(run_id: str, cmd: list[str], *, stream: str, timeout: floa
     It never claims, records or pushes the tracker: run completion stays with the caller.
     Returns (output, input_tokens, output_tokens, model, session_id, stderr, ok)."""
     timeout = AI_RUN_TIMEOUT_S if timeout is None else timeout
-    proc = subprocess.Popen(cmd, cwd=str(cwd or ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            start_new_session=True)  # its own group, so a timeout or cancel ends descendants too
+    with _JOB_LOCK:
+        live = _running_jobs.get(run_id)
+        if live is None or _SHUTTING_DOWN.is_set():  # ended (cancel/stall) before launch: start nothing (CM-020)
+            raise _RunEnded("runner is shutting down" if _SHUTTING_DOWN.is_set() else run_id)
+        _LAUNCHING[run_id] = live  # the live job's identity, until the handshake publishes or kills (CM-017)
+    try:
+        proc = subprocess.Popen(cmd, cwd=str(cwd or ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                start_new_session=True)  # its own group, so a timeout or cancel ends descendants too
+    except BaseException:
+        with _JOB_LOCK:
+            _LAUNCHING.pop(run_id, None)
+        raise
     if not _register_proc(run_id, proc):  # cancelled/stalled meanwhile, or shutting down: proc is already dead
         raise _RunEnded("runner is shutting down" if _SHUTTING_DOWN.is_set() else run_id)
     try:
@@ -2744,6 +2550,7 @@ def run_agent_process(run_id: str, cmd: list[str], *, stream: str, timeout: floa
     except BaseException:  # any failure after launch ends this process's group (RWS-008)
         _kill_and_reap(proc)
         raise
+    _kill_group(proc)  # success too: a background writer the agent left must not outlive its run (CM-021)
     return out, it, ot, pm, sid, err, ok
 
 
@@ -3127,6 +2934,7 @@ def _run_grouped(cmd, timeout: float, **kw) -> subprocess.CompletedProcess:
     except BaseException:
         _kill_and_reap(proc)
         raise
+    _kill_group(proc)  # success too: nothing it started outlives the call (CM-023)
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
@@ -3144,17 +2952,27 @@ def _register_proc(run_id: str, proc) -> bool:
             live = True
         else:
             live = False
-    if live:
-        if old is not None and old is not proc:
-            _kill_group(old)  # the previous attempt's leftovers end with it (RWS-005)
-        return True
-    _kill_and_reap(proc)
-    return False
+    try:
+        if live:
+            if old is not None and old is not proc:
+                _kill_group(old)  # the previous attempt's leftovers end with it (RWS-005)
+            return True
+        _kill_and_reap(proc)
+        return False
+    finally:
+        with _JOB_LOCK:
+            _LAUNCHING.pop(run_id, None)  # published (a live job again) or killed (CM-017)
 
 
 # Runs whose worker won _end_job and has not written its record yet; shutdown waits for them.
 # Added by _end_job, removed by _write_run_log once the run's record is on disk (SBR-010).
 _FINALIZING: set[str] = set()
+# Jobs a cancel or stall retired while their process group may still be stopping: a manual merge
+# still counts them as activity until that path has stopped them and written the record (CM-011).
+_RETIRING: dict[str, dict] = {}
+# Runs between Popen and the _register_proc handshake: a cancel in that gap sees no process, so
+# the child is activity until the handshake publishes or kills it (CM-017).
+_LAUNCHING: dict[str, dict] = {}
 
 
 def _end_job(run_id: str) -> bool:
@@ -3165,7 +2983,7 @@ def _end_job(run_id: str) -> bool:
         job = _running_jobs.pop(run_id, None)
         _running_procs.pop(run_id, None)
         if job is not None:
-            _FINALIZING.add(run_id)
+            _FINALIZING.add(run_id)  # its process has ended: not activity (only cancel/stall retire live groups, CM-019)
     return job is not None
 
 
@@ -3178,18 +2996,23 @@ def _cancel_generic(run_id: str, error: str) -> dict | None:
         _mark_job_closing(run_id)  # before the job leaves the live set: no rename slips in (R3)
         job = _running_jobs.pop(run_id, None)
         proc = _running_procs.pop(run_id, None) if job is not None else None
+        if job is not None:
+            _RETIRING[run_id] = job  # until its record is written, after the group is gone (CM-011)
     if job is None:
         return None
-    if proc is not None:
-        _kill_group(proc, signal.SIGTERM)
-        with contextlib.suppress(Exception):
-            proc.wait(timeout=5)
-        # Unconditional: a descendant ignoring SIGTERM outlives a leader that exited promptly (WS-002).
-        # ponytail: the group id could in theory be reused within the grace; same ceiling as _terminate_group.
-        _kill_group(proc)
-        with contextlib.suppress(Exception):
-            proc.wait(timeout=5)
-    _write_owner_record(run_id, job, "cancelled", error, proc=proc)
+    try:
+        if proc is not None:
+            _kill_group(proc, signal.SIGTERM)
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=5)
+            # Unconditional: a descendant ignoring SIGTERM outlives a leader that exited promptly (WS-002).
+            # ponytail: the group id could in theory be reused within the grace; same ceiling as _terminate_group.
+            _kill_group(proc)
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=5)
+        _write_owner_record(run_id, job, "cancelled", error, proc=proc)
+    finally:
+        _RETIRING.pop(run_id, None)  # stopped and recorded (or the record failed): never blocks merges forever
     return job
 
 
@@ -3379,7 +3202,8 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
                 run_start_sha = _projects._git(wt_path, "rev-parse", "HEAD",
                                                confine=_projects.confine_for(project, wt_path)).stdout.strip() or None
             exclude = project_runs.bookkeeping_paths(project, [STATE_DIR, OUTPUTS_DIR])
-            before = _projects.fingerprint(project, exclude=exclude)
+            with _merge_gate(project.key):  # never between a queued merge's check and its merge (SC-019)
+                before = _projects.fingerprint(project, exclude=exclude)
             tab_open = _main_path_tab_open(project.key)
             cmd = _project_cmd(agent, project, project_runs.project_prompt(prompt, project, binding, agent),
                                resume_session)
@@ -3487,7 +3311,140 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
         _after_card_run(run_id, linear_issue_id, agent, sid or resume_session, agent_pgid[0])
 
 
-_PENDING_MERGES: dict[str, list[str]] = {}  # project key -> tickets waiting for its other runs (AGE-111)
+_PENDING_MERGES: dict[str, list[tuple[str, str]]] = {}  # project key -> (ticket, verified sha) waiting for its other runs (AGE-111)
+
+
+_MERGE_GATES: dict[str, threading.Lock] = {}
+_MERGE_GATES_GUARD = threading.Lock()
+
+
+def _merge_gate(key: str) -> threading.Lock:
+    """Per-checkout gate: a queued or manual merge holds it from its "no other run is open" check to
+    the end of the merge (including any wait on the global merge lock); a run takes it around its
+    opening fingerprint or job publish, so none can start in between (SC-019, CM-013). Keyed by the
+    checkout, so two registrations of one folder share it (CM-018). Lock order: ticket -> gate."""
+    gate_id = _registry_checkouts().get(key) or f"key:{key}"
+    with _MERGE_GATES_GUARD:
+        return _MERGE_GATES.setdefault(gate_id, threading.Lock())
+
+
+_ROOT_ACTIVE = 0  # runner-root work that is not a job, e.g. a Linear routing call (CM-013); under _JOB_LOCK
+
+
+_ROOT_KEY_CACHE: dict = {}
+
+
+def _registry_checkouts() -> dict[str, str]:
+    """key -> real checkout path, from the registry file only (no git, no validation: this runs on
+    every job publish and merge check), cached by its mtime."""
+    path = _projects.REGISTRY_PATH
+    try:
+        stamp = (str(path), path.stat().st_mtime_ns)
+    except OSError:
+        return {}
+    if _ROOT_KEY_CACHE.get("stamp") != stamp:
+        out: dict[str, str] = {}
+        entries: dict = {}
+        with contextlib.suppress(Exception):
+            entries = _projects.raw_entries(_projects._read_registry_bytes(path))
+        for k, entry in entries.items():  # one bad entry never hides the others (CM-025)
+            raw = entry.get("path") if isinstance(entry, dict) else None
+            if isinstance(raw, str) and raw:
+                with contextlib.suppress(Exception):
+                    out[k] = os.path.realpath(os.path.expanduser(raw))
+        _ROOT_KEY_CACHE.update(stamp=stamp, paths=out)
+    return _ROOT_KEY_CACHE["paths"]
+
+
+def _same_checkout_keys(key: str) -> set[str]:
+    """Every registered key that names the same checkout as `key` (CM-018), `key` included."""
+    paths = _registry_checkouts()
+    mine = paths.get(key)
+    return {key} | ({k for k, p in paths.items() if p == mine} if mine else set())
+
+
+def _runner_root_key() -> str | None:
+    """A registered project whose folder is the runner's own checkout, if any."""
+    root = os.path.realpath(_PROTO)
+    return next((k for k, p in _registry_checkouts().items() if p == root), None)
+
+
+def _checkout_gate(path) -> threading.Lock | contextlib.nullcontext:
+    """The merge gate of the registered checkout that contains `path` (longest match), or the
+    runner-root gate when none does: a tab is gated by where it really runs (CM-028)."""
+    real = os.path.realpath(str(path))
+    best = None
+    for k, p in _registry_checkouts().items():
+        if (real == p or real.startswith(p.rstrip("/") + "/")) and (best is None or len(p) > len(best[1])):
+            best = (k, p)
+    return _merge_gate(best[0]) if best else _runner_root_gate()
+
+
+def _runner_root_gate():
+    key = _runner_root_key()
+    return _merge_gate(key) if key else contextlib.nullcontext()
+
+
+def _publish_job(run_id: str, job: dict) -> dict:
+    """Publish a runner-root job (free prompt, generic retry, unbound dispatch) under the runner
+    checkout's merge gate: it can never appear between a manual merge's check and its merge (CM-013)."""
+    with _runner_root_gate():
+        _running_jobs[run_id] = job
+    return job
+
+
+@contextlib.contextmanager
+def _root_activity():
+    """Runner-root work that is not a published job (a routing call) counts as activity too."""
+    global _ROOT_ACTIVE
+    with _runner_root_gate():
+        with _JOB_LOCK:
+            _ROOT_ACTIVE += 1
+    try:
+        yield
+    finally:
+        with _JOB_LOCK:
+            _ROOT_ACTIVE -= 1
+
+
+def _project_runs_open(key: str, job: dict | None, sessions: bool = False, runner_root: bool = False) -> bool:
+    """Another run of this project is still before its closing fingerprint: a merge now would
+    read as that run changing the main checkout. Caller holds _JOB_LOCK.
+    Used under _merge_gate, which a new run's opening fingerprint also takes (SC-019)."""
+    # every registration of this checkout for a manual merge (CM-018); the auto-drain stays per key,
+    # like its queue, so one registration's queued merge is never stranded by another's run (CM-022)
+    keys = _same_checkout_keys(key) if sessions else {key}
+
+    def here(j):
+        extra = j.get("record_extra") or {}
+        return (j.get("project_key") in keys
+                # an agent working in the main checkout itself (a session card, no project_key) (CM-004)
+                or (sessions and extra.get("session_project") in keys)
+                # a runner-root job (free prompt, generic retry, unbound dispatch) when the project IS the runner's checkout (CM-010)
+                or (runner_root and not j.get("project_key") and not extra.get("session_project")))
+    # retiring: still stopping (CM-011); launching: between Popen and its handshake (CM-017)
+    jobs = list(_running_jobs.values()) + (list(_RETIRING.values()) + list(_LAUNCHING.values()) if sessions else [])
+    if runner_root and _ROOT_ACTIVE:
+        return True
+    return any(j is not job and not j.get("merge_checked") and here(j) for j in jobs)
+
+
+@contextlib.contextmanager
+def _wait_ticket_lock(key: str, ident: str, timeout: float = 120.0):
+    """Another finished ticket's lock, waiting for its run's finalization (log, tracker comment)
+    to release it. No deadlock: only one run drains the queue, and a finalizing holder never
+    needs the drainer's lock. Raises TicketLocked after `timeout` (SC-010)."""
+    end = time.monotonic() + timeout
+    with contextlib.ExitStack() as stack:
+        while True:  # only the acquire is retried, never the caller's body
+            try:
+                stack.enter_context(_projects.ticket_lock(key, ident))
+                break
+            except _projects.TicketLocked:
+                if time.monotonic() >= end:
+                    raise
+                time.sleep(0.5)
+        yield
 
 
 def _merge_when_last(project, ident: str, job: dict, eligible: bool) -> dict:
@@ -3498,20 +3455,48 @@ def _merge_when_last(project, ident: str, job: dict, eligible: bool) -> dict:
     ponytail: the queue is in memory; a runner restart drops it (the branches stay, merge by hand)."""
     if not project.auto_merge:
         return {}
+    # The commit that passed verification, read under this ticket's lock: a later commit on the
+    # branch (a manual Commit, a terminal) never rides in on this verification (SC-007).
+    head, head_error = None, None
+    if eligible:
+        try:
+            head = _projects.branch_head(project, ident)
+        except _projects.ProjectError as exc:
+            head_error = str(exc)[:500]
     with _JOB_LOCK:
         job["merge_checked"] = True
-        if eligible:
-            _PENDING_MERGES.setdefault(project.key, []).append(ident)
-        busy = any(j is not job and j.get("project_key") == project.key and not j.get("merge_checked")
-                   for j in _running_jobs.values())
-        todo = [] if busy else list(dict.fromkeys(_PENDING_MERGES.pop(project.key, [])))
+        if head:
+            _PENDING_MERGES.setdefault(project.key, []).append((ident, head))
+        busy = _project_runs_open(project.key, job)
+        todo = [] if busy else list(dict(_PENDING_MERGES.pop(project.key, [])).items())  # newest sha per ticket
+    out: dict = {"merge_error": {ident: head_error}, "verify_badge": "merge failed"} if head_error else {}
     if busy:
-        return {"merge": "waiting for this project's other runs"} if eligible else {}
-    out: dict = {}
-    for t in todo:
+        return out or ({"merge": "waiting for this project's other runs"} if eligible else {})
+    def keep(entries):  # back in the queue for the project's next run; a newer one queued meanwhile wins (SC-013)
+        with _JOB_LOCK:
+            queue = _PENDING_MERGES.setdefault(project.key, [])
+            for t, sha in entries:
+                if not any(q == t for q, _ in queue):
+                    queue.append((t, sha))
+        for t, _ in entries:
+            out.setdefault("merge", f"{t} waits for this project's next run")
+
+    for n, (t, sha) in enumerate(todo):
         try:
-            out["merged_head"] = _projects.merge_into_checkout(project, t)
+            # another ticket's entry: re-check it under its own lock, since it may have been cleaned
+            # up or re-run since it queued (SC-009); ours is held by this run already
+            with contextlib.nullcontext() if t == ident else _wait_ticket_lock(project.key, t), _merge_gate(project.key):
+                with _JOB_LOCK:
+                    opened = _project_runs_open(project.key, job)
+                if opened:  # a run opened (e.g. during a wait): no merge under its fingerprint, ours included (SC-016/018)
+                    keep(todo[n:])
+                    break
+                eff = _effective_project(project, t)  # that ticket's own sticky policy, not the drainer's (SC-012)
+                _projects.check_queued_merge(eff, t, sha)
+                out["merged_head"] = _projects.merge_into_checkout(eff, t, sha)  # still under the gate
             out.setdefault("merged", []).append(t)
+        except _projects.TicketLocked:
+            keep([(t, sha)])  # its run is still finishing (SC-010)
         except _projects.ProjectError as exc:
             out.setdefault("merge_error", {})[t] = str(exc)[:500]
     if ident in out.get("merge_error", {}):
@@ -3573,8 +3558,8 @@ def run():
             run_id = str(uuid.uuid4())
             started_at = datetime.now(timezone.utc).isoformat()
             t0 = time.monotonic()
-            _running_jobs[run_id] = {"run_id": run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent),
-                                     "record": {"agent": agent}}  # for a cancel/stall record (RWS-002)
+            _publish_job(run_id, {"run_id": run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent),
+                                  "record": {"agent": agent}})  # for a cancel/stall record (RWS-002); gated (CM-013)
             socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill})
             end = _RunClaim(run_id)
             ended = {"ok": False, "run_id": run_id, "error": "cancelled"}  # cancel/stall wrote the record
@@ -3627,8 +3612,8 @@ def run():
     run_id = str(uuid.uuid4())
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
-    _running_jobs[run_id] = {"run_id": run_id, "skill": skill_name, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent),
-                             "record": {"agent": agent, "model": _agent_model(agent), "task_id": run_id}}  # RWS-002
+    _publish_job(run_id, {"run_id": run_id, "skill": skill_name, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent),
+                          "record": {"agent": agent, "model": _agent_model(agent), "task_id": run_id}})  # RWS-002; gated (CM-013)
     socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill_name})
     # Claude: stream-json; Codex: json; dsh: --json NDJSON
     end = _RunClaim(run_id)
@@ -4347,6 +4332,13 @@ def _session_note(run_id: str, text: str) -> None:
         logger.warning("run note for %s not written", run_id)
 
 
+def _latest_card_session_record(issue_id: str | None) -> dict | None:
+    """The card's newest record with a session, whichever agent's; audits and archived runs skipped."""
+    return next((r for r in reversed(_all_records()) if issue_id and r.get("linear_issue_id") == issue_id
+                 and r.get("agent_session_id") and not r.get("interactive_ended")
+                 and r.get("status") != "archived"), None)
+
+
 def _resumable_card_session(issue_id: str | None, agent: str | None, folder: str | Path | None
                             ) -> tuple[str | None, str | None]:
     """(sid, None) when the card's session for this agent can continue in `folder`; otherwise
@@ -4359,6 +4351,10 @@ def _resumable_card_session(issue_id: str | None, agent: str | None, folder: str
         other = any(_card_session(issue_id, a) for a in _SESSION_AGENTS if a != agent)
         return None, "the card's session belongs to another agent" if other else "no session yet"
     sid = found[0]
+    latest = _latest_card_session_record(issue_id)
+    other = latest and (canonical_agent(latest.get("agent")) or latest.get("agent"))
+    if other and other != agent:  # switched away since: that session lacks the later turns (AGE-114 D4)
+        return None, f"the card's latest session belongs to {other}"
     target = _projects.find_session(agent, sid)
     if not target:
         return None, "the card's session was removed or archived"
@@ -4477,7 +4473,7 @@ def _retry_session_card(run_id: str, original: dict, intent: dict, data: dict, c
     attachments = data.get("attachments") or []
     prompt = (reply + _format_prompt_attachments(attachments)).strip()  # the reply only (§3.5)
     if switch_to:
-        prompt = _handoff_prompt(original, reply, attachments, (agent, sid))
+        prompt = _handoff_prompt(original, reply, attachments, agent)
     elif not prompt and card_sourced:  # a plain Retry of a card continuing its session: the task again (PVST-02)
         prompt = (original.get("prompt") or "").strip()
     if not prompt:
@@ -4562,6 +4558,7 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
     # A card-sourced continuation persists no intent: the next reply finds the session again
     # through _card_session (DP-34). Nor does a switch: the next reply continues the new session.
     record_extra = {"issue_identifier": ident, "source": "session", "session_project": project.key,
+                    "reply": (reply + _format_prompt_attachments(attachments)).strip(),  # the human turn (AGE-114 D3)
                     **({} if card_sourced or switch_to else {"resume_session": intent}), **binding,
                     **_issue_title_extra(linear_issue_id, conf)}
     wt_ident = durable.get("issue_identifier") if durable.get("project_key") == project.key else None
@@ -4606,15 +4603,16 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
         return jsonify(ok_body)
     eff = dataclasses.replace(project, confidential=True) if conf is not False else project  # STB-032
     skill = original.get("skill") or "_prompt"
-    _running_jobs[new_run_id] = {
-        "run_id": new_run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running",
-        "last_progress_at": time.monotonic(), "linear_issue_id": linear_issue_id, "launch_gen": launch_gen,
-        "agent": run_agent, "agent_session_id": run_sid, "model": _agent_model(run_agent),
-        # no top-level project_key: cancel, stall and shutdown use the generic path (SBR-005)
-        "record": {"attempt": attempt, "parent_run_id": run_id, "agent": run_agent, "model": _agent_model(run_agent),
-                   "task_id": task_id, "reset_generation": launch_gen},
-        "record_extra": record_extra,
-    }
+    with _merge_gate(project.key):  # never between a manual merge's activity check and its merge (CM-004)
+        _running_jobs[new_run_id] = {
+            "run_id": new_run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running",
+            "last_progress_at": time.monotonic(), "linear_issue_id": linear_issue_id, "launch_gen": launch_gen,
+            "agent": run_agent, "agent_session_id": run_sid, "model": _agent_model(run_agent),
+            # no top-level project_key: cancel, stall and shutdown use the generic path (SBR-005)
+            "record": {"attempt": attempt, "parent_run_id": run_id, "agent": run_agent, "model": _agent_model(run_agent),
+                       "task_id": task_id, "reset_generation": launch_gen},
+            "record_extra": record_extra,
+        }
     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "running", "skill": skill})
 
     def _record(status: str, output: str = "", error: str = "", dur: float = 0.0, it=None, ot=None, model=None,
@@ -4749,7 +4747,7 @@ def api_projects():
         try:  # one project's reader failure never hides the others
             out.append({"key": key, "name": p.path.name, "kind": p.kind, "confidential": p.confidential, "no_push": p.no_push,
                         "note": p.note, "entry": raw.get(key), "baseline": _BASELINES.get(key),
-                        "sessions": _projects.project_sessions(p, board_ids, labels),
+                        "sessions": _with_commit_state(p, _projects.project_sessions(p, board_ids, labels)),
                         "memory": _projects.claude_memory_names(p)})
         except Exception as exc:
             out.append({"key": key, "error": f"session readers failed: {exc}", "entry": raw.get(key)})
@@ -4835,6 +4833,9 @@ _BASELINES: dict[str, dict] = {}  # key -> last baseline (memory only; the tail 
 _BASELINE_LOCK = threading.Lock()
 
 
+_BASELINE_RUNS: dict[str, int] = {}  # project key -> baselines in flight; under _JOB_LOCK (CM-026)
+
+
 @_counted
 def _run_baseline(key: str) -> None:
     result: dict = {"state": "done", "finished_at": None}
@@ -4845,13 +4846,21 @@ def _run_baseline(key: str) -> None:
                 raise _projects.ProjectError(f"{key}: no verify command configured")
             ident = f"BASELINE-{int(time.time() * 1000)}"
             with _projects.ticket_lock(key, ident):
-                info = _projects.create_worktree(project, ident)
-                if info["reused"]:  # never verify or delete a worktree this call did not create (REGUI-003)
-                    raise _projects.ProjectError(f"{key}/{ident} already existed; left untouched")
+                # its verify can read the main checkout ({root}): activity for a manual merge from
+                # admission (under the checkout's gate) until its process group is reaped (CM-026)
+                with _merge_gate(key), _JOB_LOCK:
+                    _BASELINE_RUNS[key] = _BASELINE_RUNS.get(key, 0) + 1
                 try:
-                    result.update(_projects.run_verify(project, Path(info["worktree"])))
+                    info = _projects.create_worktree(project, ident)
+                    if info["reused"]:  # never verify or delete a worktree this call did not create (REGUI-003)
+                        raise _projects.ProjectError(f"{key}/{ident} already existed; left untouched")
+                    try:
+                        result.update(_projects.run_verify(project, Path(info["worktree"])))
+                    finally:
+                        _projects.remove_worktree(project, ident)
                 finally:
-                    _projects.remove_worktree(project, ident)
+                    with _JOB_LOCK:
+                        _BASELINE_RUNS[key] -= 1
             # ponytail: the one-off lock file stays (only the shared project lock is held here, so
             # unlinking could split a lock another holder shares, SAP-009); remove clears it.
     except Exception as exc:
@@ -4963,6 +4972,61 @@ def _rename_card_session(key: str, agent: str, sid: str, issue_id: str, title: o
     busy = _sync_card_session_names(issue_id, title=clean)
     return jsonify({"ok": True, "title": clean, "card": True,
                     "pending": (canonical_agent(agent) or agent, sid) in busy})
+
+
+def _manual_merge(project, ident: str) -> str:
+    """Commit & merge from a session row: agent/<ident> into the main checkout, under the same
+    rules as the auto-merge (conflict-free only, the ticket's own policy) and its project gate.
+    Refused while another run of the project is open: a merge now would read as that run
+    changing the main checkout. Caller holds the ticket lock."""
+    with _merge_gate(project.key):
+        runner_root = os.path.realpath(project.path) == os.path.realpath(_PROTO)
+        with _JOB_LOCK:
+            opened = _project_runs_open(project.key, None, sessions=True, runner_root=runner_root)
+            testing = any(_BASELINE_RUNS.get(k) for k in _same_checkout_keys(project.key))
+        if opened:
+            raise _projects.ProjectError("another run of this project is in progress; merge after it finishes")
+        if testing:  # Run tests can be reading the main checkout (CM-026)
+            raise _projects.ProjectError("this project's tests are running; merge after they finish")
+        from runner.modules.pty import interactive_agents_in
+        if interactive_agents_in(project.path):  # an agent tab in the main checkout (CM-024)
+            raise _projects.ProjectError("an interactive agent tab is open in the main checkout; close it, then merge")
+        eff = _effective_project(project, ident)
+        # the exact branch commit (refs/heads/), resolved under the caller's ticket lock (CM-002)
+        return _projects.merge_into_checkout(eff, ident, _projects.branch_head(eff, ident))
+
+
+def _with_commit_state(project, sessions: list[dict]) -> list[dict]:
+    """Each row's Commit colour: one read-only status per checkout, shared by its sessions."""
+    by_root: dict = {}  # keyed by checkout root: sessions in its subfolders share one status (CM-003)
+    for s in sessions:
+        try:
+            s["commit_state"] = _projects.commit_state(project, s["cwd"], by_root) if s.get("cwd") else None
+        except Exception:  # an unreadable checkout: the button stays neutral, the panel still loads
+            s["commit_state"] = None
+    return sessions
+
+
+@app.route("/api/projects/<key>/sessions/<agent>/<sid>/commit", methods=["POST"])
+def api_session_commit(key: str, agent: str, sid: str):
+    """Manual Commit on a session row: every change in that session's checkout, local only."""
+    body = request.get_json(silent=True) or {}
+    try:
+        # Shared lifecycle hold for the whole commit: no path or policy change can slip in (SC-002).
+        with _projects.project_lock(key):
+            project = _projects.get_project(key, _projects.load_registry(errors={}))
+            target = _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])
+            # commit_checkout always runs git sandboxed, so no policy snapshot can go stale (SC-001/006)
+            result = _projects.commit_checkout(project, target["cwd"], body.get("message"),
+                                               dry_run=bool(body.get("dry_run")),
+                                               merger=lambda ident: _manual_merge(project, ident))
+    except _projects.SessionNotFound as exc:
+        return jsonify({"error": str(exc)}), 404
+    except (_projects.TicketLocked, _projects.ProjectBusy) as exc:
+        return jsonify({"error": str(exc)}), 409
+    except _projects.ProjectError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"ok": True, **result})
 
 
 @app.route("/api/projects/<key>/sessions/<agent>/<sid>/remove", methods=["POST"])
@@ -5102,6 +5166,8 @@ def api_run_detail(run_id: str):
             if rid == run_id:
                 r["run_id"] = rid
                 r.setdefault("output_path", "")
+                stderr = (read_json(_stream_meta_path(rid)) or {}).get("stderr_tail") or []
+                r["stderr_tail"] = [e.get("line", "") if isinstance(e, dict) else str(e) for e in stderr]  # Error tab (AGE-117)
                 intent = _valid_intent(r) if r.get("status") != "running" else None
                 r["resume_ok"] = bool(intent)  # precomputed for the reply UI (§1, STB-084)
                 if intent:
@@ -5154,20 +5220,6 @@ def _run_context(run_id: str) -> dict | None:
 @app.route("/api/runs/<run_id>/context")
 def api_run_context(run_id: str):
     return jsonify({"context": _run_context(run_id)})
-
-
-@app.route("/api/runs/<run_id>/progress")
-def api_run_progress(run_id: str):
-    issue_id = request.args.get("linear_issue_id") or None
-    return jsonify(_build_progress_payload(run_id, issue_id=issue_id))
-
-
-@app.route("/api/linear/issues/<issue_id>/progress")
-def api_linear_issue_progress(issue_id: str):
-    for rid, job in _running_jobs.items():
-        if job.get("linear_issue_id") == issue_id:
-            return jsonify(_build_progress_payload(rid, issue_id=issue_id))
-    return jsonify(_build_progress_payload(f"linear-{issue_id}", issue_id=issue_id))
 
 
 @app.route("/api/runs/<run_id>/status", methods=["PATCH"])
@@ -5306,32 +5358,106 @@ def record_interactive_ended(run_id: str, session_id: str | None) -> str | None:
     return new_id
 
 
-def _handoff_prompt(original: dict, reply: str, attachments: list,
-                    switched_from: tuple[str, str | None] | None = None) -> str:
-    """A new session's prompt: the task, the previous attempt's output and the reply. On a switch of
-    agent (AGE-113), also where the previous agent's whole conversation is, for the new one to read."""
-    original_prompt = original.get("prompt", "")
-    prev_output = (original.get("output") or "").strip()
+_HANDOFF_FULL_TURNS, _HANDOFF_CUT, _HANDOFF_MAX = 3, 1500, 30_000  # AGE-114 D2
+
+
+def _record_chain(rec: dict) -> list[dict]:
+    """`rec` and its ancestors by parent_run_id, oldest first, each run's newest record."""
+    by_id = {r["run_id"]: r for r in _all_records() if r.get("run_id")}
+    chain, seen = [], set()
+    while rec and rec.get("run_id") not in seen:
+        seen.add(rec.get("run_id"))
+        chain.append(rec)
+        rec = by_id.get(rec.get("parent_run_id"))
+    return chain[::-1]
+
+
+def _turn_reply(rec: dict) -> str:
+    """The human message that started this run: its `reply` (AGE-114 D3), or for an older record,
+    the outermost feedback in its prompt. ponytail: best effort for records written before the
+    field; delete once those cards are done."""
+    if "reply" in rec:
+        return rec["reply"] or ""
+    p = rec.get("prompt") or ""
+    i = p.rfind("[Human feedback]:")
+    if i < 0:  # a session-card continuation sent the reply alone; a nested retry prompt had none
+        return "" if "Original task:" in p else p
+    p = p[i + len("[Human feedback]:"):]
+    end = p.find("\n\nPlease continue or revise")
+    return (p[:end] if end >= 0 else p.split("\n\n")[0]).strip()
+
+
+def _chain_transcripts(chain: list[dict]) -> list[str]:
+    """Where each earlier session's whole conversation is: the CLI's own transcript, or for dsh
+    (its store is compressed) the runner's stream log of each of its runs."""
+    out: list[str] = []
+    for r in chain:
+        agent = canonical_agent(r.get("agent")) or r.get("agent")
+        path = None
+        if agent == "dsh" and r.get("run_id"):
+            path = _claude_stream_log_path(r["run_id"])
+            path = path if path.is_file() else None
+        elif r.get("agent_session_id"):
+            with contextlib.suppress(Exception):
+                path = _projects.session_file(agent, r["agent_session_id"])
+        line = f"{agent}: {path}"
+        if path and line not in out:
+            out.append(line)
+    return out
+
+
+def _cut(text: str, n: int) -> str:
+    return text if len(text) <= n else text[:n] + f" … [{len(text) - n} more characters cut]"
+
+
+def _handoff_prompt(original: dict, reply: str, attachments: list, switched_from: str | None = None,
+                    task: str | None = None) -> str:
+    """A new session's prompt on a card that already ran: the task, every earlier turn of the run
+    chain whichever agent ran it, the reply, and where the earlier sessions' transcripts are
+    (AGE-114 D2). On a switch of agent (AGE-113), who had the task. A resumed session gets the
+    reply only: it has all this already (D1)."""
     attach_note = _format_prompt_attachments(attachments)
-    if reply and prev_output:
-        prompt = (
-            f"Original task:\n{original_prompt}\n\n"
-            f"Previous attempt output:\n{prev_output}\n\n"
-            f"[Human feedback]: {reply}{attach_note}\n\n"
-            f"Please continue or revise based on the feedback above."
-        )
-    elif reply:
-        prompt = f"[Human feedback]: {reply}{attach_note}\n\n{original_prompt}"
-    elif attach_note:
-        prompt = f"[Human feedback]:{attach_note}\n\n{original_prompt}"
+    chain = _record_chain(original)
+    task = (task if task is not None else chain[0].get("prompt") or "").strip()  # `task`: the issue's text now
+    turns = []
+    for i, r in enumerate(chain):
+        human = "" if i == 0 else _turn_reply(r).strip()
+        out = (r.get("output") or "").strip()
+        if human == task:
+            human = ""
+        if human or out:
+            turns.append((r.get("agent") or "agent", human, out))
+    if not turns and not reply and not attach_note:
+        return task
+    blocks = []
+    for n, (agent, human, out) in enumerate(turns, 1):
+        cut = _HANDOFF_CUT if n <= len(turns) - _HANDOFF_FULL_TURNS else None
+        blocks.append(f"--- Turn {n} ({agent})"
+                      + (f"\nHuman: {_cut(human, cut) if cut else human}" if human else "")
+                      + (f"\nAgent: {_cut(out, cut) if cut else out}" if out else ""))
+    dropped = 0
+    # ponytail: oldest turns go first past the budget; an LLM-written handoff if that loses too much
+    while len(blocks) > 1 and sum(map(len, blocks)) > _HANDOFF_MAX:
+        blocks.pop(0)
+        dropped += 1
+    parts = [f"Original task:\n{task}"]
+    if blocks:
+        parts.append("Conversation so far, oldest first"
+                     + (f" ({dropped} earlier turns omitted; see the transcripts below)" if dropped else "")
+                     + ":\n" + "\n\n".join(blocks))
+    if reply or attach_note:
+        parts += [f"[Human feedback]: {reply}{attach_note}", "Please continue or revise based on the feedback above."]
     else:
-        prompt = original_prompt
+        parts.append("Please continue the task.")
     if switched_from:
-        old_agent, old_sid = switched_from
-        path = _projects.session_file(old_agent, old_sid) if old_sid else None
-        prompt += (f"\n\n[Agent switch]: this task was being worked on by {old_agent}; you take over from here."
-                   + (f" Its full conversation is in {path} (JSONL); read it if you need more context." if path else ""))
-    return prompt
+        parts.append(f"[Agent switch]: this task was being worked on by {switched_from}; you take over from here.")
+    transcripts = _chain_transcripts(chain)
+    if transcripts:
+        parts.append("Earlier sessions' full conversations (JSONL), read them if you need more context:\n"
+                     + "\n".join(transcripts))
+    if len(chain) > 1 or switched_from:
+        parts.append("Changes from earlier turns are already in this folder: check `git status` and `git log` first.")
+    return "\n\n".join(parts)
 
 
 @app.route("/api/runs/<run_id>/retry", methods=["POST"])
@@ -5481,8 +5607,11 @@ def api_run_retry(run_id: str):
                         return jsonify({"ok": False, "in_use_elsewhere": why}), 409
                 _lock_session_id, card_session = sid, True
     if switch_from:  # a new session of the chosen agent, in the folder chosen above, told what came before
-        prompt = _handoff_prompt(original, reply, attachments, (switch_from, _lock_session_id))
+        prompt = _handoff_prompt(original, reply, attachments, switch_from)
         card_note, _lock_session_id, card_session = f"new session: switched from {switch_from}", None, False
+    fresh_prompt = prompt  # a new session's, e.g. the fallback after a failed resume
+    if _lock_session_id:  # the resumed session has the history already: the reply only (AGE-114 D1, as §3.5)
+        prompt = (reply + _format_prompt_attachments(attachments)).strip() or "Continue the task from where you stopped."
     try:  # before any tracker change: a session being renamed/removed/opened is refused (A, R02)
         _claim_session(agent, _lock_session_id, new_run_id)
     except _projects.SessionBusy as exc:
@@ -5582,7 +5711,7 @@ def api_run_retry(run_id: str):
                 reuse_only=bool(bound.get("worktree")), skill=skill, confidential=bound.get("confidential"),
                 ticket_hold=card_hold if bound.get("issue_identifier") else None,
                 timeout=AI_SESSION_TIMEOUT_S if card_session or (_lock_session_id and linear_issue_id) else None,
-                note=card_note)
+                note=card_note, record_extra={"reply": (reply + _format_prompt_attachments(attachments)).strip()})
         except Exception as e:
             return _start_failed(e, binding=bound)
         return jsonify({"ok": True, "run_id": new_run_id, "skill": skill, "attempt": prev_attempt + 1, "agent": agent})
@@ -5612,8 +5741,9 @@ def api_run_retry(run_id: str):
                     attachments=attachments,
                 ),
             )
-    _card_extra = {**_issue_title_extra(linear_issue_id), **({"session_note": card_note} if card_note else {})}
-    _running_jobs[new_run_id] = {
+    _card_extra = {**_issue_title_extra(linear_issue_id), **({"session_note": card_note} if card_note else {}),
+                   "reply": (reply + _format_prompt_attachments(attachments)).strip()}  # the human turn (AGE-114 D3)
+    _publish_job(new_run_id, {  # gated (CM-013)
         "run_id": new_run_id, "skill": skill, "started_at": started_at,
         "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(),
         "linear_issue_id": linear_issue_id, "launch_gen": _launch_gen,  # the stall pass's tracker guard (WS-013)
@@ -5622,7 +5752,7 @@ def api_run_retry(run_id: str):
         "agent": agent,
         "model": _agent_model(agent, cfg),
         **({"record_extra": _card_extra} if _card_extra else {}),
-    }
+    })
     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "running", "skill": skill})
 
     def _do_retry():
@@ -5633,7 +5763,7 @@ def api_run_retry(run_id: str):
             card_hold.close()
 
     def _do_retry_attempts():
-            nonlocal agent
+            nonlocal agent, prompt
             attempt_proc: list = [None]  # the current attempt, kept past _end_job for error cleanup (RWS-021)
             # Claude / Codex / dsh — subprocess dispatch with streaming + resume
 
@@ -5689,6 +5819,7 @@ def api_run_retry(run_id: str):
                         "[retry] resume failed for %s session=%s; full retry without resume",
                         agent, _lock_session_id,
                     )
+                    prompt = fresh_prompt  # a new session: the card's history, not the reply alone (D1)
                     fallback_cmd = _ai_command(agent, prompt, output_format=_agent_output_format(agent),
                                                skill_name=skill, registry=registry)
                     output, input_tokens, output_tokens, parsed_model, new_sid, stderr_s, ok = _dispatch_cmd(fallback_cmd, _stream)

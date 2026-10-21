@@ -523,7 +523,9 @@ def test_card_bound_resume_ends_with_its_agent_and_unbound_keeps_a_shell(harness
     bound = pty_mod.open_terminal({"kind": "resume", "agent": "claude", "session_id": SID, "in_panel": False,
                                    "run_id": "a"}, None)
     assert "error" not in bound
-    assert argvs[-1][-1] == f"claude --resume {SID}"  # no "; exec $SHELL -l": the card unlocks on /exit (AC1)
+    import shlex
+    want = shlex.join(["claude", *pr.CLAUDE_SETTINGS, "--resume", SID])
+    assert argvs[-1][-1] == want  # no "; exec $SHELL -l": the card unlocks on /exit (AC1)
     unbound = pty_mod.open_terminal({"kind": "resume", "agent": "claude", "session_id": "not-a-card"}, None)
     assert "error" not in unbound and "; exec " in argvs[-1][-1]
 

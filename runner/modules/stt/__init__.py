@@ -2,8 +2,9 @@
 
 支持多个后端:
 - browser — 浏览器 Web Speech API（免费，实时预览，不需要 API key）
-- openai  — POST /api/stt 两步整理：gpt-transcribe 重新转写录音，再由小文本模型润色
-            （需要 OPENAI_API_KEY；见 docs/exec-plans/active/2026-10-14-stt-two-pass.md）
+- openai  — 边说边出字：浏览器经 WebRTC 直连 OpenAI Realtime 转写会话（gpt-live-transcribe），
+            POST /api/stt/live-token 签发短期 client secret；说完后 POST /api/stt (text=…) 只做润色。
+            连不上实时会话时退回两步整理：录音交 gpt-transcribe 重转写，再润色（需要 OPENAI_API_KEY）
 - local   — 本地 whisper-cpp 模型（未来，需要 whisper-cpp 可执行文件）
 
 模块名: "stt"
@@ -15,6 +16,8 @@ import asyncio
 import json
 import logging
 import os
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from runner.core.module_registry import AgenticModule, registry
@@ -23,6 +26,8 @@ from runner.core.features import has_env_key, has_executable, has_package
 logger = logging.getLogger(__name__)
 
 STT_MODEL = os.environ.get("OPENAI_STT_MODEL", "gpt-transcribe")
+LIVE_MODEL = os.environ.get("OPENAI_STT_LIVE_MODEL", "gpt-live-transcribe")
+CLIENT_SECRETS_URL = "https://api.openai.com/v1/realtime/client_secrets"
 POLISH_MODEL = os.environ.get("OPENAI_STT_POLISH_MODEL", "gpt-6-luna")
 # Total per-stage deadlines (HTTPX timeouts are per phase/read, so they are not enough).
 TRANSCRIBE_TIMEOUT_S = 30.0
@@ -131,6 +136,26 @@ async def polish(api_key: str, raw: str, browser_text: str, keywords: list[str])
     return (result.output_text or "").strip()
 
 
+def live_session(keywords: list[str], language: str | None) -> dict:
+    """Realtime transcription session for the browser's WebRTC call (audio format comes from WebRTC)."""
+    transcription: dict = {"model": LIVE_MODEL, "delay": "low"}
+    if keywords:
+        transcription["keywords"] = keywords
+    if language:
+        transcription["languages"] = [language]
+    # gpt-live-transcribe supports no VAD: the browser commits the one turn when the user stops.
+    return {"type": "transcription", "audio": {"input": {
+        "transcription": transcription, "turn_detection": None, "noise_reduction": {"type": "near_field"}}}}
+
+
+def mint_live_secret(api_key: str, session: dict) -> str:
+    body = json.dumps({"expires_after": {"anchor": "created_at", "seconds": 60}, "session": session}).encode()
+    req = urllib.request.Request(CLIENT_SECRETS_URL, data=body, method="POST", headers={
+        "Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.load(resp)["value"]
+
+
 class STTModule(AgenticModule):
     """Speech-to-Text module with multiple backend support."""
 
@@ -155,6 +180,22 @@ class STTModule(AgenticModule):
         def _json(payload: dict, status: int = 200):
             return app.response_class(response=json.dumps(payload), status=status, mimetype="application/json")
 
+        @app.route("/api/stt/live-token", methods=["POST"])
+        def _api_stt_live_token():
+            from flask import request
+
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if not api_key:
+                return _json({"error": "OPENAI_API_KEY not set in environment"}, 400)
+            language = _normalize_language((request.get_json(silent=True) or {}).get("language"))
+            try:
+                value = mint_live_secret(api_key, live_session(load_glossary(), language))
+            except urllib.error.HTTPError as e:
+                return _json({"error": f"client secret HTTP {e.code}: {e.read()[:300].decode(errors='replace')}"}, 502)
+            except Exception as e:
+                return _json({"error": str(e) or type(e).__name__}, 502)
+            return _json({"value": value, "model": LIVE_MODEL})
+
         @app.route("/api/stt", methods=["POST"])
         def _api_stt():
             from flask import request
@@ -162,22 +203,26 @@ class STTModule(AgenticModule):
             api_key = os.environ.get("OPENAI_API_KEY")
             if not api_key:
                 return _json({"error": "OPENAI_API_KEY not set in environment"}, 400)
-            if "audio" not in request.files:
+            live_text = (request.form.get("text") or "").strip()
+            if "audio" not in request.files and not live_text:
                 return _json({"error": "No audio file provided"}, 400)
 
-            upload = request.files["audio"]
-            audio = (upload.filename or "recording.webm", upload.read(), upload.content_type or "audio/webm")
             browser_text = (request.form.get("browser_text") or "").strip()[:PROMPT_MAX_CHARS]
-            language = _normalize_language(request.form.get("language"))
             keywords = load_glossary()
-
-            try:
-                raw = run_with_deadline(
-                    lambda: transcribe(api_key, audio, browser_text, keywords, language), TRANSCRIBE_TIMEOUT_S)
-            except TimeoutError:
-                return _json({"error": "transcription timed out"}, 504)
-            except Exception as e:
-                return _json({"error": str(e)}, 502)
+            if live_text:  # already transcribed live: polish only
+                raw, model = live_text, LIVE_MODEL
+            else:
+                upload = request.files["audio"]
+                audio = (upload.filename or "recording.webm", upload.read(), upload.content_type or "audio/webm")
+                language = _normalize_language(request.form.get("language"))
+                try:
+                    raw = run_with_deadline(
+                        lambda: transcribe(api_key, audio, browser_text, keywords, language), TRANSCRIBE_TIMEOUT_S)
+                except TimeoutError:
+                    return _json({"error": "transcription timed out"}, 504)
+                except Exception as e:
+                    return _json({"error": str(e)}, 502)
+                model = STT_MODEL
 
             text, polished = raw, False
             if raw:
@@ -188,7 +233,7 @@ class STTModule(AgenticModule):
                 except Exception as e:  # timeout or API error ⇒ fall back to the raw transcript
                     logger.warning("STT polish skipped: %s", e or type(e).__name__)
             return _json({"text": text, "raw": raw, "polished": polished,
-                          "model": STT_MODEL, "polish_model": POLISH_MODEL if polished else None})
+                          "model": model, "polish_model": POLISH_MODEL if polished else None})
 
 
 # ── Module registration ────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 """Phase 2: project-bound dispatch — argv policy, comment gate, location guard, the launch helper."""
 
+import contextlib
 import json
 import os
 import subprocess
@@ -95,7 +96,8 @@ def test_non_confidential_codex_uses_auto_review_without_sandbox_flag(proj):
 
 def test_non_confidential_claude_and_dsh_unchanged(proj):
     repo, _ = proj
-    assert cli("claude", repo, False) == ["claude", "-p", "--verbose", "--permission-mode", "bypassPermissions"]
+    assert cli("claude", repo, False) == ["claude", "-p", "--verbose", "--permission-mode", "bypassPermissions",
+                                          *pr.CLAUDE_SETTINGS]
     assert cli("dsh", repo, False) == ["dsh", "--profile", "headless"]
 
 
@@ -310,13 +312,135 @@ def test_merge_waits_for_the_projects_other_runs(helper, monkeypatch):
     app_mod, *_ = helper
     p = SimpleNamespace(key="demo", auto_merge=True)
     merged = []
-    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t: merged.append(t) or "sha")
+    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t, sha=None: merged.append((t, sha)) or "sha")
+    monkeypatch.setattr(pj, "branch_head", lambda project, t: f"head-of-{t}")
+    checked = []
+    monkeypatch.setattr(pj, "check_queued_merge", lambda project, t, sha: checked.append(t))
     a, b = {"project_key": "demo"}, {"project_key": "demo"}
     monkeypatch.setattr(app_mod, "_running_jobs", {"a": a, "b": b, "c": {"project_key": "other"}})
     assert app_mod._merge_when_last(p, "T-1", a, eligible=True) == {"merge": "waiting for this project's other runs"}
     assert merged == []
     assert app_mod._merge_when_last(p, "T-2", b, eligible=True) == {"merged_head": "sha", "merged": ["T-1", "T-2"]}
+    assert merged == [("T-1", "head-of-T-1"), ("T-2", "head-of-T-2")]  # the verified commits, not branch tips (SC-007)
+    assert checked == ["T-1", "T-2"]  # every queued entry re-checked before it merges (SC-009)
     assert app_mod._merge_when_last(SimpleNamespace(key="demo", auto_merge=False), "T-3", b, eligible=True) == {}
+
+
+def test_queued_merge_waits_for_a_finalizing_ticket_then_keeps_it(helper, monkeypatch):
+    """SC-010: a queued ticket whose run still holds its lock is waited for, and kept (not dropped) on timeout."""
+    app_mod, *_ = helper
+    p = SimpleNamespace(key="demo", auto_merge=True)
+    merged = []
+    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t, sha=None: merged.append(t) or "sha")
+    monkeypatch.setattr(pj, "branch_head", lambda project, t: f"head-of-{t}")
+    monkeypatch.setattr(pj, "check_queued_merge", lambda project, t, sha: None)
+    monkeypatch.setattr(app_mod, "_PENDING_MERGES", {"demo": [("T-1", "head-of-T-1")]})
+    b = {"project_key": "demo"}
+    monkeypatch.setattr(app_mod, "_running_jobs", {"b": b})
+    real = app_mod._wait_ticket_lock
+    monkeypatch.setattr(app_mod, "_wait_ticket_lock", lambda key, t: real(key, t, timeout=0.6))
+    with pj.ticket_lock("demo", "T-1"):  # T-1's run is still finalizing
+        out = app_mod._merge_when_last(p, "T-2", b, eligible=True)
+    assert merged == ["T-2"] and "T-1 waits for this project's next run" in out["merge"]
+    assert app_mod._PENDING_MERGES["demo"] == [("T-1", "head-of-T-1")]  # kept for the next run
+
+
+def test_queued_merge_uses_each_tickets_own_policy_and_newest_entry(helper, monkeypatch):
+    """SC-012: a confidential ticket drained by a public one merges under its own policy.
+    SC-013: a timed-out old entry never displaces a newer verification of the same ticket."""
+    app_mod, *_ = helper
+    p = SimpleNamespace(key="demo", auto_merge=True, confidential=False)
+    seen = []
+    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t, sha=None: seen.append((t, project.confidential)) or "sha")
+    monkeypatch.setattr(pj, "branch_head", lambda project, t: f"head-of-{t}")
+    monkeypatch.setattr(pj, "check_queued_merge", lambda project, t, sha: None)
+    monkeypatch.setattr(app_mod, "_ticket_confidential", lambda key, ident, *a: ident == "T-1")
+    monkeypatch.setattr(app_mod.dataclasses, "replace", lambda obj, **kw: SimpleNamespace(**{**vars(obj), **kw}))
+    monkeypatch.setattr(app_mod, "_PENDING_MERGES", {"demo": [("T-1", "old")]})
+    b = {"project_key": "demo"}
+    monkeypatch.setattr(app_mod, "_running_jobs", {"b": b})
+    app_mod._merge_when_last(p, "T-2", b, eligible=True)
+    assert ("T-1", True) in seen and ("T-2", False) in seen
+    # SC-013: T-1 busy until timeout, while a newer T-1 verification is already queued again
+    seen.clear()
+    monkeypatch.setattr(app_mod, "_PENDING_MERGES", {"demo": [("T-1", "old")]})
+    real = app_mod._wait_ticket_lock
+
+    def slow(key, t):
+        app_mod._PENDING_MERGES.setdefault("demo", []).append(("T-1", "new"))  # T-1 re-ran and queued meanwhile
+        return real(key, t, timeout=0.3)
+
+    monkeypatch.setattr(app_mod, "_wait_ticket_lock", slow)
+    b2 = {"project_key": "demo"}
+    monkeypatch.setattr(app_mod, "_running_jobs", {"b2": b2})
+    with pj.ticket_lock("demo", "T-1"):
+        app_mod._merge_when_last(p, "T-3", b2, eligible=True)
+    assert app_mod._PENDING_MERGES["demo"] == [("T-1", "new")]
+
+
+def test_queued_merge_deferred_when_a_run_starts_during_the_wait(helper, monkeypatch):
+    """SC-016: a run admitted while the drain waited keeps the queued entry from merging under it."""
+    app_mod, *_ = helper
+    p = SimpleNamespace(key="demo", auto_merge=True, confidential=False)
+    merged = []
+    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t, sha=None: merged.append(t) or "sha")
+    monkeypatch.setattr(pj, "branch_head", lambda project, t: f"head-of-{t}")
+    monkeypatch.setattr(pj, "check_queued_merge", lambda project, t, sha: None)
+    monkeypatch.setattr(app_mod, "_PENDING_MERGES", {"demo": [("T-1", "v1")]})
+    b = {"project_key": "demo"}
+    jobs = {"b": b}
+    monkeypatch.setattr(app_mod, "_running_jobs", jobs)
+    real = app_mod._wait_ticket_lock
+
+    @contextlib.contextmanager
+    def admitting(key, t):
+        jobs["c"] = {"project_key": "demo"}  # a new run takes its fingerprint during the wait
+        with real(key, t, timeout=0.3):
+            yield
+
+    monkeypatch.setattr(app_mod, "_wait_ticket_lock", admitting)
+    out = app_mod._merge_when_last(p, "T-2", b, eligible=True)
+    assert merged == []  # neither T-1 nor the drainer's own T-2 merges under T-3's fingerprint (SC-018)
+    assert app_mod._PENDING_MERGES["demo"] == [("T-1", "v1"), ("T-2", "head-of-T-2")]
+    assert "waits for this project's next run" in out["merge"]
+
+
+def test_run_fingerprint_waits_for_a_merge_holding_the_gate(helper, monkeypatch):
+    """SC-019: a merge blocked on the global merge lock still holds its project's gate, so a run
+    admitted meanwhile fingerprints only after the merge completed."""
+    app_mod, *_ = helper
+    p = SimpleNamespace(key="demo", auto_merge=True, confidential=False)
+    order = []
+    release = threading.Event()
+
+    def slow_merge(project, t, sha=None):
+        order.append("merge-start")
+        release.wait(2)  # e.g. waiting on _MERGE_LOCK held by a manual commit elsewhere
+        order.append("merge-end")
+        return "sha"
+
+    monkeypatch.setattr(pj, "merge_into_checkout", slow_merge)
+    monkeypatch.setattr(pj, "branch_head", lambda project, t: f"head-of-{t}")
+    monkeypatch.setattr(pj, "check_queued_merge", lambda project, t, sha: None)
+    monkeypatch.setattr(app_mod, "_PENDING_MERGES", {})
+    b = {"project_key": "demo"}
+    monkeypatch.setattr(app_mod, "_running_jobs", {"b": b})
+    drain = threading.Thread(target=app_mod._merge_when_last, args=(p, "T-2", b, True))
+    drain.start()
+    while "merge-start" not in order:
+        time.sleep(0.01)
+
+    def admit():
+        with app_mod._merge_gate("demo"):  # what a new run's opening fingerprint takes
+            order.append("fingerprint")
+
+    t3 = threading.Thread(target=admit)
+    t3.start()
+    time.sleep(0.2)
+    assert "fingerprint" not in order  # blocked behind the merge
+    release.set()
+    drain.join(5); t3.join(5)
+    assert order == ["merge-start", "merge-end", "fingerprint"]
 
 
 def test_background_writer_is_gone_before_verify(helper, tmp_path):
