@@ -3979,7 +3979,10 @@ function _linearStateToBoard(linearState) {
   return map[key] || 'todo';
 }
 
-// ── Voice input: Browser STT live preview + OpenAI two-pass refinement ─────
+// ── Voice input: OpenAI live transcription (text while speaking) + polish ─────
+// Preferred path works like ChatGPT dictation: the mic streams over WebRTC to an OpenAI Realtime
+// transcription session, whose deltas fill the field as the user speaks. If that cannot connect, the
+// older two-pass path runs: browser STT live preview, then the recording is re-transcribed and polished.
 // Plan: docs/exec-plans/active/2026-10-14-stt-two-pass.md. A recording is owned by its target
 // field's draft key (issue/task + field), whichever column the issue was opened from.
 const _STT_TARGETS = {
@@ -4087,7 +4090,7 @@ function _sttSetButton(kind, recording) {
 }
 
 function _sttUpdateTitles() {
-  const title = _sttBackends.includes('openai') ? 'Voice input (live + OpenAI refine)' : 'Voice input (browser only)';
+  const title = _sttBackends.includes('openai') ? 'Voice input (OpenAI live transcription)' : 'Voice input (browser only)';
   for (const t of Object.values(_STT_TARGETS)) {
     const btn = document.getElementById(t.btnId);
     if (btn) btn.title = title;
@@ -4118,13 +4121,17 @@ function _sttStart(kind) {
     sid: String(seq), seq, kind, owner, el, attached: true, base: el.value, expected: el.value,
     finalText: '', interim: '', capturing: true, draining: false, recActive: false, done: false,
     noRefine: !canRefine, SR, rec: null, recorder: null, stream: null, chunks: [], mime: '', ext: 'webm', abort: null,
+    live: false, pc: null, dc: null, items: new Map(), finishTimer: null,
   };
   _sttLatestSeq.set(owner, seq);
   if (!_sttSessions.has(owner)) _sttSessions.set(owner, new Set());
   _sttSessions.get(owner).add(s);
   _sttCapture = s;
   _sttSetButton(kind, true);
-  if (canRefine) {
+  if (canRefine && typeof RTCPeerConnection !== 'undefined') {
+    s.live = true;
+    _sttStartLive(s);
+  } else if (canRefine) {
     _sttSetStatus(kind, '● Starting mic…', 'var(--accent)');
     _sttStartRecorder(s);  // recognition starts only once recording runs, so the audio covers all live text
   } else {
@@ -4143,6 +4150,108 @@ function _sttWrite(s, value) {
   s.expected = value;  // set before dispatching so draft persistence sees our own write
   s.el.dispatchEvent(new Event('input', { bubbles: true }));
   return true;
+}
+
+async function _sttStartLive(s) {
+  _sttSetStatus(s.kind, '● Connecting…', 'var(--accent)');
+  try {
+    const tok = await fetch('/api/stt/live-token', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ language: _getSttLanguage() }),
+    }).then(r => r.json());
+    if (tok.error) throw new Error(tok.error);
+    if (!s.capturing || s.done) throw new Error('stopped');
+    s.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (!s.capturing || s.done) throw new Error('stopped');
+    const pc = s.pc = new RTCPeerConnection();
+    pc.addTrack(s.stream.getTracks()[0], s.stream);
+    const dc = s.dc = pc.createDataChannel('oai-events');
+    dc.onopen = () => { if (s.capturing && s.attached) _sttSetStatus(s.kind, '● Listening…', 'var(--red)'); };
+    dc.onmessage = (e) => { try { _sttLiveEvent(s, JSON.parse(e.data)); } catch (err) { console.warn('[stt] live event:', err); } };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState !== 'failed' || s.done) return;  // 'disconnected' can recover
+      _sttLiveEndCapture(s);
+      _sttLiveFinish(s, 'Live connection lost');
+    };
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    const res = await fetch('https://api.openai.com/v1/realtime/calls', {
+      method: 'POST', body: offer.sdp,
+      headers: { Authorization: `Bearer ${tok.value}`, 'Content-Type': 'application/sdp' },
+    });
+    if (!res.ok) throw new Error(`realtime HTTP ${res.status}`);
+    const sdp = await res.text();
+    if (!s.capturing || s.done) throw new Error('stopped');
+    await pc.setRemoteDescription({ type: 'answer', sdp });
+  } catch (err) {
+    _sttLiveClose(s);
+    if (s.done) return;
+    if (!s.capturing) { _sttEndSession(s, ''); return; }
+    console.warn('[stt] live transcription unavailable, using two-pass:', err.message);
+    s.live = false;
+    _sttSetStatus(s.kind, '● Starting mic…', 'var(--accent)');
+    _sttStartRecorder(s);
+  }
+}
+
+function _sttLiveEvent(s, ev) {
+  if (s.done) return;
+  if (ev.type === 'conversation.item.input_audio_transcription.delta') {
+    s.items.set(ev.item_id, (s.items.get(ev.item_id) || '') + (ev.delta || ''));
+  } else if (ev.type === 'conversation.item.input_audio_transcription.completed') {
+    s.items.set(ev.item_id, ev.transcript || '');
+  } else if (ev.type === 'error') {
+    console.warn('[stt] realtime error:', ev.error);
+    if (s.draining) _sttLiveFinish(s);  // e.g. the commit found an empty buffer
+    return;
+  } else {
+    return;
+  }
+  s.finalText = [...s.items.values()].join('');
+  if (!_sttWrite(s, s.base + s.finalText) && s.capturing) _sttStopCapture(s);  // field changed: result goes to a hint
+  if (ev.type.endsWith('.completed') && s.draining) _sttLiveFinish(s);
+}
+
+function _sttLiveEndCapture(s) {
+  s.capturing = false;
+  if (_sttCapture === s) _sttCapture = null;
+  _sttSetButton(s.kind, false);
+}
+
+// Stop: release the mic, commit the one open turn, wait for its final transcript.
+function _sttLiveStop(s) {
+  _sttReleaseStream(s);
+  if (s.dc?.readyState !== 'open') { _sttLiveClose(s); _sttEndSession(s, ''); return; }  // still connecting
+  s.draining = true;
+  if (s.attached) _sttSetStatus(s.kind, '⏳ Finishing…', 'var(--accent)');
+  // ponytail: fixed 300 ms for audio still in flight before the commit; raise it if last words go missing.
+  setTimeout(() => {
+    if (s.done || !s.draining) return;
+    try { s.dc.send(JSON.stringify({ type: 'input_audio_buffer.commit' })); } catch (_) { _sttLiveFinish(s); return; }
+    s.finishTimer = setTimeout(() => _sttLiveFinish(s), 10000);  // no final event: keep the deltas
+  }, 300);
+}
+
+function _sttLiveClose(s) {
+  clearTimeout(s.finishTimer);
+  if (s.dc) s.dc.onmessage = null;
+  if (s.pc) s.pc.onconnectionstatechange = null;
+  try { s.pc?.close(); } catch (_) {}
+  s.pc = s.dc = null;
+  _sttReleaseStream(s);
+}
+
+function _sttLiveFinish(s, emptyMessage = '') {
+  if (s.done || s.finished) return;
+  s.finished = true;
+  s.draining = false;
+  _sttLiveClose(s);
+  const text = s.finalText.trim();
+  if (!text) { _sttEndSession(s, emptyMessage, 'var(--red)'); return; }
+  if (s.attached) _sttSetStatus(s.kind, '⏳ Polishing…', 'var(--accent)');
+  const form = new FormData();
+  form.append('text', text);
+  _sttPost(s, form, () => _sttDeliver(s, { text, raw: text, polished: false }));  // field may be detached: keep the text
 }
 
 function _sttStartRecognition(s) {
@@ -4262,6 +4371,7 @@ function _sttStopCapture(s) {
   s.capturing = false;
   if (_sttCapture === s) _sttCapture = null;
   _sttSetButton(s.kind, false);
+  if (s.live) { _sttLiveStop(s); return; }
   if (s.rec && s.recActive) {
     s.draining = true;  // stop() may still deliver a final result; onend finishes draining
     try { s.rec.stop(); } catch (_) { s.draining = false; }
@@ -4287,6 +4397,10 @@ function _sttRefine(s, waited = 0) {
   const form = new FormData();
   form.append('audio', blob, `recording.${s.ext}`);
   form.append('browser_text', (s.finalText + s.interim).trim());
+  _sttPost(s, form, (why) => _sttEndSession(s, `Refine failed (${why}) — kept browser text`, 'var(--red)'));
+}
+
+function _sttPost(s, form, onFail) {
   form.append('language', _getSttLanguage());
   s.abort = new AbortController();
   const timer = setTimeout(() => s.abort.abort(), _STT_FETCH_TIMEOUT_MS);
@@ -4298,8 +4412,7 @@ function _sttRefine(s, waited = 0) {
     })
     .catch(err => {
       if (s.done) return;  // cancelled
-      const why = err.name === 'AbortError' ? 'timed out' : err.message;
-      _sttEndSession(s, `Refine failed (${why}) — kept browser text`, 'var(--red)');
+      onFail(err.name === 'AbortError' ? 'timed out' : err.message);
     })
     .finally(() => clearTimeout(timer));
 }
@@ -4357,7 +4470,7 @@ function _sttDispose(s) {
   if (s.rec) { s.rec.onend = s.rec.onresult = null; try { s.rec.abort(); } catch (_) {} }
   if (s.recorder) { s.recorder.onstop = null; try { s.recorder.stop(); } catch (_) {} }
   if (s.abort) s.abort.abort();
-  _sttReleaseStream(s);
+  _sttLiveClose(s);
   if (s.attached) { _sttSetButton(s.kind, false); _sttSetStatus(s.kind, ''); }
   const set = _sttSessions.get(_sttCanon(s.owner));
   if (set) { set.delete(s); if (!set.size) _sttSessions.delete(_sttCanon(s.owner)); }
