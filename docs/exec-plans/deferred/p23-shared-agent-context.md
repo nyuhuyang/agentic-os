@@ -4,6 +4,7 @@ created: 2026-05-20
 deferred: 2026-10-13
 reason: research not started
 resume_from: 待调研问题 section
+research: docs/design-docs/multi-turn-memory.md (AGE-114, 2026-10-20; Step 3 covers this plan)
 ---
 
 # P23 — Shared agent context injection
