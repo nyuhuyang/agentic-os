@@ -3372,12 +3372,12 @@ async function openDetailModal(run_id) {
     _cardTermBind(run_id, r, boardItem);
     const unsent = _unsentReplies.get(_cardKey());  // a quick reply that did not complete while this card was closed
     if (unsent) { _unsentReplies.delete(_cardKey()); _showUnsent(unsent.text, unsent.reason); }
-    const sessionOpen = _cardHasSession(_cardKey());  // an open interactive session: shown first, whatever the column (AC4)
+    const sessionOpen = _cardHasSession(_cardKey());  // an open interactive session: End session shows
     document.getElementById('detail-end-session').style.display = sessionOpen ? '' : 'none';
-    // a queued next-state choice, or a retained session the card was redirected for, opens there too
+    // a queued next-state choice, or a retained session the card was redirected for
     const choicePending = _pendingNextRuns.has(_cardKey()) || _openTerminalFor === run_id;
     if (_openTerminalFor === run_id) _openTerminalFor = null;
-    if (isReview || r.status === 'running' || state === 'in_progress' || sessionOpen || choicePending) {  // C2: Terminal opens by default
+    if (choicePending) {  // only a choice waiting for an answer opens on Terminal; else Output (AGE-117)
       switchOutputTab('terminal');
       _cardTermOpen();
     }
