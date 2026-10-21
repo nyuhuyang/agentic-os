@@ -2235,6 +2235,11 @@ def _parse_agent_output(agent: str, stdout_s: str) -> tuple[str, int | None, int
                 elif ev_type == "turn.completed":
                     usage = ev.get("usage", {})
                     input_tokens = usage.get("input_tokens")
+                    if input_tokens is not None:
+                        # Codex counts cache hits inside input_tokens; Claude reports them apart.
+                        # Drop them so both mean uncached input and cost is not priced off
+                        # re-sent context (a 3-paper ingest: 7.3M "input", 96.8% cached → $22).
+                        input_tokens = max(0, input_tokens - (usage.get("cached_input_tokens") or 0))
                     output_tokens = usage.get("output_tokens")
             except Exception:
                 pass
