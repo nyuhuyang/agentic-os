@@ -889,15 +889,11 @@
     <div class="detail-section" id="detail-output-section">
       <div class="detail-output-tab-bar">
         <button class="detail-output-tab active" data-tab="output" onclick="switchOutputTab('output')">Output</button>
-        <button class="detail-output-tab" data-tab="log" onclick="switchOutputTab('log')">Log</button>
         <button class="detail-output-tab" data-tab="error" onclick="switchOutputTab('error')">Error</button>
         <button class="detail-output-tab" data-tab="terminal" onclick="switchOutputTab('terminal');_cardTermOpen()">Terminal</button>
       </div>
       <div class="detail-output-tab-content active" id="detail-output-content">
         <div class="detail-section-body" id="detail-output"></div>
-      </div>
-      <div class="detail-output-tab-content" id="detail-log-content">
-        <div class="detail-section-body" id="detail-log"></div>
       </div>
       <div class="detail-output-tab-content" id="detail-error-content">
         <div class="detail-section-body error-panel" id="detail-error"></div>
@@ -2520,61 +2516,18 @@ function _agentLabel(agent) {
 
 // run_progress state: run_id -> {snippet, turn}
 const _runProgress = {};
-let _detailProgressTimer = null;
+let _detailCtxTimer = null;
 
-function _stopDetailProgressPoll() {
-  if (_detailProgressTimer) {
-    clearInterval(_detailProgressTimer);
-    _detailProgressTimer = null;
+function _stopDetailCtxPoll() {
+  if (_detailCtxTimer) {
+    clearInterval(_detailCtxTimer);
+    _detailCtxTimer = null;
   }
 }
 
-function _renderProgressLog(data) {
-  const logEl = document.getElementById('detail-log');
-  if (!logEl) return;
-  const events = Array.isArray(data?.events) ? data.events : [];
-  const header = [
-    data?.status ? `status: ${data.status}` : '',
-    data?.pid ? `pid: ${data.pid}` : '',
-    data?.session_path ? `session: ${data.session_path}` : '',
-    data?.log_path ? `json: ${data.log_path}` : '',
-  ].filter(Boolean).join('\n');
-  const body = events.map(e => {
-    const ts = e.ts ? `[${e.ts}] ` : '';
-    return `${ts}${e.text || ''}`;
-  }).join('\n\n');
-  logEl.textContent = [header, body || '(no live log yet)'].filter(Boolean).join('\n\n');
-  logEl.classList.toggle('empty', !body);
-}
-
-async function _refreshDetailProgress(runId, issueId = '') {
-  if (!runId && !issueId) return;
-  const url = issueId
-    ? `/api/linear/issues/${encodeURIComponent(issueId)}/progress`
-    : `/api/runs/${encodeURIComponent(runId)}/progress`;
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return;
-    const data = await res.json();
-    _renderProgressLog(data);
-    const last = (data.events || []).slice(-1)[0];
-    const progressKey = runId || (issueId ? `linear-${issueId}` : '');
-    if (progressKey && last?.text) {
-      _runProgress[progressKey] = {
-        snippet: String(last.text).replace(/\s+/g, ' ').slice(-140),
-        turn: (data.events || []).length,
-      };
-    }
-  } catch (_) {}
-}
-
-function _startDetailProgressPoll(runId, issueId = '', withProgress = true) {
-  _stopDetailProgressPoll();
-  if (withProgress) _refreshDetailProgress(runId, issueId);
-  _detailProgressTimer = setInterval(() => {
-    if (withProgress) _refreshDetailProgress(runId, issueId);
-    _refreshDetailCtx(runId);
-  }, 3000);
+function _startDetailCtxPoll(runId) {
+  _stopDetailCtxPoll();
+  _detailCtxTimer = setInterval(() => _refreshDetailCtx(runId), 3000);
 }
 
 // Context-window usage of the card's agent session, on the detail meta line (CTX D1).
@@ -3155,7 +3108,7 @@ async function openDetailModal(run_id) {
   const boardItem = _boardItemsByRunId[run_id] || null;
   _sttDetachKind('reply');  // the textareas are reused for the next issue
   _sttDetachKind('desc');
-  _stopDetailProgressPoll();
+  _stopDetailCtxPoll();
   _detailRunId = run_id;
   _detailLinearIssueId = null;
   _detailLinearInitial = null;
@@ -3171,8 +3124,6 @@ async function openDetailModal(run_id) {
   document.getElementById('detail-prompt').classList.add('empty');
   document.getElementById('detail-output').textContent = '';
   document.getElementById('detail-output').classList.add('empty');
-  document.getElementById('detail-log').textContent = '';
-  document.getElementById('detail-log').classList.add('empty');
   document.getElementById('detail-error').textContent = '';
   document.getElementById('detail-error').classList.add('empty');
   document.getElementById('detail-path-section').style.display = 'none';
@@ -3217,14 +3168,9 @@ async function openDetailModal(run_id) {
     _detailLinearIssueId = _sttIssueId(issueId);
     document.getElementById('detail-meta').textContent = 'Linear issue';
     document.getElementById('detail-prompt-section').style.display = 'none';
-    const isInProgressVirtual = (boardItem?._boardStatus || '') === 'in_progress';
     const isInReviewVirtual = (boardItem?._boardStatus || '') === 'in_review';
     const isTodoVirtual = (boardItem?._boardStatus || '') === 'todo';
     document.getElementById('detail-output-section').style.display = isTodoVirtual ? 'none' : '';
-    if (isInProgressVirtual) {
-      _switchOutputTab('log');
-      _startDetailProgressPoll(run_id, issueId);
-    }
     document.getElementById('detail-reply-section').style.display = isInReviewVirtual ? '' : 'none';
     document.getElementById('desc-stt-group').style.display = 'flex';
     document.getElementById('detail-dispatch-group').style.display = isTodoVirtual ? 'inline-flex' : 'none';
@@ -3294,11 +3240,7 @@ async function openDetailModal(run_id) {
     errorEl.classList.toggle('empty', !errorText);
 
     _refreshDetailCtx(run_id);
-    // The Log is the run's own stream log: fetched once when finished, polled while live (AGE-117).
-    // By run id, not issue id: the issue route serves the card's virtual run, not this one.
-    const live = r.status === 'running' || state === 'in_progress';
-    if (!live) _refreshDetailProgress(run_id);
-    _startDetailProgressPoll(run_id, '', live);  // ctx% refreshes even with no log (CTX-007)
+    _startDetailCtxPoll(run_id);  // ctx% refreshes even with no log (CTX-007)
 
     const path = (r.output_path || '').trim();
     if (path) {
@@ -3386,10 +3328,6 @@ async function openDetailModal(run_id) {
   }
 }
 
-function _switchOutputTab(_tab) {
-  // panels always visible; no-op
-}
-
 function switchOutputTab(name) {
   document.querySelectorAll('.detail-output-tab').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.tab === name);
@@ -3403,7 +3341,7 @@ function closeDetailModal({ flush = true } = {}) {
   _cardTermDetach();  // the session keeps running on the server (C2)
   _detailModalLoadSeq++;
   _detailLinearLoadSeq++;
-  _stopDetailProgressPoll();
+  _stopDetailCtxPoll();
   document.getElementById('detail-modal').classList.remove('open');
   _detailRunId = null;
   _detailLinearIssueId = null;
