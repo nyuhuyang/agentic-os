@@ -1,6 +1,6 @@
 # 多轮对话记忆：各家做法调研与 AgenticOS 建议（AGE-114）
 
-**日期:** 2026-10-20 · **状态:** 调研完成，待用户决定是否立项 · **相关:** AGE-113（`docs/exec-plans/completed/2026-10-20-switch-agent.md`）、P23（`docs/exec-plans/deferred/p23-shared-agent-context.md`）
+**日期:** 2026-10-20 · **状态:** Step 0–2 已实现（2026-10-21，`docs/exec-plans/completed/2026-10-21-multi-turn-memory.md`）；Step 3 待用户决定 · **相关:** AGE-113（`docs/exec-plans/completed/2026-10-20-switch-agent.md`）、P23（`docs/exec-plans/deferred/p23-shared-agent-context.md`）
 
 ## TL;DR
 
@@ -147,8 +147,8 @@
 
 ## 6. 需要用户决定
 
-- [ ] Step 0–2 是否立为一张实现卡？三步都是 runner 改动，需要 /verify。
-- [ ] handoff 预算：K（全文保留的轮数）、N（每轮截断字符数）、总量上限，默认按上文的 3 / 1 500 / 30 KB。
+- [x] Step 0–2：已按默认预算实现并 /verify（用户回复 "continue"，2026-10-21）。
+- [x] handoff 预算：采用默认 3 / 1 500 / 30 000 字符（`runner/app.py` `_HANDOFF_*`），可再调。
 - [ ] Step 3 会改动 CLAUDE.md（工作区契约）与 AGENTS.md 的关系，需要用户拍板选 `@import` 还是改设置。
 
 ## 来源

@@ -2184,6 +2184,8 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
         record["reset_gen"] = reset_generation  # the generation this run launched under (Decision 11)
     if extra:
         record.update({k: v for k, v in extra.items() if k not in record})  # additive fields only
+    if record.get("reply") and str(prompt).startswith("[withheld"):
+        record["reply"] = ""  # the human turn is the prompt's text: withheld with it (AGE-114)
     progress_path = _run_progress_path(run_id)
     if progress_path.exists():
         record["log_path"] = str(progress_path)
@@ -4293,6 +4295,13 @@ def _session_note(run_id: str, text: str) -> None:
         logger.warning("run note for %s not written", run_id)
 
 
+def _latest_card_session_record(issue_id: str | None) -> dict | None:
+    """The card's newest record with a session, whichever agent's; audits and archived runs skipped."""
+    return next((r for r in reversed(_all_records()) if issue_id and r.get("linear_issue_id") == issue_id
+                 and r.get("agent_session_id") and not r.get("interactive_ended")
+                 and r.get("status") != "archived"), None)
+
+
 def _resumable_card_session(issue_id: str | None, agent: str | None, folder: str | Path | None
                             ) -> tuple[str | None, str | None]:
     """(sid, None) when the card's session for this agent can continue in `folder`; otherwise
@@ -4305,6 +4314,10 @@ def _resumable_card_session(issue_id: str | None, agent: str | None, folder: str
         other = any(_card_session(issue_id, a) for a in _SESSION_AGENTS if a != agent)
         return None, "the card's session belongs to another agent" if other else "no session yet"
     sid = found[0]
+    latest = _latest_card_session_record(issue_id)
+    other = latest and (canonical_agent(latest.get("agent")) or latest.get("agent"))
+    if other and other != agent:  # switched away since: that session lacks the later turns (AGE-114 D4)
+        return None, f"the card's latest session belongs to {other}"
     target = _projects.find_session(agent, sid)
     if not target:
         return None, "the card's session was removed or archived"
@@ -4423,7 +4436,7 @@ def _retry_session_card(run_id: str, original: dict, intent: dict, data: dict, c
     attachments = data.get("attachments") or []
     prompt = (reply + _format_prompt_attachments(attachments)).strip()  # the reply only (§3.5)
     if switch_to:
-        prompt = _handoff_prompt(original, reply, attachments, (agent, sid))
+        prompt = _handoff_prompt(original, reply, attachments, agent)
     elif not prompt and card_sourced:  # a plain Retry of a card continuing its session: the task again (PVST-02)
         prompt = (original.get("prompt") or "").strip()
     if not prompt:
@@ -4508,6 +4521,7 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
     # A card-sourced continuation persists no intent: the next reply finds the session again
     # through _card_session (DP-34). Nor does a switch: the next reply continues the new session.
     record_extra = {"issue_identifier": ident, "source": "session", "session_project": project.key,
+                    "reply": (reply + _format_prompt_attachments(attachments)).strip(),  # the human turn (AGE-114 D3)
                     **({} if card_sourced or switch_to else {"resume_session": intent}), **binding,
                     **_issue_title_extra(linear_issue_id, conf)}
     wt_ident = durable.get("issue_identifier") if durable.get("project_key") == project.key else None
@@ -5249,32 +5263,106 @@ def record_interactive_ended(run_id: str, session_id: str | None) -> str | None:
     return new_id
 
 
-def _handoff_prompt(original: dict, reply: str, attachments: list,
-                    switched_from: tuple[str, str | None] | None = None) -> str:
-    """A new session's prompt: the task, the previous attempt's output and the reply. On a switch of
-    agent (AGE-113), also where the previous agent's whole conversation is, for the new one to read."""
-    original_prompt = original.get("prompt", "")
-    prev_output = (original.get("output") or "").strip()
+_HANDOFF_FULL_TURNS, _HANDOFF_CUT, _HANDOFF_MAX = 3, 1500, 30_000  # AGE-114 D2
+
+
+def _record_chain(rec: dict) -> list[dict]:
+    """`rec` and its ancestors by parent_run_id, oldest first, each run's newest record."""
+    by_id = {r["run_id"]: r for r in _all_records() if r.get("run_id")}
+    chain, seen = [], set()
+    while rec and rec.get("run_id") not in seen:
+        seen.add(rec.get("run_id"))
+        chain.append(rec)
+        rec = by_id.get(rec.get("parent_run_id"))
+    return chain[::-1]
+
+
+def _turn_reply(rec: dict) -> str:
+    """The human message that started this run: its `reply` (AGE-114 D3), or for an older record,
+    the outermost feedback in its prompt. ponytail: best effort for records written before the
+    field; delete once those cards are done."""
+    if "reply" in rec:
+        return rec["reply"] or ""
+    p = rec.get("prompt") or ""
+    i = p.rfind("[Human feedback]:")
+    if i < 0:  # a session-card continuation sent the reply alone; a nested retry prompt had none
+        return "" if "Original task:" in p else p
+    p = p[i + len("[Human feedback]:"):]
+    end = p.find("\n\nPlease continue or revise")
+    return (p[:end] if end >= 0 else p.split("\n\n")[0]).strip()
+
+
+def _chain_transcripts(chain: list[dict]) -> list[str]:
+    """Where each earlier session's whole conversation is: the CLI's own transcript, or for dsh
+    (its store is compressed) the runner's stream log of each of its runs."""
+    out: list[str] = []
+    for r in chain:
+        agent = canonical_agent(r.get("agent")) or r.get("agent")
+        path = None
+        if agent == "dsh" and r.get("run_id"):
+            path = _claude_stream_log_path(r["run_id"])
+            path = path if path.is_file() else None
+        elif r.get("agent_session_id"):
+            with contextlib.suppress(Exception):
+                path = _projects.session_file(agent, r["agent_session_id"])
+        line = f"{agent}: {path}"
+        if path and line not in out:
+            out.append(line)
+    return out
+
+
+def _cut(text: str, n: int) -> str:
+    return text if len(text) <= n else text[:n] + f" … [{len(text) - n} more characters cut]"
+
+
+def _handoff_prompt(original: dict, reply: str, attachments: list, switched_from: str | None = None,
+                    task: str | None = None) -> str:
+    """A new session's prompt on a card that already ran: the task, every earlier turn of the run
+    chain whichever agent ran it, the reply, and where the earlier sessions' transcripts are
+    (AGE-114 D2). On a switch of agent (AGE-113), who had the task. A resumed session gets the
+    reply only: it has all this already (D1)."""
     attach_note = _format_prompt_attachments(attachments)
-    if reply and prev_output:
-        prompt = (
-            f"Original task:\n{original_prompt}\n\n"
-            f"Previous attempt output:\n{prev_output}\n\n"
-            f"[Human feedback]: {reply}{attach_note}\n\n"
-            f"Please continue or revise based on the feedback above."
-        )
-    elif reply:
-        prompt = f"[Human feedback]: {reply}{attach_note}\n\n{original_prompt}"
-    elif attach_note:
-        prompt = f"[Human feedback]:{attach_note}\n\n{original_prompt}"
+    chain = _record_chain(original)
+    task = (task if task is not None else chain[0].get("prompt") or "").strip()  # `task`: the issue's text now
+    turns = []
+    for i, r in enumerate(chain):
+        human = "" if i == 0 else _turn_reply(r).strip()
+        out = (r.get("output") or "").strip()
+        if human == task:
+            human = ""
+        if human or out:
+            turns.append((r.get("agent") or "agent", human, out))
+    if not turns and not reply and not attach_note:
+        return task
+    blocks = []
+    for n, (agent, human, out) in enumerate(turns, 1):
+        cut = _HANDOFF_CUT if n <= len(turns) - _HANDOFF_FULL_TURNS else None
+        blocks.append(f"--- Turn {n} ({agent})"
+                      + (f"\nHuman: {_cut(human, cut) if cut else human}" if human else "")
+                      + (f"\nAgent: {_cut(out, cut) if cut else out}" if out else ""))
+    dropped = 0
+    # ponytail: oldest turns go first past the budget; an LLM-written handoff if that loses too much
+    while len(blocks) > 1 and sum(map(len, blocks)) > _HANDOFF_MAX:
+        blocks.pop(0)
+        dropped += 1
+    parts = [f"Original task:\n{task}"]
+    if blocks:
+        parts.append("Conversation so far, oldest first"
+                     + (f" ({dropped} earlier turns omitted; see the transcripts below)" if dropped else "")
+                     + ":\n" + "\n\n".join(blocks))
+    if reply or attach_note:
+        parts += [f"[Human feedback]: {reply}{attach_note}", "Please continue or revise based on the feedback above."]
     else:
-        prompt = original_prompt
+        parts.append("Please continue the task.")
     if switched_from:
-        old_agent, old_sid = switched_from
-        path = _projects.session_file(old_agent, old_sid) if old_sid else None
-        prompt += (f"\n\n[Agent switch]: this task was being worked on by {old_agent}; you take over from here."
-                   + (f" Its full conversation is in {path} (JSONL); read it if you need more context." if path else ""))
-    return prompt
+        parts.append(f"[Agent switch]: this task was being worked on by {switched_from}; you take over from here.")
+    transcripts = _chain_transcripts(chain)
+    if transcripts:
+        parts.append("Earlier sessions' full conversations (JSONL), read them if you need more context:\n"
+                     + "\n".join(transcripts))
+    if len(chain) > 1 or switched_from:
+        parts.append("Changes from earlier turns are already in this folder: check `git status` and `git log` first.")
+    return "\n\n".join(parts)
 
 
 @app.route("/api/runs/<run_id>/retry", methods=["POST"])
@@ -5424,8 +5512,11 @@ def api_run_retry(run_id: str):
                         return jsonify({"ok": False, "in_use_elsewhere": why}), 409
                 _lock_session_id, card_session = sid, True
     if switch_from:  # a new session of the chosen agent, in the folder chosen above, told what came before
-        prompt = _handoff_prompt(original, reply, attachments, (switch_from, _lock_session_id))
+        prompt = _handoff_prompt(original, reply, attachments, switch_from)
         card_note, _lock_session_id, card_session = f"new session: switched from {switch_from}", None, False
+    fresh_prompt = prompt  # a new session's, e.g. the fallback after a failed resume
+    if _lock_session_id:  # the resumed session has the history already: the reply only (AGE-114 D1, as §3.5)
+        prompt = (reply + _format_prompt_attachments(attachments)).strip() or "Continue the task from where you stopped."
     try:  # before any tracker change: a session being renamed/removed/opened is refused (A, R02)
         _claim_session(agent, _lock_session_id, new_run_id)
     except _projects.SessionBusy as exc:
@@ -5525,7 +5616,7 @@ def api_run_retry(run_id: str):
                 reuse_only=bool(bound.get("worktree")), skill=skill, confidential=bound.get("confidential"),
                 ticket_hold=card_hold if bound.get("issue_identifier") else None,
                 timeout=AI_SESSION_TIMEOUT_S if card_session or (_lock_session_id and linear_issue_id) else None,
-                note=card_note)
+                note=card_note, record_extra={"reply": (reply + _format_prompt_attachments(attachments)).strip()})
         except Exception as e:
             return _start_failed(e, binding=bound)
         return jsonify({"ok": True, "run_id": new_run_id, "skill": skill, "attempt": prev_attempt + 1, "agent": agent})
@@ -5555,7 +5646,8 @@ def api_run_retry(run_id: str):
                     attachments=attachments,
                 ),
             )
-    _card_extra = {**_issue_title_extra(linear_issue_id), **({"session_note": card_note} if card_note else {})}
+    _card_extra = {**_issue_title_extra(linear_issue_id), **({"session_note": card_note} if card_note else {}),
+                   "reply": (reply + _format_prompt_attachments(attachments)).strip()}  # the human turn (AGE-114 D3)
     _running_jobs[new_run_id] = {
         "run_id": new_run_id, "skill": skill, "started_at": started_at,
         "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(),
@@ -5576,7 +5668,7 @@ def api_run_retry(run_id: str):
             card_hold.close()
 
     def _do_retry_attempts():
-            nonlocal agent
+            nonlocal agent, prompt
             attempt_proc: list = [None]  # the current attempt, kept past _end_job for error cleanup (RWS-021)
             # Claude / Codex / dsh — subprocess dispatch with streaming + resume
 
@@ -5632,6 +5724,7 @@ def api_run_retry(run_id: str):
                         "[retry] resume failed for %s session=%s; full retry without resume",
                         agent, _lock_session_id,
                     )
+                    prompt = fresh_prompt  # a new session: the card's history, not the reply alone (D1)
                     fallback_cmd = _ai_command(agent, prompt, output_format=_agent_output_format(agent),
                                                skill_name=skill, registry=registry)
                     output, input_tokens, output_tokens, parsed_model, new_sid, stderr_s, ok = _dispatch_cmd(fallback_cmd, _stream)
