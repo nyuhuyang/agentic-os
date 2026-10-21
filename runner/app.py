@@ -3239,11 +3239,14 @@ def _merge_gate(key: str) -> threading.Lock:
         return _MERGE_GATES.setdefault(key, threading.Lock())
 
 
-def _project_runs_open(key: str, job: dict) -> bool:
+def _project_runs_open(key: str, job: dict | None, sessions: bool = False) -> bool:
     """Another run of this project is still before its closing fingerprint: a merge now would
     read as that run changing the main checkout. Caller holds _JOB_LOCK.
     Used under _merge_gate, which a new run's opening fingerprint also takes (SC-019)."""
-    return any(j is not job and j.get("project_key") == key and not j.get("merge_checked")
+    return any(j is not job and not j.get("merge_checked")
+               and (j.get("project_key") == key
+                    # an agent working in the main checkout itself (a session card, no project_key) (CM-004)
+                    or (sessions and (j.get("record_extra") or {}).get("session_project") == key))
                for j in _running_jobs.values())
 
 
@@ -4421,15 +4424,16 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
         return jsonify(ok_body)
     eff = dataclasses.replace(project, confidential=True) if conf is not False else project  # STB-032
     skill = original.get("skill") or "_prompt"
-    _running_jobs[new_run_id] = {
-        "run_id": new_run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running",
-        "last_progress_at": time.monotonic(), "linear_issue_id": linear_issue_id, "launch_gen": launch_gen,
-        "agent": run_agent, "agent_session_id": run_sid, "model": _agent_model(run_agent),
-        # no top-level project_key: cancel, stall and shutdown use the generic path (SBR-005)
-        "record": {"attempt": attempt, "parent_run_id": run_id, "agent": run_agent, "model": _agent_model(run_agent),
-                   "task_id": task_id, "reset_generation": launch_gen},
-        "record_extra": record_extra,
-    }
+    with _merge_gate(project.key):  # never between a manual merge's activity check and its merge (CM-004)
+        _running_jobs[new_run_id] = {
+            "run_id": new_run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running",
+            "last_progress_at": time.monotonic(), "linear_issue_id": linear_issue_id, "launch_gen": launch_gen,
+            "agent": run_agent, "agent_session_id": run_sid, "model": _agent_model(run_agent),
+            # no top-level project_key: cancel, stall and shutdown use the generic path (SBR-005)
+            "record": {"attempt": attempt, "parent_run_id": run_id, "agent": run_agent, "model": _agent_model(run_agent),
+                       "task_id": task_id, "reset_generation": launch_gen},
+            "record_extra": record_extra,
+        }
     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "running", "skill": skill})
 
     def _record(status: str, output: str = "", error: str = "", dur: float = 0.0, it=None, ot=None, model=None,
@@ -4787,7 +4791,7 @@ def _manual_merge(project, ident: str) -> str:
     changing the main checkout. Caller holds the ticket lock."""
     with _merge_gate(project.key):
         with _JOB_LOCK:
-            opened = _project_runs_open(project.key, None)
+            opened = _project_runs_open(project.key, None, sessions=True)
         if opened:
             raise _projects.ProjectError("another run of this project is in progress; merge after it finishes")
         eff = _effective_project(project, ident)

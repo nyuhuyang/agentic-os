@@ -398,3 +398,43 @@ def test_commit_state_one_status_per_checkout_root(repo, monkeypatch):
     for cwd in (root, root / "src", root / "src" / "deep"):
         pj.commit_state(project, cwd, cache)
     assert len(calls) == 1
+
+
+# ── Inspection fixes (CM-004..006) ───────────────────────────────────────────
+
+def test_manual_merge_refused_while_an_agent_works_in_the_main_checkout(repo, monkeypatch):
+    project, root = repo
+    import app as app_mod
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    session_worker = {"record_extra": {"session_project": "alpha"}}  # no top-level project_key (SBR-005)
+    monkeypatch.setattr(app_mod, "_running_jobs", {"s": session_worker})
+    out = pj.commit_checkout(project, wt, "m", merger=lambda i: app_mod._manual_merge(project, i))
+    assert out["committed"] and "another run" in out["merge_error"] and not (root / "w.txt").exists()
+
+
+def test_merge_completes_despite_merge_options_no_commit(repo):
+    project, root = repo
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    pj.commit_checkout(project, wt, "branch work")
+    (root / "m.txt").write_text("m\n"); git(root, "add", "-A"); git(root, "commit", "-qm", "diverge")  # no fast-forward
+    git(root, "config", "branch.main.mergeOptions", "--no-commit --squash")
+    head = pj.merge_into_checkout(project, "T-1")
+    assert head == git(root, "rev-parse", "HEAD") and (root / "w.txt").exists()
+    assert git(root, "rev-list", "--parents", "-n1", "HEAD").count(" ") == 2  # a real two-parent merge commit
+    assert subprocess.run(["git", "-C", str(root), "rev-parse", "-q", "--verify", "MERGE_HEAD"]).returncode != 0
+
+
+def test_failing_status_is_cached_as_neutral(repo, monkeypatch):
+    project, root = repo
+    calls = []
+
+    def boom(cwd):
+        calls.append(cwd)
+        raise pj.ProjectError("git status timed out")
+
+    monkeypatch.setattr(pj, "readonly_status", boom)
+    cache = {}
+    assert [pj.commit_state(project, c, cache) for c in (root, root / "src")] == [None, None]
+    assert len(calls) == 1

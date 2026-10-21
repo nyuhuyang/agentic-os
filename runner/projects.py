@@ -1182,7 +1182,10 @@ def commit_state(project: Project, cwd: str | Path, cache: dict | None = None) -
     repo = Path(top.stdout.strip()).resolve()
     if cache is not None and repo in cache:  # one status per checkout, whatever subfolder (CM-003)
         return cache[repo]
-    state = _commit_state(project, repo)
+    try:
+        state = _commit_state(project, repo)
+    except ProjectError:  # e.g. a status timeout: neutral, and not retried for the next row (CM-006)
+        state = None
     if cache is not None:
         cache[repo] = state
     return state
@@ -1231,8 +1234,12 @@ def merge_into_checkout(project: Project, ident: str, rev: str | None = None) ->
             raise ProjectError(f"{root} is on a detached HEAD; merge {branch} by hand")
         if _git(root, "merge-tree", "--write-tree", "HEAD", target, check=False, confine=confine).returncode:
             raise ProjectError(f"{branch} conflicts with {root}; merge it by hand")
-        _git(root, "merge", "--no-edit", "--no-verify", "--no-gpg-sign", "-q", "-m", f"Merge branch '{branch}'",
-             target, confine=confine, timeout=COMMIT_TIMEOUT_S, env=_identity_env(root))
+        # --commit --no-squash: a branch.<name>.mergeOptions default can never leave it half done (CM-005)
+        _git(root, "merge", "--no-edit", "--no-verify", "--no-gpg-sign", "--commit", "--no-squash", "-q",
+             "-m", f"Merge branch '{branch}'", target, confine=confine, timeout=COMMIT_TIMEOUT_S, env=_identity_env(root))
+        if _git_operation(root, confine) or _git(root, "merge-base", "--is-ancestor", target, "HEAD",
+                                                 check=False, confine=confine).returncode:
+            raise ProjectError(f"{branch} did not merge into {root} cleanly; finish or abort it by hand")
         return _git(root, "rev-parse", "HEAD", confine=confine).stdout.strip()
 
 

@@ -45,5 +45,9 @@ The user asked for two things (2026-10-21):
   - CM-001: the binding and branch are validated under the ticket lock; a switched worktree is refused and shows neutral.
   - CM-002: the manual merge takes the `refs/heads` sha, and the default merge target is fully qualified.
   - CM-003: one status per checkout root.
+- [x] Inspection 2 fixes:
+  - CM-004: a manual merge also counts session-card agents working in the main checkout, which register under the merge gate.
+  - CM-005: `--commit --no-squash`, plus a post-merge check that the commit landed.
+  - CM-006: a failed status is cached as neutral.
 - [ ] Fresh Codex inspection approved.
 - [ ] Archive.
