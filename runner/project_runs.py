@@ -347,6 +347,9 @@ AGENT_ERRORS: dict[str, str] = {}
 # turn.failed): a failed run even when the process exits 0 (PVST-R4-03). A Codex `error` event
 # alone is diagnostic (e.g. a reconnect) and does not fail the run.
 AGENT_FAILED: set[str] = set()
+# run_id -> epoch seconds when the agent's usage limit resets: a Claude rate_limit_event "rejected"
+# seen in the run's stream. Popped by _write_run_log, which schedules the auto-continue (AGE-115).
+LIMIT_RESETS: dict[str, float] = {}
 
 
 # run_ids whose agent produced reply content (Claude: a non-empty result or assistant text;
@@ -416,11 +419,28 @@ def agent_error_of(fmt: str, line: str) -> str | None:
     return str(msg).strip()[:2000] if msg else None
 
 
+def limit_reset_of(fmt: str, line: str) -> float | None:
+    """When the usage limit this stdout line reports as hit resets (epoch seconds), if it does.
+    ponytail: Claude only; Codex states its reset as prose ("try again at 3:15 PM"), parse it if needed."""
+    if fmt != "claude" or '"rejected"' not in line:
+        return None
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        return None
+    info = ev.get("rate_limit_info") if isinstance(ev, dict) and ev.get("type") == "rate_limit_event" else None
+    at = info.get("resetsAt") if isinstance(info, dict) and info.get("status") == "rejected" else None
+    return float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else None
+
+
 def note_agent_error(run_id: str, fmt: str, line: str) -> None:
     """Keep the agent's error for this run (a Codex turn.failed wins over an earlier error
-    event), and note whether it replied at all (R16-01)."""
+    event), and note whether it replied at all (R16-01) and when a hit usage limit resets."""
     if run_id not in REPLIED and is_reply(fmt, line):
         REPLIED.add(run_id)
+    reset = limit_reset_of(fmt, line)
+    if reset:
+        LIMIT_RESETS[run_id] = reset
     msg = agent_error_of(fmt, line)
     terminal = fmt == "claude" or '"turn.failed"' in line
     if msg and (run_id not in AGENT_ERRORS or terminal):

@@ -2184,6 +2184,12 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
         record["reset_gen"] = reset_generation  # the generation this run launched under (Decision 11)
     if extra:
         record.update({k: v for k, v in extra.items() if k not in record})  # additive fields only
+    limit_reset = None if audit else project_runs.LIMIT_RESETS.pop(run_id, None)
+    # stopped by a usage limit (not by the user): continue its session once the limit resets (AGE-115)
+    continue_at = limit_reset + AUTO_CONTINUE_GRACE_S if limit_reset and agent_session_id \
+        and status in ("error", "review") else None
+    if continue_at:
+        record["auto_continue_at"] = datetime.fromtimestamp(continue_at, timezone.utc).isoformat()
     progress_path = _run_progress_path(run_id)
     if progress_path.exists():
         record["log_path"] = str(progress_path)
@@ -2195,6 +2201,8 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
     with RUN_LOG.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     _runs_cache.clear()  # invalidate so next board refresh sees the new record
+    if continue_at:
+        _schedule_auto_continue(run_id, continue_at)
     _FINALIZING.discard(run_id)  # its record is on disk: shutdown need not wait for it (SBR-010)
     if audit:  # history only: no task/job state, it is not an execution (UI3-02)
         return run_id
@@ -2209,6 +2217,52 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
     with json_transaction(JOB_STATE, indent=2) as legacy_state:  # legacy job_state.json
         legacy_state[skill] = {"status": status, "last_run": started_at, "duration_s": record["duration_s"]}
     return run_id
+
+
+AUTO_CONTINUE_GRACE_S = 120  # after the reported reset, so the continuation is not refused again
+AUTO_CONTINUE_REPLY = "Your usage limit has reset. Continue the task from where you stopped."
+
+
+def _auto_continue_path() -> Path:
+    return STATE_DIR / "auto_continue.json"  # run_id -> epoch to continue at; survives a restart
+
+
+def _schedule_auto_continue(run_id: str, at: float) -> None:
+    """AGE-115: headless `claude -p` exits when it hits a usage limit, so nothing is left waiting
+    for the reset the way an interactive session does: the runner waits and continues it."""
+    with json_transaction(_auto_continue_path()) as pending:
+        pending[run_id] = at
+    _arm_auto_continue(run_id, at)
+
+
+def _arm_auto_continue(run_id: str, at: float) -> None:
+    t = threading.Timer(max(0.0, at - time.time()), _auto_continue, (run_id,))
+    t.daemon = True
+    t.start()
+
+
+def _rearm_auto_continues() -> None:
+    for run_id, at in read_json(_auto_continue_path()).items():
+        _arm_auto_continue(run_id, float(at))
+
+
+def _auto_continue(run_id: str) -> None:
+    """A quick reply (strict) to the stopped run, through the retry route: it is refused, and
+    nothing runs, when the card was reset, removed or retried meanwhile, or its session is gone
+    or held by an interactive terminal."""
+    if _SHUTTING_DOWN.is_set():
+        return  # the restarted runner re-arms it
+    try:
+        with app.test_client() as c:
+            r = c.post(f"/api/runs/{run_id}/retry", json={"reply": AUTO_CONTINUE_REPLY, "strict": True},
+                       headers={_TOKEN_HEADER: REQUEST_TOKEN})
+        logger.info("[auto-continue] %s: %s %s", run_id, r.status_code,
+                    (r.get_json(silent=True) or {}).get("error") or "started")
+    except Exception:
+        logger.exception("[auto-continue] %s failed", run_id)
+    # ponytail: a refusal (e.g. maintenance) is not retried; the card shows the error, reply by hand
+    with json_transaction(_auto_continue_path()) as pending:
+        pending.pop(run_id, None)
 
 
 def _update_task_state(skill, status, started_at, record, run_id, agent, model, input_tokens,
@@ -6058,6 +6112,7 @@ def main() -> None:
     _migrate_legacy_state()
     _load_dismissed()
     _init_modules()
+    _rearm_auto_continues()  # usage-limit continuations scheduled before a restart (AGE-115)
     # Linear + Stall Detection polling started via ModuleRegistry.init_background()
     
     # DeepSeek polling started via ModuleRegistry.init_background()
