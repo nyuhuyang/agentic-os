@@ -2446,10 +2446,10 @@ function _preferRun(candidate, current) {
   const candidateRunning = (candidate.status || candidate.state) === 'running';
   const currentRunning = (current.status || current.state) === 'running';
   if (candidateRunning !== currentRunning) return candidateRunning;
-  const candidateAttempt = Number(candidate.attempt || 0);
-  const currentAttempt = Number(current.attempt || 0);
-  if (candidateAttempt !== currentAttempt) return candidateAttempt > currentAttempt;
-  return _runTimeMs(candidate) >= _runTimeMs(current);
+  // newest first: a reset to Todo restarts attempts at 0, so a higher attempt can be an older run (AGE-117)
+  const candidateMs = _runTimeMs(candidate), currentMs = _runTimeMs(current);
+  if (candidateMs !== currentMs) return candidateMs > currentMs;
+  return Number(candidate.attempt || 0) >= Number(current.attempt || 0);
 }
 
 function _latestLinearRuns(items) {
