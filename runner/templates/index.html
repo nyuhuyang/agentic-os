@@ -1182,6 +1182,7 @@ function _sessionRow(key, s) {
   // One Resume (§6): the session's card goes back to Todo and its reply opens.
   let actions = `<button class="session-copy" data-resume-agent="${_esc(s.agent)}" data-resume-id="${_esc(s.id)}" data-project="${_esc(key)}"
           title="Put this session's card in Todo and write the next reply (${_esc(s.resume)})">Resume</button>
+        <button class="session-copy" data-saction="commit" ${ids} title="Commit every change in this session's folder (local only, never pushed)">Commit</button>
         <button class="session-copy" data-saction="rename" ${ids}>Rename</button>
         <button class="session-copy" data-saction="remove" ${ids}>Remove</button>`;
   if (ed && ed.mode === 'rename') {
@@ -1189,6 +1190,21 @@ function _sessionRow(key, s) {
     title = `<input class="session-rename" ${ids} value="${_esc(s.card_title || s.title)}" maxlength="200" style="flex:1;font:inherit"
       ${s.label ? 'title="Renames the card too"' : ''}>`;
     actions = `<button class="session-copy" data-saction="save" ${ids}>Save</button><button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
+  } else if (ed && ed.mode === 'commit') {
+    // The whole checkout: git cannot tell which session made which edit (plan: session-commit-button).
+    const p = ed.preview;
+    if (!p) {
+      title = `<span class="session-title">${ed.error ? '' : 'Checking for changes…'}</span>`;
+      actions = `<button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
+    } else if (!p.files.length) {
+      title = `<span class="session-title">Nothing to commit in ${_esc(p.repo)} (${_esc(p.branch)}).</span>`;
+      actions = `<button class="session-copy" data-saction="cancel" ${ids}>Close</button>`;
+    } else {
+      title = `<input class="session-rename" data-commit="1" ${ids} value="${_esc(s.card_title || s.title)}" maxlength="500" style="flex:1;font:inherit"
+        title="Commit message" placeholder="Commit message">
+        <span class="session-meta" title="${_esc(p.files.join('\n'))}">all ${p.files.length} changed file${p.files.length === 1 ? '' : 's'} in ${_esc(p.repo.split('/').pop())} · ${_esc(p.branch)}</span>`;
+      actions = `<button class="session-copy" data-saction="docommit" ${ids}>Commit</button><button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
+    }
   } else if (ed && ed.mode === 'remove') {
     const where = s.agent === 'codex' ? "it is archived the way Codex archives (its rollout moves to ~/.codex/archived_sessions); restore with Codex's unarchive"
       : 'its transcript moves to ~/.agentic-os/session-trash; restore by moving it back';
@@ -1203,16 +1219,33 @@ function _sessionRow(key, s) {
         ${err}${actions}
       </div>`;
 }
+async function _sessionCommitPreview(key, agent, sid) {
+  _sessionEdit = { key, agent, id: sid, mode: 'commit' };
+  _renderProjects();
+  const r = await _projectApi('POST', `/api/projects/${encodeURIComponent(key)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(sid)}/commit`, { dry_run: true });
+  if (!_sessionEdit || _sessionEdit.id !== sid || _sessionEdit.mode !== 'commit') return;  // cancelled meanwhile
+  _sessionEdit = r.ok ? { ..._sessionEdit, preview: r.data } : { ..._sessionEdit, error: r.data.error || `HTTP ${r.status}` };
+  _renderProjects();
+  document.querySelector(`.session-rename[data-sid="${CSS.escape(sid)}"]`)?.focus();
+}
 async function _sessionSubmit(el, mode) {
   const { key, sagent, sid } = el.dataset;
   const base = `/api/projects/${encodeURIComponent(key)}/sessions/${encodeURIComponent(sagent)}/${encodeURIComponent(sid)}`;
   let body;
-  if (mode === 'rename') {
+  if (mode === 'rename' || mode === 'commit') {
     const input = document.querySelector(`.session-rename[data-sid="${CSS.escape(sid)}"]`);
-    body = { title: input ? input.value : '' };
+    body = mode === 'rename' ? { title: input ? input.value : '' } : { message: input ? input.value : '' };
   }
   const r = await _projectApi('POST', `${base}/${mode}`, body);
-  if (!r.ok) { _sessionEdit = { key, agent: sagent, id: sid, mode, error: r.data.error || `HTTP ${r.status}` }; _renderProjects(); return; }
+  if (!r.ok) {
+    const keep = mode === 'commit' && _sessionEdit ? _sessionEdit.preview : undefined;  // the message stays editable
+    _sessionEdit = { key, agent: sagent, id: sid, mode, preview: keep, error: r.data.error || `HTTP ${r.status}` }; _renderProjects(); return;
+  }
+  if (mode === 'commit') {
+    const note = r.data.committed ? `committed ${r.data.committed.slice(0, 7)} (${r.data.files.length} file${r.data.files.length === 1 ? '' : 's'})` : 'nothing to commit';
+    _sessionEdit = { key, agent: sagent, id: sid, mode: 'note', error: note };
+    loadProjects(); return;
+  }
   // a busy card session: the card is renamed now, the session when it is idle (§3)
   _sessionEdit = r.data.pending ? { key, agent: sagent, id: sid, mode: 'note', error: 'card renamed; the session name follows when it is idle' } : null;
   loadProjects();
@@ -1489,6 +1522,8 @@ document.getElementById('project-panel-content')?.addEventListener('click', (eve
   if (sact) {
     const { key, sagent, sid } = sact.dataset, a = sact.dataset.saction;
     if (a === 'rename' || a === 'remove') _sessionEdit = { key, agent: sagent, id: sid, mode: a };
+    else if (a === 'commit') { _sessionCommitPreview(key, sagent, sid); return; }
+    else if (a === 'docommit') { _sessionSubmit(sact, 'commit'); return; }
     else if (a === 'cancel') _sessionEdit = null;
     else if (a === 'save') { _sessionSubmit(sact, 'rename'); return; }
     else if (a === 'confirm') { _sessionSubmit(sact, 'remove'); return; }
@@ -1613,7 +1648,7 @@ document.getElementById('project-panel-content')?.addEventListener('keydown', (e
   }
   const input = event.target.closest('.session-rename');
   if (!input) return;
-  if (event.key === 'Enter') { event.preventDefault(); _sessionSubmit(input, 'rename'); }
+  if (event.key === 'Enter') { event.preventDefault(); _sessionSubmit(input, input.dataset.commit ? 'commit' : 'rename'); }
   else if (event.key === 'Escape') { _sessionEdit = null; _renderProjects(); }
 });
 

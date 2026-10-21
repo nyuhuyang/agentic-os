@@ -4713,6 +4713,23 @@ def _rename_card_session(key: str, agent: str, sid: str, issue_id: str, title: o
                     "pending": (canonical_agent(agent) or agent, sid) in busy})
 
 
+@app.route("/api/projects/<key>/sessions/<agent>/<sid>/commit", methods=["POST"])
+def api_session_commit(key: str, agent: str, sid: str):
+    """Manual Commit on a session row: every change in that session's checkout, local only."""
+    body = request.get_json(silent=True) or {}
+    try:
+        project = _projects.get_project(key, _projects.load_registry(errors={}))
+        target = _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])
+        result = _projects.commit_checkout(project, target["cwd"], body.get("message"), dry_run=bool(body.get("dry_run")))
+    except _projects.SessionNotFound as exc:
+        return jsonify({"error": str(exc)}), 404
+    except _projects.TicketLocked as exc:
+        return jsonify({"error": str(exc)}), 409
+    except _projects.ProjectError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"ok": True, **result})
+
+
 @app.route("/api/projects/<key>/sessions/<agent>/<sid>/remove", methods=["POST"])
 def api_session_remove(key: str, agent: str, sid: str):
     return _session_action(key, agent, sid, _projects.remove_session)

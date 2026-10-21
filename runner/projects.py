@@ -1163,6 +1163,43 @@ def merge_into_checkout(project: Project, ident: str) -> str:
         return _git(root, "rev-parse", "HEAD", confine=confine).stdout.strip()
 
 
+def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry_run: bool = False) -> dict:
+    """The user's manual Commit on a session row: stage every change in the session's checkout
+    (the project's folder or one of its AgenticOS worktrees) and commit it locally. Never pushes.
+    A dry run only reports {repo, branch, files}. Hooks off and unsigned, like runner_commit."""
+    top = _git(Path(cwd), "rev-parse", "--show-toplevel", check=False)
+    if top.returncode:
+        raise ProjectError(f"{cwd} is not inside a git checkout")
+    repo = Path(top.stdout.strip()).resolve()
+    ident = None
+    if repo != project.path.resolve():
+        ident = ticket_from_worktree(project, repo)  # refuses anything else (a nested or foreign repo)
+    msg = message.strip() if isinstance(message, str) else ""
+    if not dry_run and not msg:
+        raise ProjectError("a commit message is required")
+    confine = confine_for(project, repo)
+    with contextlib.ExitStack() as stack:
+        if ident:
+            stack.enter_context(ticket_lock(project.key, ident))  # a run, verify or terminal owns it now
+        elif not _MERGE_LOCK.acquire(blocking=False):
+            raise TicketLocked(f"a merge into {repo} is in progress; try again in a moment")
+        else:
+            stack.callback(_MERGE_LOCK.release)
+        if _git(repo, "symbolic-ref", "-q", "HEAD", check=False, confine=confine).returncode:
+            raise ProjectError(f"{repo} is on a detached HEAD; commit there by hand")
+        branch = _git(repo, "symbolic-ref", "--short", "HEAD", confine=confine).stdout.strip()
+        files = uncommitted(project, repo)
+        out = {"repo": str(repo), "branch": branch, "files": files}
+        if dry_run or not files:
+            return {**out, "committed": None}
+        _git(repo, "add", "-A", confine=confine, timeout=COMMIT_TIMEOUT_S)
+        if _git(repo, "diff", "--cached", "--quiet", "--no-ext-diff", check=False, confine=confine).returncode == 0:
+            return {**out, "committed": None}
+        _git(repo, "commit", "--no-verify", "--no-gpg-sign", "-q", "-m", msg, confine=confine,
+             timeout=COMMIT_TIMEOUT_S, env=_identity_env(repo))
+        return {**out, "committed": _git(repo, "rev-parse", "HEAD", confine=confine).stdout.strip()}
+
+
 def committed_seeds(project: Project, wt: Path, base: str) -> list[str]:
     """Seed paths touched by commits base..HEAD in the worktree (=> badge `seed committed`)."""
     confine = confine_for(project, wt)
