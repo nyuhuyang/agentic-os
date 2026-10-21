@@ -4926,7 +4926,8 @@ function _resolveReply(runId, data) {
 }
 function _showUnsent(text, reason) {
   const box = document.getElementById('detail-term-reply');
-  if (!box.value.trim()) box.value = text;
+  text = text.replace(/\s*\n\s*/g, ' ');  // a one-line box
+  if (!box.value.includes(text)) box.value = box.value.trim() ? `${box.value.trim()} ${text}` : text;  // added, never dropped (AGE-117)
   document.getElementById('detail-term-status').textContent = `reply not completed: ${reason}`;
 }
 // One outcome check per pending reply at a time; it keeps polling (every 3 s) until the outcome is known,
@@ -4970,20 +4971,90 @@ function _cardTermReplyState() {
   if (!_cardTerm.runId) why = 'No run on this card yet';
   else if (_cardTerm.historyUnknown) why = 'Loading…';  // the latest attempt is not known (QR-R3-003)
   else if (viewed !== latest) why = 'Viewing an earlier attempt — switch to the latest to reply';
-  else if (d && d.finished === false) why = 'The agent is working — reply when it stops';
+  else if (_cardTermWorking()) why = '';  // typed now, sent when it stops (AGE-117)
   else if (!d || d.unknown || d.finished !== true) why = 'Loading…';  // stopped must be known (QR-R2-003)
-  else if (d && d.finished && !d.status && _cardTerm.mode !== 'interactive') why = 'Starting…';  // launched, no record yet
   else if (_cardTerm.sendingReply) why = 'Sending…';
   input.disabled = btn.disabled = !!why;
-  input.placeholder = why || (_cardTerm.mode === 'interactive'
-    ? 'Quick reply: ends the open interactive session and continues it here'
-    : 'Quick reply: continues this same session');
+  input.placeholder = why || (_cardTermWorking()
+    ? 'The agent is working: your reply is queued and sent when it stops'
+    : _cardTerm.mode === 'interactive'
+      ? 'Quick reply: ends the open interactive session and continues it here'
+      : 'Quick reply: continues this same session');
+  const queued = _queuedReplies()[_cardKey()];
+  if (queued) document.getElementById('detail-term-status').textContent = `queued, sent when the agent stops: ${queued.text}`;
 }
+// The latest attempt is still running, or launched with no record yet.
+function _cardTermWorking() {
+  const d = _cardTerm.data;
+  return !!d && (d.finished === false || (d.finished === true && !d.status && _cardTerm.mode !== 'interactive'));
+}
+// Quick replies typed while the agent works (AGE-117): kept per card in localStorage (a reload keeps
+// them), joined into one reply, and sent once the attempt they were typed on stops, card open or not.
+// A cancelled attempt sends nothing: the text goes back to its card unsent.
+// ponytail: lives in this browser; with the dashboard closed the reply waits until it is opened again.
+const _QUEUED_REPLIES = 'agenticos.queuedReplies';
+function _queuedReplies() {
+  try { return JSON.parse(_storageGet(_QUEUED_REPLIES, '{}')) || {}; } catch (_) { return {}; }
+}
+function _setQueuedReplies(q) { _storageSet(_QUEUED_REPLIES, JSON.stringify(q)); }
+function _queueReply(key, runId, text) {
+  const q = _queuedReplies();
+  q[key] = { runId, text: q[key] ? `${q[key].text}\n${text}` : text };
+  _setQueuedReplies(q);
+  _watchQueued(key);
+}
+const _queuedWatching = new Set();  // one polling chain per card
+async function _watchQueued(key, chained = false) {
+  if (_queuedWatching.has(key) && !chained) return;
+  const item = _queuedReplies()[key];
+  if (!item) { _queuedWatching.delete(key); return; }
+  _queuedWatching.add(key);
+  let d = null;
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(item.runId)}/events`);
+    if (res.ok) d = await res.json();
+  } catch (_) {}
+  if (d && d.finished === true && !d.unknown && d.status) { _queuedWatching.delete(key); await _flushQueued(key, d.status); }
+  else setTimeout(() => _watchQueued(key, true), 5000);
+}
+async function _flushQueued(key, status) {
+  const q = _queuedReplies(), item = q[key];
+  if (!item) return;
+  delete q[key];
+  _setQueuedReplies(q);
+  const open = () => _isModalOpen('detail-modal') && _cardKey() === key;
+  const unsent = reason => {
+    if (open()) { _showUnsent(item.text, reason); return; }
+    const prev = _unsentReplies.get(key);  // the cancelled reply's own text may be waiting there too
+    _unsentReplies.set(key, { text: prev ? `${prev.text}\n${item.text}` : item.text, reason });
+  };
+  if (status === 'cancelled') { unsent('the run was cancelled'); return; }
+  let data = null;
+  try { data = await _postRetry(item.runId, { reply: item.text, strict: true }); }  // the same session (QR2)
+  catch (err) { data = { ok: false, error: `connection failed: ${err}` }; }
+  if (!data || !data.ok || !data.run_id) { unsent((data && data.error) || 'not sent'); return; }
+  _pendingReplies.set(data.run_id, { text: item.text, key });
+  _checkReply(data.run_id);
+  refreshJobBoard(true);
+  if (!open()) return;
+  const gen = _cardTerm.gen;  // on screen: its run streams here, like a reply sent from the box
+  document.getElementById('detail-term-status').textContent = 'continuing the same session…';
+  _cardTerm.runId = _cardTerm.latestRunId = data.run_id;
+  await _cardTermAttempts(gen);
+  if (_cardTermCurrent(gen)) _cardTermLoad(data.run_id);
+}
+Object.keys(_queuedReplies()).forEach(key => _watchQueued(key));  // queued before a reload
 async function _cardTermQuickReply() {
   const gen = _cardTerm.gen, input = document.getElementById('detail-term-reply'), status = document.getElementById('detail-term-status');
   const reply = input.value.trim(), runId = _cardTerm.runId, key = _cardKey();
   const latestId = _cardTerm.latestRunId || runId;
   if (!reply || !runId || input.disabled || (_cardTerm.viewRunId || runId) !== latestId) return;  // latest attempt only
+  if (_cardTermWorking()) {  // queued, sent when this attempt stops (AGE-117)
+    _queueReply(key, latestId, reply);
+    if (input.value.trim() === reply) input.value = '';
+    _cardTermReplyState();
+    return;
+  }
   const token = {};  // this send's own: a newer card's controls are never changed by it (QR-003)
   _cardTerm.sendingReply = token; _cardTermReplyState();
   status.textContent = 'sending…';
