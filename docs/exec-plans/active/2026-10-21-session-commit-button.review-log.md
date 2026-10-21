@@ -35,3 +35,7 @@
 ## Inspection 6 — Codex (fresh): REVISE
 - SC-016 (med) accepted in part: after the lock wait, the drain re-checks under _JOB_LOCK whether another project run has opened. If so, the entry is requeued, not merged. This brings the window back to the original AGE-111 milliseconds. FOLLOW-UP: a per-project admission gate closing that residual window, noted as a ponytail comment on _project_runs_open.
 - SC-017 (med) accepted: a single commit request per editor (a pending flag; the button is disabled and shows "Committing…"; repeated Enter is ignored), and the typed message is kept on failure. Browser check: double-click plus Enter gave exactly one commit, and the row showed its sha.
+
+## Inspection 7 — Codex (fresh): REVISE
+- SC-018 (med) accepted: the open-run re-check now runs before every entry, the drainer's own included. Once a run has opened, that entry and all remaining ones are requeued (newest-wins) and nothing merges. The test now requires no merges and both entries kept.
+- Not done here (recorded follow-up, with the SC-016 residual): a per-project admission gate, so no run can be admitted between the check and the end of the merge (including the wait on _MERGE_LOCK).

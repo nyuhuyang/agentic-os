@@ -400,7 +400,8 @@ def test_queued_merge_deferred_when_a_run_starts_during_the_wait(helper, monkeyp
 
     monkeypatch.setattr(app_mod, "_wait_ticket_lock", admitting)
     out = app_mod._merge_when_last(p, "T-2", b, eligible=True)
-    assert "T-1" not in merged and app_mod._PENDING_MERGES["demo"] == [("T-1", "v1")]
+    assert merged == []  # neither T-1 nor the drainer's own T-2 merges under T-3's fingerprint (SC-018)
+    assert app_mod._PENDING_MERGES["demo"] == [("T-1", "v1"), ("T-2", "head-of-T-2")]
     assert "waits for this project's next run" in out["merge"]
 
 
