@@ -651,3 +651,36 @@ def test_successful_run_leaves_no_background_writer(tmp_path, monkeypatch):
     else:
         os.kill(pid, 9)
         pytest.fail("the background writer outlived its run")  # (CM-021)
+
+
+def test_routing_helper_leaves_no_background_writer(tmp_path):
+    import os, time
+    import app as app_mod
+    pidfile = tmp_path / "bg.pid"
+    app_mod._run_grouped(["/bin/sh", "-c", f"(sleep 30 >/dev/null 2>&1 </dev/null & echo $! > {pidfile}); echo ok"], 20)
+    pid = int(pidfile.read_text())
+    for _ in range(50):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.1)
+    os.kill(pid, 9)
+    pytest.fail("the routing call's background writer outlived it")  # (CM-023)
+
+
+def test_agent_tab_in_the_main_checkout_blocks_a_manual_merge(repo, monkeypatch):
+    project, root = repo
+    import app as app_mod
+    from runner.modules import pty as pty_mod
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    monkeypatch.setattr(app_mod, "_running_jobs", {})
+    monkeypatch.setattr(app_mod, "_ticket_confidential", lambda *a: False)
+    tab = pty_mod.Terminal(term_id="t1", kind="resume", cwd=str(root / "src"))
+    shell = pty_mod.Terminal(term_id="t2", kind="shell", cwd=str(root))
+    monkeypatch.setattr(pty_mod, "TERMINALS", {"t1": tab, "t2": shell})
+    out = pj.commit_checkout(project, wt, "m", merger=lambda i: app_mod._manual_merge(project, i))
+    assert "interactive agent tab" in out["merge_error"] and not (root / "w.txt").exists()  # (CM-024)
+    tab.alive, tab.cleaned = False, True  # its processes are proven gone
+    assert pj.commit_checkout(project, wt, "", merger=lambda i: app_mod._manual_merge(project, i))["merged_head"]

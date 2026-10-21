@@ -64,5 +64,6 @@ The user asked for two things (2026-10-21):
   - no launch for an ended run, and the marker carries the live job (CM-020);
   - successful generic runs kill leftover descendants (CM-021);
   - checkout aliasing for the manual merge only (CM-022).
+- [x] Inspection 7 fixes: the routing helper kills its group on success (CM-023); agent tabs in the main checkout block manual merges and spawn under the merge gate (CM-024).
 - [ ] Fresh Codex inspection approved.
 - [ ] Archive.

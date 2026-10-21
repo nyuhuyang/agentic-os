@@ -2875,6 +2875,7 @@ def _run_grouped(cmd, timeout: float, **kw) -> subprocess.CompletedProcess:
     except BaseException:
         _kill_and_reap(proc)
         raise
+    _kill_group(proc)  # success too: nothing it started outlives the call (CM-023)
     return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
@@ -4900,6 +4901,9 @@ def _manual_merge(project, ident: str) -> str:
             opened = _project_runs_open(project.key, None, sessions=True, runner_root=runner_root)
         if opened:
             raise _projects.ProjectError("another run of this project is in progress; merge after it finishes")
+        from runner.modules.pty import interactive_agents_in
+        if interactive_agents_in(project.path):  # an agent tab in the main checkout (CM-024)
+            raise _projects.ProjectError("an interactive agent tab is open in the main checkout; close it, then merge")
         eff = _effective_project(project, ident)
         # the exact branch commit (refs/heads/), resolved under the caller's ticket lock (CM-002)
         return _projects.merge_into_checkout(eff, ident, _projects.branch_head(eff, ident))

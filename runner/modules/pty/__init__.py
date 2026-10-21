@@ -103,6 +103,20 @@ class Terminal:
 
 
 TERMINALS: dict[str, Terminal] = {}
+
+
+def interactive_agents_in(checkout) -> list[str]:
+    """Agent (resume) tabs working inside `checkout` whose processes are not proven gone: a manual
+    merge waits for them (CM-024). Path-based, so every registration of the folder counts."""
+    root = Path(os.path.realpath(str(checkout)))
+    out = []
+    for t in list(TERMINALS.values()):
+        if t.kind != "resume" or (not t.alive and t.cleaned):
+            continue
+        with contextlib.suppress(Exception):
+            if Path(os.path.realpath(t.cwd)).is_relative_to(root):
+                out.append(t.term_id)
+    return out
 _SOCKETIO = None  # set at registration; close_terminal announces the ends it owns
 _registry_lock = threading.Lock()
 
@@ -616,8 +630,13 @@ def open_terminal(data: dict, socketio) -> dict:
             argv = [argv[0], "-l", "-c", shlex.join(resume) + tail]
         short = (t.ticket or Path(t.cwd).name)[:16]
         t.label = f"{key or 'runner'} · {kind} · {short}"
-        _spawn(t, argv, _shell_env(project), cols, rows, socketio)
-        TERMINALS[t.term_id] = t
+        # An agent tab starts and registers under its checkout's merge gate: never between a manual
+        # merge's activity check and its merge (CM-024). Lock order: card/ticket -> gate.
+        from app import _merge_gate, _runner_root_gate
+        gate = (_merge_gate(key) if key else _runner_root_gate()) if kind == "resume" else contextlib.nullcontext()
+        with gate:
+            _spawn(t, argv, _shell_env(project), cols, rows, socketio)
+            TERMINALS[t.term_id] = t
     except Exception as exc:
         t.holds.close()
         return {"error": str(exc)}
