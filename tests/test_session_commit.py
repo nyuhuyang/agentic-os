@@ -241,3 +241,21 @@ def test_preview_runs_a_clean_filter_with_nothing_writable(repo):
     except pj.ProjectError:
         pass  # a filter that fails under the read-only sandbox may fail the preview: still nothing written
     assert not marker.exists() and not (root / ".git" / "spy").exists()
+
+
+def test_checkout_path_with_quotes_and_backslash_works_sandboxed(tmp_path, monkeypatch):
+    """A valid folder name like My "app" must not break the sandbox profile (SC-015)."""
+    monkeypatch.setattr(pj, "WORKTREE_ROOT", tmp_path / "wt")
+    for k in ("AUTHOR", "COMMITTER"):
+        monkeypatch.setenv(f"GIT_{k}_NAME", "t")
+        monkeypatch.setenv(f"GIT_{k}_EMAIL", "t@t.invalid")
+    root = tmp_path / 'My "app" \\x'
+    root.mkdir()
+    (root / "a.txt").write_text("a\n")
+    git(root, "init", "-q", "-b", "main"); git(root, "add", "-A"); git(root, "commit", "-qm", "init")
+    project = pj.Project(key="quoted", path=root, verify="true")
+    (root / "a.txt").write_text("b\n")
+    assert pj.commit_checkout(project, root, dry_run=True)["files"] == ["a.txt"]
+    assert pj.commit_checkout(project, root, "quoted path")["committed"]
+    with pytest.raises(pj.ProjectError, match="control"):
+        pj.sandbox_profile([Path("/tmp/bad\nname")])

@@ -89,11 +89,18 @@ class Project:
 _GIT_HARDENING = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
 
 
+def _sb_str(path: str) -> str:
+    """A path as a sandbox-profile string literal: quotes and backslashes escaped (SC-015)."""
+    if any(ord(c) < 32 or c == "\x7f" for c in path):
+        raise ProjectError(f"path {path!r} has control characters; the sandbox cannot name it")
+    return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def sandbox_profile(writable: list[Path], temp: bool = True) -> str:
     """macOS sandbox-exec profile: no network, writes only under `writable` and (temp) temp dirs."""
     tmp = {Path("/private/tmp"), Path(os.path.realpath(tempfile.gettempdir()))} if temp else set()
     roots = sorted({str(Path(os.path.realpath(p))) for p in [*writable, *tmp]})
-    allow = " ".join(f'(subpath "{r}")' for r in roots) or '(literal "/dev/null")'
+    allow = " ".join(f'(subpath {_sb_str(r)})' for r in roots) or '(literal "/dev/null")'
     # allow-default keeps git, shells and test runtimes working; the denials close the routes
     # by which sandboxed code asks something outside the sandbox to act for it.
     # ponytail: deny-list, not deny-default; spike (g2) probes `open URL`, osascript and

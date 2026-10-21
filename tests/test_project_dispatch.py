@@ -344,6 +344,39 @@ def test_queued_merge_waits_for_a_finalizing_ticket_then_keeps_it(helper, monkey
     assert app_mod._PENDING_MERGES["demo"] == [("T-1", "head-of-T-1")]  # kept for the next run
 
 
+def test_queued_merge_uses_each_tickets_own_policy_and_newest_entry(helper, monkeypatch):
+    """SC-012: a confidential ticket drained by a public one merges under its own policy.
+    SC-013: a timed-out old entry never displaces a newer verification of the same ticket."""
+    app_mod, *_ = helper
+    p = SimpleNamespace(key="demo", auto_merge=True, confidential=False)
+    seen = []
+    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t, sha=None: seen.append((t, project.confidential)) or "sha")
+    monkeypatch.setattr(pj, "branch_head", lambda project, t: f"head-of-{t}")
+    monkeypatch.setattr(pj, "check_queued_merge", lambda project, t, sha: None)
+    monkeypatch.setattr(app_mod, "_ticket_confidential", lambda key, ident, *a: ident == "T-1")
+    monkeypatch.setattr(app_mod.dataclasses, "replace", lambda obj, **kw: SimpleNamespace(**{**vars(obj), **kw}))
+    monkeypatch.setattr(app_mod, "_PENDING_MERGES", {"demo": [("T-1", "old")]})
+    b = {"project_key": "demo"}
+    monkeypatch.setattr(app_mod, "_running_jobs", {"b": b})
+    app_mod._merge_when_last(p, "T-2", b, eligible=True)
+    assert ("T-1", True) in seen and ("T-2", False) in seen
+    # SC-013: T-1 busy until timeout, while a newer T-1 verification is already queued again
+    seen.clear()
+    monkeypatch.setattr(app_mod, "_PENDING_MERGES", {"demo": [("T-1", "old")]})
+    real = app_mod._wait_ticket_lock
+
+    def slow(key, t):
+        app_mod._PENDING_MERGES.setdefault("demo", []).append(("T-1", "new"))  # T-1 re-ran and queued meanwhile
+        return real(key, t, timeout=0.3)
+
+    monkeypatch.setattr(app_mod, "_wait_ticket_lock", slow)
+    b2 = {"project_key": "demo"}
+    monkeypatch.setattr(app_mod, "_running_jobs", {"b2": b2})
+    with pj.ticket_lock("demo", "T-1"):
+        app_mod._merge_when_last(p, "T-3", b2, eligible=True)
+    assert app_mod._PENDING_MERGES["demo"] == [("T-1", "new")]
+
+
 def test_background_writer_is_gone_before_verify(helper, tmp_path):
     app_mod, run, records, state, *_ = helper
     marker = tmp_path / "late-write"

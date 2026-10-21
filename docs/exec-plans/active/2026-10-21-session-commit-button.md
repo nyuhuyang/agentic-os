@@ -74,6 +74,7 @@ Each session row gets a **Commit** button between Resume and Rename. Clicking it
 - [x] Inspection 2 fixes: always-sandboxed manual commits (SC-006); queued merges take the verified sha (SC-007). Tests added.
 - [x] Inspection 3 fixes: the preview status is sandboxed (SC-008); queued merges are re-validated under the ticket lock (SC-009).
 - [x] Inspection 4 fixes: a bounded wait for a finalizing ticket's lock, with the entry kept on timeout (SC-010); the preview status runs in a write-nothing sandbox (SC-011).
+- [x] Inspection 5 fixes: per-ticket merge policy (SC-012), newest queue entry wins (SC-013), editor-bound responses (SC-014), escaped sandbox paths (SC-015).
 - [ ] Fresh Codex inspection approved.
 - [ ] Restart the live runner when it is idle.
 - [ ] Archive the plan and its log.

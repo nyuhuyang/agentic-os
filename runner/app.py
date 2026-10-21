@@ -3275,12 +3275,15 @@ def _merge_when_last(project, ident: str, job: dict, eligible: bool) -> dict:
             # another ticket's entry: re-check it under its own lock, since it may have been cleaned
             # up or re-run since it queued (SC-009); ours is held by this run already
             with contextlib.nullcontext() if t == ident else _wait_ticket_lock(project.key, t):
-                _projects.check_queued_merge(project, t, sha)
-                out["merged_head"] = _projects.merge_into_checkout(project, t, sha)
+                eff = _effective_project(project, t)  # that ticket's own sticky policy, not the drainer's (SC-012)
+                _projects.check_queued_merge(eff, t, sha)
+                out["merged_head"] = _projects.merge_into_checkout(eff, t, sha)
             out.setdefault("merged", []).append(t)
         except _projects.TicketLocked:
             with _JOB_LOCK:  # its run is still finishing: keep it for the project's next run (SC-010)
-                _PENDING_MERGES.setdefault(project.key, []).append((t, sha))
+                queue = _PENDING_MERGES.setdefault(project.key, [])
+                if not any(q == t for q, _ in queue):  # a newer verification queued meanwhile wins (SC-013)
+                    queue.append((t, sha))
             out.setdefault("merge", f"{t} still finishing; it merges with this project's next run")
         except _projects.ProjectError as exc:
             out.setdefault("merge_error", {})[t] = str(exc)[:500]
