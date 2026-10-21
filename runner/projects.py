@@ -1171,7 +1171,7 @@ def branch_head(project: Project, ident: str) -> str:
                 confine=confine_for(project, project.path)).stdout.strip()
 
 
-def commit_state(project: Project, cwd: str | Path) -> dict | None:
+def commit_state(project: Project, cwd: str | Path, cache: dict | None = None) -> dict | None:
     """What the session row's Commit button reflects, read-only: {state, files, ahead}.
     dirty = uncommitted changes; unmerged = a clean worktree whose agent/<id> has commits the
     main checkout's HEAD lacks; clean = nothing to commit and nothing left to merge. None when
@@ -1180,12 +1180,23 @@ def commit_state(project: Project, cwd: str | Path) -> dict | None:
     if top.returncode:
         return None
     repo = Path(top.stdout.strip()).resolve()
+    if cache is not None and repo in cache:  # one status per checkout, whatever subfolder (CM-003)
+        return cache[repo]
+    state = _commit_state(project, repo)
+    if cache is not None:
+        cache[repo] = state
+    return state
+
+
+def _commit_state(project: Project, repo: Path) -> dict | None:
     ident = None
     if repo != project.path.resolve():
         try:
             ident = ticket_from_worktree(project, repo)
+            br = _git(repo, "symbolic-ref", "-q", "--short", "HEAD", check=False).stdout.strip()
+            _check_bound_branch(project, ident, br)
         except ProjectError:
-            return None
+            return None  # not this ticket's work as bound: neutral, never "clean" (CM-001)
     files = len(readonly_status(repo))  # write-nothing sandbox: status can run clean filters (SC-011)
     if files:
         return {"state": "dirty", "files": files, "ahead": 0}
@@ -1212,7 +1223,7 @@ def merge_into_checkout(project: Project, ident: str, rev: str | None = None) ->
     branch = f"agent/{_check_ident(ident)}"
     if rev is not None and not re.fullmatch(r"[0-9a-f]{40}([0-9a-f]{24})?", rev):
         raise ProjectError(f"not a commit id: {rev!r}")
-    target = rev or branch  # rev: the commit that passed verification, not whatever the branch holds now
+    target = rev or f"refs/heads/{branch}"  # rev: the verified commit; never a bare name a tag could shadow (CM-002)
     root = project.path
     confine = confine_for(project, root)
     with _MERGE_LOCK:
@@ -1257,6 +1268,8 @@ def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry
         if busy:  # git add -A would mark conflicts resolved and commit their markers (SC-003)
             raise ProjectError(f"{repo} has {busy} in progress; finish or abort it by hand first")
         branch = _git(repo, "symbolic-ref", "--short", "HEAD", confine=confine).stdout.strip()
+        if ident:
+            _check_bound_branch(project, ident, branch)  # a switched worktree is not that ticket's work (CM-001)
         files = readonly_status(repo)  # preview and count: nothing writable (SC-011)
         into = None
         if ident:
@@ -1280,6 +1293,14 @@ def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry
             except ProjectError as exc:  # the commit stands; the row says why it did not merge
                 out["merge_error"] = str(exc)[:500]
         return out
+
+
+def _check_bound_branch(project: Project, ident: str, branch: str) -> None:
+    """The worktree is still bound to its ticket and on agent/<ident>."""
+    meta = load_binding(project, ident)  # raises for a missing or foreign binding
+    want = meta.get("branch") or f"agent/{ident}"
+    if branch != want:
+        raise ProjectError(f"{ident}'s worktree is on {branch}, not {want}; commit and merge there by hand")
 
 
 def _ahead(project: Project, ident: str) -> int:

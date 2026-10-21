@@ -41,5 +41,9 @@ The user asked for two things (2026-10-21):
 ## Progress Checklist
 
 - [x] Implement and test.
+- [x] Inspection 1 fixes:
+  - CM-001: the binding and branch are validated under the ticket lock; a switched worktree is refused and shows neutral.
+  - CM-002: the manual merge takes the `refs/heads` sha, and the default merge target is fully qualified.
+  - CM-003: one status per checkout root.
 - [ ] Fresh Codex inspection approved.
 - [ ] Archive.

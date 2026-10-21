@@ -304,8 +304,8 @@ def test_api_projects_rows_carry_commit_state(repo, tmp_path, monkeypatch):
                                                     "message": {"role": "user", "content": "hi"}}) + "\n")
     (root / "a.txt").write_text("c\n")
     calls = []
-    real = pj.commit_state
-    monkeypatch.setattr(pj, "commit_state", lambda p, cwd: calls.append(cwd) or real(p, cwd))
+    real = pj.readonly_status
+    monkeypatch.setattr(pj, "readonly_status", lambda cwd: calls.append(cwd) or real(cwd))
     r = app_mod.app.test_client().get("/api/projects", headers={"X-AgenticOS-Token": app_mod.REQUEST_TOKEN})
     rows = next(p for p in r.get_json()["projects"] if p["key"] == "alpha")["sessions"]
     assert {s["commit_state"]["state"] for s in rows} == {"dirty"} and len(calls) == 1
@@ -358,3 +358,43 @@ def test_manual_merge_merges_when_no_run_is_open(repo, monkeypatch):
     monkeypatch.setattr(app_mod, "_ticket_confidential", lambda *a: False)
     out = pj.commit_checkout(project, wt, "m", merger=lambda ident: app_mod._manual_merge(project, ident))
     assert out["merged_head"] and (root / "w.txt").exists()
+
+
+# ── Inspection fixes (CM-001..003) ───────────────────────────────────────────
+
+def test_switched_worktree_is_refused_and_neutral(repo):
+    project, root = repo
+    wt = _wt(project)
+    git(wt, "checkout", "-q", "-b", "elsewhere")
+    (wt / "w.txt").write_text("w\n")
+    with pytest.raises(pj.ProjectError, match="not agent/T-1"):
+        pj.commit_checkout(project, wt, "m", merger=lambda i: pj.merge_into_checkout(project, i))
+    assert pj.commit_state(project, wt) is None and not (root / "w.txt").exists()
+
+
+def test_manual_merge_ignores_a_same_named_tag(repo, monkeypatch):
+    project, root = repo
+    import app as app_mod
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    pj.commit_checkout(project, wt, "branch work")
+    git(root, "tag", "agent/T-1", "main")  # a tag shadowing the branch name, pointing at main's HEAD
+    monkeypatch.setattr(app_mod, "_running_jobs", {})
+    monkeypatch.setattr(app_mod, "_ticket_confidential", lambda *a: False)
+    with pytest.raises(pj.ProjectError):  # an ambiguous branch name: the binding check refuses outright
+        pj.commit_checkout(project, wt, "", merger=lambda i: app_mod._manual_merge(project, i))
+    with pj.ticket_lock("alpha", "T-1"):
+        app_mod._manual_merge(project, "T-1")  # merges refs/heads/agent/T-1, never the tag (CM-002)
+    assert (root / "w.txt").exists()
+
+
+def test_commit_state_one_status_per_checkout_root(repo, monkeypatch):
+    project, root = repo
+    calls = []
+    real = pj.readonly_status
+    monkeypatch.setattr(pj, "readonly_status", lambda cwd: calls.append(cwd) or real(cwd))
+    cache = {}
+    (root / "src" / "deep").mkdir()
+    for cwd in (root, root / "src", root / "src" / "deep"):
+        pj.commit_state(project, cwd, cache)
+    assert len(calls) == 1

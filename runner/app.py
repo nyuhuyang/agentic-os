@@ -4790,20 +4790,19 @@ def _manual_merge(project, ident: str) -> str:
             opened = _project_runs_open(project.key, None)
         if opened:
             raise _projects.ProjectError("another run of this project is in progress; merge after it finishes")
-        return _projects.merge_into_checkout(_effective_project(project, ident), ident)
+        eff = _effective_project(project, ident)
+        # the exact branch commit (refs/heads/), resolved under the caller's ticket lock (CM-002)
+        return _projects.merge_into_checkout(eff, ident, _projects.branch_head(eff, ident))
 
 
 def _with_commit_state(project, sessions: list[dict]) -> list[dict]:
     """Each row's Commit colour: one read-only status per checkout, shared by its sessions."""
-    seen: dict = {}
+    by_root: dict = {}  # keyed by checkout root: sessions in its subfolders share one status (CM-003)
     for s in sessions:
-        cwd = s.get("cwd") or ""
-        if cwd not in seen:
-            try:
-                seen[cwd] = _projects.commit_state(project, cwd) if cwd else None
-            except Exception:  # an unreadable checkout: the button stays neutral, the panel still loads
-                seen[cwd] = None
-        s["commit_state"] = seen[cwd]
+        try:
+            s["commit_state"] = _projects.commit_state(project, s["cwd"], by_root) if s.get("cwd") else None
+        except Exception:  # an unreadable checkout: the button stays neutral, the panel still loads
+            s["commit_state"] = None
     return sessions
 
 
