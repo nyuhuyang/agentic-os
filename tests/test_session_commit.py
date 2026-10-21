@@ -714,3 +714,14 @@ def test_running_baseline_blocks_a_manual_merge(repo, monkeypatch):
     monkeypatch.setattr(app_mod, "_BASELINE_RUNS", {"alpha": 1})  # Run tests in flight
     out = pj.commit_checkout(project, wt, "m", merger=lambda i: app_mod._manual_merge(project, i))
     assert "tests are running" in out["merge_error"] and not (root / "w.txt").exists()  # (CM-026)
+
+
+def test_resume_tab_takes_the_gate_of_its_real_checkout(tmp_path, monkeypatch):
+    import app as app_mod
+    (tmp_path / "proj" / "src").mkdir(parents=True)
+    reg = tmp_path / "projects.yaml"
+    reg.write_text(f"projects:\n  proj:\n    path: {tmp_path}/proj\n  self:\n    path: {app_mod._PROTO}\n")
+    monkeypatch.setattr(pj, "REGISTRY_PATH", reg)
+    monkeypatch.setattr(app_mod, "_ROOT_KEY_CACHE", {})
+    assert app_mod._checkout_gate(tmp_path / "proj" / "src") is app_mod._merge_gate("proj")  # (CM-028)
+    assert app_mod._checkout_gate(app_mod._PROTO) is app_mod._merge_gate("self")

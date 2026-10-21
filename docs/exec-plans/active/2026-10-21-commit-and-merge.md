@@ -66,5 +66,7 @@ The user asked for two things (2026-10-21):
   - checkout aliasing for the manual merge only (CM-022).
 - [x] Inspection 7 fixes: the routing helper kills its group on success (CM-023); agent tabs in the main checkout block manual merges and spawn under the merge gate (CM-024).
 - [x] Inspection 8 fixes: per-entry registry map (CM-025); running baselines block manual merges and register under the gate (CM-026).
+- [x] Inspection 9 fix: resume tabs take the gate of the checkout they actually run in (CM-028).
+- [ ] CM-027: shared interprocess admission for CLI `projects.py verify` and `run_skill.py`. — BLOCKED: awaiting the user's decision (recommended: record it as a known limitation).
 - [ ] Fresh Codex inspection approved.
 - [ ] Archive.

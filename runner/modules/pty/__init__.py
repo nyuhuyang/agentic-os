@@ -632,8 +632,9 @@ def open_terminal(data: dict, socketio) -> dict:
         t.label = f"{key or 'runner'} · {kind} · {short}"
         # An agent tab starts and registers under its checkout's merge gate: never between a manual
         # merge's activity check and its merge (CM-024). Lock order: card/ticket -> gate.
-        from app import _merge_gate, _runner_root_gate
-        gate = (_merge_gate(key) if key else _runner_root_gate()) if kind == "resume" else contextlib.nullcontext()
+        from app import _checkout_gate
+        # gated by the folder it actually runs in, not by the key it was opened under (CM-028)
+        gate = _checkout_gate(t.cwd) if kind == "resume" else contextlib.nullcontext()
         with gate:
             _spawn(t, argv, _shell_env(project), cols, rows, socketio)
             TERMINALS[t.term_id] = t

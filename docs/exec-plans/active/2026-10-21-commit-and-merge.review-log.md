@@ -11,3 +11,4 @@
 - Inspection 6 (CM-020..022): all fixed. A launch is refused when the job has ended, and the marker carries the live job; the group is killed after a successful generic run; checkout aliasing only for the manual merge (it had stranded the per-key queue). Suite: 838 passed.
 - Inspection 7 (CM-023..024): fixed. _run_grouped kills the group on success; interactive_agents_in blocks a manual merge while an agent (resume) tab works in the main checkout, and resume tabs spawn under the checkout's merge gate.
 - Inspection 8 (CM-025..026): fixed. The registry checkout map handles a bad entry by skipping only that entry; _BASELINE_RUNS counts Run-tests activity (taken under the merge gate, held until verify is reaped) and blocks a manual merge.
+- Inspection 9 (CM-027..028): CM-028 fixed (_checkout_gate by the real cwd). CM-027 is OPEN, pending the user's decision: the CLI verify and run_skill.py run outside the dashboard process and are not part of merge admission.

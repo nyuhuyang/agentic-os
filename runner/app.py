@@ -3310,6 +3310,17 @@ def _runner_root_key() -> str | None:
     return next((k for k, p in _registry_checkouts().items() if p == root), None)
 
 
+def _checkout_gate(path) -> threading.Lock | contextlib.nullcontext:
+    """The merge gate of the registered checkout that contains `path` (longest match), or the
+    runner-root gate when none does: a tab is gated by where it really runs (CM-028)."""
+    real = os.path.realpath(str(path))
+    best = None
+    for k, p in _registry_checkouts().items():
+        if (real == p or real.startswith(p.rstrip("/") + "/")) and (best is None or len(p) > len(best[1])):
+            best = (k, p)
+    return _merge_gate(best[0]) if best else _runner_root_gate()
+
+
 def _runner_root_gate():
     key = _runner_root_key()
     return _merge_gate(key) if key else contextlib.nullcontext()
