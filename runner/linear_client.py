@@ -97,6 +97,17 @@ mutation AgenticOSUpdateIssue($issueId: String!, $title: String, $description: S
 }
 """
 
+# Title only: a variable left out of the shared update mutation becomes null and would clear the
+# description (DP-42), so a rename sends nothing else.
+_MUTATION_UPDATE_TITLE = """
+mutation AgenticOSUpdateTitle($issueId: String!, $title: String!) {
+  issueUpdate(id: $issueId, input: {title: $title}) {
+    success
+    issue { id title updatedAt }
+  }
+}
+"""
+
 _MUTATION_CREATE_ISSUE = """
 mutation AgenticOSCreateIssue($teamId: String!, $title: String!, $description: String, $stateId: String, $labelIds: [String!], $projectId: String) {
   issueCreate(input: {teamId: $teamId, title: $title, description: $description, stateId: $stateId, labelIds: $labelIds, projectId: $projectId}) {
@@ -445,6 +456,16 @@ class LinearClient:
         if result.get("success"):
             return result.get("issue")
         return None
+
+    def update_title(self, issue_id: str, title: str) -> dict:
+        """Change only the title; raises LinearError unless Linear confirms it. Returns
+        {id, title, updated_at} as Linear reports them."""
+        data = self._graphql_strict(_MUTATION_UPDATE_TITLE, {"issueId": issue_id, "title": title})
+        result = data.get("issueUpdate") or {}
+        issue = result.get("issue") or {}
+        if not result.get("success") or issue.get("title") != title:
+            raise LinearError("Linear did not confirm the new title")
+        return {"id": issue.get("id", issue_id), "title": issue["title"], "updated_at": issue.get("updatedAt", "")}
 
     def fetch_projects(self) -> list[dict]:
         data = self._graphql(_QUERY_PROJECTS)

@@ -40,7 +40,8 @@ _PROTO = Path(__file__).resolve().parent.parent
 REGISTRY_PATH = Path(os.environ.get("AGENTIC_OS_PROJECTS", str(_PROTO / "projects.yaml")))
 WORKTREE_ROOT = Path(os.environ.get("AGENTIC_OS_WORKTREES", "~/.agentic-os/worktrees")).expanduser()
 
-_FIELDS = {"path", "kind", "verify", "env", "confidential", "no_push", "seed", "verify_timeout_s", "note"}
+_FIELDS = {"path", "kind", "verify", "env", "confidential", "no_push", "seed", "verify_timeout_s", "note",
+           "auto_merge"}
 _IDENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DEFAULT_VERIFY_TIMEOUT_S = 600
 TAIL_CHARS = 4000
@@ -80,6 +81,7 @@ class Project:
     seed: tuple = ()
     verify_timeout_s: int = DEFAULT_VERIFY_TIMEOUT_S
     note: str = ""
+    auto_merge: bool = True
 
 
 # An agent can write the shared git config (e.g. core.fsmonitor -> a script in its
@@ -87,11 +89,18 @@ class Project:
 _GIT_HARDENING = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
 
 
-def sandbox_profile(writable: list[Path]) -> str:
-    """macOS sandbox-exec profile: no network, writes only under `writable` and temp dirs."""
-    tmp = {Path("/private/tmp"), Path(os.path.realpath(tempfile.gettempdir()))}
+def _sb_str(path: str) -> str:
+    """A path as a sandbox-profile string literal: quotes and backslashes escaped (SC-015)."""
+    if any(ord(c) < 32 or c == "\x7f" for c in path):
+        raise ProjectError(f"path {path!r} has control characters; the sandbox cannot name it")
+    return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def sandbox_profile(writable: list[Path], temp: bool = True) -> str:
+    """macOS sandbox-exec profile: no network, writes only under `writable` and (temp) temp dirs."""
+    tmp = {Path("/private/tmp"), Path(os.path.realpath(tempfile.gettempdir()))} if temp else set()
     roots = sorted({str(Path(os.path.realpath(p))) for p in [*writable, *tmp]})
-    allow = " ".join(f'(subpath "{r}")' for r in roots)
+    allow = " ".join(f'(subpath {_sb_str(r)})' for r in roots) or '(literal "/dev/null")'
     # allow-default keeps git, shells and test runtimes working; the denials close the routes
     # by which sandboxed code asks something outside the sandbox to act for it.
     # ponytail: deny-list, not deny-default; spike (g2) probes `open URL`, osascript and
@@ -103,8 +112,22 @@ def sandbox_profile(writable: list[Path]) -> str:
             f'(allow file-write* {allow} (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/fd/"))')
 
 
-def sandbox_prefix(writable: list[Path]) -> list[str]:
-    return ["/usr/bin/sandbox-exec", "-p", sandbox_profile(writable)]
+def sandbox_prefix(writable: list[Path], temp: bool = True) -> list[str]:
+    return ["/usr/bin/sandbox-exec", "-p", sandbox_profile(writable, temp)]
+
+
+def readonly_status(cwd: Path) -> list[str]:
+    """`uncommitted` under a write-nothing sandbox: no writable roots, not even temp. A clean
+    filter that status runs can neither touch the checkout nor its git dir (SC-011)."""
+    argv = [*sandbox_prefix([], temp=False), "git", *_GIT_HARDENING, "-C", str(cwd), "--no-optional-locks",
+            "status", "--porcelain", "-z", "--untracked-files=all"]
+    try:
+        code, out, err = _run_bounded(argv, GIT_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise ProjectError(f"git status timed out in {cwd}") from None
+    if code != 0:
+        raise ProjectError(f"git status failed in {cwd}: {err.decode(errors='replace').strip()}")
+    return _porcelain_paths(out)
 
 
 GIT_TIMEOUT_S = 120
@@ -259,7 +282,7 @@ def _parse_project(key: str, entry: object) -> Project:
     return Project(
         key=key, path=root, verify=(verify or "").strip(), kind=str(entry.get("kind") or ""),
         env=env, confidential=bool(entry.get("confidential", False)),
-        no_push=bool(entry.get("no_push", False)),
+        no_push=bool(entry.get("no_push", False)), auto_merge=bool(entry.get("auto_merge", True)),
         seed=tuple(_seed_path(root, s, key) for s in seeds), verify_timeout_s=timeout, note=note,
     )
 
@@ -1126,12 +1149,198 @@ def runner_commit(project: Project, wt: Path, message: str) -> str | None:
     _git(wt, "add", "-A", confine=confine, timeout=COMMIT_TIMEOUT_S)
     if _git(wt, "diff", "--cached", "--quiet", "--no-ext-diff", check=False, confine=confine).returncode == 0:
         return None
-    env = None
-    if not _git(wt, "config", "user.email", check=False).stdout.strip():
-        env = {**os.environ, "GIT_AUTHOR_NAME": "AgenticOS", "GIT_AUTHOR_EMAIL": "agentic-os@localhost",
-               "GIT_COMMITTER_NAME": "AgenticOS", "GIT_COMMITTER_EMAIL": "agentic-os@localhost"}
-    _git(wt, "commit", "--no-verify", "--no-gpg-sign", "-q", "-m", message, confine=confine, timeout=COMMIT_TIMEOUT_S, env=env)
+    _git(wt, "commit", "--no-verify", "--no-gpg-sign", "-q", "-m", message, confine=confine, timeout=COMMIT_TIMEOUT_S,
+         env=_identity_env(wt))
     return _git(wt, "rev-parse", "HEAD").stdout.strip()
+
+
+def _identity_env(cwd: Path) -> dict | None:
+    """A fallback committer when the repo has none configured."""
+    if _git(cwd, "config", "user.email", check=False).stdout.strip():
+        return None
+    return {**os.environ, "GIT_AUTHOR_NAME": "AgenticOS", "GIT_AUTHOR_EMAIL": "agentic-os@localhost",
+            "GIT_COMMITTER_NAME": "AgenticOS", "GIT_COMMITTER_EMAIL": "agentic-os@localhost"}
+
+
+_MERGE_LOCK = threading.Lock()  # ponytail: one per process; runs of different projects rarely finish at once
+
+
+def branch_head(project: Project, ident: str) -> str:
+    """The commit agent/<ident> points at now: what a queued merge must merge (SC-007)."""
+    return _git(project.path, "rev-parse", "--verify", f"refs/heads/agent/{_check_ident(ident)}^{{commit}}",
+                confine=confine_for(project, project.path)).stdout.strip()
+
+
+def commit_state(project: Project, cwd: str | Path, cache: dict | None = None) -> dict | None:
+    """What the session row's Commit button reflects, read-only: {state, files, ahead}.
+    dirty = uncommitted changes; unmerged = a clean worktree whose agent/<id> has commits the
+    main checkout's HEAD lacks; clean = nothing to commit and nothing left to merge. None when
+    the folder is not this project's checkout or worktree (the button stays neutral)."""
+    top = _git(Path(cwd), "rev-parse", "--show-toplevel", check=False)
+    if top.returncode:
+        return None
+    repo = Path(top.stdout.strip()).resolve()
+    if cache is not None and repo in cache:  # one status per checkout, whatever subfolder (CM-003)
+        return cache[repo]
+    try:
+        state = _commit_state(project, repo)
+    except ProjectError:  # e.g. a status timeout: neutral, and not retried for the next row (CM-006)
+        state = None
+    if cache is not None:
+        cache[repo] = state
+    return state
+
+
+def _commit_state(project: Project, repo: Path) -> dict | None:
+    ident = None
+    if repo != project.path.resolve():
+        try:
+            ident = ticket_from_worktree(project, repo)
+            br = _git(repo, "symbolic-ref", "-q", "--short", "HEAD", check=False).stdout.strip()
+            _check_bound_branch(project, ident, br)
+        except ProjectError:
+            return None  # not this ticket's work as bound: neutral, never "clean" (CM-001)
+    files = len(readonly_status(repo))  # write-nothing sandbox: status can run clean filters (SC-011)
+    if files:
+        return {"state": "dirty", "files": files, "ahead": 0}
+    ahead = _ahead(project, ident) if ident else 0
+    return {"state": "unmerged" if ahead else "clean", "files": 0, "ahead": ahead}
+
+
+def check_queued_merge(project: Project, ident: str, sha: str) -> None:
+    """A queued (ticket, verified sha) is still that ticket's work: its binding exists and its
+    branch still contains the sha. Cleanup or a replaced branch refuses the merge (SC-009).
+    Caller holds the ticket's lock."""
+    load_binding(project, ident)  # raises when the worktree/binding was cleaned up
+    if _git(project.path, "merge-base", "--is-ancestor", sha, f"refs/heads/agent/{_check_ident(ident)}",
+            check=False, confine=confine_for(project, project.path)).returncode:
+        raise ProjectError(f"agent/{ident} no longer contains the verified commit; merge it by hand")
+
+
+def merge_into_checkout(project: Project, ident: str, rev: str | None = None) -> str:
+    """Merge agent/<ident> into the branch the main checkout has checked out (AGE-111).
+
+    Only a conflict-free merge is made: merge-tree checks first, so no merge is ever left
+    half done and no `merge --abort` can touch the user's own uncommitted edits. Git itself
+    refuses when the merge would overwrite a local change. Returns the checkout's new HEAD."""
+    branch = f"agent/{_check_ident(ident)}"
+    if rev is not None and not re.fullmatch(r"[0-9a-f]{40}([0-9a-f]{24})?", rev):
+        raise ProjectError(f"not a commit id: {rev!r}")
+    target = rev or f"refs/heads/{branch}"  # rev: the verified commit; never a bare name a tag could shadow (CM-002)
+    root = project.path
+    confine = confine_for(project, root)
+    with _MERGE_LOCK:
+        if _git(root, "symbolic-ref", "-q", "HEAD", check=False, confine=confine).returncode:
+            raise ProjectError(f"{root} is on a detached HEAD; merge {branch} by hand")
+        busy = _git_operation(root, confine)  # before touching it: never merge into a paused rebase etc. (CM-009)
+        if busy:
+            raise ProjectError(f"{root} has {busy} in progress; merge {branch} by hand after finishing it")
+        pre = _git(root, "merge-tree", "--write-tree", "HEAD", target, check=False, confine=confine)
+        if pre.returncode:
+            raise ProjectError(f"{branch} conflicts with {root}; merge it by hand")
+        tree = pre.stdout.split("\n", 1)[0].strip()
+        # the full ref, minus exactly refs/heads/: --short can say heads/main when a tag main exists (CM-012)
+        current = _git(root, "symbolic-ref", "HEAD", confine=confine).stdout.strip().removeprefix("refs/heads/")
+        # Exactly the merge the preflight checked: no inherited branch.<name>.mergeOptions
+        # (-s ours, --no-commit, --squash) and no autostash of the user's edits (CM-005/007/008).
+        # --strategy=ort: what merge-tree checked, never pull.twohead's choice (CM-015);
+        # --no-overwrite-ignore: an ignored local file (.env) is never replaced by a tracked one (CM-016)
+        _git(root, "-c", f"branch.{current}.mergeOptions=", "-c", "merge.autoStash=false", "merge",
+             "--strategy=ort", "--no-overwrite-ignore",
+             "--no-edit", "--no-verify", "--no-gpg-sign", "--commit", "--no-squash", "--no-autostash", "-q",
+             "-m", f"Merge branch '{branch}'", target, confine=confine, timeout=COMMIT_TIMEOUT_S, env=_identity_env(root))
+        if (_git_operation(root, confine)
+                or _git(root, "merge-base", "--is-ancestor", target, "HEAD", check=False, confine=confine).returncode
+                or _git(root, "rev-parse", "HEAD^{tree}", confine=confine).stdout.strip() != tree):
+            raise ProjectError(f"{branch} did not merge into {root} as checked; inspect it by hand")
+        return _git(root, "rev-parse", "HEAD", confine=confine).stdout.strip()
+
+
+def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry_run: bool = False,
+                    merger=None) -> dict:
+    """The user's manual Commit on a session row: stage every change in the session's checkout
+    (the project's folder or one of its AgenticOS worktrees) and commit it locally. Never pushes.
+    In a worktree, `merger(ident)` then merges agent/<ident> into the main checkout, still under
+    the ticket lock so the branch cannot move in between; its refusal never undoes the commit.
+    A dry run only reports {repo, branch, files, ahead, into}. Hooks off and unsigned."""
+    top = _git(Path(cwd), "rev-parse", "--show-toplevel", check=False)
+    if top.returncode:
+        raise ProjectError(f"{cwd} is not inside a git checkout")
+    repo = Path(top.stdout.strip()).resolve()
+    ident = None
+    if repo != project.path.resolve():
+        ident = ticket_from_worktree(project, repo)  # refuses anything else (a nested or foreign repo)
+    msg = message.strip() if isinstance(message, str) else ""
+    # Always sandboxed, whatever the policy says: staging can run repo-configured clean filters,
+    # and a policy read before the ticket lock could be stale by the time git runs (SC-006).
+    common = _git(project.path, "rev-parse", "--git-common-dir").stdout.strip()
+    confine = [(project.path / common).resolve(), repo]
+    with contextlib.ExitStack() as stack:
+        if ident:
+            stack.enter_context(ticket_lock(project.key, ident))  # a run, verify or terminal owns it now
+        elif not _MERGE_LOCK.acquire(blocking=False):
+            raise TicketLocked(f"a merge into {repo} is in progress; try again in a moment")
+        else:
+            stack.callback(_MERGE_LOCK.release)
+        if _git(repo, "symbolic-ref", "-q", "HEAD", check=False, confine=confine).returncode:
+            raise ProjectError(f"{repo} is on a detached HEAD; commit there by hand")
+        busy = _git_operation(repo, confine)
+        if busy:  # git add -A would mark conflicts resolved and commit their markers (SC-003)
+            raise ProjectError(f"{repo} has {busy} in progress; finish or abort it by hand first")
+        branch = _git(repo, "symbolic-ref", "--short", "HEAD", confine=confine).stdout.strip()
+        if ident:
+            _check_bound_branch(project, ident, branch)  # a switched worktree is not that ticket's work (CM-001)
+        files = readonly_status(repo)  # preview and count: nothing writable (SC-011)
+        into = None
+        if ident:
+            r = _git(project.path, "symbolic-ref", "-q", "--short", "HEAD", check=False)
+            into = r.stdout.strip() if r.returncode == 0 else None  # the main checkout's branch
+        out = {"repo": str(repo), "branch": branch, "files": files, "into": into,
+               "ahead": _ahead(project, ident) + (1 if files else 0) if ident else 0, "committed": None}
+        if dry_run:
+            return out
+        if files:
+            if not msg:
+                raise ProjectError("a commit message is required")
+            _git(repo, "add", "-A", confine=confine, timeout=COMMIT_TIMEOUT_S)
+            if _git(repo, "diff", "--cached", "--quiet", "--no-ext-diff", check=False, confine=confine).returncode:
+                _git(repo, "commit", "--no-verify", "--no-gpg-sign", "-q", "-m", msg, confine=confine,
+                     timeout=COMMIT_TIMEOUT_S, env=_identity_env(repo))
+                out["committed"] = _git(repo, "rev-parse", "HEAD", confine=confine).stdout.strip()
+        if ident and merger and _ahead(project, ident):
+            try:
+                out["merged_head"] = merger(ident)
+            except ProjectError as exc:  # the commit stands; the row says why it did not merge
+                out["merge_error"] = str(exc)[:500]
+        return out
+
+
+def _check_bound_branch(project: Project, ident: str, branch: str) -> None:
+    """The worktree is still bound to its ticket and on agent/<ident>."""
+    meta = load_binding(project, ident)  # raises for a missing or foreign binding
+    want = meta.get("branch") or f"agent/{ident}"
+    if branch != want:
+        raise ProjectError(f"{ident}'s worktree is on {branch}, not {want}; commit and merge there by hand")
+
+
+def _ahead(project: Project, ident: str) -> int:
+    """Commits on agent/<ident> that the main checkout's HEAD lacks."""
+    r = _git(project.path, "rev-list", "--count", f"HEAD..refs/heads/agent/{_check_ident(ident)}", check=False)
+    return int(r.stdout.strip() or 0) if r.returncode == 0 else 0
+
+
+def _git_operation(repo: Path, confine: list[Path] | None) -> str | None:
+    """An unfinished merge / cherry-pick / revert / rebase, or unmerged index entries, else None."""
+    for ref, what in (("MERGE_HEAD", "a merge"), ("CHERRY_PICK_HEAD", "a cherry-pick"), ("REVERT_HEAD", "a revert")):
+        if _git(repo, "rev-parse", "-q", "--verify", ref, check=False, confine=confine).returncode == 0:
+            return what
+    for d in ("rebase-merge", "rebase-apply"):
+        p = _git(repo, "rev-parse", "--git-path", d, confine=confine).stdout.strip()
+        if (repo / p if not os.path.isabs(p) else Path(p)).exists():
+            return "a rebase"
+    if _git(repo, "--no-optional-locks", "ls-files", "-u", confine=confine).stdout.strip():
+        return "unresolved conflicts"
+    return None
 
 
 def committed_seeds(project: Project, wt: Path, base: str) -> list[str]:
@@ -1247,10 +1456,27 @@ def verify_writable_roots(wt: Path) -> list[Path]:
     return [wt, Path(_git(wt, "rev-parse", "--absolute-git-dir").stdout.strip())]
 
 
-def uncommitted(project: Project, wt: Path) -> list[str]:
-    """Tracked or non-ignored untracked changes left in the worktree (seeds are ignored)."""
-    out = _git_bytes(wt, "status", "--porcelain", "-z", "--untracked-files=all", confine=confine_for(project, wt))
-    return [e[3:].decode("utf-8", "surrogateescape") for e in out.split(b"\0") if len(e) > 3]
+def uncommitted(project: Project, wt: Path, confine: list[Path] | None = None) -> list[str]:
+    """Tracked or non-ignored untracked changes left in the worktree (seeds are ignored).
+    Read-only: --no-optional-locks keeps status from refreshing the index (SC-004). `confine`
+    overrides the policy's confinement (status can run clean filters, SC-008)."""
+    out = _git_bytes(wt, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all",
+                     confine=confine if confine is not None else confine_for(project, wt))
+    return _porcelain_paths(out)
+
+
+def _porcelain_paths(out: bytes) -> list[str]:
+    """Paths of `status --porcelain -z`: a rename/copy record is followed by its source path,
+    a bare token that is consumed, not counted (SC-005)."""
+    tokens, paths, i = out.split(b"\0"), [], 0
+    while i < len(tokens):
+        e = tokens[i]
+        i += 1
+        if len(e) > 3:
+            paths.append(e[3:].decode("utf-8", "surrogateescape"))
+            if e[0:1] in (b"R", b"C") or e[1:2] in (b"R", b"C"):
+                i += 1  # the source path
+    return paths
 
 
 def run_verify(project: Project, worktree: Path, base: str | None = None, prefix: list[str] | None = None,
@@ -1682,6 +1908,71 @@ def session_target(project: Project, agent: str, sid: str, board_ids=None) -> di
         raise ProjectError(f"Codex session {sid} has no rollout inside {store}; not touched")
     texts = [v if isinstance(v, str) else None for v in row[2:5]]
     return {"agent": agent, "id": sid, "cwd": row[0], "path": rollout, "title": _codex_title(*texts)}
+
+
+def find_session(agent: str, sid: str) -> dict | None:
+    """A session the runner itself launched or bound (its id comes from run records, never from
+    a client): {agent, id, cwd, path, title, native_title}, or None. Store-confined like
+    session_target, but with no project-root check. native_title is the name the agent's picker
+    shows (Claude's newest custom-title, Codex threads.name), None when unset (DP-30)."""
+    if agent not in ("claude", "codex") or not isinstance(sid, str) or not _SESSION_ID.match(sid):
+        return None
+    if agent == "claude":
+        if not CLAUDE_PROJECTS.is_dir():
+            return None
+        store = CLAUDE_PROJECTS.resolve()
+        for d in CLAUDE_PROJECTS.iterdir():
+            f = d / f"{sid}.jsonl"
+            if not d.is_dir() or not f.is_file() or f.is_symlink() or not f.resolve().is_relative_to(store):
+                continue
+            info = _claude_summary(f)
+            if info and info["cwd"]:
+                return {"agent": agent, "id": sid, "cwd": info["cwd"], "path": f,
+                        "title": _claude_title(info), "native_title": info["custom"]}
+        return None
+    import sqlite3
+    try:
+        db = sqlite3.connect(f"file:{_codex_db_checked()}?mode=ro", uri=True, timeout=5)
+        try:
+            row = db.execute("SELECT cwd, rollout_path, name, title, first_user_message FROM threads "
+                             "WHERE id = ? AND archived = 0", (sid,)).fetchone()
+        finally:
+            db.close()
+    except (sqlite3.Error, ProjectError):
+        return None
+    if not row or not isinstance(row[0], str) or not isinstance(row[1], str) or not row[1]:
+        return None
+    store = Path(os.path.realpath(CODEX_DB.parent))
+    rollout = Path(os.path.realpath(row[1]))
+    if not rollout.is_relative_to(store) or not rollout.is_file() or not os.access(rollout, os.R_OK):
+        return None  # a thread row whose rollout is gone is not resumable (R6)
+    texts = [v if isinstance(v, str) else None for v in row[2:5]]
+    return {"agent": agent, "id": sid, "cwd": row[0], "path": Path(row[1]),
+            "title": _codex_title(*texts), "native_title": texts[0] or None}
+
+
+def session_file(agent: str, sid: str) -> Path | None:
+    """The transcript/rollout of a runner-known session, path only: find_session's store
+    confinement without reading the file (a poll target; CTX-003)."""
+    if agent == "codex":
+        found = find_session(agent, sid)  # DB row + a stat, no file scan
+        return found["path"] if found else None
+    if agent != "claude" or not isinstance(sid, str) or not _SESSION_ID.match(sid) or not CLAUDE_PROJECTS.is_dir():
+        return None
+    store = CLAUDE_PROJECTS.resolve()
+    found = [f for d in CLAUDE_PROJECTS.iterdir() for f in [d / f"{sid}.jsonl"]
+             if d.is_dir() and f.is_file() and not f.is_symlink() and f.resolve().is_relative_to(store)]
+    # the same id can sit under an old and a new checkout's folder: the one written last is live (CTX-008)
+    return max(found, key=lambda f: (f.stat().st_mtime_ns, str(f)), default=None)
+
+
+def session_name_text(title: object) -> str:
+    """A card title as a session name: control characters as spaces, whitespace collapsed,
+    at most 200 characters; '' when nothing is left (§Definitions)."""
+    if not isinstance(title, str):
+        return ""
+    text = "".join(" " if unicodedata.category(c) == "Cc" else c for c in title)
+    return " ".join(text.split())[:200].strip()
 
 
 def check_session_idle(target: dict, live_ids: set[tuple[str, str]], now: float | None = None) -> None:

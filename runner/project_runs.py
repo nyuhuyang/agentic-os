@@ -12,9 +12,11 @@ import collections
 import contextlib
 import json
 import os
+import re
 import subprocess
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -57,6 +59,14 @@ def common_dir(project: projects.Project) -> Path:
 
 # ── agent command (Decision 9) ───────────────────────────────────────────────
 
+# AGE-114 Step 3: a runner-launched Claude reads AGENTS.md as well as CLAUDE.md, so it sees the
+# rules Codex sees (Claude Code's default reads AGENTS.md only where there is no CLAUDE.md). Not for
+# confidential runs: their `--setting-sources ""` loads no CLAUDE.md or AGENTS.md at all.
+CLAUDE_INSTRUCTION_FILES = {"pluginConfigs": {"cc-plugin-agents-md@builtin": {
+    "options": {"instructionFiles": "claude-md-and-agents-md"}}}}
+CLAUDE_SETTINGS = ["--settings", json.dumps(CLAUDE_INSTRUCTION_FILES)]
+
+
 def claude_confidential_settings(common: Path) -> str:
     return json.dumps({
         "sandbox": {
@@ -95,7 +105,7 @@ def agent_cli(agent: str, project: projects.Project, claude_bin: str, dsh_prefix
         return ["codex", "exec", "--json", "--approve-for-me", "--add-dir", common]
     if agent == "dsh":
         return dsh_prefix()
-    return [claude_bin, "-p", "--verbose", "--permission-mode", "bypassPermissions"]
+    return [claude_bin, "-p", "--verbose", "--permission-mode", "bypassPermissions", *CLAUDE_SETTINGS]
 
 
 def project_prompt(prompt: str, project: projects.Project, binding: dict, agent: str) -> str:
@@ -104,6 +114,9 @@ def project_prompt(prompt: str, project: projects.Project, binding: dict, agent:
         rules.append("Leave your changes uncommitted; the runner commits them on this branch after you finish.")
     else:
         rules.append("Commit your work on this branch. Do not switch branches.")
+    if project.auto_merge:
+        rules.append(f"When you finish, the runner merges this branch into {project.path}; "
+                     "do not ask the user to merge or copy files there.")
     if project.no_push:
         rules.append("Do not push, deploy or publish anything.")
     rules.append("Never edit files outside this worktree.")
@@ -329,10 +342,155 @@ def _codex_tool_lines(t: str, item: dict) -> list[str]:
     return [f"{_DIM}  ↳ {shown}{_RESET}"]
 
 
+NOTE_TYPE = "agenticos-note"  # a line the runner itself writes into a run's stream (§4 DP-19)
+
+
+def note_line(text: str) -> str:
+    """The stream line for a runner note, e.g. why a run started a new session."""
+    return json.dumps({"type": NOTE_TYPE, "text": text}, ensure_ascii=False)
+
+
+# run_id -> the agent's own error text (Claude is_error result, Codex turn.failed/error), set by
+# the stream readers and popped by the caller after the run (D6).
+AGENT_ERRORS: dict[str, str] = {}
+# run_ids whose agent reported a terminal failure of its turn (Claude is_error result, Codex
+# turn.failed): a failed run even when the process exits 0 (PVST-R4-03). A Codex `error` event
+# alone is diagnostic (e.g. a reconnect) and does not fail the run.
+AGENT_FAILED: set[str] = set()
+# run_id -> epoch seconds when the agent's usage limit resets (Claude rate_limit_event "rejected", Codex "try again at")
+# seen in the run's stream. Popped by _write_run_log, which schedules the auto-continue (AGE-115).
+LIMIT_RESETS: dict[str, float] = {}
+
+
+# run_ids whose agent produced reply content (Claude: a non-empty result or assistant text;
+# Codex: an agent_message; dsh: a final text), observed in the stream itself, so a reply is
+# never judged by its shape (R16-01, replacing R14-01's shape check).
+REPLIED: set[str] = set()
+
+
+def is_reply(fmt: str, line: str) -> bool:
+    """Whether this stdout line carries reply content from the agent."""
+    if fmt not in ("claude", "codex", "dsh"):
+        return False
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        return False
+    if not isinstance(ev, dict):
+        return False
+    t = ev.get("type")
+    if fmt == "claude":
+        if t == "result" and not ev.get("is_error"):
+            return isinstance(ev.get("result"), str) and bool(ev["result"].strip())
+        if t == "assistant":
+            return any(isinstance(b, dict) and b.get("type") == "text" and str(b.get("text") or "").strip()
+                       for b in (ev.get("message") or {}).get("content") or [])
+        return False
+    if fmt == "codex":
+        item = ev.get("item") or {}
+        return t == "item.completed" and item.get("type") == "agent_message" and bool(str(item.get("text") or "").strip())
+    return t == "final" and bool(str(ev.get("text") or "").strip())
+
+
+def pop_replied(run_id: str) -> bool:
+    """Whether the finished run's agent replied at all, cleared."""
+    replied = run_id in REPLIED
+    REPLIED.discard(run_id)
+    return replied
+
+
+def pop_agent_failure(run_id: str) -> tuple[str | None, bool]:
+    """(the agent's own error text, whether its turn failed) for a finished run, cleared."""
+    failed = run_id in AGENT_FAILED
+    AGENT_FAILED.discard(run_id)
+    return AGENT_ERRORS.pop(run_id, None), failed
+
+
+def agent_error_of(fmt: str, line: str) -> str | None:
+    """The error an agent reports about its own turn, if this stdout line carries one."""
+    if fmt not in ("claude", "codex") or "rror" not in line and "failed" not in line:
+        return None
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(ev, dict):
+        return None
+    t = ev.get("type")
+    if fmt == "claude" and t == "result" and ev.get("is_error"):
+        msg = ev.get("result") or ev.get("api_error") or ev.get("subtype")
+    elif fmt == "codex" and t == "turn.failed":
+        err = ev.get("error")
+        msg = err.get("message") if isinstance(err, dict) else err
+    elif fmt == "codex" and t == "error":
+        msg = ev.get("message")
+    else:
+        return None
+    return str(msg).strip()[:2000] if msg else None
+
+
+def limit_reset_of(fmt: str, line: str) -> float | None:
+    """When the usage limit this stdout line reports as hit resets (epoch seconds), if it does:
+    a Claude rate_limit_event "rejected", or a Codex error / turn.failed "usage limit" message."""
+    if fmt == "codex" and "usage limit" in line:
+        return codex_reset_of(agent_error_of(fmt, line) or "")
+    if fmt != "claude" or '"rejected"' not in line:
+        return None
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        return None
+    info = ev.get("rate_limit_info") if isinstance(ev, dict) and ev.get("type") == "rate_limit_event" else None
+    at = info.get("resetsAt") if isinstance(info, dict) and info.get("status") == "rejected" else None
+    return float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else None
+
+
+# Codex CLI: "You've hit your usage limit. … or try again at 3:15 PM." (today, local time) or
+# "… try again at Oct 22nd, 2026 3:15 PM." (format_retry_timestamp in codex-rs).
+_CODEX_RETRY_AT = re.compile(r"try again at (?:([A-Z][a-z]{2}) (\d{1,2})(?:st|nd|rd|th), (\d{4}) )?(\d{1,2}:\d{2} [AP]M)",
+                             re.IGNORECASE)
+
+
+def codex_reset_of(msg: str, now: datetime | None = None) -> float | None:
+    """The local reset time a Codex usage-limit message names (epoch seconds), if it names one.
+    ponytail: "try again later" (no time) is not continued; a fixed back-off if that shows up."""
+    m = _CODEX_RETRY_AT.search(msg) if "usage limit" in msg else None
+    if not m:
+        return None
+    mon, day, year, clock = m.groups()
+    try:
+        t = datetime.strptime(clock.upper(), "%I:%M %p").time()
+        d = datetime.strptime(f"{mon} {day} {year}", "%b %d %Y").date() if mon else (now or datetime.now()).date()
+    except ValueError:
+        return None
+    return datetime.combine(d, t).timestamp()  # naive = local time, as Codex printed it
+
+
+def note_agent_error(run_id: str, fmt: str, line: str) -> None:
+    """Keep the agent's error for this run (a Codex turn.failed wins over an earlier error
+    event), and note whether it replied at all (R16-01) and when a hit usage limit resets."""
+    if run_id not in REPLIED and is_reply(fmt, line):
+        REPLIED.add(run_id)
+    reset = limit_reset_of(fmt, line)
+    if reset:
+        LIMIT_RESETS[run_id] = reset
+    msg = agent_error_of(fmt, line)
+    terminal = fmt == "claude" or '"turn.failed"' in line
+    if msg and (run_id not in AGENT_ERRORS or terminal):
+        AGENT_ERRORS[run_id] = msg
+    if msg and terminal:
+        AGENT_FAILED.add(run_id)
+
+
 def render_event(fmt: str, line: str) -> list[str]:
     """One raw stdout line -> terminal lines for the live/replay run view (shared by both).
     fmt: claude (stream-json), codex (exec --json), dsh (--json) or text (plain output).
-    Tool calls cyan, tool results dim and truncated, errors red."""
+    Tool calls cyan, tool results dim and truncated, errors red. A runner note shows in every format."""
+    if NOTE_TYPE in line[:40]:
+        with contextlib.suppress(ValueError):
+            ev = json.loads(line)
+            if isinstance(ev, dict) and ev.get("type") == NOTE_TYPE:
+                return [f"{_DIM}[runner] {ev.get('text', '')}{_RESET}"]
     if fmt not in ("claude", "codex", "dsh"):
         return [line] if line.strip() else []
     try:
@@ -421,7 +579,7 @@ def session_id_of(fmt: str, line: str) -> str | None:
 def run_agent(argv: list[str], cwd: str, env: dict, run_id: str, agent: str, timeout: float,
               emit: Callable[[str, dict], None], on_start: Callable[[subprocess.Popen], None] | None = None,
               on_session: Callable[[str], None] | None = None, log_path: Path | None = None,
-              on_stderr: Callable[[bytes], None] | None = None
+              on_stderr: Callable[[bytes], None] | None = None, note: str | None = None
               ) -> tuple[list[str], str, int | None, bool]:
     """Run one agent in its own process group, streaming stdout line by line.
 
@@ -439,11 +597,19 @@ def run_agent(argv: list[str], cwd: str, env: dict, run_id: str, agent: str, tim
     def read_out():
         log = open(log_path, "w", encoding="utf-8") if log_path else contextlib.nullcontext()
         with log as lf:
+            if note:  # first, right after the log is opened (truncated), so it survives into replay (DP-39)
+                with order_lock(run_id):
+                    if lf:
+                        lf.write(note_line(note) + "\n")
+                        lf.flush()
+                    for shown in render_event(agent, note_line(note)):
+                        emit("run_event", {"run_id": run_id, "line": shown, "seq": ring.append(shown)})
             for raw in proc.stdout:
                 line = raw.decode("utf-8", "replace").rstrip("\n")
                 if not line:
                     continue
                 lines.append(line)
+                note_agent_error(run_id, agent, line)
                 sid = on_session and session_id_of(agent, line)
                 if sid:
                     on_session(sid)
@@ -481,7 +647,7 @@ def run_agent(argv: list[str], cwd: str, env: dict, run_id: str, agent: str, tim
 def post_run(project: projects.Project, binding: dict, agent: str, title: str,
              fingerprint_before: str, exclude: set[str], on_start=None,
              stopped: Callable[[], bool] = lambda: False, start_sha: str | None = None) -> dict:
-    """Runner commit (sandboxed Codex, branch checked first), uncommitted check, verify, then
+    """Runner commit of leftover changes (any agent, branch checked first), uncommitted check, verify, then
     binding + seed-history checks after verify (it may run git too), shortstat, and the closing
     fingerprint last, also on failure (I4-05, I5-10/11/14). `on_start` gets the verify process
     so a cancel can kill it; `stopped()` skips verify after a cancel. Returns additive
@@ -491,9 +657,10 @@ def post_run(project: projects.Project, binding: dict, agent: str, title: str,
     seeds, dirty, verify = [], [], None
     changed_nothing = False  # this run (from start_sha) left no commit and no change (§7)
     try:
-        if is_sandboxed_codex(agent, project):
-            result["runner_commit"] = projects.runner_commit(project, wt, f"{binding['issue_identifier']}: {title}"[:200])
         dirty = projects.uncommitted(project, wt)
+        if dirty:  # any agent: leftover work lands on the branch, never stranded in the worktree (AGE-111)
+            result["runner_commit"] = projects.runner_commit(project, wt, f"{binding['issue_identifier']}: {title}"[:200])
+            dirty = projects.uncommitted(project, wt)
         result["uncommitted"] = dirty[:50]
         if start_sha:  # before verify: its own artifacts never count as this run's change (STB-081)
             confine = projects.confine_for(project, wt)

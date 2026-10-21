@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -1451,6 +1452,133 @@ def _fmt(n: int) -> str:
     if n >= 1_000:
         return f"{n/1_000:.1f}K"
     return str(n)
+
+
+# ── Context-window usage of one agent session (card detail ctx%) ─────────────
+
+CTX_TAIL_BYTES = 2_000_000
+CTX_1M = 1_000_000
+_STREAM_MODELS: dict[str, tuple[int, int, str | None]] = {}  # path -> (inode, offset, model)
+_STREAM_MODELS_LOCK = threading.Lock()
+
+
+def _tail_lines(path: Path, limit: int | None = None) -> list[str]:
+    """Lines of the file's last `limit` bytes, newest first; [] when unreadable.
+    ponytail: a fixed tail; usage written further back shows nothing (reverse block reader if needed)."""
+    limit = limit or CTX_TAIL_BYTES
+    try:
+        with open(path, "rb") as f:
+            size = f.seek(0, os.SEEK_END)
+            start = max(0, size - limit - 1)  # one byte early: is the tail's first line whole?
+            f.seek(start)
+            data = f.read()
+    except OSError:
+        return []
+    if start:
+        cut = data.find(b"\n")  # drop everything up to the first newline: a partial line,
+        data = data[cut + 1:] if cut >= 0 else b""  # or just that extra byte when the tail starts a line
+    # physical LF only: str.splitlines would also break JSON strings at U+2028/U+2029/U+0085 (CTX-011)
+    return [ln.decode("utf-8", errors="ignore") for ln in data.split(b"\n") if ln.strip()][::-1]
+
+
+def _tok(*values) -> int | None:
+    """Sum of token counts, None when any is not a non-negative int (missing counts as 0)."""
+    total = 0
+    for v in values:
+        if v is None:
+            continue
+        if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+            return None
+        total += v
+    return total
+
+
+def _ctx_line(agent: str, raw: str) -> tuple[int, int | None] | None:
+    """(used, reported window) from one JSONL line, or None when it carries no usable usage."""
+    try:
+        r = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(r, dict):
+        return None
+    if agent == "codex":
+        p = r.get("payload")
+        info = p.get("info") if isinstance(p, dict) and p.get("type") == "token_count" else None
+        last = info.get("last_token_usage") if isinstance(info, dict) else None
+        if not isinstance(last, dict) or not isinstance(last.get("input_tokens"), int):
+            return None
+        used = _tok(last["input_tokens"])
+        win = info.get("model_context_window")
+        return (used, win if isinstance(win, int) and not isinstance(win, bool) and win > 0 else None) \
+            if used is not None else None
+    if agent == "dsh":
+        u = r.get("usage")
+        if r.get("type") != "status" or r.get("phase") != "step_end" or not isinstance(u, dict) \
+                or not isinstance(u.get("inputTokens"), int):
+            return None
+        used = _tok(u["inputTokens"], u.get("cacheReadTokens"), u.get("cacheWriteTokens"))
+        return (used, CTX_1M) if used is not None else None  # dsh-llm-deepseek DEFAULT_CONTEXT_WINDOW = 1e6
+    m = r.get("message")
+    if r.get("type") != "assistant" or r.get("isSidechain") is True or not isinstance(m, dict) \
+            or m.get("model") == "<synthetic>" or not isinstance(m.get("usage"), dict):
+        return None
+    u = m["usage"]
+    if not isinstance(u.get("input_tokens"), int):
+        return None
+    used = _tok(u["input_tokens"], u.get("cache_read_input_tokens"), u.get("cache_creation_input_tokens"))
+    return (used, None) if used is not None else None
+
+
+def context_usage(agent: str, path: Path | None, model: str | None = None) -> dict | None:
+    """{used, window, pct} from the newest main-thread model call in a session file, or None.
+    used = prompt-side tokens of that call (output excluded, like Claude Code's status line)."""
+    if path is None:
+        return None
+    for raw in _tail_lines(Path(path)):
+        hit = _ctx_line(agent, raw)
+        if hit is None:
+            continue
+        used, window = hit
+        if agent == "claude":
+            window = CTX_1M if (model or "").endswith("[1m]") or used > DEFAULT_CTX else DEFAULT_CTX
+        pct = min(100, round(used * 100 / window)) if window else None
+        out = {"used": used, "window": window, "pct": pct}
+        if agent == "dsh":
+            # dsh's step_end sums every attempt of the step, so a retried attempt that reported
+            # usage counts twice; its stream has no per-call usage (CTX-009). An upper bound.
+            out["approx"] = True
+        return out
+    return None
+
+
+def stream_model(path: Path | None) -> str | None:
+    """Model of the newest stream-json init event in a Claude stream log. Scans only the bytes
+    appended since the last call, so an old init line never falls out of view (D6)."""
+    if path is None:
+        return None
+    key = str(path)
+    with _STREAM_MODELS_LOCK:
+        try:
+            with open(path, "rb") as f:
+                st = os.fstat(f.fileno())
+                inode, offset, model = _STREAM_MODELS.get(key, (st.st_ino, 0, None))
+                if inode != st.st_ino or st.st_size < offset:
+                    offset, model = 0, None
+                f.seek(offset)
+                data = f.read()
+        except OSError:
+            return None
+        end = data.rfind(b"\n") + 1  # only whole lines; a partial last line is read next time
+        for raw in data[:end].split(b"\n"):
+            if b'"subtype":"init"' not in raw and b'"subtype": "init"' not in raw:
+                continue
+            with contextlib.suppress(ValueError):
+                r = json.loads(raw)
+                if isinstance(r, dict) and r.get("type") == "system" and r.get("subtype") == "init" \
+                        and isinstance(r.get("model"), str):
+                    model = r["model"]
+        _STREAM_MODELS[key] = (st.st_ino, offset + end, model)
+        return model
 
 
 def main() -> int:

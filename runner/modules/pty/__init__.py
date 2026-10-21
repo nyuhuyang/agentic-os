@@ -84,6 +84,15 @@ class Terminal:
     card_key: str | None = None    # runner-root card lock held while open (C2)
     finalized: bool = False        # locks released and closure audited (once)
     closing: bool = False          # close_terminal owns the end: the reader leaves finalizing to it
+    reader_done: bool = False      # the reader saw the PTY end (set and read under _finalize_lock)
+    # one cleanup at a time; reentrant so a close holds it across its cleanup *and* its outcome (ICS-40/46)
+    end_lock: threading.RLock = field(default_factory=threading.RLock)
+    superseding: int = 0           # closes for a user action in progress or done (ICS-37/40/45)
+    cleaned: bool = False          # its session's processes were proven gone (set under end_lock, ICS-48)
+
+    @property
+    def superseded(self) -> bool:  # ended for a user action: viewers drop its next-state choice
+        return self.superseding > 0
 
     def info(self) -> dict:
         return {"term_id": self.term_id, "kind": self.kind, "project_key": self.project_key,
@@ -94,6 +103,21 @@ class Terminal:
 
 
 TERMINALS: dict[str, Terminal] = {}
+
+
+def interactive_agents_in(checkout) -> list[str]:
+    """Agent (resume) tabs working inside `checkout` whose processes are not proven gone: a manual
+    merge waits for them (CM-024). Path-based, so every registration of the folder counts."""
+    root = Path(os.path.realpath(str(checkout)))
+    out = []
+    for t in list(TERMINALS.values()):
+        if t.kind != "resume" or (not t.alive and t.cleaned):
+            continue
+        with contextlib.suppress(Exception):
+            if Path(os.path.realpath(t.cwd)).is_relative_to(root):
+                out.append(t.term_id)
+    return out
+_SOCKETIO = None  # set at registration; close_terminal announces the ends it owns
 _registry_lock = threading.Lock()
 
 
@@ -110,10 +134,15 @@ def _finalize(t: Terminal) -> bool:
         t.finalized = True
     t.holds.close()
     if t.kind == "resume" and t.run_id:
-        from app import record_interactive_ended, _inflight_work, MaintenanceRefused
+        from app import record_interactive_ended, _inflight_work, MaintenanceRefused, _after_card_run, _latest_record
         try:
             with _inflight_work():
                 record_interactive_ended(t.run_id, t.session_id)
+                # admitted like the audit: the card's session is named once the terminal's group
+                # is gone (DP-11); under maintenance neither runs (PVST-04)
+                with contextlib.suppress(Exception):
+                    issue_id = (_latest_record(t.run_id) or {}).get("linear_issue_id")
+                    _after_card_run(t.term_id, issue_id, t.agent, t.session_id, t.pid, kind="term")
         except MaintenanceRefused as exc:
             logger.warning("closure of %s not recorded: %s", t.term_id, exc)
         except Exception:
@@ -123,6 +152,26 @@ def _finalize(t: Terminal) -> bool:
 
 def _room(term_id: str) -> str:
     return f"term:{term_id}"
+
+
+def card_terminal(card_key=None, project_key=None, ticket=None, agent=None, session_id=None) -> str | None:
+    """The live dashboard terminal holding a card, by its card key, its (project, ticket), or its
+    session; None when nothing in the dashboard holds it (a headless run or an outside process).
+    A refusal carries this id so the user can end that session and continue."""
+    for t in list(TERMINALS.values()):
+        if t.finalized or not ((t.alive or t.cleanup_failed) and t.pid):  # a failed cleanup still holds its card
+            continue
+        if (card_key and t.card_key == str(card_key)) \
+                or (project_key and ticket and (t.project_key, t.ticket) == (project_key, ticket)) \
+                or (agent and session_id and (t.agent, t.session_id) == (agent, session_id)):
+            return t.term_id
+    return None
+
+
+def card_interactive(body: dict, **keys) -> dict:
+    """`body` plus `code`/`term_id` when a live dashboard terminal holds the card, else unchanged."""
+    term_id = card_terminal(**keys)
+    return {**body, "code": "card_interactive", "term_id": term_id} if term_id else body
 
 
 def live_count() -> int:
@@ -155,11 +204,51 @@ def _append_scrollback(t: Terminal, data: bytes) -> None:
         del t.scrollback[: len(t.scrollback) - SCROLLBACK_BYTES]
 
 
+def _agent_exited(t: Terminal) -> bool:
+    """A card session's agent process has exited (reaped here, exit code kept)."""
+    with contextlib.suppress(ChildProcessError, OSError):
+        pid, status = os.waitpid(t.pid, os.WNOHANG)
+        if pid:
+            t.exit_code = os.waitstatus_to_exitcode(status)
+            return True
+    return False
+
+
+def _drain(t: Terminal, socketio, budget: float = 0.3) -> None:
+    """Forward what is already in the PTY (bounded), e.g. an exiting agent's final output."""
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        try:
+            r, _, _ = select.select([t.fd], [], [], 0.05)
+            if not r:
+                return
+            data = os.read(t.fd, 4096)
+        except (OSError, TypeError, ValueError):
+            return
+        if not data:
+            return
+        with t.lock:
+            _append_scrollback(t, data)
+            socketio.emit("term_output", {"term_id": t.term_id, "data": data.decode("utf-8", "replace")},
+                          to=_room(t.term_id))
+
+
 def _reader(t: Terminal, socketio) -> None:
     """Read the PTY; append + emit under the terminal lock so attach sees each byte once."""
+    # A card's session ends with its agent even if a leftover background process keeps the PTY
+    # open (no EOF): its card must not stay held by a process nobody sees (AC1, ICS-22).
+    card_bound = t.kind == "resume" and bool(t.run_id) and t.pid is not None
+    agent_gone, next_check = False, 0.0
     while True:
         try:
             r, _, _ = select.select([t.fd], [], [], 0.2)
+            # checked on a schedule, busy PTY or not: a chatty leftover cannot hide the exit (ICS-24)
+            if card_bound and not t.closing and time.monotonic() >= next_check:
+                next_check = time.monotonic() + 0.5
+                if _agent_exited(t):
+                    agent_gone = True
+                    _drain(t, socketio)  # the agent's last words still reach the view
+                    break
             if not r:
                 if t.fd is None:
                     break
@@ -173,16 +262,54 @@ def _reader(t: Terminal, socketio) -> None:
             _append_scrollback(t, data)
             socketio.emit("term_output", {"term_id": t.term_id, "data": data.decode("utf-8", "replace")},
                           to=_room(t.term_id))
-    with t.lock:
+    # Who ends the terminal is decided once, here, under the lock close_terminal takes: while a close
+    # is in progress it owns the end entirely — on success it marks it dead, finalizes and says so;
+    # on a failed cleanup the terminal stays live, held and retryable. A reader that yields never takes
+    # the end back later; a reader that owns it finalizes only after its own cleanup (ICS-31..34).
+    with _finalize_lock:
+        t.reader_done = True
+        own = not t.closing
+    if not own:
+        return
+    if card_bound:
+        # However the PTY ended (agent exit seen, EOF or EIO), a card session's leftovers in its
+        # session go with it, as on End session; EOF alone never proves they are gone (ICS-27).
+        if not agent_gone:
+            _agent_exited(t)  # keep its exit code before the cleanup reaps it
+        try:
+            with t.end_lock:  # a close waiting on it reuses this result instead of repeating it (ICS-48)
+                _kill_session(t)
+                t.cleaned = True
+            t.cleanup_failed = False  # proven gone now, whatever an earlier attempt said (ICS-35)
+        except Exception as exc:
+            # Not proven gone: the terminal stays live, flagged, holding its card, so End session can
+            # retry the cleanup; nothing else may start in that checkout meanwhile (ICS-25).
+            t.cleanup_failed = True
+            logger.error("terminal %s: leftover processes after the agent exited, cleanup failed: %s", t.term_id, exc)
+            with contextlib.suppress(Exception):
+                socketio.emit("term_output", {"term_id": t.term_id, "data": "\r\n[agent exited; leftover processes could "
+                              "not be ended — use End session to retry]\r\n"}, to=_room(t.term_id))
+            return
+    from app import _JOB_LOCK, _mark_closing
+    # The closing marker first, then the terminal stops counting as live, at the boundary the
+    # rename check snapshots under (R10-02). ponytail: the shell's own group stands for the
+    # terminal's session; a child that moved to another group outlives the check.
+    with _JOB_LOCK:
+        if t.kind == "resume" and t.session_id:
+            _mark_closing(t.agent, t.session_id, t.pid)
         t.alive = False
+    with t.lock:
         if t.pid:
             with contextlib.suppress(ChildProcessError, OSError):
                 pid, status = os.waitpid(t.pid, os.WNOHANG)
                 if pid:
                     t.exit_code = os.waitstatus_to_exitcode(status)
-    if t.kind == "resume" and not t.closing:  # exited by itself: free its card before the next-state choice
+    if t.kind == "resume":  # exited by itself: free its card before the next-state choice
         _finalize(t)
-    socketio.emit("term_exit", {"term_id": t.term_id, "exit_code": t.exit_code}, to=_room(t.term_id))
+    # read after the cleanup: a close for an action that arrived meanwhile has marked it superseded
+    _remember_end(t)
+    socketio.emit("term_exit", {"term_id": t.term_id, "exit_code": t.exit_code, "superseded": t.superseded},
+                  to=_room(t.term_id))
 
 
 def _session_pgids(sid: int) -> set[int]:
@@ -205,7 +332,14 @@ def _session_pgids(sid: int) -> set[int]:
 
 
 def _kill_session(t: Terminal) -> None:
-    """SIGHUP, then SIGTERM, then SIGKILL every group in the shell's session; reap; close."""
+    """SIGHUP, then SIGTERM, then SIGKILL every group in the shell's session; reap; close.
+    Serialized per terminal: a reader's and a close's cleanup never overlap, and the descriptor is
+    closed once (ICS-40)."""
+    with t.end_lock:
+        _kill_session_locked(t)
+
+
+def _kill_session_locked(t: Terminal) -> None:
     if t.pid is not None:
         for sig, grace in ((signal.SIGHUP, 0.5), (signal.SIGTERM, 2.0), (signal.SIGKILL, 0.5)):
             groups = _session_pgids(t.pid)  # pty.fork made the shell a session leader: sid == pid
@@ -226,26 +360,62 @@ def _kill_session(t: Terminal) -> None:
     t.alive = False
 
 
-def close_terminal(term_id: str) -> dict:
+# Recently ended terminals (bounded): a close that finds one gone says how it ended, so a viewer that
+# missed the exit event never offers a choice its end made obsolete (ICS-41).
+ENDED: dict[str, dict] = {}
+_ENDED_MAX = 200
+
+
+def _remember_end(t: Terminal) -> None:
+    ENDED[t.term_id] = {"run_id": t.run_id if t.kind == "resume" else None, "superseded": t.superseded}
+    while len(ENDED) > _ENDED_MAX:
+        ENDED.pop(next(iter(ENDED)))
+
+
+def close_terminal(term_id: str, superseded: bool = False) -> dict:
+    """End a terminal. `superseded`: ended for an action the user is taking (retry, move…), so every
+    viewer's next-state choice for it is obsolete (ICS-37)."""
     t = TERMINALS.get(term_id)
     if t is None:
-        return {"error": "unknown terminal"}
+        return {"error": "unknown terminal", **({"ended": ENDED[term_id]} if term_id in ENDED else {})}
+    if superseded:  # per request, before any cleanup: whoever finishes it announces it superseded
+        with _finalize_lock:
+            t.superseding += 1
     # Who prompts is decided by who closed a live session, not by who won _finalize: killing the
     # shell also wakes the reader, which would otherwise finalize first (FB2-01).
     with _finalize_lock:
         prompt = t.alive and not t.finalized
         t.closing = True
-    try:
-        _kill_session(t)
-    except Exception as exc:  # enumeration failed: keep the tab, flagged, so nothing is lost silently
-        t.cleanup_failed = True
-        logger.error("terminal %s cleanup failed: %s", term_id, exc)
-        return {"error": f"cleanup failed: {exc}", **t.info()}
+    # The cleanup and its outcome (a failed request withdrawing its intent) happen under the terminal's
+    # end lock, so a concurrent close waiting on it publishes only after that outcome (ICS-46).
+    with t.end_lock:
+        try:
+            if not t.cleaned:  # already proven gone (the reader's cleanup): reuse it, do not repeat (ICS-48)
+                _kill_session(t)
+                t.cleaned = True
+            t.cleanup_failed = False
+        except Exception as exc:  # enumeration failed: keep the tab, flagged, so nothing is lost silently
+            t.cleanup_failed = True
+            logger.error("terminal %s cleanup failed: %s", term_id, exc)
+            # Not proven gone: ownership stays (locks held, terminal registered, flagged and still matched
+            # by card_terminal), so End session can retry; a reader that has not ended yet takes the end
+            # over again, and finalizes only after its own cleanup succeeds (ICS-29).
+            with _finalize_lock:
+                t.closing = False
+                if superseded:  # this request did not end it: only its own intent is withdrawn (ICS-43/45)
+                    t.superseding -= 1
+            return {"error": f"cleanup failed: {exc}", **t.info()}
     _finalize(t)  # releases its locks; a card session's end is audited once, from any entry point
     with _registry_lock:
         TERMINALS.pop(term_id, None)
+    _remember_end(t)
+    if _SOCKETIO is not None:  # other viewers of it learn it ended (the reader leaves that to the close)
+        with contextlib.suppress(Exception):
+            _SOCKETIO.emit("term_exit", {"term_id": term_id, "exit_code": t.exit_code, "superseded": t.superseded},
+                           to=_room(term_id))
     # run_id only when this close ended a live session: an already-exited one was offered its choice (FB-05)
-    return {"ok": True, "term_id": term_id, "run_id": t.run_id if t.kind == "resume" and prompt else None}
+    return {"ok": True, "term_id": term_id, "run_id": t.run_id if t.kind == "resume" and prompt else None,
+            "superseded": t.superseded}  # ended for someone's action: no viewer offers its choice (ICS-44)
 
 
 def close_all() -> None:
@@ -291,7 +461,8 @@ def interactive_resume_argv(agent: str, session_id: str, project) -> list[str] |
     if agent == "dsh":
         return None  # dsh has no interactive TUI
     if project is None:  # runner-root session: no project policy applies
-        return ["claude", "--resume", session_id] if agent == "claude" else ["codex", "resume", session_id]
+        return (["claude", *project_runs.CLAUDE_SETTINGS, "--resume", session_id] if agent == "claude"
+                else ["codex", "resume", session_id])
     try:
         cli = project_runs.agent_cli(agent, project, "claude", lambda: [])
     except project_runs.ProjectRunError:
@@ -453,11 +624,20 @@ def open_terminal(data: dict, socketio) -> dict:
             if data.get("cwd") and not data.get("session_card") and (not t.ticket or Path(os.path.realpath(
                     str(data["cwd"]))).is_relative_to(Path(os.path.realpath(t.cwd)))):
                 t.cwd = str(data["cwd"])
-            argv = [argv[0], "-l", "-c", shlex.join(resume) + f"; exec {shlex.quote(argv[0])} -l"]
+            # A card's session ends with its agent, so the card's lock goes with it (no shell is
+            # left holding it); an unbound resume keeps a shell in its folder afterwards.
+            tail = "" if rec is not None else f"; exec {shlex.quote(argv[0])} -l"
+            argv = [argv[0], "-l", "-c", shlex.join(resume) + tail]
         short = (t.ticket or Path(t.cwd).name)[:16]
         t.label = f"{key or 'runner'} · {kind} · {short}"
-        _spawn(t, argv, _shell_env(project), cols, rows, socketio)
-        TERMINALS[t.term_id] = t
+        # An agent tab starts and registers under its checkout's merge gate: never between a manual
+        # merge's activity check and its merge (CM-024). Lock order: card/ticket -> gate.
+        from app import _checkout_gate
+        # gated by the folder it actually runs in, not by the key it was opened under (CM-028)
+        gate = _checkout_gate(t.cwd) if kind == "resume" else contextlib.nullcontext()
+        with gate:
+            _spawn(t, argv, _shell_env(project), cols, rows, socketio)
+            TERMINALS[t.term_id] = t
     except Exception as exc:
         t.holds.close()
         return {"error": str(exc)}
@@ -543,7 +723,9 @@ class PTYModule(AgenticModule):
         return {"available": True, "reason": "", "terminal": True}
 
     def register_socketio(self, socketio) -> None:
+        global _SOCKETIO
         _ensure_imports()
+        _SOCKETIO = socketio
         from flask_socketio import join_room
 
         @socketio.on("term_list")
@@ -597,7 +779,7 @@ class PTYModule(AgenticModule):
 
         @socketio.on("term_close")
         def term_close(data):
-            return close_terminal((data or {}).get("term_id"))
+            return close_terminal((data or {}).get("term_id"), superseded=bool((data or {}).get("superseded")))
 
         @socketio.on("term_show")
         def term_show(data):

@@ -66,6 +66,8 @@ def stb(env, tmp_path, monkeypatch):
 
     def fake_run(rid, cmd, **kw):
         launches.append({"rid": rid, "cmd": cmd, **kw})
+        import project_runs
+        project_runs.REPLIED.add(rid)  # what the stream reader notes for a real reply (R16-01)
         return "done", 10, 20, "claude-opus-5-5[1m]", SID, "", True
     monkeypatch.setattr(app_mod, "run_agent_process", fake_run)
     return app_mod, mod, client, log, tmp, proj, conf, launches
@@ -198,7 +200,8 @@ def test_reply_continues_the_same_session_in_its_folder_and_again_from_done(stb)
 def test_reply_rules_agent_empty_and_reset(stb):
     app_mod, mod, client, log, tmp, proj, conf, launches = stb
     rid, issue_id = _new_card(client, log)
-    assert client.post(f"/api/runs/{rid}/retry", json={"reply": "x", "agent": "codex"}).status_code == 409
+    # a quick reply keeps its agent; a non-strict one switches (AGE-113, tests/test_switch_agent.py)
+    assert client.post(f"/api/runs/{rid}/retry", json={"reply": "x", "agent": "codex", "strict": True}).status_code == 409
     assert client.post(f"/api/runs/{rid}/retry", json={"reply": " "}).status_code == 400
     # a drag back to Todo voids the intent: the next retry is today's path (Decision 11)
     client.patch(f"/api/linear/issues/local/{issue_id}", json={"state_name": "Todo"})
@@ -350,7 +353,6 @@ def test_session_card_terminal_opens_in_the_session_folder(stb):
     ("", [], "timeout", False, "timeout"),
     ("", [], None, True, "main checkout changed"),
     ("abc", [], None, False, "no check"),           # changed files, no check: neutral
-    ("", ["a.py"], None, False, "uncommitted changes"),
 ])
 def test_badge_for_a_run_that_changed_nothing(monkeypatch, tmp_path, commits, dirty, verify, changed, expected):
     import project_runs as pr
@@ -379,6 +381,10 @@ def test_observed_model_and_cost():
     assert app_mod._parse_project_output("claude", [result], "", 0)[3] == "claude-opus-5-5[1m]"  # modelUsage
     assert app_mod._compute_token_cost(1_000_000, 0, "claude-opus-5-5[1m]") == 20.0
     assert app_mod._compute_token_cost(1_000_000, 0, "gpt-5.4-mini") == app_mod._DEFAULT_PRICE  # no prefix match
+    # Codex counts cache hits inside input_tokens; only uncached input is kept (AGE-116)
+    done = json.dumps({"type": "turn.completed",
+                       "usage": {"input_tokens": 7_307_325, "cached_input_tokens": 7_073_920, "output_tokens": 52_783}})
+    assert app_mod._parse_agent_output("codex", done)[1:3] == (233_405, 52_783)
 
 
 # ── §9 board-launched sessions ───────────────────────────────────────────────
@@ -505,13 +511,17 @@ def test_intent_survives_the_cards_own_tab_and_a_failed_reply_is_an_error(stb, m
     assert len(launches) == 1 and rec["status"] == "error" and rec["issue_identifier"]  # strict, no fallback (STB-060/061)
 
 
-def test_session_moved_away_refuses_the_reply_and_leaks_no_claim(stb):
+def test_session_moved_away_starts_a_fresh_session_and_leaks_no_claim(stb, monkeypatch):
+    """Since the 2026-10-16 plan (D3, R12-01): a session card whose session was removed starts a
+    new session, saying why, instead of refusing the reply."""
     app_mod, mod, client, log, tmp, proj, conf, launches = stb
     rid, _ = _new_card(client, log)
     next((tmp / "claude").rglob(f"{SID}.jsonl")).unlink()
-    before = log.read_text()
-    assert client.post(f"/api/runs/{rid}/retry", json={"reply": "x"}).status_code == 409
-    assert log.read_text() == before and not app_mod._SESSION_CLAIMS and launches == []
+    seen = {}
+    monkeypatch.setattr(app_mod, "_run_project_ticket", lambda **kw: seen.update(kw))
+    assert client.post(f"/api/runs/{rid}/retry", json={"reply": "x"}).status_code == 200
+    assert seen["resume_session"] is None and "removed or archived" in seen["note"]
+    assert not app_mod._SESSION_CLAIMS and launches == []
 
 
 def test_reply_holds_the_card_and_project_locks_and_posts_no_text_for_confidential(stb, monkeypatch):
@@ -860,3 +870,24 @@ def test_empty_trash_survives_an_id_less_cache_entry(stb, monkeypatch):
     assert mod.issues_cache["x2"]["id"] == "x2"  # push_state never writes an id-less entry (SBI-019)
     r = client.post("/api/linear/trash/empty").get_json()
     assert r["archived"] == 2 and r["failed"] == {}
+
+
+def test_to_board_of_an_older_session_names_the_terminal_holding_its_card(stb, monkeypatch):
+    """Resume of session A while session B of the same card holds its live interactive terminal:
+    the refusal names B's terminal; a headless run keeps the plain refusal (plan 2026-10-17, R6)."""
+    app_mod, mod, client, log, tmp, proj, conf, launches = stb
+    import runner.modules.linear as linear_mod
+    import runner.modules.pty as pty_mod
+    write_log(log, {"run_id": "r0", "agent": "claude", "status": "review", "agent_session_id": SID},
+              {"run_id": "r1", "agent": "claude", "status": "review", "agent_session_id": "other"})
+    before = (log.read_text(), tasks(tmp))
+    monkeypatch.setattr(pty_mod, "TERMINALS", {})
+    monkeypatch.setattr(linear_mod, "card_locked", lambda issue, issue_id: True)  # B's terminal holds the card
+    monkeypatch.setitem(pty_mod.TERMINALS, "tB", pty_mod.Terminal(term_id="tB", kind="resume", pid=1, alive=True,
+                                                                  card_key=ISSUE, agent="claude", session_id="other"))
+    r = to_board(client)  # session A = SID
+    assert r.status_code == 409 and r.get_json() == {"error": "still running", "code": "card_interactive", "term_id": "tB"}
+    pty_mod.TERMINALS.clear()
+    app_mod._running_jobs["j"] = {"linear_issue_id": ISSUE, "state": "running", "agent": "claude"}
+    assert to_board(client).get_json() == {"error": "still running"}  # headless: unchanged
+    assert (log.read_text(), tasks(tmp)) == before

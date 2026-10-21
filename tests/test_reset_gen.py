@@ -1,4 +1,5 @@
-"""Decision 11 / DSH-30: a tracker reset starts the next retry fresh, and older runs never move the ticket."""
+"""Decision 11 / DSH-30: older runs never move the ticket after a reset; since the 2026-10-16 plan (D3)
+a reset no longer starts a claude/codex card fresh: the card keeps its own session."""
 
 import json
 import sys
@@ -111,19 +112,51 @@ def reset_route(client):
     assert r.status_code == 200
 
 
+def on_disk(app_mod, agent, sid):
+    """The session in the agent's (tmp, conftest) store, in the generic launch folder: resumable."""
+    import os, sqlite3
+    import projects as pj
+    if agent == "claude":
+        d = pj.CLAUDE_PROJECTS / pj._slug(str(app_mod.ROOT))
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / f"{sid}.jsonl"
+        f.write_text(json.dumps({"type": "user", "cwd": str(app_mod.ROOT), "message": {"content": "x"}}) + "\n")
+        os.utime(f, (time.time() - 600, time.time() - 600))
+    elif agent == "codex":
+        pj.CODEX_DB.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(pj.CODEX_DB)
+        db.execute("CREATE TABLE IF NOT EXISTS threads (id TEXT, cwd TEXT, name TEXT, title TEXT, first_user_message TEXT, "
+                   "updated_at INTEGER, tokens_used INTEGER, git_branch TEXT, source TEXT, archived INTEGER, "
+                   "archived_at INTEGER, rollout_path TEXT)")
+        rollout = pj.CODEX_DB.parent / f"rollout-{sid}.jsonl"
+        rollout.write_text("{}\n")
+        os.utime(rollout, (time.time() - 600, time.time() - 600))
+        db.execute("INSERT INTO threads VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                   (sid, str(app_mod.ROOT), None, "t", "f", 1, 0, "main", "exec", 0, None, str(rollout)))
+        db.commit()
+        db.close()
+
+
 def resumed(cmd):
-    return any(flag in cmd for flag in ("--resume", "--session-id")) or (len(cmd) > 3 and "resume" in cmd[:4])
+    return any(flag in cmd for flag in ("--resume", "--session-id")) or "resume" in cmd[:6]  # codex exec … resume <id>
 
 
 @pytest.mark.parametrize("agent", ["claude", "codex", "dsh"])
-def test_tracker_reset_route_then_retry_starts_fresh(env, monkeypatch, agent):
+def test_tracker_reset_route_then_retry_continues_the_card_session(env, monkeypatch, agent):
+    """One task, one session (D3): a reset no longer starts fresh for claude/codex; dsh still does."""
     app_mod, mod, client, log, events, _ = env
+    monkeypatch.setattr(app_mod, "_process_table", lambda: {})
+    on_disk(app_mod, agent, SID)
     write_log(log, {"run_id": "a", "agent": agent, "status": "review", "agent_session_id": SID})
-    assert app_mod._get_task_agent_lock("T")["agent_session_id"] == SID  # before: would resume
+    assert app_mod._get_task_agent_lock("T")["agent_session_id"] == SID
     reset_route(client)
+    assert app_mod._get_task_agent_lock("T") is None  # the lock still clears (Decision 11) ...
     cmds = capture_launches(app_mod, monkeypatch)
     client.post("/api/runs/a/retry", json={})
-    assert cmds and not resumed(cmds[0]) and SID not in cmds[0]
+    if agent == "dsh":
+        assert cmds and not resumed(cmds[0]) and SID not in cmds[0]
+    else:  # ... but the card's own session continues
+        assert cmds and resumed(cmds[0]) and SID in cmds[0]
 
 
 def test_agent_change_honored_after_reset(env, monkeypatch):
@@ -148,15 +181,19 @@ def test_old_run_completing_after_reset_neither_resumes_nor_moves_ticket(env, mo
     tasks = json.loads((tmp / "tasks.json").read_text())
     assert tasks[ISSUE]["state"] == "Todo"  # the old run's completion did not push In Review
     assert not [e for e in events if e[0] == "run_state_change" and e[1].get("state") == "review"]
-    # ... and its session id is never resumed
+    # ... its lock is void, but the card's newest session continues (D3)
     assert app_mod._get_task_agent_lock("T") is None
+    monkeypatch.setattr(app_mod, "_process_table", lambda: {})
+    on_disk(app_mod, "codex", "session-new")
     cmds = capture_launches(app_mod, monkeypatch)
     client.post("/api/runs/a/retry", json={})
-    assert not resumed(cmds[0]) and "session-new" not in cmds[0]
+    assert resumed(cmds[0]) and "session-new" in cmds[0]
 
 
-def test_restored_pre_reset_run_is_not_resumed(env, monkeypatch):
+def test_restored_pre_reset_run_continues_the_card_session(env, monkeypatch):
     app_mod, mod, client, log, events, _ = env
+    monkeypatch.setattr(app_mod, "_process_table", lambda: {})
+    on_disk(app_mod, "claude", SID)
     write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
     reset_route(client)
     write_log(log, {"run_id": "a", "agent": "claude", "status": "archived", "prev_status": "review",
@@ -164,18 +201,21 @@ def test_restored_pre_reset_run_is_not_resumed(env, monkeypatch):
     assert client.post("/api/runs/a/restore").status_code == 200
     cmds = capture_launches(app_mod, monkeypatch)
     client.post("/api/runs/a/retry", json={})
-    assert not resumed(cmds[0])
+    assert resumed(cmds[0]) and SID in cmds[0]  # one task, one session (D3)
 
 
-def test_reset_then_fresh_launch_failing_before_session_then_retry_still_fresh(env, monkeypatch):
+def test_reset_then_fresh_launch_failing_before_session_then_retry_continues(env, monkeypatch):
+    """A lock with no session id still consults the card's own session (DP-40)."""
     app_mod, mod, client, log, events, _ = env
+    monkeypatch.setattr(app_mod, "_process_table", lambda: {})
+    on_disk(app_mod, "claude", SID)
     write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID})
     reset_route(client)
     import reset_gen
     write_log(log, {"run_id": "b", "agent": "claude", "status": "error", "reset_gen": reset_gen.current(ISSUE)})
     cmds = capture_launches(app_mod, monkeypatch)
     client.post("/api/runs/b/retry", json={})
-    assert not resumed(cmds[0])
+    assert resumed(cmds[0]) and SID in cmds[0]
 
 
 def test_in_flight_push_racing_a_reset_loses(env, monkeypatch):
