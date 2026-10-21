@@ -211,7 +211,7 @@ def test_route_holds_the_lifecycle_lock(repo, tmp_path, monkeypatch):
                                             "message": {"role": "user", "content": "hi"}}) + "\n")
     seen = {}
 
-    def fake_commit(p, cwd, message, dry_run=False):
+    def fake_commit(p, cwd, message, dry_run=False, merger=None):
         try:
             with pj.project_lock("alpha", exclusive=True, blocking=False):
                 seen["locked"] = False
@@ -309,3 +309,52 @@ def test_api_projects_rows_carry_commit_state(repo, tmp_path, monkeypatch):
     r = app_mod.app.test_client().get("/api/projects", headers={"X-AgenticOS-Token": app_mod.REQUEST_TOKEN})
     rows = next(p for p in r.get_json()["projects"] if p["key"] == "alpha")["sessions"]
     assert {s["commit_state"]["state"] for s in rows} == {"dirty"} and len(calls) == 1
+
+
+# ── Commit & merge from a worktree row ───────────────────────────────────────
+
+def _wt(project):
+    with pj.ticket_lock(project.key, "T-1"):
+        return Path(pj.create_worktree(project, "T-1")["worktree"])
+
+
+def test_worktree_commit_then_merge_into_main(repo):
+    project, root = repo
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    pre = pj.commit_checkout(project, wt, dry_run=True)
+    assert (pre["into"], pre["ahead"], pre["files"]) == ("main", 1, ["w.txt"])
+    out = pj.commit_checkout(project, wt, "agent work", merger=lambda ident: pj.merge_into_checkout(project, ident))
+    assert out["committed"] and out["merged_head"] and (root / "w.txt").read_text() == "w\n"
+    assert pj.commit_state(project, wt)["state"] == "clean"
+
+
+def test_clean_worktree_ahead_merges_without_a_message(repo):
+    project, root = repo
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    pj.commit_checkout(project, wt, "committed earlier")
+    out = pj.commit_checkout(project, wt, "", merger=lambda ident: pj.merge_into_checkout(project, ident))
+    assert out["committed"] is None and out["merged_head"] and (root / "w.txt").exists()
+
+
+def test_merge_refusal_keeps_the_commit(repo, monkeypatch):
+    project, root = repo
+    import app as app_mod
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    monkeypatch.setattr(app_mod, "_running_jobs", {"other": {"project_key": "alpha"}})  # another run is open
+    out = pj.commit_checkout(project, wt, "keep me", merger=lambda ident: app_mod._manual_merge(project, ident))
+    assert out["committed"] and "another run" in out["merge_error"] and not (root / "w.txt").exists()
+    assert git(wt, "log", "-1", "--format=%s") == "keep me"
+
+
+def test_manual_merge_merges_when_no_run_is_open(repo, monkeypatch):
+    project, root = repo
+    import app as app_mod
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    monkeypatch.setattr(app_mod, "_running_jobs", {})
+    monkeypatch.setattr(app_mod, "_ticket_confidential", lambda *a: False)
+    out = pj.commit_checkout(project, wt, "m", merger=lambda ident: app_mod._manual_merge(project, ident))
+    assert out["merged_head"] and (root / "w.txt").exists()

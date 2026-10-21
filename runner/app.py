@@ -4780,6 +4780,19 @@ def _rename_card_session(key: str, agent: str, sid: str, issue_id: str, title: o
                     "pending": (canonical_agent(agent) or agent, sid) in busy})
 
 
+def _manual_merge(project, ident: str) -> str:
+    """Commit & merge from a session row: agent/<ident> into the main checkout, under the same
+    rules as the auto-merge (conflict-free only, the ticket's own policy) and its project gate.
+    Refused while another run of the project is open: a merge now would read as that run
+    changing the main checkout. Caller holds the ticket lock."""
+    with _merge_gate(project.key):
+        with _JOB_LOCK:
+            opened = _project_runs_open(project.key, None)
+        if opened:
+            raise _projects.ProjectError("another run of this project is in progress; merge after it finishes")
+        return _projects.merge_into_checkout(_effective_project(project, ident), ident)
+
+
 def _with_commit_state(project, sessions: list[dict]) -> list[dict]:
     """Each row's Commit colour: one read-only status per checkout, shared by its sessions."""
     seen: dict = {}
@@ -4805,7 +4818,8 @@ def api_session_commit(key: str, agent: str, sid: str):
             target = _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])
             # commit_checkout always runs git sandboxed, so no policy snapshot can go stale (SC-001/006)
             result = _projects.commit_checkout(project, target["cwd"], body.get("message"),
-                                               dry_run=bool(body.get("dry_run")))
+                                               dry_run=bool(body.get("dry_run")),
+                                               merger=lambda ident: _manual_merge(project, ident))
     except _projects.SessionNotFound as exc:
         return jsonify({"error": str(exc)}), 404
     except (_projects.TicketLocked, _projects.ProjectBusy) as exc:

@@ -1183,8 +1183,8 @@ function _commitClass(c) {
 function _commitTitle(c) {
   const base = 'Commit every change in this session\'s folder (local only, never pushed)';
   if (!c) return base;
-  if (c.state === 'dirty') return `${c.files} uncommitted file${c.files === 1 ? '' : 's'} · ${base}`;
-  if (c.state === 'unmerged') return `Nothing to commit; ${c.ahead} commit${c.ahead === 1 ? '' : 's'} not yet merged into main`;
+  if (c.state === 'dirty') return `${c.files} uncommitted file${c.files === 1 ? '' : 's'} · ${base}; a worktree's branch is then merged into main`;
+  if (c.state === 'unmerged') return `${c.ahead} commit${c.ahead === 1 ? '' : 's'} not yet merged into main: click to merge`;
   return 'Nothing to commit; already merged into main';
 }
 function _sessionRow(key, s) {
@@ -1210,14 +1210,18 @@ function _sessionRow(key, s) {
     if (!p) {
       title = `<span class="session-title">${ed.error ? '' : 'Checking for changes…'}</span>`;
       actions = `<button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
-    } else if (!p.files.length) {
-      title = `<span class="session-title">Nothing to commit in ${_esc(p.repo)} (${_esc(p.branch)}).</span>`;
+    } else if (!p.files.length && !p.ahead) {
+      title = `<span class="session-title">Nothing to commit in ${_esc(p.repo)} (${_esc(p.branch)})${p.into ? `; already merged into ${_esc(p.into)}` : ''}.</span>`;
       actions = `<button class="session-copy" data-saction="cancel" ${ids}>Close</button>`;
+    } else if (!p.files.length) {  // a clean worktree whose branch main lacks: merge only
+      title = `<span class="session-title">${_esc(p.branch)} has ${p.ahead} commit${p.ahead === 1 ? '' : 's'} not in the main checkout${p.into ? ` (${_esc(p.into)})` : ''}. Merge ${p.ahead === 1 ? 'it' : 'them'} now? Conflict-free merges only.</span>`;
+      actions = `<button class="session-copy commit-todo" data-saction="docommit" ${ids}>Merge</button><button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
     } else {
+      const merge = p.into !== undefined && p.ahead ? `, then merge into ${_esc(p.into || 'the main checkout')}` : '';
       title = `<input class="session-rename" data-commit="1" ${ids} value="${_esc(s.card_title || s.title)}" maxlength="500" style="flex:1;font:inherit"
         title="Commit message" placeholder="Commit message">
-        <span class="session-meta" title="${_esc(p.files.join('\n'))}">all ${p.files.length} changed file${p.files.length === 1 ? '' : 's'} in ${_esc(p.repo.split('/').pop())} · ${_esc(p.branch)}</span>`;
-      actions = `<button class="session-copy" data-saction="docommit" ${ids}>Commit</button><button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
+        <span class="session-meta" title="${_esc(p.files.join('\n'))}">all ${p.files.length} changed file${p.files.length === 1 ? '' : 's'} in ${_esc(p.repo.split('/').pop())} · ${_esc(p.branch)}${merge}</span>`;
+      actions = `<button class="session-copy commit-todo" data-saction="docommit" ${ids}>${merge ? 'Commit &amp; merge' : 'Commit'}</button><button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
     }
   } else if (ed && ed.mode === 'remove') {
     const where = s.agent === 'codex' ? "it is archived the way Codex archives (its rollout moves to ~/.codex/archived_sessions); restore with Codex's unarchive"
@@ -1267,7 +1271,11 @@ async function _sessionSubmit(el, mode) {
     return;
   }
   if (mode === 'commit') {
-    const note = r.data.committed ? `committed ${r.data.committed.slice(0, 7)} (${r.data.files.length} file${r.data.files.length === 1 ? '' : 's'})` : 'nothing to commit';
+    const parts = [];
+    if (r.data.committed) parts.push(`committed ${r.data.committed.slice(0, 7)} (${r.data.files.length} file${r.data.files.length === 1 ? '' : 's'})`);
+    if (r.data.merged_head) parts.push(`merged into ${r.data.into || 'the main checkout'} (${r.data.merged_head.slice(0, 7)})`);
+    if (r.data.merge_error) parts.push(`not merged: ${r.data.merge_error}`);
+    const note = parts.join(' · ') || 'nothing to commit';
     _sessionEdit = { key, agent: sagent, id: sid, mode: 'note', error: note };
     loadProjects(); return;
   }

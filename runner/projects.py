@@ -1189,10 +1189,7 @@ def commit_state(project: Project, cwd: str | Path) -> dict | None:
     files = len(readonly_status(repo))  # write-nothing sandbox: status can run clean filters (SC-011)
     if files:
         return {"state": "dirty", "files": files, "ahead": 0}
-    ahead = 0
-    if ident:
-        r = _git(project.path, "rev-list", "--count", f"HEAD..refs/heads/agent/{ident}", check=False)
-        ahead = int(r.stdout.strip() or 0) if r.returncode == 0 else 0
+    ahead = _ahead(project, ident) if ident else 0
     return {"state": "unmerged" if ahead else "clean", "files": 0, "ahead": ahead}
 
 
@@ -1228,10 +1225,13 @@ def merge_into_checkout(project: Project, ident: str, rev: str | None = None) ->
         return _git(root, "rev-parse", "HEAD", confine=confine).stdout.strip()
 
 
-def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry_run: bool = False) -> dict:
+def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry_run: bool = False,
+                    merger=None) -> dict:
     """The user's manual Commit on a session row: stage every change in the session's checkout
     (the project's folder or one of its AgenticOS worktrees) and commit it locally. Never pushes.
-    A dry run only reports {repo, branch, files}. Hooks off and unsigned, like runner_commit."""
+    In a worktree, `merger(ident)` then merges agent/<ident> into the main checkout, still under
+    the ticket lock so the branch cannot move in between; its refusal never undoes the commit.
+    A dry run only reports {repo, branch, files, ahead, into}. Hooks off and unsigned."""
     top = _git(Path(cwd), "rev-parse", "--show-toplevel", check=False)
     if top.returncode:
         raise ProjectError(f"{cwd} is not inside a git checkout")
@@ -1240,8 +1240,6 @@ def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry
     if repo != project.path.resolve():
         ident = ticket_from_worktree(project, repo)  # refuses anything else (a nested or foreign repo)
     msg = message.strip() if isinstance(message, str) else ""
-    if not dry_run and not msg:
-        raise ProjectError("a commit message is required")
     # Always sandboxed, whatever the policy says: staging can run repo-configured clean filters,
     # and a policy read before the ticket lock could be stale by the time git runs (SC-006).
     common = _git(project.path, "rev-parse", "--git-common-dir").stdout.strip()
@@ -1260,15 +1258,34 @@ def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry
             raise ProjectError(f"{repo} has {busy} in progress; finish or abort it by hand first")
         branch = _git(repo, "symbolic-ref", "--short", "HEAD", confine=confine).stdout.strip()
         files = readonly_status(repo)  # preview and count: nothing writable (SC-011)
-        out = {"repo": str(repo), "branch": branch, "files": files}
-        if dry_run or not files:
-            return {**out, "committed": None}
-        _git(repo, "add", "-A", confine=confine, timeout=COMMIT_TIMEOUT_S)
-        if _git(repo, "diff", "--cached", "--quiet", "--no-ext-diff", check=False, confine=confine).returncode == 0:
-            return {**out, "committed": None}
-        _git(repo, "commit", "--no-verify", "--no-gpg-sign", "-q", "-m", msg, confine=confine,
-             timeout=COMMIT_TIMEOUT_S, env=_identity_env(repo))
-        return {**out, "committed": _git(repo, "rev-parse", "HEAD", confine=confine).stdout.strip()}
+        into = None
+        if ident:
+            r = _git(project.path, "symbolic-ref", "-q", "--short", "HEAD", check=False)
+            into = r.stdout.strip() if r.returncode == 0 else None  # the main checkout's branch
+        out = {"repo": str(repo), "branch": branch, "files": files, "into": into,
+               "ahead": _ahead(project, ident) + (1 if files else 0) if ident else 0, "committed": None}
+        if dry_run:
+            return out
+        if files:
+            if not msg:
+                raise ProjectError("a commit message is required")
+            _git(repo, "add", "-A", confine=confine, timeout=COMMIT_TIMEOUT_S)
+            if _git(repo, "diff", "--cached", "--quiet", "--no-ext-diff", check=False, confine=confine).returncode:
+                _git(repo, "commit", "--no-verify", "--no-gpg-sign", "-q", "-m", msg, confine=confine,
+                     timeout=COMMIT_TIMEOUT_S, env=_identity_env(repo))
+                out["committed"] = _git(repo, "rev-parse", "HEAD", confine=confine).stdout.strip()
+        if ident and merger and _ahead(project, ident):
+            try:
+                out["merged_head"] = merger(ident)
+            except ProjectError as exc:  # the commit stands; the row says why it did not merge
+                out["merge_error"] = str(exc)[:500]
+        return out
+
+
+def _ahead(project: Project, ident: str) -> int:
+    """Commits on agent/<ident> that the main checkout's HEAD lacks."""
+    r = _git(project.path, "rev-list", "--count", f"HEAD..refs/heads/agent/{_check_ident(ident)}", check=False)
+    return int(r.stdout.strip() or 0) if r.returncode == 0 else 0
 
 
 def _git_operation(repo: Path, confine: list[Path] | None) -> str | None:
