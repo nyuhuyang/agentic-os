@@ -1,6 +1,6 @@
 # 多轮对话记忆：各家做法调研与 AgenticOS 建议（AGE-114）
 
-**日期:** 2026-10-20 · **状态:** Step 0–2 已实现（2026-10-21，`docs/exec-plans/completed/2026-10-21-multi-turn-memory.md`）；Step 3 待用户决定 · **相关:** AGE-113（`docs/exec-plans/completed/2026-10-20-switch-agent.md`）、P23（`docs/exec-plans/deferred/p23-shared-agent-context.md`）
+**日期:** 2026-10-20 · **状态:** Step 0–2 已实现（2026-10-21，`docs/exec-plans/completed/2026-10-21-multi-turn-memory.md`）；Step 3 已实现（runner 启动的 Claude 读 CLAUDE.md + AGENTS.md，2026-10-21） · **相关:** AGE-113（`docs/exec-plans/completed/2026-10-20-switch-agent.md`）、P23（`docs/exec-plans/deferred/p23-shared-agent-context.md`）
 
 ## TL;DR
 
@@ -149,7 +149,9 @@
 
 - [x] Step 0–2：已按默认预算实现并 /verify（用户回复 "continue"，2026-10-21）。
 - [x] handoff 预算：采用默认 3 / 1 500 / 30 000 字符（`runner/app.py` `_HANDOFF_*`），可再调。
-- [ ] Step 3 会改动 CLAUDE.md（工作区契约）与 AGENTS.md 的关系，需要用户拍板选 `@import` 还是改设置。
+- [x] Step 3：用户选“改 Claude 的设置让它两个都读”。runner 启动的每个 Claude（headless、项目、交互终端）都带 `--settings '{"pluginConfigs":{"cc-plugin-agents-md@builtin":{"options":{"instructionFiles":"claude-md-and-agents-md"}}}}'`（`runner/project_runs.py` `CLAUDE_SETTINGS`）。实测 Claude Code 2.1.305：带此参数能看到 AGENTS.md 的 “Critical Token Budget Rule”，不带看不到。
+  - 例外：机密项目的 Claude 用 `--setting-sources ""`，本来就不加载 CLAUDE.md 和 AGENTS.md（实测），维持原样。
+  - runner 之外手动开的 Claude Code 不受影响；要全局生效，需在 `~/.claude/settings.json` 里加同样的 `pluginConfigs`，或在 `/config` 里把 Project instructions 设为 `claude-md-and-agents-md`。
 
 ## 来源
 

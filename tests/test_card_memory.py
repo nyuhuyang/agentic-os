@@ -109,3 +109,15 @@ def test_a_failed_resume_falls_back_to_a_new_session_with_the_history(env, monke
     assert r.status_code == 200, r.get_json()
     assert resumed(cmds[0]) and "A1" not in " ".join(cmds[0])
     assert not resumed(cmds[1]) and "A1" in " ".join(cmds[1]) and "go on" in " ".join(cmds[1])
+
+
+def test_every_runner_launched_claude_reads_agents_md_too(env):
+    """AGE-114 Step 3: headless, project and interactive Claude get the setting that loads AGENTS.md
+    beside CLAUDE.md."""
+    app_mod = env[0]
+    import project_runs as pr
+    from runner.modules.pty import interactive_resume_argv
+    want = {"pluginConfigs": {"cc-plugin-agents-md@builtin": {"options": {"instructionFiles": "claude-md-and-agents-md"}}}}
+    for argv in (app_mod._ai_cli("claude"), app_mod._build_resume_cmd("claude", SID, "p"),
+                 interactive_resume_argv("claude", SID, None)):
+        assert json.loads(argv[argv.index("--settings") + 1]) == want, argv

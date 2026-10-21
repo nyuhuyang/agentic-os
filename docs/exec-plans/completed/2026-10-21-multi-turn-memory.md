@@ -12,7 +12,7 @@ See the research doc §4: a resumed plain card re-sends the nested history (F1);
 - D2 A **new** session on a card with history gets a flat handoff built from the run chain (`parent_run_id`): the root task, then one block per turn (agent, human reply, agent output), the reply, the transcript of every earlier session (dsh: the runner's stream log), and a pointer to `git status` / `git log`. Budget: last 3 turns whole, older ones cut to 1 500 characters per field, older turns dropped past 30 000 characters.
 - D3 Records keep the human turn as `reply`; legacy records without it are parsed from their prompt on a best-effort basis.
 - D4 A board dispatch never resumes a card session when the card has a newer session of another agent: it starts fresh with the card history (note `new session: the card's latest session belongs to <agent>`).
-- Step 3 (CLAUDE.md vs AGENTS.md) waits for the user.
+- D5 Step 3 (user's choice: the setting, not an import): every runner-launched Claude gets `--settings` with `instructionFiles: claude-md-and-agents-md`; confidential runs keep `--setting-sources ""`, which loads neither file.
 
 ## Progress
 
@@ -28,6 +28,10 @@ See the research doc §4: a resumed plain card re-sends the nested history (F1);
 - [x] /verify against an isolated runner
 - [x] Test: a failed resume falls back to a new session that gets the history
 
+- [x] D5 `CLAUDE_SETTINGS` on headless, project and runner-root interactive Claude argv
+- [x] Test: `test_every_runner_launched_claude_reads_agents_md_too`; terminal and dispatch argv tests updated
+- [x] Real Claude 2.1.305 check: with the flag it sees AGENTS.md's "Critical Token Budget Rule", without it does not
+
 ## Evidence
 
 - `tests/test_card_memory.py` (5 tests) pass. Full suite: 779 pass (2026-10-21).
@@ -36,3 +40,4 @@ See the research doc §4: a resumed plain card re-sends the nested history (F1);
   - Switch to codex with "OVER TO CODEX": `codex exec` without resume, prompt = flat handoff (task, turns 1–3 with each human reply and claude answer, feedback, `[Agent switch]`, git hint); record `session_note: new session: switched from claude`. No transcript line: the fake S1 has no file in `~/.claude/projects`.
   - Next plain reply: `codex exec … resume cx1 CODEX NEXT`. `/api/maintenance` inflight 0 after.
 - Not driven live: the board dispatch after a switch (D4) — covered by `test_dispatch_never_resumes_a_session_another_agent_moved_past` at the helper level.
+- D5: full suite 780 pass; isolated runner (fake claude) showed `--settings {"pluginConfigs": …}` on both the first run and the `--resume` reply (2026-10-21).

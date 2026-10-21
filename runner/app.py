@@ -2346,7 +2346,7 @@ def _ai_cli(agent: str) -> list[str]:
     # default: claude
     claude_bin = _PROTO / ".venv" / "bin" / "claude"
     bin_str = str(claude_bin) if claude_bin.exists() else "claude"
-    return [bin_str, "-p", "--verbose", "--permission-mode", "bypassPermissions"]
+    return [bin_str, "-p", "--verbose", "--permission-mode", "bypassPermissions", *project_runs.CLAUDE_SETTINGS]
 
 
 def _load_skill_md(skill_name: str | None, registry: dict[str, dict]) -> str:
