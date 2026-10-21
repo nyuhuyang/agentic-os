@@ -514,3 +514,53 @@ def test_stalled_job_counts_as_activity_until_it_is_stopped(monkeypatch):
     monkeypatch.setattr(app_mod, "_write_owner_record", lambda *a, **k: None)
     sd._stall(app_mod, type("S", (), {"emit": lambda *a, **k: None})(), "r", job)
     assert seen == [True] and app_mod._RETIRING == {}  # counted while being killed, gone after (CM-014)
+
+
+# ── CM-013: runner-root launches are admitted through the runner checkout's gate ────
+
+def test_runner_root_job_waits_for_a_merge_holding_the_gate(monkeypatch):
+    import threading, time
+    import app as app_mod
+    monkeypatch.setattr(app_mod, "_runner_root_key", lambda: "os")
+    monkeypatch.setattr(app_mod, "_running_jobs", {})
+    gate = app_mod._merge_gate("os")
+    gate.acquire()  # a manual merge between its activity check and the end of its merge
+    t = threading.Thread(target=app_mod._publish_job, args=("free", {"skill": "_prompt"}))
+    t.start()
+    time.sleep(0.2)
+    assert "free" not in app_mod._running_jobs  # not published mid-merge
+    gate.release()
+    t.join(5)
+    assert "free" in app_mod._running_jobs
+
+
+def test_routing_call_counts_as_runner_root_activity(monkeypatch):
+    import app as app_mod
+    monkeypatch.setattr(app_mod, "_runner_root_key", lambda: "os")
+    monkeypatch.setattr(app_mod, "_running_jobs", {})
+    monkeypatch.setattr(app_mod, "_RETIRING", {})
+    assert not app_mod._project_runs_open("os", None, sessions=True, runner_root=True)
+    with app_mod._root_activity():
+        assert app_mod._project_runs_open("os", None, sessions=True, runner_root=True)
+        assert not app_mod._project_runs_open("other", None, sessions=True)  # other projects unaffected
+    assert app_mod._ROOT_ACTIVE == 0
+
+
+def test_publish_without_a_runner_project_takes_no_gate(monkeypatch):
+    import app as app_mod
+    monkeypatch.setattr(app_mod, "_runner_root_key", lambda: None)
+    monkeypatch.setattr(app_mod, "_running_jobs", {})
+    app_mod._publish_job("x", {"skill": "_prompt"})
+    assert "x" in app_mod._running_jobs
+
+
+def test_runner_root_key_reads_the_file_only(tmp_path, monkeypatch):
+    """Called on every job publish: no registry validation, no git (a full load spawned git per project)."""
+    import app as app_mod
+    reg = tmp_path / "projects.yaml"
+    reg.write_text(f"projects:\n  self:\n    path: {app_mod._PROTO}\n  other:\n    path: {tmp_path}\n")
+    monkeypatch.setattr(pj, "REGISTRY_PATH", reg)
+    monkeypatch.setattr(app_mod, "_ROOT_KEY_CACHE", {})
+    monkeypatch.setattr(pj, "_git", lambda *a, **k: pytest.fail("no git on the publish path"))
+    monkeypatch.setattr(pj, "load_registry", lambda *a, **k: pytest.fail("no full registry load"))
+    assert app_mod._runner_root_key() == "self"

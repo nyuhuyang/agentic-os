@@ -983,14 +983,16 @@ class LinearModule(AgenticModule):
                 selected_skill = prev_skill if prev_skill in registry else "_prompt"  # no routing call (DP-28)
             else:
                 try:
-                    result = _run_grouped(  # its own group: a routing timeout ends descendants too (RWS-016)
-                        # persist=False: the routing call leaves no session in the agent's store (DP-28)
-                        _ai_command(backend, routing_prompt, output_format="text", persist=False),
-                        60,
-                        cwd=str(ROOT),
-                        env=_registry_exec_env(backend, registry),
-                        text=True,
-                    )
+                    from app import _root_activity
+                    with _root_activity():  # the routing agent runs in the runner root: no merge under it (CM-013)
+                        result = _run_grouped(  # its own group: a routing timeout ends descendants too (RWS-016)
+                            # persist=False: the routing call leaves no session in the agent's store (DP-28)
+                            _ai_command(backend, routing_prompt, output_format="text", persist=False),
+                            60,
+                            cwd=str(ROOT),
+                            env=_registry_exec_env(backend, registry),
+                            text=True,
+                        )
                     selected_skill = _extract_skill_name(result.stdout or "", registry)
                 except Exception:
                     selected_skill = "_prompt"
@@ -1020,7 +1022,8 @@ class LinearModule(AgenticModule):
                 with contextlib.suppress(Exception):
                     self._mark_issue_review(issue_id, gen=launch_gen)
                 return
-            _running_jobs[run_id] = {
+            from app import _publish_job
+            _publish_job(run_id, {  # under the runner checkout's merge gate (CM-013)
                 "run_id": run_id,
                 "skill": selected_skill,
                 "started_at": started_at,
@@ -1033,7 +1036,7 @@ class LinearModule(AgenticModule):
                 "agent": backend,
                 **({"agent_session_id": resume_sid} if resume_sid else {}),  # live while it runs (DP-15)
                 "record_extra": card_extra,
-            }
+            })
             entry = registry.get(selected_skill, {})
             is_entrypoint = bool(entry.get("schedule_eligible") and entry.get("entrypoint"))
             end = _RunClaim(run_id)  # cancel/stall may end the run first; then they own its side effects

@@ -3249,6 +3249,59 @@ def _merge_gate(key: str) -> threading.Lock:
         return _MERGE_GATES.setdefault(key, threading.Lock())
 
 
+_ROOT_ACTIVE = 0  # runner-root work that is not a job, e.g. a Linear routing call (CM-013); under _JOB_LOCK
+
+
+_ROOT_KEY_CACHE: dict = {}
+
+
+def _runner_root_key() -> str | None:
+    """The registered project whose folder is the runner's own checkout, if any. Reads only the
+    registry file (no git, no validation: this runs on every job publish), cached by its mtime."""
+    path = _projects.REGISTRY_PATH
+    try:
+        stamp = (str(path), path.stat().st_mtime_ns)
+    except OSError:
+        return None
+    if _ROOT_KEY_CACHE.get("stamp") != stamp:
+        root, key = os.path.realpath(_PROTO), None
+        with contextlib.suppress(Exception):
+            for k, entry in _projects.raw_entries(_projects._read_registry_bytes(path)).items():
+                raw = entry.get("path") if isinstance(entry, dict) else None
+                if isinstance(raw, str) and os.path.realpath(os.path.expanduser(raw)) == root:
+                    key = k
+                    break
+        _ROOT_KEY_CACHE.update(stamp=stamp, key=key)
+    return _ROOT_KEY_CACHE["key"]
+
+
+def _runner_root_gate():
+    key = _runner_root_key()
+    return _merge_gate(key) if key else contextlib.nullcontext()
+
+
+def _publish_job(run_id: str, job: dict) -> dict:
+    """Publish a runner-root job (free prompt, generic retry, unbound dispatch) under the runner
+    checkout's merge gate: it can never appear between a manual merge's check and its merge (CM-013)."""
+    with _runner_root_gate():
+        _running_jobs[run_id] = job
+    return job
+
+
+@contextlib.contextmanager
+def _root_activity():
+    """Runner-root work that is not a published job (a routing call) counts as activity too."""
+    global _ROOT_ACTIVE
+    with _runner_root_gate():
+        with _JOB_LOCK:
+            _ROOT_ACTIVE += 1
+    try:
+        yield
+    finally:
+        with _JOB_LOCK:
+            _ROOT_ACTIVE -= 1
+
+
 def _project_runs_open(key: str, job: dict | None, sessions: bool = False, runner_root: bool = False) -> bool:
     """Another run of this project is still before its closing fingerprint: a merge now would
     read as that run changing the main checkout. Caller holds _JOB_LOCK.
@@ -3261,6 +3314,8 @@ def _project_runs_open(key: str, job: dict | None, sessions: bool = False, runne
                 # a runner-root job (free prompt, generic retry, unbound dispatch) when the project IS the runner's checkout (CM-010)
                 or (runner_root and not j.get("project_key") and not extra.get("session_project")))
     jobs = list(_running_jobs.values()) + (list(_RETIRING.values()) if sessions else [])  # retiring: still stopping (CM-011)
+    if runner_root and _ROOT_ACTIVE:
+        return True
     return any(j is not job and not j.get("merge_checked") and here(j) for j in jobs)
 
 
@@ -3393,8 +3448,8 @@ def run():
             run_id = str(uuid.uuid4())
             started_at = datetime.now(timezone.utc).isoformat()
             t0 = time.monotonic()
-            _running_jobs[run_id] = {"run_id": run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent),
-                                     "record": {"agent": agent}}  # for a cancel/stall record (RWS-002)
+            _publish_job(run_id, {"run_id": run_id, "skill": skill, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent),
+                                  "record": {"agent": agent}})  # for a cancel/stall record (RWS-002); gated (CM-013)
             socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill})
             end = _RunClaim(run_id)
             ended = {"ok": False, "run_id": run_id, "error": "cancelled"}  # cancel/stall wrote the record
@@ -3447,8 +3502,8 @@ def run():
     run_id = str(uuid.uuid4())
     started_at = datetime.now(timezone.utc).isoformat()
     t0 = time.monotonic()
-    _running_jobs[run_id] = {"run_id": run_id, "skill": skill_name, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent),
-                             "record": {"agent": agent, "model": _agent_model(agent), "task_id": run_id}}  # RWS-002
+    _publish_job(run_id, {"run_id": run_id, "skill": skill_name, "started_at": started_at, "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(), "agent": agent, "model": _agent_model(agent),
+                          "record": {"agent": agent, "model": _agent_model(agent), "task_id": run_id}})  # RWS-002; gated (CM-013)
     socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill_name})
     # Claude: stream-json; Codex: json; dsh: --json NDJSON
     end = _RunClaim(run_id)
@@ -5561,7 +5616,7 @@ def api_run_retry(run_id: str):
             )
     _card_extra = {**_issue_title_extra(linear_issue_id), **({"session_note": card_note} if card_note else {}),
                    "reply": (reply + _format_prompt_attachments(attachments)).strip()}  # the human turn (AGE-114 D3)
-    _running_jobs[new_run_id] = {
+    _publish_job(new_run_id, {  # gated (CM-013)
         "run_id": new_run_id, "skill": skill, "started_at": started_at,
         "prompt": prompt, "state": "running", "last_progress_at": time.monotonic(),
         "linear_issue_id": linear_issue_id, "launch_gen": _launch_gen,  # the stall pass's tracker guard (WS-013)
@@ -5570,7 +5625,7 @@ def api_run_retry(run_id: str):
         "agent": agent,
         "model": _agent_model(agent, cfg),
         **({"record_extra": _card_extra} if _card_extra else {}),
-    }
+    })
     socketio.emit("run_state_change", {"run_id": new_run_id, "state": "running", "skill": skill})
 
     def _do_retry():

@@ -53,6 +53,6 @@ The user asked for two things (2026-10-21):
   - the merge clears inherited mergeOptions, never autostashes, refuses a target mid-operation, and verifies the merged tree (CM-007/008/009);
   - the manual merge counts runner-root jobs when the project is the runner's checkout, and jobs still retiring (CM-010/011).
 - [x] Inspection 4 fixes: the mergeOptions key comes from the full ref (CM-012); a stalled job stays in _RETIRING while it is killed, and the cancel/stall paths always clear it (CM-014).
-- [ ] CM-013: every runner-root launch (/run, generic retry, unbound Linear dispatch and its routing call) takes the project merge gate before it publishes its job, so none can start mid-merge when the project is the runner's own checkout. — BLOCKED: awaiting the user's decision on scope (see the log).
+- [x] CM-013: every runner-root launch (/run, generic retry, unbound Linear dispatch and its routing call) takes the project merge gate before it publishes its job, so none can start mid-merge when the project is the runner's own checkout. Done after the user said "做": `_publish_job` publishes these jobs under that gate, and `_root_activity` counts a routing call while it runs. The runner-root lookup reads only the registry file. Tests added; the suite passed (831).
 - [ ] Fresh Codex inspection approved.
 - [ ] Archive.
