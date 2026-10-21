@@ -77,6 +77,7 @@ Each session row gets a **Commit** button between Resume and Rename. Clicking it
 - [x] Inspection 5 fixes: per-ticket merge policy (SC-012), newest queue entry wins (SC-013), editor-bound responses (SC-014), escaped sandbox paths (SC-015).
 - [x] Inspection 6 fixes: requeue when a run opened during the wait (SC-016); single-flight commit editor (SC-017).
 - [x] Inspection 7 fix: the open-run re-check covers every entry and requeues the rest (SC-018).
+- [x] Inspection 8 fix: the per-project merge gate makes the check and merge atomic against run admission (SC-019).
 - [ ] Fresh Codex inspection approved.
 - [ ] Restart the live runner when it is idle.
 - [ ] Archive the plan and its log.

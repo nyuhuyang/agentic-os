@@ -39,3 +39,6 @@
 ## Inspection 7 — Codex (fresh): REVISE
 - SC-018 (med) accepted: the open-run re-check now runs before every entry, the drainer's own included. Once a run has opened, that entry and all remaining ones are requeued (newest-wins) and nothing merges. The test now requires no merges and both entries kept.
 - Not done here (recorded follow-up, with the SC-016 residual): a per-project admission gate, so no run can be admitted between the check and the end of the merge (including the wait on _MERGE_LOCK).
+
+## Inspection 8 — Codex (fresh): REVISE
+- SC-019 (med) accepted; closes the SC-016/018 follow-up. A per-project _merge_gate is held by the drain from its no-open-runs check to the end of the merge (including any wait on the global _MERGE_LOCK), and a new run takes it around its opening fingerprint. Lock order is ticket, then gate, on both sides. Test: a run admitted while a merge is blocked fingerprints only after the merge ends.

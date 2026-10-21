@@ -3115,7 +3115,8 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
                 run_start_sha = _projects._git(wt_path, "rev-parse", "HEAD",
                                                confine=_projects.confine_for(project, wt_path)).stdout.strip() or None
             exclude = project_runs.bookkeeping_paths(project, [STATE_DIR, OUTPUTS_DIR])
-            before = _projects.fingerprint(project, exclude=exclude)
+            with _merge_gate(project.key):  # never between a queued merge's check and its merge (SC-019)
+                before = _projects.fingerprint(project, exclude=exclude)
             tab_open = _main_path_tab_open(project.key)
             cmd = _project_cmd(agent, project, project_runs.project_prompt(prompt, project, binding, agent),
                                resume_session)
@@ -3226,11 +3227,22 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
 _PENDING_MERGES: dict[str, list[tuple[str, str]]] = {}  # project key -> (ticket, verified sha) waiting for its other runs (AGE-111)
 
 
+_MERGE_GATES: dict[str, threading.Lock] = {}
+_MERGE_GATES_GUARD = threading.Lock()
+
+
+def _merge_gate(key: str) -> threading.Lock:
+    """Per-project gate: a queued merge holds it from its "no other run is open" check to the end
+    of the merge (including any wait on the global merge lock); a run takes it around its opening
+    fingerprint, so no run can start fingerprinting in between (SC-019). Lock order: ticket -> gate."""
+    with _MERGE_GATES_GUARD:
+        return _MERGE_GATES.setdefault(key, threading.Lock())
+
+
 def _project_runs_open(key: str, job: dict) -> bool:
     """Another run of this project is still before its closing fingerprint: a merge now would
     read as that run changing the main checkout. Caller holds _JOB_LOCK.
-    ponytail: a run admitted between this check and the merge still sees it (the original
-    AGE-111 window, milliseconds); a per-project admission gate would close it."""
+    Used under _merge_gate, which a new run's opening fingerprint also takes (SC-019)."""
     return any(j is not job and j.get("project_key") == key and not j.get("merge_checked")
                for j in _running_jobs.values())
 
@@ -3291,7 +3303,7 @@ def _merge_when_last(project, ident: str, job: dict, eligible: bool) -> dict:
         try:
             # another ticket's entry: re-check it under its own lock, since it may have been cleaned
             # up or re-run since it queued (SC-009); ours is held by this run already
-            with contextlib.nullcontext() if t == ident else _wait_ticket_lock(project.key, t):
+            with contextlib.nullcontext() if t == ident else _wait_ticket_lock(project.key, t), _merge_gate(project.key):
                 with _JOB_LOCK:
                     opened = _project_runs_open(project.key, job)
                 if opened:  # a run opened (e.g. during a wait): no merge under its fingerprint, ours included (SC-016/018)
@@ -3299,7 +3311,7 @@ def _merge_when_last(project, ident: str, job: dict, eligible: bool) -> dict:
                     break
                 eff = _effective_project(project, t)  # that ticket's own sticky policy, not the drainer's (SC-012)
                 _projects.check_queued_merge(eff, t, sha)
-                out["merged_head"] = _projects.merge_into_checkout(eff, t, sha)
+                out["merged_head"] = _projects.merge_into_checkout(eff, t, sha)  # still under the gate
             out.setdefault("merged", []).append(t)
         except _projects.TicketLocked:
             keep([(t, sha)])  # its run is still finishing (SC-010)

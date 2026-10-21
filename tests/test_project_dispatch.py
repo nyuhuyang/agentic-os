@@ -405,6 +405,44 @@ def test_queued_merge_deferred_when_a_run_starts_during_the_wait(helper, monkeyp
     assert "waits for this project's next run" in out["merge"]
 
 
+def test_run_fingerprint_waits_for_a_merge_holding_the_gate(helper, monkeypatch):
+    """SC-019: a merge blocked on the global merge lock still holds its project's gate, so a run
+    admitted meanwhile fingerprints only after the merge completed."""
+    app_mod, *_ = helper
+    p = SimpleNamespace(key="demo", auto_merge=True, confidential=False)
+    order = []
+    release = threading.Event()
+
+    def slow_merge(project, t, sha=None):
+        order.append("merge-start")
+        release.wait(2)  # e.g. waiting on _MERGE_LOCK held by a manual commit elsewhere
+        order.append("merge-end")
+        return "sha"
+
+    monkeypatch.setattr(pj, "merge_into_checkout", slow_merge)
+    monkeypatch.setattr(pj, "branch_head", lambda project, t: f"head-of-{t}")
+    monkeypatch.setattr(pj, "check_queued_merge", lambda project, t, sha: None)
+    monkeypatch.setattr(app_mod, "_PENDING_MERGES", {})
+    b = {"project_key": "demo"}
+    monkeypatch.setattr(app_mod, "_running_jobs", {"b": b})
+    drain = threading.Thread(target=app_mod._merge_when_last, args=(p, "T-2", b, True))
+    drain.start()
+    while "merge-start" not in order:
+        time.sleep(0.01)
+
+    def admit():
+        with app_mod._merge_gate("demo"):  # what a new run's opening fingerprint takes
+            order.append("fingerprint")
+
+    t3 = threading.Thread(target=admit)
+    t3.start()
+    time.sleep(0.2)
+    assert "fingerprint" not in order  # blocked behind the merge
+    release.set()
+    drain.join(5); t3.join(5)
+    assert order == ["merge-start", "merge-end", "fingerprint"]
+
+
 def test_background_writer_is_gone_before_verify(helper, tmp_path):
     app_mod, run, records, state, *_ = helper
     marker = tmp_path / "late-write"
