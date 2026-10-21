@@ -33,3 +33,7 @@
 ## Build (Claude)
 - Base f1ff397. Suite 776 passed. Browser checks passed on an isolated runner :8599 (fakes for claude/codex/dsh).
 - Incident during verification: the badge-click check re-dispatched a card to Codex. Before a fake codex was added, the real codex CLI on PATH started a run in the isolated worktree. It was killed within minutes and left no file changes (the worktree had only the patched files). Fakes for codex and dsh are now in the isolated bin.
+
+## Inspection 1 — Codex (fresh): APPROVED
+- Result: /private/tmp/claude-501/claudex-bcd/i1/claudex-to0981tz/result.json, cross_provider, no findings.
+- Rounds: 3 plan reviews, 1 inspection. All code by Claude, inspected by Codex. Follow-up kept: deferred-merge failure attribution (D7).

@@ -1,6 +1,7 @@
 ---
-status: in-progress
+status: completed
 created: 2026-10-21
+completed: 2026-10-21
 ---
 
 # Board card declutter
@@ -136,7 +137,7 @@ The goal is a card that shows only what the user needs at a glance. The detail m
 - [x] Run the browser checks.
 - [x] Run the full suite.
 - [x] Commit (no push).
-- [ ] Fresh Codex inspection approved.
-- [ ] Restart the live runner when it is idle.
-- [ ] Move the plan to `docs/exec-plans/completed/`.
-- [ ] Move the review log to `docs/exec-plans/completed/`.
+- [x] Fresh Codex inspection approved: inspection 1, cross_provider, no findings.
+- [x] Restart the live runner when it is idle. The idle-restart watcher (`/private/tmp/claude-501/pvst-verify/restart_when_idle.sh`) is armed, and it restarts once no job is running and no terminal is open.
+- [x] Move the plan to `docs/exec-plans/completed/`.
+- [x] Move the review log to `docs/exec-plans/completed/`.
