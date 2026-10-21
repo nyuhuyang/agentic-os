@@ -1150,6 +1150,16 @@ def branch_head(project: Project, ident: str) -> str:
                 confine=confine_for(project, project.path)).stdout.strip()
 
 
+def check_queued_merge(project: Project, ident: str, sha: str) -> None:
+    """A queued (ticket, verified sha) is still that ticket's work: its binding exists and its
+    branch still contains the sha. Cleanup or a replaced branch refuses the merge (SC-009).
+    Caller holds the ticket's lock."""
+    load_binding(project, ident)  # raises when the worktree/binding was cleaned up
+    if _git(project.path, "merge-base", "--is-ancestor", sha, f"refs/heads/agent/{_check_ident(ident)}",
+            check=False, confine=confine_for(project, project.path)).returncode:
+        raise ProjectError(f"agent/{ident} no longer contains the verified commit; merge it by hand")
+
+
 def merge_into_checkout(project: Project, ident: str, rev: str | None = None) -> str:
     """Merge agent/<ident> into the branch the main checkout has checked out (AGE-111).
 
@@ -1203,7 +1213,7 @@ def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry
         if busy:  # git add -A would mark conflicts resolved and commit their markers (SC-003)
             raise ProjectError(f"{repo} has {busy} in progress; finish or abort it by hand first")
         branch = _git(repo, "symbolic-ref", "--short", "HEAD", confine=confine).stdout.strip()
-        files = uncommitted(project, repo)
+        files = uncommitted(project, repo, confine=confine)
         out = {"repo": str(repo), "branch": branch, "files": files}
         if dry_run or not files:
             return {**out, "committed": None}
@@ -1342,11 +1352,12 @@ def verify_writable_roots(wt: Path) -> list[Path]:
     return [wt, Path(_git(wt, "rev-parse", "--absolute-git-dir").stdout.strip())]
 
 
-def uncommitted(project: Project, wt: Path) -> list[str]:
+def uncommitted(project: Project, wt: Path, confine: list[Path] | None = None) -> list[str]:
     """Tracked or non-ignored untracked changes left in the worktree (seeds are ignored).
-    Read-only: --no-optional-locks keeps status from refreshing the index (SC-004)."""
+    Read-only: --no-optional-locks keeps status from refreshing the index (SC-004). `confine`
+    overrides the policy's confinement (status can run clean filters, SC-008)."""
     out = _git_bytes(wt, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all",
-                     confine=confine_for(project, wt))
+                     confine=confine if confine is not None else confine_for(project, wt))
     return _porcelain_paths(out)
 
 

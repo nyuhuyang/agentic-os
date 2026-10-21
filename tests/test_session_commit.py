@@ -186,6 +186,18 @@ def test_commit_is_always_sandboxed(repo, monkeypatch):
     assert seen and all(root.resolve() in w for w in seen)
 
 
+def test_preview_status_is_sandboxed_too(repo, monkeypatch):
+    """Status can run clean filters: the preview's status is confined like the commit (SC-008)."""
+    project, root = repo
+    calls = []
+    real = pj._git_bytes
+    monkeypatch.setattr(pj, "_git_bytes", lambda cwd, *a, confine=None, **k: calls.append((a, confine)) or real(cwd, *a, confine=confine, **k))
+    (root / "a.txt").write_text("c\n")
+    pj.commit_checkout(project, root, dry_run=True)
+    status = [c for a, c in calls if "status" in a]
+    assert status and all(c and root.resolve() in c for c in status)
+
+
 def test_route_holds_the_lifecycle_lock(repo, tmp_path, monkeypatch):
     project, root = repo
     import app as app_mod

@@ -16,3 +16,7 @@
 ## Inspection 2 — Codex (fresh): REVISE
 - SC-006 (high) accepted: manual commits now always run git sandboxed (writes confined to the repo and its common git dir), whatever the policy. No confidentiality snapshot can go stale, and the route's policy read is removed.
 - SC-007 (med) accepted at the source: _merge_when_last queues (ticket, verified sha) read under the ticket lock, and merge_into_checkout merges that exact sha (validated hex) with a "Merge branch 'agent/X'" message. A later commit on the branch (manual Commit or terminal) never rides in on an earlier verification. A head-read failure is recorded as merge failed.
+
+## Inspection 3 — Codex (fresh): REVISE
+- SC-008 (high) accepted: uncommitted() takes an explicit confine, and commit_checkout passes its unconditional sandbox, so the preview's status (which can run clean filters) is confined too. Test asserts every status call is confined.
+- SC-009 (med) accepted: before merging a queued (ticket, sha), the drain takes that ticket's lock (except its own, already held) and check_queued_merge confirms the binding still exists and agent/<ticket> still contains the sha. Cleanup or a replaced branch refuses the merge (merge_error). Tests: cleanup and replacement refused; the drain checks every entry.

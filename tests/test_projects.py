@@ -323,6 +323,22 @@ def test_merge_into_checkout_merges_the_verified_commit_not_the_branch_tip(repo)
         pj.merge_into_checkout(p, "T-1", "HEAD~1")
 
 
+def test_queued_merge_refused_after_cleanup_or_branch_replacement(repo):
+    """SC-009: a queued verified sha merges only while it is still that ticket's work."""
+    p, wt, info = make(repo)
+    (wt / "q.txt").write_text("q\n")
+    pj.runner_commit(p, wt, "T-1: queued")
+    sha = pj.branch_head(p, "T-1")
+    pj.check_queued_merge(p, "T-1", sha)  # still valid
+    subprocess.run(["git", "-C", str(wt), "reset", "-q", "--hard", info["base_sha"]], check=True)  # branch replaced
+    with pytest.raises(pj.ProjectError, match="no longer contains"):
+        pj.check_queued_merge(p, "T-1", sha)
+    with pj.ticket_lock(p.key, "T-1"):
+        pj.remove_worktree(p, "T-1")  # cleaned up
+    with pytest.raises(pj.ProjectError):
+        pj.check_queued_merge(p, "T-1", sha)
+
+
 @pytest.mark.parametrize("dirty", [False, True])
 def test_merge_into_checkout_refuses_without_touching_it(repo, dirty):
     """A conflict (or a local edit the merge would overwrite) leaves the checkout as it was."""

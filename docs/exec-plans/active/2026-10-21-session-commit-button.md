@@ -72,6 +72,7 @@ Each session row gets a **Commit** button between Resume and Rename. Clicking it
 - [x] Commit (no push).
 - [x] Inspection 1 fixes: sticky confidentiality plus the shared lifecycle lock in the route (SC-001/002); refusal on git's own in-progress merge, cherry-pick, revert or rebase, or unmerged entries (SC-003); a read-only status (SC-004); a correct rename/copy porcelain parse shared by `uncommitted()` (SC-005). 6 tests added; a manual check confirmed sandboxed commits work for a confidential main checkout and worktree.
 - [x] Inspection 2 fixes: always-sandboxed manual commits (SC-006); queued merges take the verified sha (SC-007). Tests added.
+- [x] Inspection 3 fixes: the preview status is sandboxed (SC-008); queued merges are re-validated under the ticket lock (SC-009).
 - [ ] Fresh Codex inspection approved.
 - [ ] Restart the live runner when it is idle.
 - [ ] Archive the plan and its log.

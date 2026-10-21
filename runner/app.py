@@ -3254,7 +3254,11 @@ def _merge_when_last(project, ident: str, job: dict, eligible: bool) -> dict:
         return out or ({"merge": "waiting for this project's other runs"} if eligible else {})
     for t, sha in todo:
         try:
-            out["merged_head"] = _projects.merge_into_checkout(project, t, sha)
+            # another ticket's entry: re-check it under its own lock, since it may have been cleaned
+            # up or re-run since it queued (SC-009); ours is held by this run already
+            with contextlib.nullcontext() if t == ident else _projects.ticket_lock(project.key, t):
+                _projects.check_queued_merge(project, t, sha)
+                out["merged_head"] = _projects.merge_into_checkout(project, t, sha)
             out.setdefault("merged", []).append(t)
         except _projects.ProjectError as exc:
             out.setdefault("merge_error", {})[t] = str(exc)[:500]
