@@ -4718,12 +4718,18 @@ def api_session_commit(key: str, agent: str, sid: str):
     """Manual Commit on a session row: every change in that session's checkout, local only."""
     body = request.get_json(silent=True) or {}
     try:
-        project = _projects.get_project(key, _projects.load_registry(errors={}))
-        target = _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])
-        result = _projects.commit_checkout(project, target["cwd"], body.get("message"), dry_run=bool(body.get("dry_run")))
+        # Shared lifecycle hold for the whole commit: no path or policy change can slip in (SC-002).
+        with _projects.project_lock(key):
+            project = _projects.get_project(key, _projects.load_registry(errors={}))
+            target = _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])
+            # sticky policy: registry, ticket sidecar/bindings and this session's history; unknown = confidential (SC-001)
+            if session_confidential(project, target["cwd"], sid=sid) is not False:
+                project = dataclasses.replace(project, confidential=True)
+            result = _projects.commit_checkout(project, target["cwd"], body.get("message"),
+                                               dry_run=bool(body.get("dry_run")))
     except _projects.SessionNotFound as exc:
         return jsonify({"error": str(exc)}), 404
-    except _projects.TicketLocked as exc:
+    except (_projects.TicketLocked, _projects.ProjectBusy) as exc:
         return jsonify({"error": str(exc)}), 409
     except _projects.ProjectError as exc:
         return jsonify({"error": str(exc)}), 400

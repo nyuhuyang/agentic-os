@@ -1187,6 +1187,9 @@ def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry
             stack.callback(_MERGE_LOCK.release)
         if _git(repo, "symbolic-ref", "-q", "HEAD", check=False, confine=confine).returncode:
             raise ProjectError(f"{repo} is on a detached HEAD; commit there by hand")
+        busy = _git_operation(repo, confine)
+        if busy:  # git add -A would mark conflicts resolved and commit their markers (SC-003)
+            raise ProjectError(f"{repo} has {busy} in progress; finish or abort it by hand first")
         branch = _git(repo, "symbolic-ref", "--short", "HEAD", confine=confine).stdout.strip()
         files = uncommitted(project, repo)
         out = {"repo": str(repo), "branch": branch, "files": files}
@@ -1198,6 +1201,20 @@ def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry
         _git(repo, "commit", "--no-verify", "--no-gpg-sign", "-q", "-m", msg, confine=confine,
              timeout=COMMIT_TIMEOUT_S, env=_identity_env(repo))
         return {**out, "committed": _git(repo, "rev-parse", "HEAD", confine=confine).stdout.strip()}
+
+
+def _git_operation(repo: Path, confine: list[Path] | None) -> str | None:
+    """An unfinished merge / cherry-pick / revert / rebase, or unmerged index entries, else None."""
+    for ref, what in (("MERGE_HEAD", "a merge"), ("CHERRY_PICK_HEAD", "a cherry-pick"), ("REVERT_HEAD", "a revert")):
+        if _git(repo, "rev-parse", "-q", "--verify", ref, check=False, confine=confine).returncode == 0:
+            return what
+    for d in ("rebase-merge", "rebase-apply"):
+        p = _git(repo, "rev-parse", "--git-path", d, confine=confine).stdout.strip()
+        if (repo / p if not os.path.isabs(p) else Path(p)).exists():
+            return "a rebase"
+    if _git(repo, "--no-optional-locks", "ls-files", "-u", confine=confine).stdout.strip():
+        return "unresolved conflicts"
+    return None
 
 
 def committed_seeds(project: Project, wt: Path, base: str) -> list[str]:
@@ -1314,9 +1331,25 @@ def verify_writable_roots(wt: Path) -> list[Path]:
 
 
 def uncommitted(project: Project, wt: Path) -> list[str]:
-    """Tracked or non-ignored untracked changes left in the worktree (seeds are ignored)."""
-    out = _git_bytes(wt, "status", "--porcelain", "-z", "--untracked-files=all", confine=confine_for(project, wt))
-    return [e[3:].decode("utf-8", "surrogateescape") for e in out.split(b"\0") if len(e) > 3]
+    """Tracked or non-ignored untracked changes left in the worktree (seeds are ignored).
+    Read-only: --no-optional-locks keeps status from refreshing the index (SC-004)."""
+    out = _git_bytes(wt, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all",
+                     confine=confine_for(project, wt))
+    return _porcelain_paths(out)
+
+
+def _porcelain_paths(out: bytes) -> list[str]:
+    """Paths of `status --porcelain -z`: a rename/copy record is followed by its source path,
+    a bare token that is consumed, not counted (SC-005)."""
+    tokens, paths, i = out.split(b"\0"), [], 0
+    while i < len(tokens):
+        e = tokens[i]
+        i += 1
+        if len(e) > 3:
+            paths.append(e[3:].decode("utf-8", "surrogateescape"))
+            if e[0:1] in (b"R", b"C") or e[1:2] in (b"R", b"C"):
+                i += 1  # the source path
+    return paths
 
 
 def run_verify(project: Project, worktree: Path, base: str | None = None, prefix: list[str] | None = None,

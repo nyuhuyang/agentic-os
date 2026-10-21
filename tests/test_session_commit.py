@@ -127,3 +127,75 @@ def test_route_commits_a_session_row(repo, tmp_path, monkeypatch):
     r = c.post("/api/projects/alpha/sessions/claude/s1/commit", json={"message": "via route"}, headers=h)
     assert r.status_code == 200 and r.get_json()["committed"] and git(root, "log", "-1", "--format=%s") == "via route"
     assert c.post("/api/projects/alpha/sessions/claude/nope/commit", json={"message": "m"}, headers=h).status_code == 404
+
+
+# ── Inspection 1 fixes (SC-001..005) ─────────────────────────────────────────
+
+def test_unfinished_merge_is_refused_without_writes(repo):
+    project, root = repo
+    git(root, "checkout", "-q", "-b", "side")
+    (root / "a.txt").write_text("side\n"); git(root, "commit", "-qam", "side")
+    git(root, "checkout", "-q", "main")
+    (root / "a.txt").write_text("main\n"); git(root, "commit", "-qam", "main")
+    subprocess.run(["git", "-C", str(root), "merge", "-q", "side"], capture_output=True)  # conflicts
+    head = git(root, "rev-parse", "HEAD")
+    with pytest.raises(pj.ProjectError, match="merge"):
+        pj.commit_checkout(project, root, "msg")
+    assert git(root, "rev-parse", "HEAD") == head and git(root, "ls-files", "-u")  # still unresolved
+
+
+def test_rebase_in_progress_is_refused(repo):
+    project, root = repo
+    gp = Path(git(root, "rev-parse", "--absolute-git-dir")) / "rebase-merge"
+    gp.mkdir()
+    (root / "a.txt").write_text("c\n")
+    with pytest.raises(pj.ProjectError, match="rebase"):
+        pj.commit_checkout(project, root, "msg")
+
+
+def test_dry_run_and_empty_commit_leave_the_index_alone(repo):
+    project, root = repo
+    import os
+    os.utime(root / "a.txt", (1, 1))  # stat-dirty, same content: a plain status would refresh the index
+    index = Path(git(root, "rev-parse", "--absolute-git-dir")) / "index"
+    before = (index.read_bytes(), index.stat().st_mtime_ns)
+    assert pj.commit_checkout(project, root, dry_run=True)["files"] == []
+    assert pj.commit_checkout(project, root, "msg")["committed"] is None
+    assert (index.read_bytes(), index.stat().st_mtime_ns) == before
+
+
+def test_porcelain_rename_source_is_not_a_file():
+    assert pj._porcelain_paths(b"R  new.txt\0original.txt\0 M a.txt\0?? b\0") == ["new.txt", "a.txt", "b"]
+    assert pj._porcelain_paths(b"C  copy.txt\0o\0") == ["copy.txt"]
+
+
+def test_staged_rename_counts_once(repo):
+    project, root = repo
+    git(root, "mv", "a.txt", "renamed.txt")
+    assert pj.commit_checkout(project, root, dry_run=True)["files"] == ["renamed.txt"]
+
+
+def test_route_uses_sticky_confidentiality_and_the_lifecycle_lock(repo, tmp_path, monkeypatch):
+    project, root = repo
+    import app as app_mod
+    reg = tmp_path / "projects.yaml"
+    reg.write_text(f"projects:\n  alpha:\n    path: {root}\n    verify: 'true'\n")  # not confidential in the registry
+    monkeypatch.setattr(pj, "REGISTRY_PATH", reg)
+    d = pj.CLAUDE_PROJECTS / pj._slug(str(root))
+    d.mkdir(parents=True)
+    (d / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": str(root), "entrypoint": "cli",
+                                            "message": {"role": "user", "content": "hi"}}) + "\n")
+    seen = {}
+
+    def fake_commit(p, cwd, message, dry_run=False):
+        seen["confidential"] = p.confidential
+        with pytest.raises(pj.ProjectBusy):  # the shared lifecycle lock is held: exclusive edits wait
+            with pj.project_lock("alpha", exclusive=True, blocking=False):
+                pass
+        return {"repo": str(root), "branch": "main", "files": [], "committed": None}
+
+    monkeypatch.setattr(pj, "commit_checkout", fake_commit)
+    monkeypatch.setattr(app_mod, "session_confidential", lambda *a, **k: None)  # unknown policy
+    h = {"X-AgenticOS-Token": app_mod.REQUEST_TOKEN}
+    r = app_mod.app.test_client().post("/api/projects/alpha/sessions/claude/s1/commit", json={"dry_run": True}, headers=h)
+    assert r.status_code == 200 and seen["confidential"] is True  # unknown = confidential (SC-001)
