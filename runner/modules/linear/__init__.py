@@ -906,6 +906,14 @@ class LinearModule(AgenticModule):
                     self._refuse_resume(issue, run_id, backend, launch_gen, refused,
                                         binding={"project_key": project_key, "issue_identifier": ident, "confidential": conf})
                     return
+            prompt = f"{issue.get('identifier', '')}: {issue.get('title', '')}\n\n" \
+                     f"{_strip_issue_metadata(issue.get('description') or '')}"
+            if not resume_sid:  # the card went on with another agent: a new session told its history (AGE-114 D4)
+                from app import _handoff_prompt, _latest_card_session_record
+                latest = _latest_card_session_record(issue_id) or {}
+                other = canonical_agent(latest.get("agent"))
+                if other and other != backend:
+                    prompt = _handoff_prompt(latest, "", [], other, task=prompt)
             self.dispatched[issue_id] = run_id
             try:
                 self.push_state(issue_id, "running", gen=launch_gen)
@@ -919,8 +927,7 @@ class LinearModule(AgenticModule):
                     project_key=project_key, ident=bound.get("issue_identifier") or issue.get("identifier") or issue_id,
                     agent=backend, confidential=bound.get("confidential"),
                     reuse_only=bool(bound.get("worktree")),  # a bound worktree is never silently recreated (I6-10)
-                    prompt=f"{issue.get('identifier', '')}: {issue.get('title', '')}\n\n"
-                           f"{_strip_issue_metadata(issue.get('description') or '')}",
+                    prompt=prompt,
                     title=issue.get("title", ""), run_id=run_id, linear_issue_id=issue_id,
                     task_id=run_id, launch_gen=launch_gen,
                     # the route's reservation goes on only if it is this very ticket's lock; otherwise

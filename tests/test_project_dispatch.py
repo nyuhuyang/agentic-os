@@ -95,7 +95,8 @@ def test_non_confidential_codex_uses_auto_review_without_sandbox_flag(proj):
 
 def test_non_confidential_claude_and_dsh_unchanged(proj):
     repo, _ = proj
-    assert cli("claude", repo, False) == ["claude", "-p", "--verbose", "--permission-mode", "bypassPermissions"]
+    assert cli("claude", repo, False) == ["claude", "-p", "--verbose", "--permission-mode", "bypassPermissions",
+                                          *pr.CLAUDE_SETTINGS]
     assert cli("dsh", repo, False) == ["dsh", "--profile", "headless"]
 
 

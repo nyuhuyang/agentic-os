@@ -57,6 +57,14 @@ def common_dir(project: projects.Project) -> Path:
 
 # ── agent command (Decision 9) ───────────────────────────────────────────────
 
+# AGE-114 Step 3: a runner-launched Claude reads AGENTS.md as well as CLAUDE.md, so it sees the
+# rules Codex sees (Claude Code's default reads AGENTS.md only where there is no CLAUDE.md). Not for
+# confidential runs: their `--setting-sources ""` loads no CLAUDE.md or AGENTS.md at all.
+CLAUDE_INSTRUCTION_FILES = {"pluginConfigs": {"cc-plugin-agents-md@builtin": {
+    "options": {"instructionFiles": "claude-md-and-agents-md"}}}}
+CLAUDE_SETTINGS = ["--settings", json.dumps(CLAUDE_INSTRUCTION_FILES)]
+
+
 def claude_confidential_settings(common: Path) -> str:
     return json.dumps({
         "sandbox": {
@@ -95,7 +103,7 @@ def agent_cli(agent: str, project: projects.Project, claude_bin: str, dsh_prefix
         return ["codex", "exec", "--json", "--approve-for-me", "--add-dir", common]
     if agent == "dsh":
         return dsh_prefix()
-    return [claude_bin, "-p", "--verbose", "--permission-mode", "bypassPermissions"]
+    return [claude_bin, "-p", "--verbose", "--permission-mode", "bypassPermissions", *CLAUDE_SETTINGS]
 
 
 def project_prompt(prompt: str, project: projects.Project, binding: dict, agent: str) -> str:

@@ -447,7 +447,8 @@ def interactive_resume_argv(agent: str, session_id: str, project) -> list[str] |
     if agent == "dsh":
         return None  # dsh has no interactive TUI
     if project is None:  # runner-root session: no project policy applies
-        return ["claude", "--resume", session_id] if agent == "claude" else ["codex", "resume", session_id]
+        return (["claude", *project_runs.CLAUDE_SETTINGS, "--resume", session_id] if agent == "claude"
+                else ["codex", "resume", session_id])
     try:
         cli = project_runs.agent_cli(agent, project, "claude", lambda: [])
     except project_runs.ProjectRunError:
