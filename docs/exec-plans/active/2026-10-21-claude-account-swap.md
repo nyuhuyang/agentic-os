@@ -217,10 +217,10 @@ Module `runner/claude_account.py`, stdlib only, CLI and importable.
 
 ## User follow-up (not claimable in this session)
 
-- [ ] Log in as account A.
-- [ ] Run `claude_account.py save a`.
-- [ ] Log in as account B.
-- [ ] Run `claude_account.py save b`.
+- [x] Log in as account A.
+- [x] Run `claude_account.py save a`. — saved as `nyu`; `list` shows both (2026-10-22)
+- [x] Log in as account B.
+- [x] Run `claude_account.py save b`. — saved as `rancho`
 - [ ] Run `use a`.
 - [ ] Confirm `claude auth status` shows A.
 - [ ] Start a dashboard run; confirm it works on A.
