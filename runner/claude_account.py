@@ -227,12 +227,20 @@ def save(label: str) -> dict:
     _check_env()
     _check_label(label)
     with _locked():
-        blob = _live_blob()
-        if not blob:
-            raise AccountError("not logged in: run `claude auth login` first")
-        profile = _profile_of(blob)
-        if not profile:
-            raise AccountError("could not verify the live login with Anthropic; run any `claude` command and retry")
+        raw = _kc_read(LIVE_SERVICE)
+        for _ in range(5):  # a running Claude may rotate the login during the profile call
+            blob = _parse_blob(raw)
+            if not blob:
+                raise AccountError("not logged in: run `claude auth login` first")
+            profile = _profile_of(blob)
+            if not profile:
+                raise AccountError("could not verify the live login with Anthropic; run any `claude` command and retry")
+            latest = _kc_read(LIVE_SERVICE)
+            if latest == raw:
+                break
+            raw = latest
+        else:
+            raise AccountError("the live login keeps changing; retry when Claude runs finish")
         acct, org = profile["account"], profile.get("organization") or {}
         uuid, email = acct["uuid"], acct.get("email") or ""
         idx = _index()
@@ -288,6 +296,7 @@ def use(label: str, force: bool = False) -> dict:
         # A running Claude may refresh (rotate) the live login while we work: re-read right before
         # the overwrite and redo the preservation if it moved. ponytail: a sub-ms window remains;
         # Claude Code has no lock to join.
+        account = _live_account()  # before the loop: nothing slow between the last read and the write
         raw = _kc_read(LIVE_SERVICE)  # None only when no login exists at all: nothing to lose
         for _ in range(5):
             blob = _parse_blob(raw)
@@ -306,7 +315,6 @@ def use(label: str, force: bool = False) -> dict:
             raise AccountError("the live login keeps changing; retry when Claude runs finish")
         if raw is not None and owner is None:
             warnings.append("current login was not saved and has been discarded")
-        account = _live_account()
         secret = json.dumps(snaps[label], separators=(",", ":"))
         _kc_write(LIVE_SERVICE, account, secret)
         if _kc_read(LIVE_SERVICE) != secret:  # what `claude` reads: service only, no account

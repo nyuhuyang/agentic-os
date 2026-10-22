@@ -435,3 +435,36 @@ def test_rotation_during_swap_is_preserved(two, monkeypatch):
     ca.use("a")
     assert two.snap("b") == creds("rt-b2", "at-b2")
     assert two.live() == creds("rt-a", "at-a")
+
+
+def test_rotation_during_save_profile_call_is_saved(kc, monkeypatch):
+    login(kc, UUID_A, "rt-a", "at-a")
+    kc.profiles["at-a2"] = UUID_A
+    real = ca._profile_of
+    rotated = []
+
+    def profile_then_rotate(blob):
+        out = real(blob)
+        if not rotated:
+            rotated.append(1)
+            kc.set_live(creds("rt-a2", "at-a2"))
+        return out
+    monkeypatch.setattr(ca, "_profile_of", profile_then_rotate)
+    ca.save("a")
+    assert kc.snap("a") == creds("rt-a2", "at-a2")
+
+
+def test_rotation_during_account_lookup_is_preserved(two, monkeypatch):
+    real = ca._live_account
+    rotated = []
+
+    def lookup_then_rotate():
+        out = real()
+        if not rotated:
+            rotated.append(1)
+            two.set_live(creds("rt-b2", "at-b2"))
+        return out
+    monkeypatch.setattr(ca, "_live_account", lookup_then_rotate)
+    two.profiles["at-b2"] = UUID_B
+    ca.use("a")
+    assert two.snap("b") == creds("rt-b2", "at-b2") and two.live() == creds("rt-a", "at-a")
