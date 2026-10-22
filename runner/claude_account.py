@@ -14,6 +14,8 @@ Daily swap (or use the account picker next to "Claude" on the dashboard):
 No runner restart is needed: every run spawns a fresh `claude`, which reads the keychain login.
 Claude processes already running keep the old account until they exit. A snapshot left unused
 for about four weeks expires; then `claude auth login` once and `save` that label again.
+A restored login whose short-lived access token expired is refreshed by Claude on its next run;
+the dashboard quota cards stay empty until then (any `claude -p` call fills them).
 
 Credential snapshots live in the login keychain (service "agenticos-claude-account"); labels
 and identities (email, ~/.claude.json oauthAccount) in ~/.agentic-os/claude-accounts.json (0600).
@@ -303,6 +305,9 @@ def use(label: str, force: bool = False) -> dict:
         except (OSError, ValueError) as exc:
             warnings.append(f"`claude auth status` may show the old email: {exc}")
         os.utime(INDEX)  # bump swap_generation(), even for a repair of the same label
+    if _oauth(snaps[label]).get("expiresAt", 0) <= time.time() * 1000:
+        # ponytail: no supported refresh outside Claude Code; a wrong refresh would rotate the token away
+        warnings.append("access token expired: Claude refreshes it on its next run; quota cards fill in after that")
     running = _running_claude()
     if running:
         warnings.append(f"{running} running claude process(es) keep the old account until they exit")

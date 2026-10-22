@@ -411,3 +411,11 @@ def test_profile_lookup_cached_per_refresh_token(two, monkeypatch):
     monkeypatch.setattr(ca, "_fetch_profile", lambda tok: calls.append(tok) or real(tok))
     assert ca.accounts()["active"] == "b" and ca.accounts()["active"] == "b"
     assert len(calls) == 1
+
+
+def test_expired_target_access_token_warns(two):
+    two.items[(ca.SNAP_SERVICE, "a")] = json.dumps(creds("rt-a", "at-a", expires=1000))
+    r = ca.use("a")
+    assert r["ok"] and two.live() == creds("rt-a", "at-a", expires=1000)
+    assert any("access token expired" in w for w in r["warnings"])
+    assert not any("expired" in w for w in ca.use("b")["warnings"])
