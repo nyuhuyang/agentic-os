@@ -638,3 +638,27 @@ def test_retry_route_accepts_a_local_only_task(lo, monkeypatch):
     r = client.post("/api/runs/a/retry", json={})
     assert "not synced" not in (r.get_json() or {}).get("error", "") and r.status_code != 409, r.get_json()
     assert calls == []
+
+
+def test_nothing_reaches_linear_after_a_local_only_task_is_emptied(lo):
+    app_mod, mod, client, tmp, calls, path = lo
+    issue = _new_local(client)
+    iid = issue["id"]
+    doc = yaml.safe_load(path.read_text())
+    doc["projects"]["demo"]["confidential"] = False  # not even the confidential refusal stops it (F1)
+    path.write_text(yaml.safe_dump(doc))
+    assert client.patch(f"/api/linear/issues/{iid}", json={"state_name": "Canceled"}).status_code == 200
+    assert client.post("/api/linear/trash/empty").get_json()["archived"] == 1
+    assert client.post(f"/api/linear/issues/{iid}/comment", json={"feedback": "late"}).status_code == 404
+    assert mod.post_comment(iid, "late runner comment") is False  # record gone: refused, not sent
+    mod._push_sync(iid, "review")
+    mod._linear_sync_patch_locked(iid, {"title": "x"}, {"tracker": {"api_key": "k"}}, None)
+    assert calls == []
+
+
+def test_raw_comment_transport_refuses_every_local_id(monkeypatch):
+    import urllib.request
+    import runner.modules.linear as lin
+    sent = []
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: sent.append(a))
+    assert lin._post_linear_comment_raw("local-abc", "secret body", "key") is False and sent == []

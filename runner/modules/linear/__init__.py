@@ -489,8 +489,16 @@ def _issue_agent_comment_body(agent: str | None, title: str = "AgenticOS Model")
     return _linear_comment_body(title=title, feedback=f"Agent backend: {agent or 'default'}")
 
 
+def _local_id(issue_id: str | None) -> bool:
+    """A tracker-local id: never a Linear issue, so nothing carrying it is ever sent to Linear,
+    even once its record is gone and local_only_id can no longer tell (AGE-127 F1)."""
+    return str(issue_id or "").startswith("local-")
+
+
 def _post_linear_comment_raw(issue_id: str, body: str, api_key: str) -> bool:
     import urllib.request
+    if _local_id(issue_id):
+        return False  # its body must never leave the machine (AGE-127 F1)
     try:
         payload = json.dumps({
             "query": _LINEAR_COMMENT_MUTATION,
@@ -1786,6 +1794,8 @@ class LinearModule(AgenticModule):
             attachments = data.get("attachments") or []
             if not text and not attachments:
                 return jsonify({"error": "feedback or attachment required"}), 400
+            if issue_id in archived_ids():  # emptied from the trash: nothing to comment on (AGE-127 F1)
+                return jsonify({"error": "this card was emptied from the trash"}), 404
             if self._is_confidential_issue(issue_id):  # Decision 4: feedback stays in the local record
                 return jsonify({"ok": False, "error": "confidential project: feedback is not posted to the tracker"}), 403
             body = _linear_comment_body(
@@ -1946,7 +1956,7 @@ class LinearModule(AgenticModule):
             self._linear_sync_patch_locked(issue_id, data, cfg, preferred_agent)
 
     def _linear_sync_patch_locked(self, issue_id: str, data: dict, cfg: dict, preferred_agent: str | None) -> None:
-        if local_only_id(issue_id):
+        if _local_id(issue_id):
             return  # never on Linear (AGE-127)
         tc = cfg.get("tracker", {})
         ak = _linear_api_key_from_cfg(tc)
@@ -2028,7 +2038,7 @@ class LinearModule(AgenticModule):
                 return
             cfg = _load_workflow_config()
             tc = cfg.get("tracker", {})
-            if tc.get("kind") == "linear" and _has_env_key("LINEAR_API_KEY") and not local_only_id(issue_id):
+            if tc.get("kind") == "linear" and _has_env_key("LINEAR_API_KEY") and not _local_id(issue_id):
                 self._push_linear(issue_id, board_status, tc)
             else:
                 self.get_local_tracker().push_state(issue_id, board_status)
@@ -2055,7 +2065,7 @@ class LinearModule(AgenticModule):
     def post_comment(self, issue_id: str, body: str) -> bool:
         cfg = _load_workflow_config()
         tc = cfg.get("tracker", {})
-        if tc.get("kind") == "linear" and _has_env_key("LINEAR_API_KEY") and not local_only_id(issue_id):
+        if tc.get("kind") == "linear" and _has_env_key("LINEAR_API_KEY") and not _local_id(issue_id):
             return _post_linear_comment_raw(issue_id, body, _linear_api_key_from_cfg(tc))
         return self.get_local_tracker().post_comment(issue_id, body)
 

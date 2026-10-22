@@ -30,3 +30,7 @@
 - /verify: isolated runner 8599, Linear mode (dummy key), sitecustomize answering api.linear.app locally. "+" form → local-only LOC-1; board shows "local" chip, no "syncing…", ▶ dispatch button; dispatch ran in the project worktree, record status review, tasks.json In Review. Linear request log: 2 team queries, 0 naming the task, its identifier, title or project.
 
 ## Inspection round 1
+- Result: /tmp/claudex-AGE-127/inspect1/claudex-ec0ihbzd/result.json — verdict REVISE, cross_provider, fresh session 01a16404-d5a0-7a22-8200-5ce5ab935273, 234 s.
+- F1 (high) after Empty trash the local_only record is gone, so a late comment for that local- id could reach Linear — ACCEPTED: `_local_id` guard at the outbound boundaries (`_post_linear_comment_raw`, `post_comment`, `_push_sync`, `_linear_sync_patch_locked`) refuses every `local-` id whatever its record says; the comment route 404s an emptied card. The unsynced-placeholder dispatch gate is unchanged. Tests: feedback, runner comment, push and sync patch after Empty trash of a declassified task make no Linear call; the raw transport refuses a local id. Full suite: 938 passed, 26 warnings in 352.26s (0:05:52).
+
+## Inspection round 2
