@@ -30,6 +30,7 @@
 
 ## Open Decisions
 <!-- Decisions made and their rationale — so a new session knows the "why" -->
+- AGE-125 Claude account swap ships in the release (user decision 2026-10-21). Constraints to keep visible: macOS only; depends on Claude Code internals (keychain item `Claude Code-credentials`, `~/.claude.json` `oauthAccount`, `/api/oauth/profile`), so a Claude Code storage change breaks it (it fails closed); picker stays hidden until ≥ 2 accounts are saved. Before public release docs advertise it: check Anthropic's terms on multiple accounts and document it as an opt-in power-user feature
 - Long-term direction (AGE-126): scale = less human attention per verified merge, not more agents. Order trust → attention → fan-out → ceiling; plan `2026-10-21-scale-agent-fleet`. Known gap: verify badge `no check` still auto-merges
 - P15, P20, P23 parked in `docs/exec-plans/deferred/` (2026-10-13); P20 depended on `../symphony-ts`, which no longer exists
 - Server bound to 127.0.0.1 only — multi-host/remote scope is explicitly out of scope
