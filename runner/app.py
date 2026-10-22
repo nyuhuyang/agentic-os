@@ -4837,6 +4837,8 @@ def _project_error(exc: Exception):
         return jsonify({"error": str(exc), "initialized": exc.initialized}), status
     if isinstance(exc, _projects.WorktreesRemain):
         return jsonify({"error": str(exc), "worktrees": exc.worktrees}), 409
+    if isinstance(exc, _projects.NeedsCommit):  # the form offers to commit the files (AGE-127)
+        return jsonify({"error": str(exc), "needs_commit": True}), 400
     if isinstance(exc, (_projects.RegistryConflict, _projects.ProjectBusy, _projects.TicketLocked)):
         return jsonify({"error": str(exc)}), 409
     return jsonify({"error": str(exc)}), 400
@@ -4855,7 +4857,8 @@ def api_project_create():
     try:
         key = body.get("key") or _projects.derive_key(  # the folder name by default
             Path(str(entry.get("path") or "")).expanduser().name, _projects.raw_entries(_projects.registry_snapshot()[0]))
-        result = _projects.save_project(key, entry, str(body.get("registry_hash") or ""), create=True)
+        result = _projects.save_project(key, entry, str(body.get("registry_hash") or ""), create=True,
+                                        commit_existing=body.get("commit_existing") is True)
     except _projects.ProjectError as exc:
         return _project_error(exc)
     return jsonify({"ok": True, **result, "warning": _records_unsafe() if result["confidential"] else None})

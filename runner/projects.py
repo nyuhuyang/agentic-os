@@ -63,6 +63,10 @@ class RegistryConflict(ProjectError):
     """projects.yaml changed since the caller read it."""
 
 
+class NeedsCommit(ProjectError):
+    """The folder holds files with no commit yet; the dashboard offers to commit them (AGE-127)."""
+
+
 class WorktreesRemain(ProjectError):
     def __init__(self, msg: str, worktrees: list[str]):
         super().__init__(msg)
@@ -441,11 +445,12 @@ def _lifecycle_changed(old: dict, new: dict) -> bool:
 
 
 def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = False,
-                 path: Path | None = None) -> dict:
+                 path: Path | None = None, commit_existing: bool = False) -> dict:
     """Create or edit one registry entry from the dashboard, validated like dispatch.
     The key is immutable: worktrees, sidecars and bindings are keyed by it. On create, a
     missing or empty folder that is not its own repo root is made one after the key/hash/
-    duplicate checks (REGUI-B005); a non-empty one is refused. If the save then fails the
+    duplicate checks (REGUI-B005); a folder with uncommitted files (no repo yet, or a repo with
+    no commits) raises NeedsCommit unless `commit_existing` (AGE-127). If the save then fails the
     folder is kept, never deleted (B006), and the error carries `initialized`."""
     path = Path(path or REGISTRY_PATH)
     _check_key(key)
@@ -466,7 +471,8 @@ def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = Fa
             raise ProjectError(f"project {key!r} already exists")
         if not create and key not in projects:
             raise ProjectError(f"unknown project {key!r}")
-        created = init_repo(str(entry.get("path") or "")) if create and _needs_init(entry.get("path")) else None
+        created = (init_repo(str(entry.get("path") or ""), commit_existing)
+                   if create and _needs_init(entry.get("path")) else None)
         try:
             project = _validate_for_save(key, entry, old, create)
             projects[key] = entry
@@ -611,41 +617,68 @@ def _is_repo_root(root: Path) -> bool:
     return bool(proc and proc.returncode == 0 and Path(proc.stdout.strip()).resolve() == root.resolve())
 
 
+def _has_commit(root: Path) -> bool:
+    return _git(root, "rev-parse", "--verify", "-q", "HEAD", check=False).returncode == 0
+
+
 def _needs_init(raw_path: object) -> bool:
-    """True for a missing folder or an empty one that is not its own repo root; a non-empty
-    non-root folder is refused (its files would otherwise be committed blind)."""
+    """True for a missing folder, one that is not its own repo root, or a repo root with no
+    commit yet. A non-empty folder inside another repo is refused: add that repo instead."""
     if not isinstance(raw_path, str) or not raw_path.strip():
         return False  # _parse_project reports the missing path
     root = Path(raw_path).expanduser()
     if not root.is_absolute() or not os.path.lexists(root):
         return root.is_absolute()
-    if not root.is_dir() or _is_repo_root(root):
+    if not root.is_dir():
         return False
-    if any(root.iterdir()):
-        raise ProjectError(f"{root} is not a git repository root and is not empty; run git init and commit first")
+    if _is_repo_root(root):
+        return not _has_commit(root)
+    top = _git(root, "rev-parse", "--show-toplevel", check=False)
+    if top.returncode == 0 and any(root.iterdir()):
+        raise ProjectError(f"{root} is inside the git repository {top.stdout.strip()}; add that folder instead")
     return True
 
 
-def init_repo(raw_path: str) -> Path:
-    """Make a missing or empty folder a repo: git init + empty initial commit. On failure it
-    removes only what it created (the folder it made, else just .git)."""
+MAX_INIT_FILE_BYTES = 50 * 1024 * 1024  # ponytail: per-file cap only; bulky data belongs in .gitignore
+
+
+def init_repo(raw_path: str, commit_existing: bool = False) -> Path:
+    """Make a folder a repo with one initial commit: git init when it is not a repo root yet,
+    then commit every file .gitignore keeps. Files present and not `commit_existing` raise
+    NeedsCommit; files over MAX_INIT_FILE_BYTES are refused. On failure it removes only what
+    it created (the folder it made, else just the .git it made)."""
     root = Path(raw_path or "").expanduser()
     if not root.is_absolute():
         raise ProjectError("path must be absolute or ~-relative")
     existed = os.path.lexists(root)
-    if existed and (not root.is_dir() or root.is_symlink() or any(root.iterdir())):
-        raise ProjectError(f"{root} is not an empty folder")
+    if existed and (not root.is_dir() or root.is_symlink()):
+        raise ProjectError(f"{root} is not a folder")
     if not existed and not root.parent.is_dir():
         raise ProjectError(f"parent folder {root.parent} does not exist")
     if (root if existed else root.parent).resolve().is_relative_to(WORKTREE_ROOT.resolve()):
         raise ProjectError(f"path must not be inside {WORKTREE_ROOT}")
+    fresh = not existed or not _is_repo_root(root)
+    if not fresh and _has_commit(root):
+        raise ProjectError(f"{root} is already a git repository with commits")
     if not existed:
         root.mkdir()
     try:
-        _git(root, "init", "-q")
+        if fresh:
+            _git(root, "init", "-q")
+        files = [f for f in _git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").stdout.split("\0") if f]
+        if files and not commit_existing:
+            raise NeedsCommit(f"{root} holds {len(files)} file(s) with no git commit yet")
+        big = [f for f in files if (root / f).is_file() and not (root / f).is_symlink()
+               and (root / f).stat().st_size > MAX_INIT_FILE_BYTES]
+        if big:
+            raise ProjectError(f"{len(big)} file(s) over {MAX_INIT_FILE_BYTES >> 20} MB would be committed "
+                               f"({', '.join(big[:5])}); add them to .gitignore and save again")
+        if files:
+            _git(root, "add", "-A")
         _git(root, "commit", "-q", "--allow-empty", "-m", "Initial commit")
     except BaseException:
-        shutil.rmtree(root / ".git" if existed else root, ignore_errors=True)
+        if fresh:
+            shutil.rmtree(root / ".git" if existed else root, ignore_errors=True)
         raise
     return root
 

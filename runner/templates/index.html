@@ -1465,8 +1465,13 @@ document.getElementById('project-form')?.addEventListener('submit', async (event
   } else {
     const path = f.path.value.trim();
     const key = _deriveKey(path.replace(/\/+$/, '').split('/').pop());
-    r = await _projectApi('POST', '/api/projects', { key, registry_hash: hash,
-      entry: { path, confidential: f.confidential.checked, no_push: true } });
+    const body = { key, registry_hash: hash, entry: { path, confidential: f.confidential.checked, no_push: true } };
+    r = await _projectApi('POST', '/api/projects', body);
+    // A folder with files but no commit yet: commit them from here, no terminal (AGE-127).
+    if (r.data?.needs_commit && confirm(`${r.data.error}.\n\nCommit them as the initial commit? `
+        + 'git init runs first if needed; files matched by .gitignore are skipped; files over 50 MB stop the save.')) {
+      r = await _projectApi('POST', '/api/projects', { ...body, commit_existing: true });
+    }
   }
   save.disabled = false;
   if (!r.ok) {

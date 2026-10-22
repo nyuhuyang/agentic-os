@@ -369,7 +369,7 @@ def test_init_repo(reg, tmp_path):
     root = pj.init_repo(str(tmp_path / "fresh"))
     log = subprocess.run(["git", "-C", str(root), "log", "--oneline"], capture_output=True, text=True).stdout
     assert len(log.splitlines()) == 1
-    with pytest.raises(pj.ProjectError, match="not an empty folder"):
+    with pytest.raises(pj.ProjectError, match="already a git repository with commits"):
         pj.init_repo(str(root))
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -447,10 +447,34 @@ def test_create_auto_inits_missing_and_empty_folders_only(reg, tmp_path):
     full.mkdir(); (full / "data.csv").write_text("x")
     (a / "src").mkdir(); (a / "src" / "f.py").write_text("x")
     before = path.read_bytes()
-    for folder in (full, a / "src"):
-        with pytest.raises(pj.ProjectError, match="not empty; run git init"):
-            pj.save_project("n", {"path": str(folder)}, h(path), create=True)
+    with pytest.raises(pj.NeedsCommit, match="1 file"):
+        pj.save_project("n", {"path": str(full)}, h(path), create=True)
+    with pytest.raises(pj.ProjectError, match="inside the git repository"):
+        pj.save_project("n", {"path": str(a / "src")}, h(path), create=True)
     assert path.read_bytes() == before and not (full / ".git").exists()
+
+
+def test_create_commits_existing_files_on_request(reg, tmp_path, monkeypatch):
+    path, a, b = reg
+    plain, bare = tmp_path / "plain", tmp_path / "bare"  # no repo yet / repo with no commit (AGE-127)
+    for folder in (plain, bare):
+        folder.mkdir(); (folder / "a.py").write_text("x"); (folder / ".gitignore").write_text("big/\n")
+        (folder / "big").mkdir(); (folder / "big" / "blob").write_text("y")
+    git(bare, "init", "-q")
+    with pytest.raises(pj.NeedsCommit):
+        pj.save_project("bare", {"path": str(bare)}, h(path), create=True)
+    assert (bare / ".git").is_dir()  # a pre-existing .git is never removed
+    for key, folder in (("plain", plain), ("bare", bare)):
+        pj.save_project(key, {"path": str(folder)}, h(path), create=True, commit_existing=True)
+        tracked = subprocess.run(["git", "-C", str(folder), "ls-files"], capture_output=True, text=True).stdout.split()
+        assert sorted(tracked) == [".gitignore", "a.py"], key
+    huge = tmp_path / "huge"
+    huge.mkdir()
+    with open(huge / "h.bin", "wb") as f:
+        f.truncate(pj.MAX_INIT_FILE_BYTES + 1)
+    with pytest.raises(pj.ProjectError, match="over 50 MB.*h.bin"):
+        pj.save_project("huge", {"path": str(huge)}, h(path), create=True, commit_existing=True)
+    assert not (huge / ".git").exists() and "huge" not in pj.raw_entries(path.read_bytes())
 
 
 def test_set_confidential_changes_only_that_field(reg):
