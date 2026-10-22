@@ -925,13 +925,8 @@ def test_relocated_worktree_root_is_refused(helper, monkeypatch, tmp_path):
 def test_failed_closing_snapshot_is_recorded(helper, monkeypatch):
     """I7-07: a closing fingerprint that fails is recorded and badges the run, on success and cancel."""
     app_mod, run, records, state, *_ = helper
-    real, calls = pj.fingerprint, []
-
-    def flaky(project, exclude=frozenset()):
-        calls.append(1)
-        if len(calls) % 2 == 0:
-            raise pj.ProjectError("index is corrupt")
-        return real(project, exclude=exclude)
+    def flaky(project, exclude=frozenset()):  # the opening uses fingerprint_parts: only the closing fails (AGE-124)
+        raise pj.ProjectError("index is corrupt")
     monkeypatch.setattr(pj, "fingerprint", flaky)
     run()
     rec = records()[-1]

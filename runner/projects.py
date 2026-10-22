@@ -41,7 +41,7 @@ REGISTRY_PATH = Path(os.environ.get("AGENTIC_OS_PROJECTS", str(_PROTO / "project
 WORKTREE_ROOT = Path(os.environ.get("AGENTIC_OS_WORKTREES", "~/.agentic-os/worktrees")).expanduser()
 
 _FIELDS = {"path", "kind", "verify", "env", "confidential", "no_push", "seed", "verify_timeout_s", "note",
-           "auto_merge"}
+           "auto_merge", "commit"}
 _IDENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DEFAULT_VERIFY_TIMEOUT_S = 600
 TAIL_CHARS = 4000
@@ -86,6 +86,7 @@ class Project:
     verify_timeout_s: int = DEFAULT_VERIFY_TIMEOUT_S
     note: str = ""
     auto_merge: bool = True
+    commit: bool = True  # false: no Commit button on its session rows (notes, a wiki: not code)
 
 
 # An agent can write the shared git config (e.g. core.fsmonitor -> a script in its
@@ -287,6 +288,7 @@ def _parse_project(key: str, entry: object) -> Project:
         key=key, path=root, verify=(verify or "").strip(), kind=str(entry.get("kind") or ""),
         env=env, confidential=bool(entry.get("confidential", False)),
         no_push=bool(entry.get("no_push", False)), auto_merge=bool(entry.get("auto_merge", True)),
+        commit=bool(entry.get("commit", True)),
         seed=tuple(_seed_path(root, s, key) for s in seeds), verify_timeout_s=timeout, note=note,
     )
 
@@ -698,13 +700,17 @@ def derive_key(folder_name: str, taken) -> str:
     return key
 
 
-def set_confidential(key: str, value: bool, expected_hash: str, path: Path | None = None) -> dict:
-    """Change only `confidential` on the stored entry; every other field stays as written
-    (no _clean_entry, SAP-007). A lifecycle change: needs the exclusive project lock."""
+def set_flags(key: str, flags: dict, expected_hash: str, path: Path | None = None) -> dict:
+    """Change only the given `confidential` / `commit` flags on the stored entry; every other
+    field stays as written (no _clean_entry, SAP-007). A lifecycle change: needs the exclusive
+    project lock."""
     path = Path(path or REGISTRY_PATH)
     _check_key(key)
-    if not isinstance(value, bool):
-        raise ProjectError("confidential must be true or false")
+    if not flags or set(flags) - {"confidential", "commit"}:
+        raise ProjectError("only confidential and commit can be changed here")
+    for name, value in flags.items():
+        if not isinstance(value, bool):
+            raise ProjectError(f"{name} must be true or false")
     from state_io import file_lock
     with project_lock(key, exclusive=True, blocking=False), file_lock(path):
         doc = _locked_doc(path, expected_hash)
@@ -712,10 +718,10 @@ def set_confidential(key: str, value: bool, expected_hash: str, path: Path | Non
         if not isinstance(entry, dict):
             raise ProjectError(f"unknown project {key!r}")
         # A copy: a YAML alias may share this mapping with another project (SAP-B001).
-        entry = doc["projects"][key] = {**entry, "confidential": value}
+        entry = doc["projects"][key] = {**entry, **flags}
         project = _parse_project(key, entry)
         _write_registry(path, doc, expected_hash)
-    return {"key": key, "confidential": project.confidential}
+    return {"key": key, "confidential": project.confidential, "commit": project.commit}
 
 
 _SCAN_ROOTS = ("Documents", "code", "Projects", "Developer", "src", "repos", "work", "")
@@ -1295,12 +1301,14 @@ def merge_into_checkout(project: Project, ident: str, rev: str | None = None) ->
 
 
 def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry_run: bool = False,
-                    merger=None) -> dict:
+                    merger=None, main_guard=None) -> dict:
     """The user's manual Commit on a session row: stage every change in the session's checkout
     (the project's folder or one of its AgenticOS worktrees) and commit it locally. Never pushes.
     In a worktree, `merger(ident)` then merges agent/<ident> into the main checkout, still under
     the ticket lock so the branch cannot move in between; its refusal never undoes the commit.
-    A dry run only reports {repo, branch, files, ahead, into}. Hooks off and unsigned."""
+    A dry run only reports {repo, branch, files, ahead, into}. Hooks off and unsigned.
+    `main_guard()`: a context entered around a real commit in the main checkout; it yields a dict
+    that gets {"head": the new commit} (AGE-124)."""
     top = _git(Path(cwd), "rev-parse", "--show-toplevel", check=False)
     if top.returncode:
         raise ProjectError(f"{cwd} is not inside a git checkout")
@@ -1313,12 +1321,15 @@ def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry
     # and a policy read before the ticket lock could be stale by the time git runs (SC-006).
     common = _git(project.path, "rev-parse", "--git-common-dir").stdout.strip()
     confine = [(project.path / common).resolve(), repo]
+    expect = None
     with contextlib.ExitStack() as stack:
         if ident:
             stack.enter_context(ticket_lock(project.key, ident))  # a run, verify or terminal owns it now
-        elif not _MERGE_LOCK.acquire(blocking=False):
-            raise TicketLocked(f"a merge into {repo} is in progress; try again in a moment")
         else:
+            if main_guard and not dry_run:
+                expect = stack.enter_context(main_guard())  # lock order: gate before _MERGE_LOCK
+            if not _MERGE_LOCK.acquire(blocking=False):
+                raise TicketLocked(f"a merge into {repo} is in progress; try again in a moment")
             stack.callback(_MERGE_LOCK.release)
         if _git(repo, "symbolic-ref", "-q", "HEAD", check=False, confine=confine).returncode:
             raise ProjectError(f"{repo} is on a detached HEAD; commit there by hand")
@@ -1345,6 +1356,8 @@ def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry
                 _git(repo, "commit", "--no-verify", "--no-gpg-sign", "-q", "-m", msg, confine=confine,
                      timeout=COMMIT_TIMEOUT_S, env=_identity_env(repo))
                 out["committed"] = _git(repo, "rev-parse", "HEAD", confine=confine).stdout.strip()
+                if expect is not None:
+                    expect["head"] = out["committed"]  # the guard checks the checkout ends exactly here
         if ident and merger and _ahead(project, ident):
             try:
                 out["merged_head"] = merger(ident)
@@ -1423,11 +1436,30 @@ CLAUDE_STAGING = ".claude/.cc-writes"
 
 
 def fingerprint(project: Project, exclude: set[str] = frozenset()) -> str:
-    """Hash of everything an agent might change in the main checkout (Decision 1).
+    """Hash of everything an agent might change in the main checkout (Decision 1)."""
+    return fingerprint_of(fingerprint_parts(project, exclude))
 
-    HEAD, staged and unstaged diffs, every untracked/ignored file's (path, size, mode,
-    mtime_ns), the effective git config and the effective hooks dir. `exclude` holds
-    runner bookkeeping paths (relative); an entry ending in "/" excludes that whole directory.
+
+# A checkout with nothing staged, changed or untracked (what a manual commit leaves, AGE-124).
+CLEAN_PARTS = {"staged": hashlib.sha256(b"").hexdigest(), "unstaged": hashlib.sha256(b"").hexdigest(),
+               "untracked": hashlib.sha256(b"[]").hexdigest()}
+
+
+def fingerprint_of(parts: dict) -> str:
+    return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
+
+
+def fingerprint_parts(project: Project, exclude: set[str] = frozenset()) -> dict:
+    """The main-checkout fingerprint, one hash per component, so a sanctioned change (a manual
+    merge or commit) can move only the components it may touch (AGE-124).
+
+    head/branch: HEAD and what it points at; refs: shared refs every worktree can change (stash,
+    other branches, tags) minus the ticket's own agent/* branches, remote-tracking refs and the
+    checked-out branch (head covers it); tracked: the tracked paths; flags: the entries carrying
+    skip-worktree / assume-unchanged (any tag but H); staged and
+    unstaged diffs; untracked / ignored: every such file's (path, size, mode, mtime_ns);
+    config: the effective git config; hooks: the effective hooks dir. `exclude` holds runner
+    bookkeeping paths (relative); an entry ending in "/" excludes that whole directory.
     ponytail: ignored dirs are walked in full; a huge node_modules makes this slow, cache by
     dir mtime if it ever matters.
     """
@@ -1436,19 +1468,21 @@ def fingerprint(project: Project, exclude: set[str] = frozenset()) -> str:
     root = project.path
     confine = confine_for(project)
     g = lambda *a: _git_bytes(root, *a, confine=confine)
-    h = hashlib.sha256()
-    h.update(g("rev-parse", "HEAD"))
-    h.update(_git_bytes(root, "symbolic-ref", "-q", "HEAD", confine=confine) if
-             _git(root, "symbolic-ref", "-q", "HEAD", check=False, confine=confine).returncode == 0 else b"detached")
-    # Shared refs every worktree can change (stash, other branches, tags); the ticket's own
-    # agent/* branches and remote-tracking refs are expected to move.
+    digest = lambda b: hashlib.sha256(b).hexdigest()
+    parts = {"head": g("rev-parse", "HEAD").decode().strip()}
+    on_branch = _git(root, "symbolic-ref", "-q", "HEAD", check=False, confine=confine).returncode == 0
+    branch = _git_bytes(root, "symbolic-ref", "-q", "HEAD", confine=confine).strip() if on_branch else b"detached"
+    parts["branch"] = branch.decode("utf-8", "surrogateescape")
     refs = g("for-each-ref", "--format=%(refname) %(objectname)")
-    h.update(b"\n".join(l for l in refs.splitlines()
-                        if not l.startswith((b"refs/heads/agent/", b"refs/remotes/"))))
-    h.update(hashlib.sha256(g("ls-files", "-v", "-z")).digest())  # skip-worktree / assume-unchanged flags
-    h.update(hashlib.sha256(g("diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv")).digest())
-    h.update(hashlib.sha256(g("diff", "--binary", "--no-ext-diff", "--no-textconv")).digest())
-    files = []
+    parts["refs"] = digest(b"\n".join(l for l in refs.splitlines()
+                                      if not l.startswith((b"refs/heads/agent/", b"refs/remotes/"))
+                                      and l.split(b" ", 1)[0] != branch))
+    listed = g("ls-files", "-v", "-z").split(b"\0")
+    parts["tracked"] = digest(b"\0".join(e[2:] for e in listed))  # which paths: a merge or commit moves it
+    parts["flags"] = digest(b"\0".join(e for e in listed if e and not e.startswith(b"H ")))  # skip-worktree etc.: never sanctioned
+    parts["staged"] = digest(g("diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"))
+    parts["unstaged"] = digest(g("diff", "--binary", "--no-ext-diff", "--no-textconv"))
+    files = {b"??": [], b"!!": []}  # untracked / ignored: a commit takes the first, never the second
     for entry in g("status", "--porcelain", "-z", "-uall", "--ignored=matching").split(b"\0"):
         if len(entry) < 4 or entry[:2] not in (b"??", b"!!"):
             continue
@@ -1464,19 +1498,20 @@ def fingerprint(project: Project, exclude: set[str] = frozenset()) -> str:
                     if r == CLAUDE_STAGING and sub.is_dir() and not sub.is_symlink():
                         continue  # its own metadata only; anything inside still counts
                     if not skip(r):
-                        files.append(_stat_entry(sub, r))
+                        files[entry[:2]].append(_stat_entry(sub, r))
         elif os.path.lexists(path):
-            files.append(_stat_entry(path, rel))
-    h.update(json.dumps(sorted(files)).encode())
-    h.update(g("config", "--list", "--show-origin", "--includes"))
+            files[entry[:2]].append(_stat_entry(path, rel))
+    parts["untracked"] = digest(json.dumps(sorted(files[b"??"])).encode())
+    parts["ignored"] = digest(json.dumps(sorted(files[b"!!"])).encode())
+    parts["config"] = digest(g("config", "--list", "--show-origin", "--includes"))
     # The hardening's own core.hooksPath=/dev/null would hide the real hooks dir;
     # rev-parse runs no hooks, so only fsmonitor is switched off for this lookup.
     hooks = Path(_git_bytes(root, "rev-parse", "--git-path", "hooks", confine=confine,
                             hardening=("-c", "core.fsmonitor=false")).decode().strip())
     hooks = hooks if hooks.is_absolute() else root / hooks
-    if hooks.is_dir():
-        h.update(json.dumps(sorted(_stat_entry(f, f.name) for f in hooks.iterdir())).encode())
-    return h.hexdigest()
+    parts["hooks"] = digest(json.dumps(sorted(_stat_entry(f, f.name) for f in hooks.iterdir())).encode()
+                            if hooks.is_dir() else b"")
+    return parts
 
 
 # ── Verify ───────────────────────────────────────────────────────────────────

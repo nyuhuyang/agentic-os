@@ -212,7 +212,7 @@ def test_route_holds_the_lifecycle_lock(repo, tmp_path, monkeypatch):
                                             "message": {"role": "user", "content": "hi"}}) + "\n")
     seen = {}
 
-    def fake_commit(p, cwd, message, dry_run=False, merger=None):
+    def fake_commit(p, cwd, message, dry_run=False, merger=None, main_guard=None):
         try:
             with pj.project_lock("alpha", exclusive=True, blocking=False):
                 seen["locked"] = False
@@ -344,9 +344,10 @@ def test_merge_refusal_keeps_the_commit(repo, monkeypatch):
     import app as app_mod
     wt = _wt(project)
     (wt / "w.txt").write_text("w\n")
-    monkeypatch.setattr(app_mod, "_running_jobs", {"other": {"project_key": "alpha"}})  # another run is open
+    session_worker = {"record_extra": {"session_project": "alpha"}}  # an agent in the main checkout itself
+    monkeypatch.setattr(app_mod, "_running_jobs", {"other": session_worker})
     out = pj.commit_checkout(project, wt, "keep me", merger=lambda ident: app_mod._manual_merge(project, ident))
-    assert out["committed"] and "another run" in out["merge_error"] and not (root / "w.txt").exists()
+    assert out["committed"] and "main checkout" in out["merge_error"] and not (root / "w.txt").exists()
     assert git(wt, "log", "-1", "--format=%s") == "keep me"
 
 
@@ -411,7 +412,7 @@ def test_manual_merge_refused_while_an_agent_works_in_the_main_checkout(repo, mo
     session_worker = {"record_extra": {"session_project": "alpha"}}  # no top-level project_key (SBR-005)
     monkeypatch.setattr(app_mod, "_running_jobs", {"s": session_worker})
     out = pj.commit_checkout(project, wt, "m", merger=lambda i: app_mod._manual_merge(project, i))
-    assert out["committed"] and "another run" in out["merge_error"] and not (root / "w.txt").exists()
+    assert out["committed"] and "main checkout" in out["merge_error"] and not (root / "w.txt").exists()
 
 
 def test_merge_completes_despite_merge_options_no_commit(repo):
@@ -725,3 +726,180 @@ def test_resume_tab_takes_the_gate_of_its_real_checkout(tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod, "_ROOT_KEY_CACHE", {})
     assert app_mod._checkout_gate(tmp_path / "proj" / "src") is app_mod._merge_gate("proj")  # (CM-028)
     assert app_mod._checkout_gate(app_mod._PROTO) is app_mod._merge_gate("self")
+
+
+# ── AGE-124: other sessions' runs do not block a manual merge or commit ─────
+
+@pytest.fixture
+def bound(repo, tmp_path, monkeypatch):
+    """`repo` registered, plus one open project-bound run with its opening fingerprint."""
+    project, root = repo
+    import app as app_mod
+    reg = tmp_path / "projects.yaml"
+    reg.write_text(f"projects:\n  alpha:\n    path: {root}\n    verify: 'true'\n")
+    monkeypatch.setattr(pj, "REGISTRY_PATH", reg)
+    monkeypatch.setattr(app_mod, "_ticket_confidential", lambda *a: False)
+    monkeypatch.setattr(app_mod, "_running_jobs", {"r2": {"run_id": "r2", "project_key": "alpha", "state": "running"}})
+    base = {"key": "alpha", "project": project, "exclude": set(), "parts": pj.fingerprint_parts(project), "changed": False}
+    monkeypatch.setattr(app_mod, "_RUN_BASELINES", {"r2": base})
+    return app_mod, project, root, base
+
+
+def flagged(project, base):
+    """What the run's closing check would say now."""
+    return base["changed"] or pj.fingerprint(project) != pj.fingerprint_of(base["parts"])
+
+
+def test_fingerprint_is_the_hash_of_its_parts(repo):
+    project, root = repo
+    assert pj.fingerprint(project) == pj.fingerprint_of(pj.fingerprint_parts(project))
+
+
+def test_merge_while_another_run_is_open_is_not_blamed_on_it(bound):
+    app_mod, project, root, base = bound
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    out = pj.commit_checkout(project, wt, "m", merger=lambda i: app_mod._manual_merge(project, i))
+    assert out.get("merged_head") and (root / "w.txt").exists()
+    assert not flagged(project, base)
+    (root / "agent-wrote.txt").write_text("x")  # a later change is still the run's
+    assert flagged(project, base)
+
+
+def test_merge_keeps_an_earlier_change_flagged(bound):
+    app_mod, project, root, base = bound
+    (root / "a.txt").write_text("edited after the run opened\n")
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    assert pj.commit_checkout(project, wt, "m", merger=lambda i: app_mod._manual_merge(project, i)).get("merged_head")
+    (root / "a.txt").write_text("a\n")  # even restored afterwards: the mark is sticky (R05)
+    assert base["changed"] and flagged(project, base)
+
+
+def _merge_then(app_mod, monkeypatch, after):
+    real = pj.merge_into_checkout
+
+    def merge_and_meddle(*a, **kw):
+        head = real(*a, **kw)
+        after()  # an agent writing during the merge window
+        return head
+    monkeypatch.setattr(pj, "merge_into_checkout", merge_and_meddle)
+
+
+def test_a_hook_written_during_the_merge_still_flags_the_run(bound, monkeypatch):
+    app_mod, project, root, base = bound
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    _merge_then(app_mod, monkeypatch, lambda: (root / ".git" / "hooks" / "post-commit").write_text("#!/bin/sh\n"))
+    assert pj.commit_checkout(project, wt, "m", merger=lambda i: app_mod._manual_merge(project, i)).get("merged_head")
+    assert base["changed"]
+
+
+def test_skip_worktree_set_during_the_merge_still_flags_the_run(bound, monkeypatch):
+    app_mod, project, root, base = bound
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+
+    def hide_an_edit():
+        git(root, "update-index", "--skip-worktree", "a.txt")
+        (root / "a.txt").write_text("hidden\n")
+    _merge_then(app_mod, monkeypatch, hide_an_edit)
+    assert pj.commit_checkout(project, wt, "m", merger=lambda i: app_mod._manual_merge(project, i)).get("merged_head")
+    assert base["changed"]
+
+
+def test_main_checkout_commit_is_not_blamed_on_an_open_run(bound):
+    app_mod, project, root, base = bound
+    (root / "user.txt").write_text("u\n")
+    base["parts"] = pj.fingerprint_parts(project)  # the run opened with this file already there
+    (root / "a.txt").write_text("before the run too\n")
+    base["parts"] = pj.fingerprint_parts(project)
+    out = pj.commit_checkout(project, root, "mine", main_guard=lambda: app_mod._main_commit_guard(project))
+    assert out["committed"] and not flagged(project, base)
+
+
+def test_main_checkout_commit_keeps_a_later_edit_flagged(bound):
+    app_mod, project, root, base = bound
+    (root / "a.txt").write_text("edited after the run opened\n")
+    out = pj.commit_checkout(project, root, "mine", main_guard=lambda: app_mod._main_commit_guard(project))
+    assert out["committed"] and git(root, "status", "--porcelain") == "" and flagged(project, base)
+
+
+def test_running_apis_serialise_while_a_baseline_is_held(bound):
+    app_mod, project, root, base = bound
+    c, h = app_mod.app.test_client(), {"X-AgenticOS-Token": app_mod.REQUEST_TOKEN}
+    assert c.get("/api/runs?state=running", headers=h).status_code == 200
+    assert c.get("/api/runs/r2", headers=h).status_code in (200, 404)
+
+
+def test_commit_off_hides_state_and_refuses_the_route(repo, tmp_path, monkeypatch):
+    project, root = repo
+    import app as app_mod
+    reg = tmp_path / "projects.yaml"
+    reg.write_text(f"projects:\n  alpha:\n    path: {root}\n    verify: 'true'\n    commit: false\n")
+    monkeypatch.setattr(pj, "REGISTRY_PATH", reg)
+    d = pj.CLAUDE_PROJECTS / pj._slug(str(root))
+    d.mkdir(parents=True)
+    (d / "s1.jsonl").write_text(json.dumps({"type": "user", "cwd": str(root), "entrypoint": "cli",
+                                            "message": {"role": "user", "content": "hi"}}) + "\n")
+    (root / "a.txt").write_text("notes\n")
+    c, h = app_mod.app.test_client(), {"X-AgenticOS-Token": app_mod.REQUEST_TOKEN}
+    row = next(p for p in c.get("/api/projects", headers=h).get_json()["projects"] if p["key"] == "alpha")
+    assert row["commit"] is False and "commit_state" not in row["sessions"][0]
+    r = c.post("/api/projects/alpha/sessions/claude/s1/commit", json={"message": "m"}, headers=h)
+    assert r.status_code == 400 and "off" in r.get_json()["error"] and count(root) == 1
+
+
+# ── AGE-124 inspection: only the operation's own result is re-based (I01/I02) ─
+
+def _commit_then(app_mod, project, meddle):
+    import contextlib
+
+    @contextlib.contextmanager
+    def guard():
+        with app_mod._main_commit_guard(project) as expect:
+            yield expect
+            meddle()  # an agent writing after the commit, before the guard's closing snapshot
+    return guard
+
+
+def test_an_ignored_file_written_during_a_commit_still_flags_the_run(bound):
+    app_mod, project, root, base = bound
+    (root / ".gitignore").write_text(".env\n"); git(root, "add", "-A"); git(root, "commit", "-qm", "ignore")
+    (root / ".env").write_text("A=1\n")
+    base["parts"] = pj.fingerprint_parts(project)
+    (root / "a.txt").write_text("mine\n")
+    base["parts"] = pj.fingerprint_parts(project)
+    guard = _commit_then(app_mod, project, lambda: (root / ".env").write_text("A=2 longer\n"))
+    assert pj.commit_checkout(project, root, "mine", main_guard=guard)["committed"]
+    assert base["changed"]
+
+
+def test_a_tracked_edit_left_after_a_commit_still_flags_the_run(bound):
+    app_mod, project, root, base = bound
+    (root / "user.txt").write_text("u\n")
+    base["parts"] = pj.fingerprint_parts(project)
+    guard = _commit_then(app_mod, project, lambda: (root / "a.txt").write_text("agent\n"))
+    assert pj.commit_checkout(project, root, "mine", main_guard=guard)["committed"]
+    assert base["changed"]
+
+
+def test_head_reset_after_the_merge_still_flags_the_run(bound, monkeypatch):
+    app_mod, project, root, base = bound
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    pre = git(root, "rev-parse", "HEAD")
+    _merge_then(app_mod, monkeypatch, lambda: git(root, "reset", "-q", "--hard", pre))
+    assert pj.commit_checkout(project, wt, "m", merger=lambda i: app_mod._manual_merge(project, i)).get("merged_head")
+    assert base["changed"]
+
+
+def test_a_non_fast_forward_merge_is_not_blamed_on_the_run(bound):
+    app_mod, project, root, base = bound
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    pj.commit_checkout(project, wt, "branch work")
+    (root / "m.txt").write_text("m\n"); git(root, "add", "-A"); git(root, "commit", "-qm", "diverge")
+    base["parts"] = pj.fingerprint_parts(project)  # the run opened after main diverged
+    assert pj.commit_checkout(project, wt, "", merger=lambda i: app_mod._manual_merge(project, i)).get("merged_head")
+    assert git(root, "rev-list", "--parents", "-n1", "HEAD").count(" ") == 2 and not flagged(project, base)

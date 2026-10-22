@@ -3276,7 +3276,22 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
                                                confine=_projects.confine_for(project, wt_path)).stdout.strip() or None
             exclude = project_runs.bookkeeping_paths(project, [STATE_DIR, OUTPUTS_DIR])
             with _merge_gate(project.key):  # never between a queued merge's check and its merge (SC-019)
-                before = _projects.fingerprint(project, exclude=exclude)
+                parts = _projects.fingerprint_parts(project, exclude=exclude)
+                with _JOB_LOCK:
+                    _RUN_BASELINES[run_id] = {"key": project.key, "project": project, "exclude": exclude,
+                                              "parts": parts, "changed": False}
+
+            def closing() -> dict:
+                """The closing fingerprint against the baseline as a manual merge/commit left it (AGE-124)."""
+                with _merge_gate(project.key):
+                    with _JOB_LOCK:
+                        base = _RUN_BASELINES.pop(run_id, None)
+                    if base is None:  # fail closed, like an unreadable snapshot (I7-07)
+                        return {"main_checkout_changed": None, "closing_check_error": "no opening fingerprint"}
+                    out = project_runs.closing_check(project, exclude, _projects.fingerprint_of(base["parts"]))
+                if base["changed"] and out["main_checkout_changed"] is False:
+                    out["main_checkout_changed"] = True  # changed before or during a sanctioned change (R05)
+                return out
             tab_open = _main_path_tab_open(project.key)
             cmd = _project_cmd(agent, project, project_runs.project_prompt(prompt, project, binding, agent),
                                resume_session)
@@ -3311,14 +3326,14 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
             else:
                 status = "review" if ok else "error"
             if job.get("cancelled"):  # skip the work, keep the safety check (I6-13, I7-07)
-                result = project_runs.closing_check(project, exclude, before)
+                result = closing()
                 if result["main_checkout_changed"] is None:
                     result["verify_badge"] = "main checkout unchecked"
                 elif result["main_checkout_changed"]:
                     result["verify_badge"] = "main checkout changed"
             else:
                 job["phase"] = "post_run"  # bounded by git/verify timeouts; not a stall candidate
-                result = project_runs.post_run(project, binding, agent, title, before, exclude,
+                result = project_runs.post_run(project, binding, agent, title, None, exclude, closing=closing,
                                                on_start=_track, stopped=lambda: bool(job.get("cancelled")),
                                                start_sha=run_start_sha)
                 if result.get("post_run_error"):
@@ -3339,6 +3354,7 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
         _running_procs.pop(run_id, None)
         with _JOB_LOCK:  # from here a cancel is refused, so the outcome below is final (I8-06)
             job["phase"] = "finalizing"
+            _RUN_BASELINES.pop(run_id, None)  # a run that failed before its closing check
             cancelled = job.get("cancelled")
     try:  # the job stays registered until its record is written: shutdown waits for it (I7-03)
         if cancelled:  # authoritative through final logging: no review push, no run comment (I5-09)
@@ -3385,6 +3401,67 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
 
 
 _PENDING_MERGES: dict[str, list[tuple[str, str]]] = {}  # project key -> (ticket, verified sha) waiting for its other runs (AGE-111)
+
+# run_id -> {key, project, exclude, parts, changed}: each open project-bound run's opening main-checkout
+# fingerprint by component, from its opening to its closing check (AGE-124). Never in the job dict:
+# /api/runs serialises jobs. Written under the checkout's merge gate and _JOB_LOCK.
+_RUN_BASELINES: dict[str, dict] = {}
+# The components a manual merge or a main-checkout commit may move. Never config, hooks, refs, the
+# branch, ignored files or the index flags (skip-worktree / assume-unchanged): those stay an agent's change.
+_SANCTIONED = {"merge": {"head", "tracked"}, "commit": {"head", "tracked", "staged", "unstaged", "untracked"}}
+
+
+def _explained(b: dict, op: str, pre: dict, post: dict, expect: dict) -> bool:
+    """`post` is exactly what the operation made of `pre`: nothing outside its components moved,
+    HEAD is the commit it reported, on top of `pre`'s HEAD (or, for a fast-forward merge, the
+    branch tip), and a commit left nothing staged, changed or untracked behind (AGE124-I01/I02)."""
+    if any(post[c] != pre[c] for c in pre if c not in _SANCTIONED[op]):
+        return False
+    head = expect.get("head")
+    if head is None:  # nothing was committed or merged: nothing may have moved
+        return post == pre
+    if post["head"] != head:
+        return False
+    root, confine = b["project"].path, _projects.confine_for(b["project"])
+    parent = _projects._git(root, "rev-parse", "-q", "--verify", f"{head}^1", check=False, confine=confine).stdout.strip()
+    fast_forward = (op == "merge" and head == expect.get("tip") and _projects._git(
+        root, "merge-base", "--is-ancestor", pre["head"], head, check=False, confine=confine).returncode == 0)
+    if parent != pre["head"] and not fast_forward:
+        return False
+    return op == "merge" or all(post[c] == v for c, v in _projects.CLEAN_PARTS.items())
+
+
+@contextlib.contextmanager
+def _rebase_bound_runs(project, op: str):
+    """A main-checkout change the user asked for (a manual merge or commit) is not blamed on the
+    checkout's open project-bound runs: their baselines move to the new state. Caller holds the
+    checkout's merge gate, which every opening and closing fingerprint also takes. A run whose
+    checkout had already changed, or whose other components move meanwhile (an agent writing a
+    hook during the merge), is marked changed for good; nothing moves if the change raises."""
+    keys = _same_checkout_keys(project.key)
+    with _JOB_LOCK:
+        runs = [b for b in _RUN_BASELINES.values() if b["key"] in keys and not b["changed"]]
+    clean, expect = [], {}  # the operation fills expect: {"head": its commit, "tip": a merged branch tip}
+    for b in runs:
+        try:
+            pre = _projects.fingerprint_parts(b["project"], b["exclude"])
+        except Exception:
+            pre = None
+        if pre != b["parts"]:  # already changed (or unreadable): never laundered by this change (R05)
+            b["changed"] = True
+        else:
+            clean.append((b, pre))
+    yield expect
+    for b, pre in clean:
+        try:
+            post = _projects.fingerprint_parts(b["project"], b["exclude"])
+            ok = _explained(b, op, pre, post, expect)
+        except Exception:
+            ok = False
+        if ok:
+            b["parts"] = post
+        else:
+            b["changed"] = True
 
 
 _MERGE_GATES: dict[str, threading.Lock] = {}
@@ -3480,7 +3557,8 @@ def _root_activity():
             _ROOT_ACTIVE -= 1
 
 
-def _project_runs_open(key: str, job: dict | None, sessions: bool = False, runner_root: bool = False) -> bool:
+def _project_runs_open(key: str, job: dict | None, sessions: bool = False, runner_root: bool = False,
+                       bound: bool = True) -> bool:
     """Another run of this project is still before its closing fingerprint: a merge now would
     read as that run changing the main checkout. Caller holds _JOB_LOCK.
     Used under _merge_gate, which a new run's opening fingerprint also takes (SC-019)."""
@@ -3490,7 +3568,7 @@ def _project_runs_open(key: str, job: dict | None, sessions: bool = False, runne
 
     def here(j):
         extra = j.get("record_extra") or {}
-        return (j.get("project_key") in keys
+        return ((bound and j.get("project_key") in keys)
                 # an agent working in the main checkout itself (a session card, no project_key) (CM-004)
                 or (sessions and extra.get("session_project") in keys)
                 # a runner-root job (free prompt, generic retry, unbound dispatch) when the project IS the runner's checkout (CM-010)
@@ -4818,9 +4896,10 @@ def api_projects():
     board_ids, labels = _board_sessions()  # board-launched headless sessions, with their card ids (§9)
     for key, p in reg.items():
         try:  # one project's reader failure never hides the others
+            sessions = _projects.project_sessions(p, board_ids, labels)
             out.append({"key": key, "name": p.path.name, "kind": p.kind, "confidential": p.confidential, "no_push": p.no_push,
-                        "note": p.note, "entry": raw.get(key), "baseline": _BASELINES.get(key),
-                        "sessions": _with_commit_state(p, _projects.project_sessions(p, board_ids, labels)),
+                        "commit": p.commit, "note": p.note, "entry": raw.get(key), "baseline": _BASELINES.get(key),
+                        "sessions": _with_commit_state(p, sessions) if p.commit else sessions,
                         "memory": _projects.claude_memory_names(p)})
         except Exception as exc:
             out.append({"key": key, "error": f"session readers failed: {exc}", "entry": raw.get(key)})
@@ -4878,7 +4957,8 @@ def api_project_edit(key: str):
 def api_project_confidential(key: str):
     body = request.get_json(silent=True) or {}
     try:
-        result = _projects.set_confidential(key, body.get("confidential"), str(body.get("registry_hash") or ""))
+        flags = {k: body[k] for k in ("confidential", "commit") if k in body}
+        result = _projects.set_flags(key, flags, str(body.get("registry_hash") or ""))
     except _projects.ProjectError as exc:
         return _project_error(exc)
     return jsonify({"ok": True, **result, "warning": _records_unsafe() if result["confidential"] else None})
@@ -5070,15 +5150,16 @@ def _rename_card_session(key: str, agent: str, sid: str, issue_id: str, title: o
 def _manual_merge(project, ident: str) -> str:
     """Commit & merge from a session row: agent/<ident> into the main checkout, under the same
     rules as the auto-merge (conflict-free only, the ticket's own policy) and its project gate.
-    Refused while another run of the project is open: a merge now would read as that run
-    changing the main checkout. Caller holds the ticket lock."""
+    Other project-bound runs (each in its own worktree) do not block it: their main-checkout
+    baselines are moved past the merge (AGE-124). Refused while an agent works in the main
+    checkout itself, its tests run there, or a tab is open there. Caller holds the ticket lock."""
     with _merge_gate(project.key):
         runner_root = os.path.realpath(project.path) == os.path.realpath(_PROTO)
         with _JOB_LOCK:
-            opened = _project_runs_open(project.key, None, sessions=True, runner_root=runner_root)
+            opened = _project_runs_open(project.key, None, sessions=True, runner_root=runner_root, bound=False)
             testing = any(_BASELINE_RUNS.get(k) for k in _same_checkout_keys(project.key))
         if opened:
-            raise _projects.ProjectError("another run of this project is in progress; merge after it finishes")
+            raise _projects.ProjectError("an agent is working in the main checkout; merge after it finishes")
         if testing:  # Run tests can be reading the main checkout (CM-026)
             raise _projects.ProjectError("this project's tests are running; merge after they finish")
         from runner.modules.pty import interactive_agents_in
@@ -5086,7 +5167,11 @@ def _manual_merge(project, ident: str) -> str:
             raise _projects.ProjectError("an interactive agent tab is open in the main checkout; close it, then merge")
         eff = _effective_project(project, ident)
         # the exact branch commit (refs/heads/), resolved under the caller's ticket lock (CM-002)
-        return _projects.merge_into_checkout(eff, ident, _projects.branch_head(eff, ident))
+        tip = _projects.branch_head(eff, ident)
+        with _rebase_bound_runs(project, "merge") as expect:
+            expect["tip"] = tip
+            expect["head"] = _projects.merge_into_checkout(eff, ident, tip)
+            return expect["head"]
 
 
 def _with_commit_state(project, sessions: list[dict]) -> list[dict]:
@@ -5100,6 +5185,13 @@ def _with_commit_state(project, sessions: list[dict]) -> list[dict]:
     return sessions
 
 
+@contextlib.contextmanager
+def _main_commit_guard(project):
+    """A commit in the main checkout is not blamed on the project's open runs (AGE-124)."""
+    with _merge_gate(project.key), _rebase_bound_runs(project, "commit") as expect:
+        yield expect
+
+
 @app.route("/api/projects/<key>/sessions/<agent>/<sid>/commit", methods=["POST"])
 def api_session_commit(key: str, agent: str, sid: str):
     """Manual Commit on a session row: every change in that session's checkout, local only."""
@@ -5108,11 +5200,14 @@ def api_session_commit(key: str, agent: str, sid: str):
         # Shared lifecycle hold for the whole commit: no path or policy change can slip in (SC-002).
         with _projects.project_lock(key):
             project = _projects.get_project(key, _projects.load_registry(errors={}))
+            if not project.commit:
+                raise _projects.ProjectError("Commit is off for this project (Edit to turn it on)")
             target = _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])
             # commit_checkout always runs git sandboxed, so no policy snapshot can go stale (SC-001/006)
             result = _projects.commit_checkout(project, target["cwd"], body.get("message"),
                                                dry_run=bool(body.get("dry_run")),
-                                               merger=lambda ident: _manual_merge(project, ident))
+                                               merger=lambda ident: _manual_merge(project, ident),
+                                               main_guard=lambda: _main_commit_guard(project))
     except _projects.SessionNotFound as exc:
         return jsonify({"error": str(exc)}), 404
     except (_projects.TicketLocked, _projects.ProjectBusy) as exc:

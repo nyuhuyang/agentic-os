@@ -645,13 +645,15 @@ def run_agent(argv: list[str], cwd: str, env: dict, run_id: str, agent: str, tim
 # ── after the agent ──────────────────────────────────────────────────────────
 
 def post_run(project: projects.Project, binding: dict, agent: str, title: str,
-             fingerprint_before: str, exclude: set[str], on_start=None,
-             stopped: Callable[[], bool] = lambda: False, start_sha: str | None = None) -> dict:
+             fingerprint_before: str | None, exclude: set[str], on_start=None,
+             stopped: Callable[[], bool] = lambda: False, start_sha: str | None = None,
+             closing: Callable[[], dict] | None = None) -> dict:
     """Runner commit of leftover changes (any agent, branch checked first), uncommitted check, verify, then
     binding + seed-history checks after verify (it may run git too), shortstat, and the closing
     fingerprint last, also on failure (I4-05, I5-10/11/14). `on_start` gets the verify process
     so a cancel can kill it; `stopped()` skips verify after a cancel. Returns additive
-    run-record fields and the badge."""
+    run-record fields and the badge. `closing`: the caller's own closing check, used instead of
+    comparing with `fingerprint_before` (AGE-124: a manual merge may move the baseline)."""
     wt = Path(binding["worktree"])
     result: dict = {}
     seeds, dirty, verify = [], [], None
@@ -685,7 +687,7 @@ def post_run(project: projects.Project, binding: dict, agent: str, title: str,
     except projects.ProjectError as exc:  # e.g. the branch was switched: refuse, keep the fingerprint
         result["post_run_error"] = str(exc)
     finally:
-        result.update(closing_check(project, exclude, fingerprint_before))
+        result.update(closing() if closing else closing_check(project, exclude, fingerprint_before))
         changed = result["main_checkout_changed"]
     if changed_nothing:
         # A question-only run: only red states, evaluated first, show (STB-039/048/076).

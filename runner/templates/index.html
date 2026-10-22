@@ -819,6 +819,7 @@
           <select id="project-history" style="display:none"></select>
           <div class="key-preview" id="project-key-preview"></div>
           <label class="check"><input type="checkbox" name="confidential" checked> Confidential (sandboxed; only template comments reach Linear)</label>
+          <label class="check"><input type="checkbox" name="commit" checked> Commit button on session rows (untick for notes or a wiki that is not code)</label>
           <div class="error" id="project-form-error"></div>
           <div class="actions">
             <button type="button" class="session-copy" id="project-form-cancel">Cancel</button>
@@ -1170,7 +1171,7 @@ function _renderProjectsInto(el) {
     const p = byKey[k];
     if (p.error) return `<div class="project-section"><div class="project-head project-error" ${head(p)}>${_esc(p.name || p.key)} — ${_esc(p.error)} ${removeBtn(p)}</div></div>`;
     const isOpen = open.has(p.key);
-    const rows = (p.sessions || []).map(s => _sessionRow(p.key, s)).join('') || '<div class="session-empty">No sessions in this project yet.</div>';
+    const rows = (p.sessions || []).map(s => _sessionRow(p.key, s, p.commit !== false)).join('') || '<div class="session-empty">No sessions in this project yet.</div>';
     return `<div class="project-section">
       <div class="project-head" ${head(p)} aria-expanded="${isOpen}">${isOpen ? '▾' : '▸'} <b>${_esc(p.name || p.key)}</b> ${badges(p)}
         <span class="session-meta">${(p.sessions || []).length} sessions</span>
@@ -1197,8 +1198,9 @@ function _commitTitle(c) {
   if (c.state === 'unmerged') return `${c.ahead} commit${c.ahead === 1 ? '' : 's'} not yet merged into main: click to merge`;
   return 'Nothing to commit; already merged into main';
 }
-function _sessionRow(key, s) {
-  const ed = _sessionEdit && _sessionEdit.key === key && _sessionEdit.agent === s.agent && _sessionEdit.id === s.id ? _sessionEdit : null;
+function _sessionRow(key, s, commit = true) {
+  let ed = _sessionEdit && _sessionEdit.key === key && _sessionEdit.agent === s.agent && _sessionEdit.id === s.id ? _sessionEdit : null;
+  if (ed && ed.mode === 'commit' && !commit) ed = null;  // Commit was turned off while its editor was open
   const ids = `data-key="${_esc(key)}" data-sagent="${_esc(s.agent)}" data-sid="${_esc(s.id)}"`;
   const err = ed && ed.error ? `<span class="session-meta" style="color:${ed.mode === 'note' ? 'var(--text-dim)' : 'var(--red)'}">${_esc(ed.error)}</span>` : '';
   // A board-launched session shows its card identifier first, e.g. "AGE-102 · title" (§9).
@@ -1206,7 +1208,7 @@ function _sessionRow(key, s) {
   // One Resume (§6): the session's card goes back to Todo and its reply opens.
   let actions = `<button class="session-copy" data-resume-agent="${_esc(s.agent)}" data-resume-id="${_esc(s.id)}" data-project="${_esc(key)}"
           title="Put this session's card in Todo and write the next reply (${_esc(s.resume)})">Resume</button>
-        <button class="session-copy ${_commitClass(s.commit_state)}" data-saction="commit" ${ids} title="${_esc(_commitTitle(s.commit_state))}">Commit</button>
+        ${commit ? `<button class="session-copy ${_commitClass(s.commit_state)}" data-saction="commit" ${ids} title="${_esc(_commitTitle(s.commit_state))}">Commit</button>` : ''}
         <button class="session-copy" data-saction="rename" ${ids}>Rename</button>
         <button class="session-copy" data-saction="remove" ${ids}>Remove</button>`;
   if (ed && ed.mode === 'note' && ed.conflict) {
@@ -1440,6 +1442,7 @@ function _projectFormOpen(p) {
   document.getElementById('project-form-title').textContent = p ? `Edit ${p.key}` : 'Add project';
   f.path.value = e.path || ''; f.path.readOnly = !!p;
   f.confidential.checked = p ? !!e.confidential : true;
+  f.commit.checked = p ? e.commit !== false : true;
   for (const id of ['project-history-btn', 'project-drop']) document.getElementById(id).style.display = p ? 'none' : '';
   document.getElementById('project-history').style.display = 'none';
   document.getElementById('project-form-error').textContent = '';
@@ -1460,12 +1463,12 @@ document.getElementById('project-form')?.addEventListener('submit', async (event
   const hash = f.dataset.hash || '';
   save.disabled = true; errEl.textContent = 'Saving…';
   let r;
-  if (f.dataset.mode === 'edit') {  // only confidential changes; every other field stays (SAP-007)
-    r = await _projectApi('PATCH', `/api/projects/${encodeURIComponent(f.dataset.key)}`, { confidential: f.confidential.checked, registry_hash: hash });
+  if (f.dataset.mode === 'edit') {  // only confidential and commit change; every other field stays (SAP-007)
+    r = await _projectApi('PATCH', `/api/projects/${encodeURIComponent(f.dataset.key)}`, { confidential: f.confidential.checked, commit: f.commit.checked, registry_hash: hash });
   } else {
     const path = f.path.value.trim();
     const key = _deriveKey(path.replace(/\/+$/, '').split('/').pop());
-    const body = { key, registry_hash: hash, entry: { path, confidential: f.confidential.checked, no_push: true } };
+    const body = { key, registry_hash: hash, entry: { path, confidential: f.confidential.checked, no_push: true, ...(f.commit.checked ? {} : { commit: false }) } };
     r = await _projectApi('POST', '/api/projects', body);
     // A folder with files but no commit yet: commit them from here, no terminal (AGE-127).
     if (r.data?.needs_commit && confirm(`${r.data.error}.\n\nCommit them as the initial commit? `

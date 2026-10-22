@@ -477,20 +477,20 @@ def test_create_commits_existing_files_on_request(reg, tmp_path, monkeypatch):
     assert not (huge / ".git").exists() and "huge" not in pj.raw_entries(path.read_bytes())
 
 
-def test_set_confidential_changes_only_that_field(reg):
+def test_set_flags_changes_only_that_field(reg):
     path, a, b = reg
     doc = yaml.safe_load(path.read_text())
     doc["projects"]["beta"].update({"note": "", "env": {}, "seed": [], "kind": None})
     path.write_text(yaml.safe_dump(doc, sort_keys=False))
     before = dict(pj.raw_entries(path.read_bytes())["beta"])
-    pj.set_confidential("beta", True, h(path))
+    pj.set_flags("beta", {"confidential": True}, h(path))
     after = pj.raw_entries(path.read_bytes())["beta"]
     assert after.pop("confidential") is True and before.pop("confidential") is False and after == before
     with pj.project_lock("beta"):
         with pytest.raises(pj.ProjectBusy):
-            pj.set_confidential("beta", False, h(path))
+            pj.set_flags("beta", {"confidential": False}, h(path))
     with pytest.raises(pj.RegistryConflict):
-        pj.set_confidential("beta", False, "stale")
+        pj.set_flags("beta", {"confidential": False}, "stale")
 
 
 @pytest.mark.parametrize("name, want", [("my-repo", "my-repo"), ("My Repo!", "My-Repo-"), ("研究", "project"),
@@ -545,10 +545,23 @@ def test_locate_folder(home):
             pj.locate_folder(bad, [])
 
 
+def test_commit_flag_defaults_on_and_set_flags_turns_it_off(reg):
+    path, a, b = reg
+    assert pj.load_registry(path)["beta"].commit is True
+    before = dict(pj.raw_entries(path.read_bytes())["beta"])
+    assert pj.set_flags("beta", {"commit": False}, h(path))["commit"] is False
+    after = pj.raw_entries(path.read_bytes())["beta"]
+    assert after.pop("commit") is False and after == before
+    assert pj.load_registry(path)["beta"].commit is False
+    for bad in ({"commit": "no"}, {"path": "/x"}, {}):
+        with pytest.raises(pj.ProjectError):
+            pj.set_flags("beta", bad, h(path))
+
+
 def test_set_confidential_does_not_leak_through_a_yaml_alias(reg):
     path, a, b = reg
     path.write_text(f"projects:\n  alpha: &shared\n    path: {a}\n    confidential: true\n  beta: *shared\n")
-    pj.set_confidential("alpha", False, h(path))
+    pj.set_flags("alpha", {"confidential": False}, h(path))
     raw = pj.raw_entries(path.read_bytes())
     assert raw["alpha"]["confidential"] is False and raw["beta"]["confidential"] is True
 
