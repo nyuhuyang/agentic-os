@@ -7,6 +7,7 @@
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- AGE-125 Claude account swap: `runner/claude_account.py save|use|list` + dashboard picker beside "◆ Claude" (≥ 2 saved accounts). Keychain holds per-account credential snapshots (service `agenticos-claude-account`); identity in `~/.agentic-os/claude-accounts.json` (0600). Owner = refresh-token match or `/api/oauth/profile`, never `~/.claude.json`; unknown owner refused without `--force`; one machine-wide lock; usage cache dropped on every swap (index mtime). No runner restart needed — every run spawns a fresh `claude` that reads the keychain. 40 account tests pass; full suite 900 pass; isolated runner 8599: `/` 200, picker hidden, GET 403 without token / 200 with. Codex plan review approved round 4; fresh Codex inspection approved round 6 (cross_provider). Real two-account swap is a user follow-up — 2026-10-21
 - AGE-126 design talk: docs-only umbrella plan `docs/exec-plans/active/2026-10-21-scale-agent-fleet.md` (4 phases: verify gate → exception inbox → ticket decomposition → concurrency/cost ceiling); no code — 2026-10-21
 - AGE-122 "All Teams" create: with an empty `tracker.team_id` (what "All Teams" stores), the + form and session to-board now create in the viewer's only team (fresh `fetch_teams`); several teams or a failed/raising lookup refuse with a message before any placeholder. 861 pytest pass; isolated runner on 8599 (local mode, All Teams) POST → 200; Codex plan review approved round 4, fresh Codex inspection approved after one fix (cross_provider). Live runner needs a restart after merge — 2026-10-21
 - AGE-122 team selector: `fetch_teams` now queries `viewer.teams` (your memberships), not root `teams` (every workspace team, including ones you left). Linear can't delete a team, only leave it, so left teams kept showing. Live Linear: root `teams` = ML4+AGE, `fetch_teams()` = AGE only; py_compile passes. Dashboard and poller pick it up after a runner restart, or within 30 min for the poller — 2026-10-21
@@ -37,4 +38,5 @@
 
 ## Next Action
 <!-- Concrete first step for the next session -->
+- AGE-125: user saves both Claude accounts (`claude auth login` → `runner/claude_account.py save a`, same for b), then confirms `use` + dashboard picker; then archive plan `2026-10-21-claude-account-swap`
 - Multi-Project Dispatch: run the cross-provider Codex inspection of the build (base a8ab382) and spike (d2) for Codex, then dogfood one labelled ticket per project

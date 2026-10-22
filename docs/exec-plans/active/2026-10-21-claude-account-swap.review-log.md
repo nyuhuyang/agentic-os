@@ -259,3 +259,293 @@ Result: `/tmp/age125-art/r4/claudex-kecnyh59/result.json` (diagnostics outside c
 ```
 
 Round 4 disposition: CAS-07 (low, user follow-up granularity) left as-is to keep the approval bound to the reviewed hash; follow-up items are user steps outside this session.
+
+## Build
+
+Builder: Claude (host). Pre-build base: 0de42d4. Commits 55f06af..a5a225e.
+
+Live finding during build: `security -i` truncates lines past ~4 KB, so a combined credentials+oauthAccount snapshot risked silent truncation. Design change: keychain holds credentials only (~0.6 KB); non-secret identity (uuid, email, oauthAccount) moved to the 0600 index file. Writes refuse >1.9 KB and read back.
+
+## Inspection round 1 (fresh Codex session)
+
+Result: `/tmp/age125-art/i1/claudex-qo71wgjh/result.json`
+
+```json
+{
+ "status": "completed",
+ "assurance": "cross_provider",
+ "cli": "codex-cli 0.163.0",
+ "session": "01a1612b-b863-7b63-92ad-312774a8ec87",
+ "response": {
+  "verdict": "REVISE",
+  "summary": "Three correctness defects remain: unreadable credentials bypass the ownership safeguard, completed swaps can receive stale quota responses, and identity repair can overwrite concurrent configuration changes.",
+  "findings": [
+   {
+    "id": "AGE125-R1",
+    "severity": "medium",
+    "path": "runner/claude_account.py:248",
+    "evidence": "_kc_read() converts every unsuccessful read to None, and _live_blob() also returns None for malformed credentials. Because use() checks `if blob and owner is None`, these failures bypass refusal and proceed to overwrite the live keychain item without --force or preserving the outgoing login. An empty dictionary also bypasses the guard.",
+    "fix": "Distinguish an absent item from read and parse failures. Fail closed when ownership cannot be established, requiring --force before discarding an unreadable existing credential. Add cases for failed reads, malformed JSON, and empty blobs."
+   },
+   {
+    "id": "AGE125-R2",
+    "severity": "medium",
+    "path": "runner/app.py:1234",
+    "evidence": "The generation check protects only the usage fetch. `/api/windows/all` captures Claude A's result, then computes Codex/Gemini/DeepSeek results before responding (6183–6190). If a CLI swap to B completes during those later computations, the endpoint still returns A's quota, which updateWindows() applies unconditionally. Similarly, index() computes Claude windows before resolving the active account, so it can render B selected alongside A's quota. This violates the acceptance criterion covering in-flight pre-swap usage.",
+    "fix": "Validate the generation across complete response assembly, including account identity and quota data. Recompute or omit Claude data when it changes, and carry generation information through browser polling so obsolete responses cannot overwrite current cards."
+   },
+   {
+    "id": "AGE125-R3",
+    "severity": "medium",
+    "path": "runner/claude_account.py:260",
+    "evidence": "The configuration repair reads all of ~/.claude.json and later replaces the entire file. The new flock serializes account commands only; Claude processes do not participate. If a running Claude process saves another setting between that read and os.replace(), the swap silently erases that setting. The plan explicitly says Claude frequently rewrites this file and permits existing sessions to remain running. Atomic replacement prevents partial JSON, but does not prevent lost updates.",
+    "fix": "Coordinate identity updates with Claude Code's actual configuration-writing protocol. Detect concurrent changes and retry from fresh content; when safe coordination is unavailable, retain the successful keychain switch and warn instead of overwriting concurrently modified configuration."
+   }
+  ],
+  "coverage": [
+   "Verified the plan, all five manifest file hashes, and tracked diff hash against the supplied values.",
+   "Inspected all changed regions, the complete new account module and tests, and the shared test fixture.",
+   "Traced request-token enforcement, the browser fetch wrapper, account routes, template rendering, and quota polling.",
+   "Traced quota caching and snapshot readers through app.py and usage_reader.py, including complete response assembly.",
+   "Inspected related agent launch and environment paths in project_runs.py, projects.py, run_skill.py, the Claude backend, and PTY code."
+  ],
+  "limitations": [
+   "Static review only; no tests, application execution, edits, or delegation.",
+   "Did not access real credentials or exercise macOS keychain operations, OAuth endpoints, or Claude CLI behavior.",
+   "The external Claude configuration and statusline writers were not available in the inspected repository; their behavior is described by the plan.",
+   "Spec fidelity was assessed against the supplied plan; broader specification documents were not inspected."
+  ]
+ }
+}
+```
+
+Inspection round 1 dispositions (host/builder Claude):
+- AGE125-R1 accepted: _kc_read returns None only for errSecItemNotFound (exit 44) and raises AccountError on any other failure; live blob without a refresh token (malformed JSON, {}, empty claudeAiOauth) is treated as an existing login of unknown owner → refused without --force. Tests added for failed read, malformed JSON, empty blob.
+- AGE125-R2 rejected as disproportionate: the race needs a CLI swap to land during the few ms of /api/windows/all assembly or index() render; the result is one poll (60 s, index.html:4734) of stale cards, after which the generation-cleared cache shows the new account. No stale state persists. Before this change every swap showed up to 55 s of stale cards, so this is strictly better; a generation round-trip through browser polling is not worth its complexity. Recorded as residual risk.
+- AGE125-R3 accepted (bounded): _set_oauth_account re-stats ~/.claude.json (mtime_ns, size, inode) right before os.replace and retries from fresh content up to 5 times, else leaves the file and warns. A microsecond window remains (Claude Code exposes no lock); noted in a ponytail comment. Race test added.
+
+## Inspection round 2 (fresh Codex session)
+
+Result: `/tmp/age125-art/i2/claudex-ys4x67sp/result.json`
+
+```json
+{
+ "status": "completed",
+ "assurance": "cross_provider",
+ "cli": "codex-cli 0.163.0",
+ "session": "01a1612f-8a05-7ec3-bc02-9477b8d5e4da",
+ "response": {
+  "verdict": "REVISE",
+  "summary": "Three concrete defects remain: persistent account-picker drift, unsafe keychain-account fallback, and an incomplete concurrent-write safeguard.",
+  "findings": [
+   {
+    "id": "AGE125-R4",
+    "severity": "medium",
+    "path": "runner/templates/index.html:606",
+    "evidence": "The selected account is rendered only at page load. After a CLI swap or a swap in another browser tab, updateWindows() refreshes quota cards but never refreshes the account picker. A page showing A therefore displays B's quotas indefinitely, and selecting the already-selected A cannot trigger onchange to switch back.",
+    "fix": "Refresh the picker’s accounts and active selection during polling, using the protected accounts endpoint or account metadata accompanying the windows response."
+   },
+   {
+    "id": "AGE125-R5",
+    "severity": "medium",
+    "path": "runner/claude_account.py:81",
+    "evidence": "_live_account() ignores the security command's return code and substitutes USER whenever attribute parsing fails. If the existing item's account differs from USER, a failed metadata lookup causes use() to write a second item instead of updating the original. Readback checks only the new account-qualified item, so use() can report success while service-only readers still retrieve the original credentials.",
+    "fix": "Raise AccountError when an existing live item's account attribute cannot be read reliably. Permit account creation only when absence has been established explicitly, and verify that the service-only lookup resolves to the switched credentials."
+   },
+   {
+    "id": "AGE125-R3",
+    "severity": "medium",
+    "path": "runner/claude_account.py:245",
+    "evidence": "The added re-stat happens before _write_json_atomic() creates, serializes, closes and chmods the temporary file. A Claude process writing ~/.claude.json during that staging work still has its update overwritten unconditionally at os.replace(). The new regression test injects a concurrent write during read_text(), so it does not cover this remaining avoidable interval.",
+    "fix": "Stage and close the temporary JSON first, then compare the destination's stat immediately before replacement. On mismatch, discard the temporary file and retry from fresh content. Cover a concurrent update during temporary-file staging."
+   }
+  ],
+  "coverage": [
+   "Read the plan and all five changed files; verified their SHA256 values and the tracked diff hash against the manifest.",
+   "Traced request-token middleware, browser fetch handling, account routes, template rendering, quota polling, usage caching and snapshot fallback.",
+   "Traced CLI and dashboard account writers, keychain operations, index updates, locks and ~/.claude.json replacement.",
+   "Inspected related launch and environment paths in app.py, project_runs.py, projects.py and modules/pty, plus usage_reader.py and existing security/cache tests."
+  ],
+  "limitations": [
+   "No files were edited, tests executed or work delegated.",
+   "Real keychain behavior, Anthropic profile responses and Claude Code's external credential/configuration writers were not exercised.",
+   "No Claude rate-limit snapshot writer was found in the searched repository sources.",
+   "Spec fidelity was assessed against the supplied plan; SPEC.md and unrelated documentation were not inspected."
+  ]
+ }
+}
+```
+
+Inspection round 2 dispositions (host/builder Claude). Earlier: R1 fixed, R2 rejected (one 60 s poll of transient staleness only), R3 bounded.
+- AGE125-R4 accepted: a 60 s poll of GET /api/claude-accounts sets the picker to the real active label (blank selection when unknown, so any option fires change). To keep that poll from hitting the profile API every minute after a refresh-token rotation, _owner caches refresh-token→uuid in process memory (one entry). Test added.
+- AGE125-R5 accepted: _live_account returns USER only on errSecItemNotFound (44); any other failure or unparseable attributes raise. After the live write, use() verifies the service-only lookup (what claude reads) returns the switched credentials, else raises "shadows". Tests added.
+- AGE125-R3 accepted: _write_json_atomic now stages and chmods the temp file first and checks unchanged() (mtime_ns, size, inode) immediately before os.replace; on mismatch it discards the temp file and the caller retries from fresh content. Test injects a concurrent write during staging and checks no temp file is left.
+
+## Inspection round 3 (fresh Codex session)
+
+Result: `/tmp/age125-art/i3/claudex-wh90rnmz/result.json`
+
+```json
+{
+ "status": "completed",
+ "assurance": "cross_provider",
+ "cli": "codex-cli 0.163.0",
+ "session": "01a16147-4598-7780-b4a2-1a88be875edc",
+ "response": {
+  "verdict": "REVISE",
+  "summary": "One unresolved correctness issue: restoring an account with an expired access token leaves its quota cards unavailable until a separate Claude process refreshes it.",
+  "findings": [
+   {
+    "id": "AGE125-R6",
+    "severity": "medium",
+    "path": "runner/claude_account.py:297",
+    "evidence": "Save B, switch to A, then switch back after B's accessToken expires while its refreshToken remains valid. use() restores B's credentials unchanged and reports success. runner/app.py:1189-1215 sends that expired access token directly to the usage API without refreshing it. The swap also clears cached usage and excludes pre-swap snapshots, so dashboard polling remains unavailable until another Claude command refreshes B. Existing tests use future-dated access tokens and mocked successful usage responses.",
+    "fix": "Refresh expired target credentials through a supported flow during switching or quota retrieval, preserve the refreshed snapshot under its verified owner, and coordinate cache invalidation. Add coverage for an expired access token with a valid refresh token, including refresh failure."
+   }
+  ],
+  "coverage": [
+   "Verified the plan and all five manifest file hashes.",
+   "Reviewed all changed regions, the complete account module, and account tests and fixtures.",
+   "Traced request-token enforcement, browser fetch wrapping, account selection, quota caching, and snapshot fallback.",
+   "Traced headless and PTY launch environments through app.py, project_runs.py, projects.py, and modules/pty/__init__.py.",
+   "Inspected usage_reader.py snapshot consumers and searched repository implementation files for related credential and snapshot writers.",
+   "Reviewed the supplied host dispositions and their corresponding fixes."
+  ],
+  "limitations": [
+   "No tests, compilation, application execution, edits, or delegation performed.",
+   "No live keychain, OAuth, or browser behavior verified.",
+   "External Claude credential refresh and statusline snapshot writers were not available in the inspected repository.",
+   "Spec fidelity was assessed against the supplied plan; SPEC.md was not inspected."
+  ]
+ }
+}
+```
+
+Inspection round 3 disposition (host/builder Claude):
+- AGE125-R6 accepted as a documented limitation with a warning, not an in-code refresh. Claude Code exposes no supported refresh command; calling the undocumented OAuth token endpoint ourselves would rotate the refresh token, and any mismatch with Claude Code's own refresh logic would log the account out — a worse failure than empty quota cards. Inference is unaffected: the next `claude` run refreshes the token and writes the live item, after which the usage fetch succeeds within one cache interval. use() now warns when the restored access token is expired ("quota cards fill in after that"), and the module docstring documents it. Test added (expired target warns; fresh target does not).
+
+## Inspection round 4 (fresh Codex session)
+
+Result: `/tmp/age125-art/i4/claudex-d61xw4d3/result.json`
+
+```json
+{
+ "status": "completed",
+ "assurance": "cross_provider",
+ "cli": "codex-cli 0.163.0",
+ "session": "01a1614a-0a63-7830-9551-320c096eaa7c",
+ "response": {
+  "verdict": "REVISE",
+  "summary": "A concurrent credential refresh can be lost while preserving the outgoing account.",
+  "findings": [
+   {
+    "id": "AGE125-R7",
+    "severity": "medium",
+    "path": "runner/claude_account.py:288",
+    "evidence": "use() reads the outgoing credentials once, then performs ownership resolution and snapshot writes before replacing the live item at line 300. A running Claude process can rotate B's refresh token during that interval. The swap then saves the earlier token and overwrites the live copy containing the newer token with A's credentials. If rotation invalidates the earlier token, switching back to B cannot recover it. This differs from the documented post-swap overwrite risk: the newer credential has already been discarded, so repeating use after processes exit does not repair it. The account lock does not coordinate with Claude's writer.",
+    "fix": "Re-read the live credentials immediately before replacement and repeat ownership verification and outgoing preservation if they changed. Because that still cannot provide atomic coordination with Claude, require quiescent credential writers for guaranteed preservation, or explicitly gate concurrent swaps as potentially losing refreshed credentials. Add coverage for rotation between the initial read and live replacement."
+   }
+  ],
+  "coverage": [
+   "Verified the plan and all five manifested file hashes; inspected every changed file and the tracked changes.",
+   "Reviewed credential ownership, snapshot storage, locking, config replacement, CLI behavior, and failure handling.",
+   "Traced endpoint token enforcement, browser fetch headers, account selection, quota-cache invalidation, and snapshot fallback.",
+   "Inspected related process environment paths in app.py, project_runs.py, registry handling, and PTY launches.",
+   "Traced the additional rate-limit reader in usage_reader.py and inspected relevant account, cache, and request-security test sources."
+  ],
+  "limitations": [
+   "No tests, application processes, credential operations, or browser checks were run; no files were edited and no work was delegated.",
+   "Live macOS keychain behavior and Anthropic refresh-token semantics were not independently exercised.",
+   "The external Claude credential writer and statusline snapshot writer were assessed from the supplied plan rather than their implementations."
+  ]
+ }
+}
+```
+
+Inspection round 4 disposition (host/builder Claude):
+- AGE125-R7 accepted: use() re-reads the live item after preserving the outgoing login and immediately before the overwrite; if it changed (a running Claude rotated it) it re-resolves the owner and re-saves, up to 5 times, else refuses with "retry when Claude runs finish". A sub-millisecond window between the final read and the write remains because Claude Code exposes no lock; noted in a ponytail comment and already covered by the plan's documented residual risk for concurrent Claude writers (running processes are counted and reported on every use). Test added: rotation injected right after the first preservation ends with the newer token saved under B.
+
+## Inspection round 5 (fresh Codex session)
+
+Result: `/tmp/age125-art/i5/claudex-8p_3t1y2/result.json`
+
+```json
+{
+ "status": "completed",
+ "assurance": "cross_provider",
+ "cli": "codex-cli 0.163.0",
+ "session": "01a1614e-866f-7872-bde1-bded2257eb29",
+ "response": {
+  "verdict": "REVISE",
+  "summary": "Two credential-rotation gaps can leave a saved account with an invalidated refresh token.",
+  "findings": [
+   {
+    "id": "AGE125-R8",
+    "severity": "medium",
+    "path": "runner/claude_account.py:230",
+    "evidence": "save() reads credentials once, performs the profile request (timeout 6 seconds), then saves the original blob without re-reading it. If a running Claude rotates A's refresh token during that request, save succeeds with the obsolete token. Following the documented setup by logging into B then restoring A can leave A unable to refresh after its access token expires. The machine-wide lock does not coordinate native Claude writes.",
+    "fix": "Re-read the live credentials before committing the snapshot. If they changed, retry ownership verification and snapshot preparation with the newer blob, using a bounded retry loop. Add coverage for rotation during save's profile request."
+   },
+   {
+    "id": "AGE125-R9",
+    "severity": "medium",
+    "path": "runner/claude_account.py:309",
+    "evidence": "The R7 retry loop checks the live blob at line 301, but _live_account() subsequently runs another security subprocess with a 15-second timeout before the overwrite. If outgoing B rotates during that subprocess, use() overwrites the newer credentials while B's snapshot still contains the invalidated token. This is an avoidable blocking operation inside the claimed sub-millisecond residual window.",
+    "fix": "Resolve the live item's account attribute before the preservation loop, then perform the final credential comparison immediately before writing. Retry preservation when that comparison detects rotation. Add coverage that rotates credentials during account-attribute lookup."
+   }
+  ],
+  "coverage": [
+   "Verified the plan and all five changed-file SHA256 values against the supplied manifest; inspected the tracked changes.",
+   "Reviewed credential storage, ownership verification, locking, identity updates, CLI behavior, and all new test source.",
+   "Traced endpoint request-token and maintenance guards, template fetch-token injection, picker polling, quota cache generations, and snapshot filtering.",
+   "Traced related dispatch and PTY environment paths, usage_reader snapshot consumers, and repository credential/snapshot references.",
+   "Reviewed the supplied R1–R7 dispositions against the current implementation."
+  ],
+  "limitations": [
+   "Static inspection only: no edits, test execution, or delegation.",
+   "Live macOS Keychain behavior, OAuth responses, and native Claude refresh behavior were not exercised.",
+   "The external Claude rate-limit snapshot producer was not present in the inspected repository."
+  ]
+ }
+}
+```
+
+Inspection round 5 dispositions (host/builder Claude):
+- AGE125-R8 accepted: save() re-reads the live item after the profile call and re-verifies from the newer blob when it changed (bounded 5, else refuses). Test injects rotation during the profile call; the newer token is saved.
+- AGE125-R9 accepted: _live_account() now runs before the preservation loop; nothing but a JSON dump sits between the final comparison read and the write. Test injects rotation during the account lookup; the newer token is preserved under B.
+
+## Inspection round 6 (fresh Codex session)
+
+Result: `/tmp/age125-art/i6/claudex-p_hj5fds/result.json`
+
+```json
+{
+ "status": "completed",
+ "assurance": "cross_provider",
+ "cli": "codex-cli 0.163.0",
+ "session": "01a16153-b28d-7581-8206-5372de0239bd",
+ "response": {
+  "verdict": "APPROVED",
+  "summary": "No material defects found beyond the explicitly disclosed and accepted residual risks.",
+  "findings": [],
+  "coverage": [
+   "Verified the plan and all five changed files against the supplied SHA256 values.",
+   "Reviewed credential storage, ownership resolution, outgoing preservation, locking, environment guards, metadata writes, and failure paths.",
+   "Reviewed dashboard endpoints, request-token enforcement, account selection, usage-cache invalidation, and snapshot filtering.",
+   "Traced related usage-reader callers and CLI, project-run, and PTY environment construction beyond the manifest.",
+   "Read the added tests and shared fixture changes; assessed the supplied prior-review dispositions."
+  ],
+  "limitations": [
+   "Static review only; no tests, edits, or delegation performed.",
+   "Real macOS keychain behavior, Anthropic responses, and Claude refresh behavior were not exercised.",
+   "The external Claude credential and statusline snapshot writers were not available in the inspected repository.",
+   "Accepted risks remain: concurrent Claude writers, expired saved tokens, post-swap snapshots from older sessions, and transient pre-swap responses reaching the browser.",
+   "Spec fidelity was assessed against the supplied plan; SPEC.md was not inspected."
+  ]
+ }
+}
+```
+
+Note: inspection round 3 was first launched in the foreground and killed by the tool timeout (exit 137, no result); rerun in the background with the same inputs.
+
+Outcome: APPROVED at round 6, assurance=cross_provider. Rejected: AGE125-R2 (one 60 s poll of transient staleness). Accepted residual risks: concurrent Claude writers (sub-ms window), expired saved tokens, post-swap snapshots from older sessions.

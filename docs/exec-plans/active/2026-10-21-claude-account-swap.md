@@ -121,99 +121,99 @@ Module `runner/claude_account.py`, stdlib only, CLI and importable.
 
 ## Acceptance Criteria
 
-- [ ] `use <label>` switches the keychain login to the saved account without a runner restart.
-- [ ] After `use`, `claude auth status --json` reports the target email (oauthAccount rewritten).
-- [ ] `use` refuses with nothing written when the live owner is unknown and `--force` is absent.
-- [ ] `use` re-saves the outgoing account's live blob only into the label that owns it.
-- [ ] `use <active label>` repairs (rewrites credentials + oauthAccount) instead of skipping.
-- [ ] Concurrent `use` calls are serialized by the lock.
-- [ ] `use`/`save` refuse when `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` or `CLAUDE_CONFIG_DIR` is set.
-- [ ] No token appears on any process argv, in logs, `state/`, or command output.
-- [ ] Dashboard select switches account.
-- [ ] The request-token check guards `GET /api/claude-accounts`.
-- [ ] The request-token check guards `POST /api/claude-accounts/use`.
-- [ ] A uuid can be saved under only one label.
-- [ ] After any swap (CLI or dashboard), cached or in-flight pre-swap usage is not shown.
-- [ ] `save` is serialized with `use` and other `save` calls by the same lock.
-- [ ] A saved snapshot's `oauthAccount.accountUuid` always equals its verified uuid.
-- [ ] A pre-swap `rate-limits-live.json` snapshot is not shown as live after a swap.
-- [ ] One-time setup and daily swap are documented in the module docstring shown by `--help`.
+- [ ] `use <label>` switches the keychain login to the saved account without a runner restart. — verified with the fake keychain and a live round-trip into a scratch item; real swap is a user follow-up
+- [ ] After `use`, `claude auth status --json` reports the target email (oauthAccount rewritten). — unit-tested (oauthAccount rewritten); `claude auth status` on a real swap is a user follow-up
+- [x] `use` refuses with nothing written when the live owner is unknown and `--force` is absent.
+- [x] `use` re-saves the outgoing account's live blob only into the label that owns it.
+- [x] `use <active label>` repairs (rewrites credentials + oauthAccount) instead of skipping.
+- [x] Concurrent `use` calls are serialized by the lock.
+- [x] `use`/`save` refuse when `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` or `CLAUDE_CONFIG_DIR` is set.
+- [x] No token appears on any process argv, in logs, `state/`, or command output.
+- [ ] Dashboard select switches account. — POST + picker render tested, isolated runner checked; real click is a user follow-up
+- [x] The request-token check guards `GET /api/claude-accounts`.
+- [x] The request-token check guards `POST /api/claude-accounts/use`.
+- [x] A uuid can be saved under only one label.
+- [x] After any swap (CLI or dashboard), cached or in-flight pre-swap usage is not shown.
+- [x] `save` is serialized with `use` and other `save` calls by the same lock.
+- [x] A saved snapshot's `oauthAccount.accountUuid` always equals its verified uuid.
+- [x] A pre-swap `rate-limits-live.json` snapshot is not shown as live after a swap.
+- [x] One-time setup and daily swap are documented in the module docstring shown by `--help`.
 
 ## Verification
 
-- [ ] `.venv/bin/python3 -m py_compile runner/*.py` passes.
-- [ ] Test: `save` stores the snapshot with the uuid from the profile call.
-- [ ] Test: `save` adds the label to the index file.
-- [ ] Test: `save` with mismatched live `oauthAccount` stores one rebuilt from the profile.
-- [ ] Test: re-save inside `use` keeps the snapshot's identity fields.
-- [ ] Test: `save` rejects an invalid label.
-- [ ] Test: `save` refuses a uuid already saved under another label.
-- [ ] Test: `use` identifies the outgoing owner by refresh-token match and re-saves it.
-- [ ] Test: `use` writes the target blob to the live keychain item.
-- [ ] Test: `use` writes the target `oauthAccount` into `~/.claude.json`.
-- [ ] Test: owner found via profile when the refresh token rotated.
-- [ ] Test: unknown owner → refusal, no keychain or file write.
-- [ ] Test: `--force` with unknown owner switches without re-saving.
-- [ ] Test: same-label `use` rewrites credentials and oauthAccount.
-- [ ] Test: unknown target label → refusal before any write.
-- [ ] Test: `~/.claude.json` mode preserved.
-- [ ] Test: `~/.claude.json` keys other than `oauthAccount` untouched.
-- [ ] Test: oauthAccount write failure → warning, keychain switch kept, exit 0.
-- [ ] Test: env override present → refusal.
-- [ ] Test: no secret in any argv passed to the fake `security`.
-- [ ] Test: a `use` blocks while another holder has the lock.
-- [ ] Test: a `save` blocks while another holder has the lock.
-- [ ] Test: POST without the request token is rejected.
-- [ ] Test: POST with the token calls `use`.
-- [ ] Test: GET returns labels and emails, no secrets.
-- [ ] Test: generation change during a fetch stops it from publishing.
-- [ ] Test: generation change (external CLI swap) clears cached usage.
-- [ ] Test: rate-limits snapshot older than the swap → not live.
-- [ ] `.venv/bin/python3 -m pytest tests -q` passes (no regressions).
-- [ ] `.venv/bin/python3 runner/claude_account.py list` runs against the real keychain without printing secrets (read-only).
-- [ ] `/verify` isolated runner: dashboard renders.
-- [ ] `/verify` isolated runner: select hidden with < 2 saved accounts.
-- [ ] `/verify` isolated runner: `GET /api/claude-accounts` responds.
+- [x] `.venv/bin/python3 -m py_compile runner/*.py` passes.
+- [x] Test: `save` stores the snapshot with the uuid from the profile call.
+- [x] Test: `save` adds the label to the index file.
+- [x] Test: `save` with mismatched live `oauthAccount` stores one rebuilt from the profile.
+- [x] Test: re-save inside `use` keeps the snapshot's identity fields.
+- [x] Test: `save` rejects an invalid label.
+- [x] Test: `save` refuses a uuid already saved under another label.
+- [x] Test: `use` identifies the outgoing owner by refresh-token match and re-saves it.
+- [x] Test: `use` writes the target blob to the live keychain item.
+- [x] Test: `use` writes the target `oauthAccount` into `~/.claude.json`.
+- [x] Test: owner found via profile when the refresh token rotated.
+- [x] Test: unknown owner → refusal, no keychain or file write.
+- [x] Test: `--force` with unknown owner switches without re-saving.
+- [x] Test: same-label `use` rewrites credentials and oauthAccount.
+- [x] Test: unknown target label → refusal before any write.
+- [x] Test: `~/.claude.json` mode preserved.
+- [x] Test: `~/.claude.json` keys other than `oauthAccount` untouched.
+- [x] Test: oauthAccount write failure → warning, keychain switch kept, exit 0.
+- [x] Test: env override present → refusal.
+- [x] Test: no secret in any argv passed to the fake `security`.
+- [x] Test: a `use` blocks while another holder has the lock.
+- [x] Test: a `save` blocks while another holder has the lock.
+- [x] Test: POST without the request token is rejected.
+- [x] Test: POST with the token calls `use`.
+- [x] Test: GET returns labels and emails, no secrets.
+- [x] Test: generation change during a fetch stops it from publishing.
+- [x] Test: generation change (external CLI swap) clears cached usage.
+- [x] Test: rate-limits snapshot older than the swap → not live.
+- [x] `.venv/bin/python3 -m pytest tests -q` passes (no regressions). — 900 passed on final HEAD
+- [x] `.venv/bin/python3 runner/claude_account.py list` runs against the real keychain without printing secrets (read-only).
+- [x] `/verify` isolated runner: dashboard renders.
+- [x] `/verify` isolated runner: select hidden with < 2 saved accounts.
+- [x] `/verify` isolated runner: `GET /api/claude-accounts` responds.
 
 ## Progress Checklist
 
-- [ ] `claude_account.py`: keychain write via `security -i` + hex.
-- [ ] `claude_account.py`: keychain read via `-w`.
-- [ ] `claude_account.py`: index file read/write.
-- [ ] `claude_account.py`: lock helper.
-- [ ] `claude_account.py`: env-override refusal.
-- [ ] `claude_account.py`: `live_owner()` refresh-token match.
-- [ ] `claude_account.py`: `live_owner()` profile API fallback.
-- [ ] `claude_account.py`: `save` with identity check.
-- [ ] `claude_account.py`: `use` target validation before writes.
-- [ ] `claude_account.py`: `use` unknown-owner refusal and `--force`.
-- [ ] `claude_account.py`: `use` outgoing re-save.
-- [ ] `claude_account.py`: `use` live keychain write.
-- [ ] `claude_account.py`: `use` `oauthAccount` write (warning on failure).
-- [ ] `claude_account.py`: `use` index touch (swap generation).
-- [ ] `claude_account.py`: running-`claude` count notice.
-- [ ] `claude_account.py`: `list`.
-- [ ] `claude_account.py`: argparse CLI.
-- [ ] `claude_account.py`: setup docstring shown by `--help`.
-- [ ] `claude_account.py`: one-label-per-uuid check in `save`.
-- [ ] Write `tests/test_claude_account.py`.
-- [ ] `runner/app.py`: `GET /api/claude-accounts`.
-- [ ] `runner/app.py`: `POST /api/claude-accounts/use`.
-- [ ] `runner/app.py`: clear cached usage on generation change.
-- [ ] `runner/app.py`: skip publishing a fetch whose generation changed.
-- [ ] `runner/app.py`: ignore pre-swap rate-limits snapshot.
-- [ ] `runner/app.py`: pass account list to `index()` template.
-- [ ] `index.html`: select rendered beside the Claude label.
-- [ ] `index.html`: select hidden with < 2 accounts.
-- [ ] `index.html`: change → POST.
-- [ ] `index.html`: success → reload.
-- [ ] `index.html`: error → alert.
-- [ ] Endpoint/cache tests.
-- [ ] Run the Verification checks.
-- [ ] Fresh Codex inspection of the diff.
-- [ ] Resolve inspection findings.
-- [ ] Update `docs/context-maintenance.md` with validation and next action.
-- [ ] Commit on `agent/AGE-125`.
+- [x] `claude_account.py`: keychain write via `security -i` + hex.
+- [x] `claude_account.py`: keychain read via `-w`.
+- [x] `claude_account.py`: index file read/write.
+- [x] `claude_account.py`: lock helper.
+- [x] `claude_account.py`: env-override refusal.
+- [x] `claude_account.py`: `live_owner()` refresh-token match.
+- [x] `claude_account.py`: `live_owner()` profile API fallback.
+- [x] `claude_account.py`: `save` with identity check.
+- [x] `claude_account.py`: `use` target validation before writes.
+- [x] `claude_account.py`: `use` unknown-owner refusal and `--force`.
+- [x] `claude_account.py`: `use` outgoing re-save.
+- [x] `claude_account.py`: `use` live keychain write.
+- [x] `claude_account.py`: `use` `oauthAccount` write (warning on failure).
+- [x] `claude_account.py`: `use` index touch (swap generation).
+- [x] `claude_account.py`: running-`claude` count notice.
+- [x] `claude_account.py`: `list`.
+- [x] `claude_account.py`: argparse CLI.
+- [x] `claude_account.py`: setup docstring shown by `--help`.
+- [x] `claude_account.py`: one-label-per-uuid check in `save`.
+- [x] Write `tests/test_claude_account.py`.
+- [x] `runner/app.py`: `GET /api/claude-accounts`.
+- [x] `runner/app.py`: `POST /api/claude-accounts/use`.
+- [x] `runner/app.py`: clear cached usage on generation change.
+- [x] `runner/app.py`: skip publishing a fetch whose generation changed.
+- [x] `runner/app.py`: ignore pre-swap rate-limits snapshot.
+- [x] `runner/app.py`: pass account list to `index()` template.
+- [x] `index.html`: select rendered beside the Claude label.
+- [x] `index.html`: select hidden with < 2 accounts.
+- [x] `index.html`: change → POST.
+- [x] `index.html`: success → reload.
+- [x] `index.html`: error → alert.
+- [x] Endpoint/cache tests.
+- [x] Run the Verification checks.
+- [x] Fresh Codex inspection of the diff.
+- [x] Resolve inspection findings.
+- [x] Update `docs/context-maintenance.md` with validation and next action.
+- [x] Commit on `agent/AGE-125`.
 
 ## User follow-up (not claimable in this session)
 
