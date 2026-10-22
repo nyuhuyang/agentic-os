@@ -203,3 +203,131 @@ Dispositions:
 - AGE124-I01 ACCEPTED: `ignored` split from `untracked` and never sanctioned; after a commit the guard requires staged/unstaged/untracked to be empty (`CLEAN_PARTS`), HEAD to be the reported commit and its parent the pre-commit HEAD. Regressions: ignored-file write during commit; tracked edit left after commit.
 - AGE124-I02 ACCEPTED: the merge reports its HEAD and branch tip; post HEAD must equal it, with first parent = pre HEAD or (fast-forward) HEAD = tip and pre HEAD an ancestor. Regressions: HEAD reset after merge; non-fast-forward merge still re-based.
 Tests: test_session_commit.py + test_projects.py 149 passed.
+
+## Inspection 2 — fresh Codex, REVISE (cross_provider)
+result: /tmp/claudex-AGE-124/inspect2/claudex-xs4icgf1/result.json
+
+Dispositions:
+- AGE124-I03 ACCEPTED: merge_into_checkout reads HEAD once and validates that sha (ancestry + tree) before returning it. Regression: HEAD replaced after the check is not returned; the run is flagged.
+- AGE124-I04 ACCEPTED: `_explained` accepts an unchanged checkout whose reported HEAD equals the pre HEAD (already-merged no-op). Regression added.
+Note: the session restarted after inspection 2; the runner auto-committed the work as a30ef92 meanwhile.
+
+Correction to the Inspection 2 entry: its result is /tmp/claudex-AGE-124/inspect2/claudex-4qre2co3/result.json (the other directory was an interrupted relaunch). Response:
+{
+ "verdict": "REVISE",
+ "summary": "Two concurrency defects remain: merge-result rebasing can absorb an unrelated HEAD replacement, and an already-completed merge can falsely flag open runs.",
+ "findings": [
+  {
+   "id": "AGE124-I03",
+   "severity": "high",
+   "path": "runner/app.py:3423",
+   "evidence": "merge_into_checkout validates moving HEAD at runner/projects.py:1296–1298, then reads HEAD again to return it at line 1300. Between those commands, an open non-confidential worker can reset main to its own existing commit B whose first parent is the pre-merge HEAD. The helper reports B; _explained accepts its matching HEAD and first parent without checking the expected merge tree or target ancestry. With a clean checkout, only sanctioned components differ, so the baseline absorbs the unrelated replacement and closing reports unchanged. The runner's locks do not constrain worker git commands.",
+   "fix": "Capture the result SHA once and validate that immutable SHA against the expected merge tree and target ancestry, then return the same SHA. Keep the post-snapshot HEAD comparison. Add a regression replacing HEAD between helper validation and its current final HEAD read."
+  },
+  {
+   "id": "AGE124-I04",
+   "severity": "medium",
+   "path": "runner/app.py:3426",
+   "evidence": "commit_checkout checks _ahead before acquiring the merge gate (runner/projects.py:1361). While request A waits, another ticket's merge can incorporate A's tip and advance main beyond it. A subsequently performs an already-up-to-date merge. Its pre/post fingerprints are identical, but _explained rejects it because HEAD's first parent is not HEAD itself and returned HEAD differs from A's older tip. _rebase_bound_runs then permanently marks otherwise unchanged open runs as changed.",
+   "fix": "Accept a verified no-op when post equals pre and the reported HEAD equals pre HEAD, or recheck merge necessity under the gate before entering rebasing. Add a regression with overlapping branch histories and two queued manual merge requests."
+  }
+ ],
+ "coverage": [
+  "Read the plan, review log, and changed sections of every manifested file; verified all supplied per-file SHA256 values.",
+  "Traced baseline publication, rebasing, closing checks, cancellation, exception cleanup, finalization, and automatic merge draining.",
+  "Inspected registry writers, lifecycle/ticket/merge locks, commit and merge helpers, fingerprints, and live-run serialization.",
+  "Reviewed Commit enforcement, project forms, preview rendering, PTY admission, stall-state writers, and relevant test source.",
+  "Inspected relevant SPEC.md scope, API, and non-functional requirements."
+ ],
+ "limitations": [
+  "Static review only: no files edited, tests executed, runtime/browser checks performed, or work delegated.",
+  "Host-reported test results were not independently verified.",
+  "The external live projects.yaml was not inspected."
+ ]
+}
+
+## Inspection 3 — fresh Codex, REVISE (cross_provider)
+result: /tmp/claudex-AGE-124/inspect3/claudex-9w01zj84/result.json
+{
+ "verdict": "REVISE",
+ "summary": "The merge fixes address I03/I04, but commit rebasing can still hide an unrelated replacement of the main checkout.",
+ "findings": [
+  {
+   "id": "AGE124-I05",
+   "severity": "high",
+   "path": "runner/projects.py:1359",
+   "evidence": "After git commit creates C, a concurrent non-confidential worker can reset main to an existing sibling commit B before rev-parse HEAD runs. The endpoint reports B and sets expect.head to B. If B's parent is the pre-operation HEAD and the checkout is clean, _explained (runner/app.py:3423–3433) accepts it without checking the committed tree. The changed baseline then hides the replacement, although the user's requested commit has disappeared from main. Worker git commands do not take the runner's locks.",
+   "fix": "Capture the intended staged tree and parent, validate the captured result SHA against both before publishing it as expect.head, and retain the post-snapshot HEAD comparison. Mark affected baselines changed on mismatch. Add a regression that resets main to a different sibling commit after git commit returns but before HEAD is captured."
+  }
+ ],
+ "coverage": [
+  "Verified the plan SHA256 and inspected changed content in every manifested file.",
+  "Traced baseline publication, rebasing, closing checks, cancellation, cleanup, and live-run serialization.",
+  "Inspected commit and merge helpers, automatic merge draining, checkout aliases, and lifecycle/ticket/gate/merge lock interactions.",
+  "Traced related activity writers through session launches, baseline verification, PTY admission, cancellation, and stall detection.",
+  "Reviewed registry persistence, Commit enforcement, project forms, disabled-editor rendering, and regression-test source."
+ ],
+ "limitations": [
+  "Static review only; no files edited, tests executed, browser checks performed, or work delegated.",
+  "Formal SPEC.md and the external live projects.yaml were not inspected.",
+  "All manifested implementation and test hashes matched; the review log contained an additional correction and differed from its supplied hash."
+ ]
+}
+
+Dispositions:
+- AGE124-I05 ACCEPTED: commit_checkout records the parent and the staged tree (`write-tree`) before `git commit`, reads HEAD once afterwards and refuses ("moved while committing") unless that sha has exactly that tree and parent; only then is it published as expect.head. Regression: HEAD swapped for a sibling right after `git commit`.
+Tests: test_session_commit.py 71 passed; full suite 919 passed before this fix.
+
+## Inspection 4 — fresh Codex, REVISE (cross_provider)
+result: /tmp/claudex-AGE-124/inspect4/claudex-cdu1nhd6/result.json
+{
+ "verdict": "REVISE",
+ "summary": "The I05 fix still permits an unrelated merge commit to replace the requested commit without flagging open runs.",
+ "findings": [
+  {
+   "id": "AGE124-I06",
+   "severity": "high",
+   "path": "runner/projects.py:1362",
+   "evidence": "Validation checks the captured commit's tree and first parent, but allows additional parents. After git commit creates C, a concurrent non-confidential worker can replace HEAD with B whose tree matches C and whose parents are [pre-operation HEAD, unrelated agent-branch tip]. Both checks pass, so B is published as expect.head. _explained also checks only the first parent (runner/app.py:3428–3433); with a clean checkout, rebasing absorbs B and closing reports unchanged. Unrequested branch history has entered main while the user's actual commit disappeared. The new regression covers only a replacement with a different tree.",
+   "fix": "Validate the captured commit's complete parent list and require exactly [parent] for a plain commit. Retain the tree and post-snapshot HEAD checks. Add a regression replacing C with a same-tree commit carrying an additional parent, and verify refusal plus detection by the open run."
+  }
+ ],
+ "coverage": [
+  "Reviewed the plan, review log, and changed content in every manifested file; verified all supplied file hashes and the tracked diff hash.",
+  "Traced baseline publication, rebasing, closing callbacks, cancellation, exception cleanup, finalization, and live-run serialization.",
+  "Inspected manual and automatic merges, commit callers, checkout aliases, and lifecycle/ticket/gate/merge lock ordering.",
+  "Traced related activity writers through session launches, baseline verification, PTY admission, and stall detection.",
+  "Reviewed registry persistence, Commit enforcement, project forms, disabled-editor rendering, relevant SPEC.md requirements, and regression-test source."
+ ],
+ "limitations": [
+  "Static review only; no files edited, tests executed, runtime/browser checks performed, or work delegated.",
+  "Host-reported test results were not independently verified.",
+  "The external live projects.yaml was not inspected."
+ ]
+}
+
+Dispositions:
+- AGE124-I06 ACCEPTED: commit_checkout requires the read-once HEAD's full parent list (`^@`) to be exactly [pre HEAD]. Same tightening applied in `_explained`: parents must be exactly [pre HEAD] (commit) or [pre HEAD, branch tip] (merge), else only a fast-forward to the tip passes. Regression: same-tree commit with an extra parent swapped in after `git commit`.
+Tests: test_session_commit.py 72 passed; full suite 920 passed before this fix.
+
+## Inspection 5 — fresh Codex, APPROVED (cross_provider)
+result: /tmp/claudex-AGE-124/inspect5/claudex-5wagyuvk/result.json
+{
+ "verdict": "APPROVED",
+ "summary": "No material unresolved defects found. The I06 fix validates the complete parent list and retains tree and post-operation HEAD checks.",
+ "findings": [],
+ "coverage": [
+  "Read the plan, review log, and changed content in every manifested file; verified all supplied file hashes and the tracked diff hash.",
+  "Traced baseline publication, rebasing, closing checks, cancellation, exception cleanup, and live-run serialization.",
+  "Reviewed manual and automatic merges, commit validation, checkout aliases, and lifecycle/ticket/gate/merge lock ordering.",
+  "Traced related activity writers through session launches, baseline verification, and PTY admission.",
+  "Reviewed registry persistence, Commit endpoint enforcement, project forms, disabled-editor rendering, and regression-test source."
+ ],
+ "limitations": [
+  "Static review only: no files edited, tests executed, runtime/browser checks performed, or work delegated. Host-reported test results were not independently verified.",
+  "Formal SPEC.md and the external live projects.yaml were not inspected.",
+  "Graphify output was absent; callers and shared-state writers were traced directly in source."
+ ]
+}
+
+Final: plan review 4 rounds (approved), inspection 5 rounds (approved), assurance cross_provider, no fallback. Full suite 921 passed.

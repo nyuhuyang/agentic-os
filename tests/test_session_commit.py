@@ -903,3 +903,84 @@ def test_a_non_fast_forward_merge_is_not_blamed_on_the_run(bound):
     base["parts"] = pj.fingerprint_parts(project)  # the run opened after main diverged
     assert pj.commit_checkout(project, wt, "", merger=lambda i: app_mod._manual_merge(project, i)).get("merged_head")
     assert git(root, "rev-list", "--parents", "-n1", "HEAD").count(" ") == 2 and not flagged(project, base)
+
+
+def test_merge_reports_the_head_it_checked(bound, monkeypatch):
+    """I03: HEAD replaced between the merge's check and its report is never returned as the merge."""
+    app_mod, project, root, base = bound
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    pj.commit_checkout(project, wt, "branch work")
+    real, calls = pj._git, []
+
+    def swap_after_check(cwd, *args, **kw):
+        out = real(cwd, *args, **kw)
+        if args[:1] == ("rev-parse",) and args[-1].endswith("^{tree}"):
+            calls.append(1)
+            git(root, "commit", "-q", "--allow-empty", "-m", "agent")  # another HEAD, parent = the merge
+        return out
+    monkeypatch.setattr(pj, "_git", swap_after_check)
+    with pj.ticket_lock("alpha", "T-1"):
+        head = app_mod._manual_merge(project, "T-1")
+    monkeypatch.setattr(pj, "_git", real)
+    assert calls and head != git(root, "rev-parse", "HEAD") and base["changed"]
+
+
+def test_an_already_merged_branch_does_not_flag_the_run(bound):
+    """I04: a merge that finds nothing to do leaves open runs unflagged."""
+    app_mod, project, root, base = bound
+    wt = _wt(project)
+    (wt / "w.txt").write_text("w\n")
+    pj.commit_checkout(project, wt, "branch work")
+    pj.merge_into_checkout(project, "T-1")
+    (root / "m.txt").write_text("m\n"); git(root, "add", "-A"); git(root, "commit", "-qm", "main moved on")
+    base["parts"] = pj.fingerprint_parts(project)
+    with pj.ticket_lock("alpha", "T-1"):
+        assert app_mod._manual_merge(project, "T-1") == git(root, "rev-parse", "HEAD")
+    assert not base["changed"] and not flagged(project, base)
+
+
+def test_commit_replaced_before_it_is_reported_is_refused(bound, monkeypatch):
+    """I05: HEAD swapped for a sibling right after git commit is never reported as the user's commit."""
+    app_mod, project, root, base = bound
+    (root / "a.txt").write_text("mine\n")
+    base["parts"] = pj.fingerprint_parts(project)
+    pre = git(root, "rev-parse", "HEAD")
+    real = pj._git
+
+    def swap_after_commit(cwd, *args, **kw):
+        out = real(cwd, *args, **kw)
+        if args[:1] == ("commit",):
+            git(root, "reset", "-q", "--hard", pre)
+            git(root, "commit", "-q", "--allow-empty", "-m", "sibling")  # parent = pre, other tree
+        return out
+    monkeypatch.setattr(pj, "_git", swap_after_commit)
+    with pytest.raises(pj.ProjectError, match="moved while committing"):
+        pj.commit_checkout(project, root, "mine", main_guard=lambda: app_mod._main_commit_guard(project))
+    monkeypatch.setattr(pj, "_git", real)
+    assert flagged(project, base)
+
+
+def test_commit_replaced_by_a_same_tree_merge_is_refused(bound, monkeypatch):
+    """I06: a same-tree commit with an extra parent is not the user's commit."""
+    app_mod, project, root, base = bound
+    git(root, "branch", "other")
+    git(root, "checkout", "-q", "other"); git(root, "commit", "-q", "--allow-empty", "-m", "other tip")
+    tip = git(root, "rev-parse", "HEAD"); git(root, "checkout", "-q", "main")
+    (root / "a.txt").write_text("mine\n")
+    base["parts"] = pj.fingerprint_parts(project)
+    pre = git(root, "rev-parse", "HEAD")
+    real = pj._git
+
+    def swap_after_commit(cwd, *args, **kw):
+        out = real(cwd, *args, **kw)
+        if args[:1] == ("commit",):
+            tree = git(root, "rev-parse", "HEAD^{tree}")
+            b = git(root, "commit-tree", tree, "-p", pre, "-p", tip, "-m", "same tree, extra parent")
+            git(root, "reset", "-q", "--soft", b)
+        return out
+    monkeypatch.setattr(pj, "_git", swap_after_commit)
+    with pytest.raises(pj.ProjectError, match="moved while committing"):
+        pj.commit_checkout(project, root, "mine", main_guard=lambda: app_mod._main_commit_guard(project))
+    monkeypatch.setattr(pj, "_git", real)
+    assert flagged(project, base)

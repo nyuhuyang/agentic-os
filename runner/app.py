@@ -3413,8 +3413,8 @@ _SANCTIONED = {"merge": {"head", "tracked"}, "commit": {"head", "tracked", "stag
 
 def _explained(b: dict, op: str, pre: dict, post: dict, expect: dict) -> bool:
     """`post` is exactly what the operation made of `pre`: nothing outside its components moved,
-    HEAD is the commit it reported, on top of `pre`'s HEAD (or, for a fast-forward merge, the
-    branch tip), and a commit left nothing staged, changed or untracked behind (AGE124-I01/I02)."""
+    HEAD is the commit it reported, whose parents are exactly `pre`'s HEAD (plus the branch tip
+    for a merge; a fast-forward merge is the tip itself), and a commit left nothing staged, changed or untracked behind (AGE124-I01/I02)."""
     if any(post[c] != pre[c] for c in pre if c not in _SANCTIONED[op]):
         return False
     head = expect.get("head")
@@ -3422,11 +3422,15 @@ def _explained(b: dict, op: str, pre: dict, post: dict, expect: dict) -> bool:
         return post == pre
     if post["head"] != head:
         return False
+    if post == pre and head == pre["head"]:  # already up to date: a no-op is no change (AGE124-I04)
+        return True
     root, confine = b["project"].path, _projects.confine_for(b["project"])
-    parent = _projects._git(root, "rev-parse", "-q", "--verify", f"{head}^1", check=False, confine=confine).stdout.strip()
+    parents = _projects._git(root, "rev-parse", f"{head}^@", check=False, confine=confine).stdout.split()
+    # every parent, not just the first: no extra history rides in on a same-tree commit (AGE124-I06)
+    made = parents == ([pre["head"], expect.get("tip")] if op == "merge" else [pre["head"]])
     fast_forward = (op == "merge" and head == expect.get("tip") and _projects._git(
         root, "merge-base", "--is-ancestor", pre["head"], head, check=False, confine=confine).returncode == 0)
-    if parent != pre["head"] and not fast_forward:
+    if not made and not fast_forward:
         return False
     return op == "merge" or all(post[c] == v for c, v in _projects.CLEAN_PARTS.items())
 

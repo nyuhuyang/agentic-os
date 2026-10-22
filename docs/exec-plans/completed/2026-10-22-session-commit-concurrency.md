@@ -1,5 +1,6 @@
 ---
-status: in-progress
+status: completed
+completed: 2026-10-22
 created: 2026-10-22
 ---
 
@@ -99,63 +100,63 @@ Two user complaints about the Projects panel's per-session **Commit** button (sc
 
 ## Acceptance Criteria
 
-- [ ] A worktree row's Commit & merge succeeds while another project-bound run of the same project is open.
-- [ ] That other run does not report "main checkout changed" because of the merge.
-- [ ] A run whose main checkout already changed before the merge still reports "main checkout changed".
-- [ ] A change outside the sanctioned components made during the merge still flags the run.
-- [ ] A merge is still refused while an agent works in the main checkout itself.
-- [ ] A main-checkout commit does not flag an open bound run whose main checkout was unchanged since it opened.
-- [ ] `/api/runs?state=running` and `/api/runs/<id>` stay JSON-serialisable while a bound run is open.
-- [ ] A project with `commit: false` shows no Commit button and its commit endpoint returns 400.
-- [ ] The project form toggles `commit` for add and edit.
-- [ ] Turning Commit off while a row's Commit editor is open removes that editor and its button.
+- [x] A worktree row's Commit & merge succeeds while another project-bound run of the same project is open.
+- [x] That other run does not report "main checkout changed" because of the merge.
+- [x] A run whose main checkout already changed before the merge still reports "main checkout changed".
+- [x] A change outside the sanctioned components made during the merge still flags the run.
+- [x] A merge is still refused while an agent works in the main checkout itself.
+- [x] A main-checkout commit does not flag an open bound run whose main checkout was unchanged since it opened.
+- [x] `/api/runs?state=running` and `/api/runs/<id>` stay JSON-serialisable while a bound run is open.
+- [x] A project with `commit: false` shows no Commit button and its commit endpoint returns 400.
+- [x] The project form toggles `commit` for add and edit.
+- [x] Turning Commit off while a row's Commit editor is open removes that editor and its button.
 
 ## Verification
 
-- [ ] `.venv/bin/python3 -m py_compile runner/*.py` passes.
-- [ ] Test: `fingerprint()` equals `fingerprint_of(fingerprint_parts())`.
-- [ ] Test: manual merge with an open bound run merges and the run's closing check reports unchanged.
-- [ ] Test: a bound run whose `unstaged` part already differed is still flagged after the merge.
-- [ ] Test: a hook written between pre and post of a merge leaves the run flagged.
-- [ ] Test: skip-worktree set on an unrelated file plus an edit during a merge leaves the run flagged.
-- [ ] Test: an edit made in the main checkout after a run opened, then a main-checkout commit, leaves the run flagged.
-- [ ] Test: main-checkout commit re-bases an open bound run with a matching baseline.
-- [ ] Test: running-job APIs serialise while `_RUN_BASELINES` holds an entry.
-- [ ] Test: `test_merge_refusal_keeps_the_commit` uses a session-in-main worker.
-- [ ] Test: registry `commit: false` parses; `set_flags` writes `commit` and keeps other fields.
-- [ ] Test: commit endpoint returns 400 for a `commit: false` project.
-- [ ] `.venv/bin/python3 -m pytest -q tests/test_session_commit.py tests/test_project_registry.py tests/test_project_dispatch.py tests/test_projects.py` passes.
-- [ ] Full `.venv/bin/python3 -m pytest -q tests` shows no new failures versus base.
-- [ ] Browser check: open a Commit preview, turn Commit off in Edit, save; the row shows no Commit button.
-- [ ] `/verify` against an isolated runner: Projects panel renders, form shows the Commit checkbox, a `commit: false` project has no Commit button.
+- [x] `.venv/bin/python3 -m py_compile runner/*.py` passes.
+- [x] Test: `fingerprint()` equals `fingerprint_of(fingerprint_parts())`.
+- [x] Test: manual merge with an open bound run merges and the run's closing check reports unchanged.
+- [x] Test: a bound run whose `unstaged` part already differed is still flagged after the merge.
+- [x] Test: a hook written between pre and post of a merge leaves the run flagged.
+- [x] Test: skip-worktree set on an unrelated file plus an edit during a merge leaves the run flagged.
+- [x] Test: an edit made in the main checkout after a run opened, then a main-checkout commit, leaves the run flagged.
+- [x] Test: main-checkout commit re-bases an open bound run with a matching baseline.
+- [x] Test: running-job APIs serialise while `_RUN_BASELINES` holds an entry.
+- [x] Test: `test_merge_refusal_keeps_the_commit` uses a session-in-main worker.
+- [x] Test: registry `commit: false` parses; `set_flags` writes `commit` and keeps other fields.
+- [x] Test: commit endpoint returns 400 for a `commit: false` project.
+- [x] `.venv/bin/python3 -m pytest -q tests/test_session_commit.py tests/test_project_registry.py tests/test_project_dispatch.py tests/test_projects.py` passes.
+- [x] Full `.venv/bin/python3 -m pytest -q tests` shows no new failures versus base.
+- [x] Browser check: open a Commit preview, turn Commit off in Edit, save; the row shows no Commit button.
+- [x] `/verify` against an isolated runner: Projects panel renders, form shows the Commit checkbox, a `commit: false` project has no Commit button.
 
 ## Progress Checklist
 
-- [ ] Split `fingerprint` into `fingerprint_parts` + `fingerprint_of` (refs part excludes the current branch ref).
-- [ ] Split `ls-files -v` into `tracked` names and non-`H` `flags`.
-- [ ] Add `commit` to `_FIELDS`, `Project`, `_parse_project`, `projects.example.yaml`.
-- [ ] Replace `set_confidential` with `set_flags`; update the PATCH endpoint.
-- [ ] Update `set_confidential` tests to `set_flags`.
-- [ ] Return `commit` from `/api/projects`; skip commit state when it is off.
-- [ ] Refuse the commit endpoint for a `commit: false` project.
-- [ ] Dashboard: pass the project to `_sessionRow`; hide Commit when off.
-- [ ] Dashboard: an open Commit editor is not rendered when the project's Commit is off.
-- [ ] Dashboard: Commit checkbox in the project form (add sends `commit: false` only when unchecked; edit PATCHes it).
-- [ ] Add `_RUN_BASELINES`; write it with the opening fingerprint under the gate and `_JOB_LOCK`.
-- [ ] Add `closing` param to `post_run`; app closing callable pops the baseline under the gate.
-- [ ] Use the same closing callable on the cancelled path.
-- [ ] Make sure the baseline entry is dropped on every exit of `_run_project_ticket`.
-- [ ] `_rebase_bound_runs`: read `pre` parts for each baseline of the checkout.
-- [ ] `_rebase_bound_runs`: mark `changed` when `pre` differs from the baseline.
-- [ ] `_rebase_bound_runs`: after success, mark `changed` when a non-sanctioned component moved, else `base = post`.
-- [ ] `_rebase_bound_runs`: re-base nothing when the operation raises.
-- [ ] `_rebase_bound_runs`: mark `changed` on a fingerprint error.
-- [ ] Closing callable honours the sticky `changed` mark.
-- [ ] `_project_runs_open`: option to skip project-bound runs; `_manual_merge` uses it and wraps the merge.
-- [ ] Add `main_guard` to `commit_checkout`; pass it from `api_session_commit`.
-- [ ] Write the tests listed under Verification.
-- [ ] Run verification.
-- [ ] Fresh Codex inspection of the diff.
-- [ ] Update `docs/context-maintenance.md` with validation and next action.
-- [ ] Commit on `agent/AGE-124`.
-- [ ] Tell the user to untick "Commit button" for `knowledge_base` in its Edit dialog (`projects.yaml` is outside this worktree).
+- [x] Split `fingerprint` into `fingerprint_parts` + `fingerprint_of` (refs part excludes the current branch ref).
+- [x] Split `ls-files -v` into `tracked` names and non-`H` `flags`.
+- [x] Add `commit` to `_FIELDS`, `Project`, `_parse_project`, `projects.example.yaml`.
+- [x] Replace `set_confidential` with `set_flags`; update the PATCH endpoint.
+- [x] Update `set_confidential` tests to `set_flags`.
+- [x] Return `commit` from `/api/projects`; skip commit state when it is off.
+- [x] Refuse the commit endpoint for a `commit: false` project.
+- [x] Dashboard: pass the project to `_sessionRow`; hide Commit when off.
+- [x] Dashboard: an open Commit editor is not rendered when the project's Commit is off.
+- [x] Dashboard: Commit checkbox in the project form (add sends `commit: false` only when unchecked; edit PATCHes it).
+- [x] Add `_RUN_BASELINES`; write it with the opening fingerprint under the gate and `_JOB_LOCK`.
+- [x] Add `closing` param to `post_run`; app closing callable pops the baseline under the gate.
+- [x] Use the same closing callable on the cancelled path.
+- [x] Make sure the baseline entry is dropped on every exit of `_run_project_ticket`.
+- [x] `_rebase_bound_runs`: read `pre` parts for each baseline of the checkout.
+- [x] `_rebase_bound_runs`: mark `changed` when `pre` differs from the baseline.
+- [x] `_rebase_bound_runs`: after success, mark `changed` when a non-sanctioned component moved, else `base = post`.
+- [x] `_rebase_bound_runs`: re-base nothing when the operation raises.
+- [x] `_rebase_bound_runs`: mark `changed` on a fingerprint error.
+- [x] Closing callable honours the sticky `changed` mark.
+- [x] `_project_runs_open`: option to skip project-bound runs; `_manual_merge` uses it and wraps the merge.
+- [x] Add `main_guard` to `commit_checkout`; pass it from `api_session_commit`.
+- [x] Write the tests listed under Verification.
+- [x] Run verification.
+- [x] Fresh Codex inspection of the diff.
+- [x] Update `docs/context-maintenance.md` with validation and next action.
+- [x] Commit on `agent/AGE-124`.
+- [x] Tell the user to untick "Commit button" for `knowledge_base` in its Edit dialog (`projects.yaml` is outside this worktree).

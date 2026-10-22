@@ -1293,11 +1293,12 @@ def merge_into_checkout(project: Project, ident: str, rev: str | None = None) ->
              "--strategy=ort", "--no-overwrite-ignore",
              "--no-edit", "--no-verify", "--no-gpg-sign", "--commit", "--no-squash", "--no-autostash", "-q",
              "-m", f"Merge branch '{branch}'", target, confine=confine, timeout=COMMIT_TIMEOUT_S, env=_identity_env(root))
+        head = _git(root, "rev-parse", "HEAD", confine=confine).stdout.strip()  # read once: what is checked is returned (AGE124-I03)
         if (_git_operation(root, confine)
-                or _git(root, "merge-base", "--is-ancestor", target, "HEAD", check=False, confine=confine).returncode
-                or _git(root, "rev-parse", "HEAD^{tree}", confine=confine).stdout.strip() != tree):
+                or _git(root, "merge-base", "--is-ancestor", target, head, check=False, confine=confine).returncode
+                or _git(root, "rev-parse", f"{head}^{{tree}}", confine=confine).stdout.strip() != tree):
             raise ProjectError(f"{branch} did not merge into {root} as checked; inspect it by hand")
-        return _git(root, "rev-parse", "HEAD", confine=confine).stdout.strip()
+        return head
 
 
 def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry_run: bool = False,
@@ -1353,11 +1354,18 @@ def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry
                 raise ProjectError("a commit message is required")
             _git(repo, "add", "-A", confine=confine, timeout=COMMIT_TIMEOUT_S)
             if _git(repo, "diff", "--cached", "--quiet", "--no-ext-diff", check=False, confine=confine).returncode:
+                parent = _git(repo, "rev-parse", "HEAD", confine=confine).stdout.strip()
+                tree = _git(repo, "write-tree", confine=confine).stdout.strip()  # what this commit must hold
                 _git(repo, "commit", "--no-verify", "--no-gpg-sign", "-q", "-m", msg, confine=confine,
                      timeout=COMMIT_TIMEOUT_S, env=_identity_env(repo))
-                out["committed"] = _git(repo, "rev-parse", "HEAD", confine=confine).stdout.strip()
+                head = _git(repo, "rev-parse", "HEAD", confine=confine).stdout.strip()  # read once (AGE124-I05)
+                if (_git(repo, "rev-parse", f"{head}^{{tree}}", confine=confine).stdout.strip() != tree
+                        or _git(repo, "rev-parse", f"{head}^@", check=False,  # every parent: exactly one (I06)
+                                confine=confine).stdout.split() != [parent]):
+                    raise ProjectError(f"{repo} moved while committing; inspect it by hand")
+                out["committed"] = head
                 if expect is not None:
-                    expect["head"] = out["committed"]  # the guard checks the checkout ends exactly here
+                    expect["head"] = head  # the guard checks the checkout ends exactly here
         if ident and merger and _ahead(project, ident):
             try:
                 out["merged_head"] = merger(ident)
