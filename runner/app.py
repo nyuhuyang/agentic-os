@@ -2733,6 +2733,8 @@ def _project_exec_env(agent: str, project) -> dict:
     env = _registry_exec_env(agent, _load_registry(agent))
     for k, v in project.env.items():
         env[k] = f"{v}{os.pathsep}{env.get('PATH', '')}" if k == "PATH" else v
+    if agent == "claude" and project.confidential:  # AGE-129: Codex inside Claude's sandbox
+        env["PATH"] = f"{project_runs.SANDBOXED_BIN}{os.pathsep}{env.get('PATH', '')}"
     return env
 
 
