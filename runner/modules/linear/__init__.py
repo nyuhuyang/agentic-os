@@ -1182,7 +1182,11 @@ class LinearModule(AgenticModule):
         tid = (requested or "").strip() or _load_workflow_config().get("tracker", {}).get("team_id", "")
         if tid:
             return tid, ""
-        teams = client.fetch_teams()
+        try:
+            teams = client.fetch_teams()
+        except Exception as e:  # e.g. GraphQL errors with data: null
+            logger.warning("Linear team lookup failed: %s", e)
+            teams = []
         if len(teams) == 1:
             return teams[0]["id"], ""
         if not teams:  # fetch_teams returns [] on any Linear error too

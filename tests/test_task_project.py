@@ -310,7 +310,10 @@ class TeamsClient(FakeClient):
         self.answers = answers
 
     def fetch_teams(self):
-        return self.answers.pop(0)
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
     def create_issue(self, team_id, title, desc, label_ids=None):
         self.calls.append(("create_team", team_id))
@@ -366,3 +369,12 @@ def test_stale_team_cache_is_never_used_to_create(reg, monkeypatch):
     before = stored()
     r = client.post("/api/linear/issues", json={"title": "t"})
     assert r.status_code == 400 and "Could not read" in r.get_json()["error"] and stored() == before and not calls
+
+
+def test_raising_team_lookup_refuses_then_recovers(reg, monkeypatch):
+    # GraphQL errors with data: null make fetch_teams raise, not return [] (inspection R1)
+    mod, client, calls, stored = _all_teams(reg, monkeypatch, [AttributeError("'NoneType' has no attribute 'get'"), ONE])
+    before = stored()
+    r = client.post("/api/linear/issues", json={"title": "t"})
+    assert r.status_code == 400 and "Could not read" in r.get_json()["error"] and stored() == before and not calls
+    assert client.post("/api/linear/issues", json={"title": "t"}).status_code == 200 and ("create_team", "age") in calls
