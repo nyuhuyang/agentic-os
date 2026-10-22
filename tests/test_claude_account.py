@@ -307,3 +307,13 @@ def test_oversized_secret_refused_without_write(kc):
     with pytest.raises(ca.AccountError, match="too large"):
         ca._kc_write(ca.SNAP_SERVICE, "a", "x" * 2000)
     assert kc.stdins == []
+
+
+@pytest.mark.parametrize("n, shown", [(1, False), (2, True)])
+def test_dashboard_select_needs_two_accounts(app_mod, monkeypatch, n, shown):
+    accs = [{"label": "a", "email": "a@x"}, {"label": "b", "email": "b@x"}][:n]
+    monkeypatch.setattr(ca, "accounts", lambda: {"accounts": accs, "active": "a"})
+    html = app_mod.app.test_client().get("/").text
+    assert ('class="claude-account-select"' in html) is shown
+    if shown:
+        assert '<option value="a" title="a@x" selected>' in html and '<option value="b" title="b@x" >' in html
