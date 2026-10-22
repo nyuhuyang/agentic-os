@@ -61,10 +61,16 @@ def common_dir(project: projects.Project) -> Path:
 
 # AGE-114 Step 3: a runner-launched Claude reads AGENTS.md as well as CLAUDE.md, so it sees the
 # rules Codex sees (Claude Code's default reads AGENTS.md only where there is no CLAUDE.md). Not for
-# confidential runs: their `--setting-sources ""` loads no CLAUDE.md or AGENTS.md at all.
+# confidential runs: their `--setting-sources user` loads no project CLAUDE.md or AGENTS.md.
 CLAUDE_INSTRUCTION_FILES = {"pluginConfigs": {"cc-plugin-agents-md@builtin": {
     "options": {"instructionFiles": "claude-md-and-agents-md"}}}}
 CLAUDE_SETTINGS = ["--settings", json.dumps(CLAUDE_INSTRUCTION_FILES)]
+
+
+# AGE-129: user settings load the user's plugins and ~/.claude/skills (claudex-loop etc.) into
+# confidential runs too; project settings stay out. --strict-mcp-config keeps every MCP server off:
+# they run outside the sandbox, so user scope would otherwise reopen the network.
+CLAUDE_CONFIDENTIAL_SOURCES = ["--setting-sources", "user", "--strict-mcp-config"]
 
 
 def claude_confidential_settings(common: Path) -> str:
@@ -100,7 +106,7 @@ def agent_cli(agent: str, project: projects.Project, claude_bin: str, dsh_prefix
                     "-c", 'approval_policy="never"', "-c", "sandbox_workspace_write.network_access=false",
                     "-c", "sandbox_workspace_write.writable_roots=[]"]
         return [claude_bin, "-p", "--verbose", "--permission-mode", "acceptEdits", "--permission-prompts", "none",
-                "--add-dir", common, "--setting-sources", "", "--settings", claude_confidential_settings(Path(common))]
+                "--add-dir", common, *CLAUDE_CONFIDENTIAL_SOURCES, "--settings", claude_confidential_settings(Path(common))]
     if agent == "codex":
         return ["codex", "exec", "--json", "--approve-for-me", "--add-dir", common]
     if agent == "dsh":
