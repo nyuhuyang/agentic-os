@@ -3,6 +3,22 @@
 Question: drive work on a company server (data that lives there) from the same dashboard,
 with the least code change. Today that server is reached through VS Code Remote-SSH.
 
+## Step 0: the bare CLIs on the server, no runner yet
+
+Prove the agents work there before porting anything. Everything installs under `$HOME`, no sudo.
+
+```bash
+curl -sI https://api.anthropic.com https://api.openai.com | grep HTTP   # egress; else set HTTPS_PROXY
+curl -fsSL https://claude.ai/install.sh | bash      # claude -> ~/.local/bin
+npm i -g --prefix ~/.local @openai/codex            # needs Node >= 18
+claude          # login prints a URL: open it on the Mac, paste the code back
+codex login --device-auth   # headless; or tunnel the callback: ssh -L 1455:localhost:1455 <server>
+```
+
+- [ ] `curl` shows HTTP responses from both APIs (directly or through the company proxy).
+- [ ] `claude -p "say hi"` answers inside a server repo.
+- [ ] `codex exec "say hi"` answers inside a server repo.
+
 ## Recommendation: a second runner on the server, reached through an SSH tunnel
 
 Do not make the Mac runner dispatch over SSH: worktrees, verify, session readers and the
