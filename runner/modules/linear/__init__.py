@@ -236,6 +236,17 @@ def _project_labels(data: dict) -> list[str]:
     return [f"{project_runs.LABEL_PREFIX}{key}"]
 
 
+def _refuse_confidential_on_linear(labels: list[str]) -> None:
+    """A confidential project's name never reaches Linear, not even as a label (AGE-127).
+    ponytail: refused outright; local-only routing for these tasks is plan 2026-10-22-confidential-local-tasks."""
+    import projects
+    import project_runs
+    key = project_runs.project_key_from_labels(labels)
+    project = projects.load_registry(errors={}).get(key) if key else None
+    if project is not None and project.confidential:
+        raise ValueError("confidential project: its tasks are not created on Linear")
+
+
 def archived_ids() -> set[str]:
     """Issues emptied from the trash (STB §11). Persisted, so neither the poller's terminal
     carry-over nor a restart (which pre-fills the cache from tasks.json) brings them back."""
@@ -1273,6 +1284,7 @@ class LinearModule(AgenticModule):
         tc = _load_workflow_config().get("tracker", {})
         tid = tc.get("team_id", "")
         if self._capability.get("type") == "linear":
+            _refuse_confidential_on_linear(labels)
             client, tc = self._linear_client()
             tid, err = self._create_team_id(client, tid)
             if not tid:
@@ -1458,6 +1470,10 @@ class LinearModule(AgenticModule):
                 if self._socketio:
                     self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
                 return jsonify({"ok": True, "issue": nd})
+            try:
+                _refuse_confidential_on_linear(labels)
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
             ak = _linear_api_key_from_cfg(tc)
             if not ak:
                 return jsonify({"error": "Linear not configured"}), 503

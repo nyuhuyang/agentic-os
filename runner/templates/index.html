@@ -1424,7 +1424,8 @@ function _projectKeyPreview() {
   const f = document.getElementById('project-form');
   const folder = f.path.value.trim().replace(/\/+$/, '').split('/').pop();
   document.getElementById('project-key-preview').textContent =
-    f.dataset.mode === 'edit' ? `Key: ${f.dataset.key}` : (folder ? `Key: ${_deriveKey(folder)}  (Linear label project:${_deriveKey(folder)})` : '');
+    f.dataset.mode === 'edit' ? `Key: ${f.dataset.key}` : !folder ? ''
+      : `Key: ${_deriveKey(folder)}  (${f.confidential.checked ? 'never sent to Linear' : `Linear label project:${_deriveKey(folder)}`})`;
 }
 
 // Bumped on every open, close, drop and typed path: a lookup result applies only while its

@@ -378,3 +378,25 @@ def test_raising_team_lookup_refuses_then_recovers(reg, monkeypatch):
     r = client.post("/api/linear/issues", json={"title": "t"})
     assert r.status_code == 400 and "Could not read" in r.get_json()["error"] and stored() == before and not calls
     assert client.post("/api/linear/issues", json={"title": "t"}).status_code == 200 and ("create_team", "age") in calls
+
+
+def test_confidential_project_tasks_never_reach_linear(reg, monkeypatch):
+    (app_mod, mod, client, log, events, tmp), path = reg
+    import linear_client
+    import runner.modules.linear as lin
+    doc = yaml.safe_load(path.read_text())
+    doc["projects"]["demo"]["confidential"] = True
+    path.write_text(yaml.safe_dump(doc))
+    calls = []
+    monkeypatch.setattr(linear_client, "LinearClient", FakeClient(True, calls))
+    monkeypatch.setattr(lin, "_linear_api_key_from_cfg", lambda tc: "key")
+    monkeypatch.setattr(mod, "_capability", {"available": True, "type": "linear"})
+    monkeypatch.setattr(mod, "_linear_client", lambda: (FakeClient(True, calls), {}))
+    before = tasks(tmp) if (tmp / "tasks.json").exists() else {}
+    r = client.post("/api/linear/issues", json={"title": "t", "project": "demo", "team_id": "team"})
+    assert r.status_code == 400 and "confidential" in r.get_json()["error"]
+    with pytest.raises(ValueError, match="confidential"):
+        mod.create_session_issue("t", "", "claude", "demo")
+    assert calls == [] and (tasks(tmp) if (tmp / "tasks.json").exists() else {}) == before  # AGE-127
+    monkeypatch.setattr(mod, "_capability", {"available": True, "type": "local"})  # the local board still takes it
+    assert client.post("/api/linear/issues", json={"title": "t", "project": "demo"}).status_code == 200
