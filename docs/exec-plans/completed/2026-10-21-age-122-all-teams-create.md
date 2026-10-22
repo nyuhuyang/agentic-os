@@ -1,5 +1,6 @@
 ---
-status: in-progress
+status: completed
+completed: 2026-10-21
 created: 2026-10-21
 ---
 # AGE-122 — Create a task while "All Teams" is selected
@@ -42,35 +43,35 @@ Step 3 calls `client.fetch_teams()` directly, not the 30-min cache: a stale cach
 
 ## Acceptance Criteria
 
-- [ ] Linear mode, `tracker.team_id = ""`, viewer in one team: `POST /api/linear/issues` with `team_id: ""` returns 200 and the background create uses that team's id.
-- [ ] Linear mode, `tracker.team_id = ""`, viewer in one team: to-board without a card creates the issue in that team.
-- [ ] Linear mode, `tracker.team_id = ""`, viewer in two teams: POST returns 400 with the "Select a team" message and creates nothing (no local placeholder).
-- [ ] A selected team (body `team_id` or `tracker.team_id`) is still used as before.
-- [ ] A failed team lookup gives the "Could not read" refusal, and the next create after Linear recovers succeeds without waiting 30 min.
+- [x] Linear mode, `tracker.team_id = ""`, viewer in one team: `POST /api/linear/issues` with `team_id: ""` returns 200 and the background create uses that team's id.
+- [x] Linear mode, `tracker.team_id = ""`, viewer in one team: to-board without a card creates the issue in that team.
+- [x] Linear mode, `tracker.team_id = ""`, viewer in two teams: POST returns 400 with the "Select a team" message and creates nothing (no local placeholder).
+- [x] A selected team (body `team_id` or `tracker.team_id`) is still used as before.
+- [x] A failed team lookup gives the "Could not read" refusal, and the next create after Linear recovers succeeds without waiting 30 min.
 
 ## Verification
 
-- [ ] New pytest: POST with empty team, one viewer team → 200, create called with that team id.
-- [ ] New pytest: POST with empty team, two viewer teams → 400 "Select a team", no task in `tasks.json`.
-- [ ] New pytest: to-board with empty `tracker.team_id`, one viewer team → issue created with that team id.
-- [ ] New pytest: first `fetch_teams` returns `[]` → POST 400 "Could not read" and no placeholder in `tasks.json`; second returns one team → POST 200.
-- [ ] New pytest: module team cache pre-filled with a stale single team, `fetch_teams` returns `[]` → POST 400 "Could not read", no placeholder (cache not consulted).
-- [ ] Existing suites pass: `.venv/bin/python3 -m pytest tests -q` (use the main checkout's `.venv` if the worktree has none).
-- [ ] `python3 -m py_compile runner/*.py runner/modules/linear/__init__.py` passes.
-- [ ] Isolated runner (`/verify` skill) in Linear-less local mode still creates a task with "All Teams" (regression check of local path).
+- [x] New pytest: POST with empty team, one viewer team → 200, create called with that team id.
+- [x] New pytest: POST with empty team, two viewer teams → 400 "Select a team", no task in `tasks.json`.
+- [x] New pytest: to-board with empty `tracker.team_id`, one viewer team → issue created with that team id.
+- [x] New pytest: first `fetch_teams` returns `[]` → POST 400 "Could not read" and no placeholder in `tasks.json`; second returns one team → POST 200.
+- [x] New pytest: module team cache pre-filled with a stale single team, `fetch_teams` returns `[]` → POST 400 "Could not read", no placeholder (cache not consulted).
+- [x] Existing suites pass: `.venv/bin/python3 -m pytest tests -q` (use the main checkout's `.venv` if the worktree has none).
+- [x] `python3 -m py_compile runner/*.py runner/modules/linear/__init__.py` passes.
+- [x] Isolated runner (`/verify` skill) in Linear-less local mode still creates a task with "All Teams" (regression check of local path).
 
 ## Progress Checklist
 
-- [ ] Add `_create_team_id`: step 1, a non-empty `requested` (stripped) wins.
-- [ ] `_create_team_id`: step 2, else a non-empty `tracker.team_id`.
-- [ ] `_create_team_id`: step 3, else the only team when a fresh `client.fetch_teams()` returns exactly one.
-- [ ] `_create_team_id`: step 4, else `""` plus the zero-teams or several-teams message.
-- [ ] POST route: build the `LinearClient` before the team check (it already has the key).
-- [ ] POST route: call `_create_team_id` in Linear mode before the local placeholder is written; empty → 400 with its message.
-- [ ] `create_session_issue`: call `_create_team_id` with the existing `client`; empty → `RuntimeError(message)`.
+- [x] Add `_create_team_id`: step 1, a non-empty `requested` (stripped) wins.
+- [x] `_create_team_id`: step 2, else a non-empty `tracker.team_id`.
+- [x] `_create_team_id`: step 3, else the only team when a fresh `client.fetch_teams()` returns exactly one.
+- [x] `_create_team_id`: step 4, else `""` plus the zero-teams or several-teams message.
+- [x] POST route: build the `LinearClient` before the team check (it already has the key).
+- [x] POST route: call `_create_team_id` in Linear mode before the local placeholder is written; empty → 400 with its message.
+- [x] `create_session_issue`: call `_create_team_id` with the existing `client`; empty → `RuntimeError(message)`.
 - [x] Confirm the to-board route maps the `RuntimeError` to an error response (409, `runner/app.py:4494`; reviewer confirmed).
-- [ ] Add the five pytest cases.
-- [ ] Run Verification.
-- [ ] Record validation in `docs/context-maintenance.md`.
-- [ ] Commit on `agent/AGE-122`.
-- [ ] Fresh Codex inspection of the diff.
+- [x] Add the five pytest cases.
+- [x] Run Verification.
+- [x] Record validation in `docs/context-maintenance.md`.
+- [x] Commit on `agent/AGE-122`.
+- [x] Fresh Codex inspection of the diff.

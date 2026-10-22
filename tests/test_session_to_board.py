@@ -620,11 +620,13 @@ def test_linear_session_issue_with_all_teams_uses_the_viewers_only_team(stb, mon
     fake.fetch_teams = lambda: [{"id": "age", "key": "AGE", "name": "Agenticos"}]
     teams = []
     fake.ensure_label = lambda team_id, name: teams.append(team_id) or "lab-1"
+    create = fake.create_issue
+    fake.create_issue = lambda team_id, *a, **k: teams.append(team_id) or create(team_id, *a, **k)
     monkeypatch.setattr(lin, "_load_workflow_config", lambda: {"tracker": {"kind": "linear", "team_id": ""}})
     monkeypatch.setattr(mod, "_linear_client", lambda: (fake, {"team_id": "", "project_slug": "slug"}))
     mod._capability = {"available": True, "type": "linear"}
     r = to_board(client)
-    assert r.status_code == 200 and teams == ["age"]  # "All Teams" no longer blocks to-board (AGE-122)
+    assert r.status_code == 200 and teams == ["age", "age"]  # label + create; "All Teams" no longer blocks (AGE-122)
     assert [c for c in fake.calls if c[0] == "create_issue"]
 
 

@@ -19,3 +19,8 @@ Dispositions: /tmp/age122-claudex/feedback-r2.md
 Dispositions: /tmp/age122-claudex/feedback-r3.md
 
 ## Round 4 — Codex, APPROVED (result /tmp/age122-claudex/review-r4/claudex-dh6jxrji/result.json, plan sha256 d75f3316…394e, assurance cross_provider). No findings.
+
+## Inspection 1 — Codex fresh session, REVISE (result /tmp/age122-claudex/inspect-1/claudex-lnf1y2_9/result.json, base 65c2f56, builder claude, assurance cross_provider)
+- R1 medium: fetch_teams raises on GraphQL errors + data:null → 500/internal 409 → accepted; helper catches, new pytest. Commit c8562d0.
+
+## Reinspection — Codex fresh session, APPROVED (result /tmp/age122-claudex/inspect-2/claudex-ozbv1j2l/result.json, cross_provider). Limitation noted: to-board test didn't assert create team → tightened after approval (test-only; asserts label + create team). Full suite 861 pass. Rounds: plan 4/20, inspection 2/20, fixes 1/20.
