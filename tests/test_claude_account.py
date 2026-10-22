@@ -419,3 +419,19 @@ def test_expired_target_access_token_warns(two):
     assert r["ok"] and two.live() == creds("rt-a", "at-a", expires=1000)
     assert any("access token expired" in w for w in r["warnings"])
     assert not any("expired" in w for w in ca.use("b")["warnings"])
+
+
+def test_rotation_during_swap_is_preserved(two, monkeypatch):
+    real_save = ca._save_snapshot
+    rotated = []
+
+    def save_then_rotate(label, blob):
+        real_save(label, blob)
+        if not rotated:  # Claude refreshes B right after we preserved the older token
+            rotated.append(1)
+            two.set_live(creds("rt-b2", "at-b2"))
+    monkeypatch.setattr(ca, "_save_snapshot", save_then_rotate)
+    two.profiles["at-b2"] = UUID_B
+    ca.use("a")
+    assert two.snap("b") == creds("rt-b2", "at-b2")
+    assert two.live() == creds("rt-a", "at-a")

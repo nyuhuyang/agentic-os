@@ -285,19 +285,30 @@ def use(label: str, force: bool = False) -> dict:
         snaps = {name: _snapshot(name) for name in idx}
         if not snaps[label] or not isinstance(idx[label].get("oauthAccount"), dict):
             raise AccountError(f"snapshot {label!r} is unreadable; log in and `save {label}` again")
+        # A running Claude may refresh (rotate) the live login while we work: re-read right before
+        # the overwrite and redo the preservation if it moved. ponytail: a sub-ms window remains;
+        # Claude Code has no lock to join.
         raw = _kc_read(LIVE_SERVICE)  # None only when no login exists at all: nothing to lose
-        blob = _parse_blob(raw)
-        owner = _owner(blob, idx, snaps)
-        if raw is not None and owner is None:
-            if not force:
+        for _ in range(5):
+            blob = _parse_blob(raw)
+            owner = _owner(blob, idx, snaps)
+            if raw is not None and owner is None and not force:
                 raise AccountError("the current login is not a saved account (or could not be verified); "
                                    "`save <label>` it first, or pass --force to discard it")
+            if owner:
+                snaps[owner] = blob  # keep its rotated refresh token; its verified identity stays in the index
+                _save_snapshot(owner, blob)
+            latest = _kc_read(LIVE_SERVICE)
+            if latest == raw:
+                break
+            raw = latest
+        else:
+            raise AccountError("the live login keeps changing; retry when Claude runs finish")
+        if raw is not None and owner is None:
             warnings.append("current login was not saved and has been discarded")
-        if owner:
-            snaps[owner] = blob  # keep its rotated refresh token; its verified identity stays in the index
-            _save_snapshot(owner, blob)
+        account = _live_account()
         secret = json.dumps(snaps[label], separators=(",", ":"))
-        _kc_write(LIVE_SERVICE, _live_account(), secret)
+        _kc_write(LIVE_SERVICE, account, secret)
         if _kc_read(LIVE_SERVICE) != secret:  # what `claude` reads: service only, no account
             raise AccountError(f"another {LIVE_SERVICE!r} item shadows the switched login")
         try:
