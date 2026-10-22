@@ -667,7 +667,9 @@ def post_run(project: projects.Project, binding: dict, agent: str, title: str,
             changed_nothing = not dirty and not projects._git(
                 wt, "rev-list", f"{start_sha}..HEAD", confine=confine).stdout.strip()
         if not stopped():  # a cancel skips verify, never the closing check and badge (I8-05)
-            if project.verify:  # optional: without it the agent ran the project's own tests
+            # optional: without it the agent ran the project's own tests. Skipped when this run changed
+            # nothing: its tests would re-check the code the previous run already checked (AGE-117)
+            if project.verify and not changed_nothing:
                 verify = projects.run_verify(project, wt, base=binding["base_sha"], on_start=on_start)
                 result["verify"] = {k: verify[k] for k in ("status", "exit", "duration_s")}
                 result["verify_tail"] = verify["tail"]  # local run record only, never a tracker comment
@@ -695,10 +697,8 @@ def post_run(project: projects.Project, binding: dict, agent: str, title: str,
             badge = "main checkout changed"
         elif "post_run_error" in result:
             badge = "error"
-        elif verify is not None and verify["status"] != "pass":
-            badge = verify["status"]
         else:
-            badge = None  # pass / no check / uncommitted are hidden when nothing changed
+            badge = None  # verify is skipped, and no check / uncommitted are hidden, when nothing changed
     elif seeds:
         badge = "seed committed"
     elif changed is None:
