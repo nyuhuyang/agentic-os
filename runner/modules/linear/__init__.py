@@ -550,8 +550,9 @@ class LinearModule(AgenticModule):
                 "type": "local", "local_fallback": True}
 
     def _on_linear(self, issue_id: str | None) -> bool:
-        """This issue lives in Linear: the tracker is Linear and it is not local-only (AGE-127)."""
-        return self._capability.get("type") == "linear" and not local_only_id(issue_id)
+        """This issue lives in Linear: the tracker is Linear and its id is not a local one. Any
+        `local-` id counts as local, also a deleted local-only task whose flag is gone (AGE-127 I2-01)."""
+        return self._capability.get("type") == "linear" and not _local_id(issue_id)
 
     # ── Background polling ────────────────────────────────────────────────
 
@@ -1281,6 +1282,8 @@ class LinearModule(AgenticModule):
         the local override and the board change. Raises with nothing changed otherwise (DP-04)."""
         import reset_gen
         with reset_gen.issue_lock(issue_id):
+            if issue_id in archived_ids():  # emptied while the rename waited for the lock (AGE-127 I2-01)
+                raise ValueError("card not found")
             stored = None
             if self._on_linear(issue_id):
                 client, _tc = self._linear_client()
@@ -1691,7 +1694,8 @@ class LinearModule(AgenticModule):
             def _handoff():
                 hold, box["hold"] = box["hold"], None
                 return hold
-            if not self._on_linear(issue_id):  # local mode, or a local-only task (AGE-127)
+            # local mode, or a local-only task; an unsynced placeholder keeps the Linear branch's 409 (AGE-127)
+            if self._capability.get("type") == "local" or local_only_id(issue_id):
                 self._local_overrides.pop(issue_id, None)
                 previous_board_status = _linear_state_to_board(self.issues_cache.get(issue_id, {}).get("state"))
                 issue = self.get_local_tracker().update_issue(
@@ -2021,7 +2025,16 @@ class LinearModule(AgenticModule):
                 if self._socketio:
                     self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
             if local_only:  # in call order under this lock: a late "running" never lands after "review" (AGE-127)
-                self.get_local_tracker().push_state(issue_id, board_status)
+                local = self.get_local_tracker()
+                persisted = (local.fetch_issue(issue_id) or {}).get("state")
+                if board_status == "review" and _linear_state_key(persisted) in (
+                        "canceled", "cancelled", "done", "duplicate"):
+                    # a run ending after the user closed the card leaves it closed (AGE-127 I2-02)
+                    self.issues_cache[issue_id] = {**self.issues_cache.get(issue_id, {}), "state": persisted}
+                    if self._socketio:
+                        self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+                    return
+                local.push_state(issue_id, board_status)
                 return
         from app import _start_counted, MaintenanceRefused
         try:  # counted until persisted; inherits the caller's admission (BUILD-005/008)

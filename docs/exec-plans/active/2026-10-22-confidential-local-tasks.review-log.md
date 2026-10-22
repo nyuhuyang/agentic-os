@@ -34,3 +34,10 @@
 - F1 (high) after Empty trash the local_only record is gone, so a late comment for that local- id could reach Linear — ACCEPTED: `_local_id` guard at the outbound boundaries (`_post_linear_comment_raw`, `post_comment`, `_push_sync`, `_linear_sync_patch_locked`) refuses every `local-` id whatever its record says; the comment route 404s an emptied card. The unsynced-placeholder dispatch gate is unchanged. Tests: feedback, runner comment, push and sync patch after Empty trash of a declassified task make no Linear call; the raw transport refuses a local id. Full suite: 938 passed, 26 warnings in 352.26s (0:05:52).
 
 ## Inspection round 2
+- Result: /tmp/claudex-AGE-127/inspect2/claudex-ct5p16_t/result.json — verdict REVISE, cross_provider, fresh session 01a1640e-c7dd-7c03-857d-21abd87dd2ea, 145 s.
+- I2-01 (high) a deleted local-only id made _on_linear true (rename, detail could send it) — ACCEPTED: _on_linear treats every local- id as local; _issues_patch_reserved keeps the unsynced placeholder's Linear-branch 409 explicitly; set_card_title rechecks the archived set under its lock. Test: detail 404 and rename refused after Empty trash, no Linear call.
+- I2-02 (medium) run-end "review" push overwrote a Canceled/Done local-only task — ACCEPTED: push_state keeps a persisted terminal state against a "review" push (run ends, run cancel); explicit "running" (dispatch/retry) still applies. Test parametrized Canceled/Done, also across a poll. Linear tasks unchanged (out of scope).
+- I2-03 (medium) Empty trash text promised Linear recovery for local tasks — ACCEPTED: the confirm counts Linear issues (archived, recoverable) and local tasks (deleted for good) separately. Browser check on isolated runner 8599: local-only only and mixed messages correct; Linear request log names nothing.
+- Mutations: _on_linear by flag only → fails; terminal guard off → fails; the rename recheck is a second guard (local branch already refuses a missing card). Full suite: 941 passed, 26 warnings in 343.67s (0:05:43).
+
+## Inspection round 3

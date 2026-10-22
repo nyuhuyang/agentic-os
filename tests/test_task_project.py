@@ -662,3 +662,28 @@ def test_raw_comment_transport_refuses_every_local_id(monkeypatch):
     sent = []
     monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: sent.append(a))
     assert lin._post_linear_comment_raw("local-abc", "secret body", "key") is False and sent == []
+
+
+def test_detail_and_rename_of_an_emptied_local_only_task_never_reach_linear(lo):
+    app_mod, mod, client, tmp, calls, _ = lo
+    issue = _new_local(client)
+    iid = issue["id"]
+    assert client.patch(f"/api/linear/issues/{iid}", json={"state_name": "Canceled"}).status_code == 200
+    assert client.post("/api/linear/trash/empty").get_json()["archived"] == 1
+    assert client.get(f"/api/linear/issues/{iid}").status_code == 404
+    with pytest.raises(ValueError, match="not found"):
+        mod.set_card_title(iid, "private title")  # a session rename that lost the race (I2-01)
+    assert not mod._on_linear(iid) and calls == []  # a local- id with no record is still not on Linear
+
+
+@pytest.mark.parametrize("closed", ["Canceled", "Done"])
+def test_a_run_ending_after_the_card_was_closed_leaves_it_closed(lo, monkeypatch, closed):
+    app_mod, mod, client, tmp, calls, _ = lo
+    issue = _new_local(client)
+    iid = issue["id"]
+    mod.push_state(iid, "running")  # the project run is going
+    assert client.patch(f"/api/linear/issues/{iid}", json={"state_name": closed}).status_code == 200
+    mod.push_state(iid, "review")  # its end (app.py run completion), same reset generation (I2-02)
+    assert tasks(tmp)[iid]["state"] == closed and mod.issues_cache[iid]["state"] == closed
+    _poll_once(mod, monkeypatch)
+    assert mod.issues_cache[iid]["state"] == closed and _named(calls, issue) == []
