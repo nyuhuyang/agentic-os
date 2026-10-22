@@ -7,6 +7,7 @@
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- AGE-126 design talk: docs-only umbrella plan `docs/exec-plans/active/2026-10-21-scale-agent-fleet.md` (4 phases: verify gate → exception inbox → ticket decomposition → concurrency/cost ceiling); no code — 2026-10-21
 - AGE-120 Claude Code Projects research: docs-only note `docs/references/claude-code-projects.md` (overlap table + pilot checklist); no code, pilot waits for beta access — 2026-10-21
 - AGE-118 live dictation (ChatGPT-style): mic streams over WebRTC to an OpenAI Realtime transcription session (`gpt-live-transcribe`, secret from `POST /api/stt/live-token`), deltas fill the field while speaking; on stop the turn is committed and `POST /api/stt text=` only polishes. Connect failure falls back to the old two-pass path. 14 STT pytest + node seq tests pass; OpenAI accepted the session; isolated runner on 8599, Chrome with synthetic `say` audio: text appeared 1 s into speech, final ✓ Refined, stop-while-connecting leaves no live track. Warm connect ≈1.1 s, speech before "● Listening…" is lost. Real-mic check pending — 2026-10-21
 - AGE-116 Codex cost: `turn.completed` input_tokens now excludes `cached_input_tokens` (matches Claude's uncached semantic), so `token_cost_usd` no longer prices re-sent context. The AGE-110 3-paper deep ingest read $22.08 = 7.36M tokens × $3 default with 96.8% cache hits; same usage now $0.86. Codex runs on the ChatGPT plan, so neither is billed cash. 128 pytest pass; isolated runner on 8599 with fake codex recorded input 233405 / cost 0.858564 — 2026-10-21
@@ -24,6 +25,7 @@
 
 ## Open Decisions
 <!-- Decisions made and their rationale — so a new session knows the "why" -->
+- Long-term direction (AGE-126): scale = less human attention per verified merge, not more agents. Order trust → attention → fan-out → ceiling; plan `2026-10-21-scale-agent-fleet`. Known gap: verify badge `no check` still auto-merges
 - P15, P20, P23 parked in `docs/exec-plans/deferred/` (2026-10-13); P20 depended on `../symphony-ts`, which no longer exists
 - Server bound to 127.0.0.1 only — multi-host/remote scope is explicitly out of scope
 - Usage reset weekly limit is fixed at 3; unavailable Codex app-server data renders as no data
