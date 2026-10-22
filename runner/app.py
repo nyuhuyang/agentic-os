@@ -115,6 +115,7 @@ except ImportError:
     _HAS_DEEPSEEK_MONITOR = False
 
 import dsh_cli
+import claude_account
 from agent_ids import AGENTS, canonical_agent
 
 # ── Module registry ────────────────────────────────────────────────────────
@@ -1137,9 +1138,24 @@ def _load_budget_limit(agent: str, key: str) -> int:
         return 0
 
 
-def _load_claude_live_limit(window_key: str) -> dict:
+def _claude_live_snapshot() -> dict:
+    """rate-limits-live.json, or {} when it predates the last account swap (it names no account)."""
     try:
         data = json.loads(CLAUDE_RATE_LIMITS_LIVE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    swapped_ns = claude_account.swap_generation()
+    captured = _parse_run_started_at(data.get("captured_at"))
+    if swapped_ns and (captured is None or captured.timestamp() * 1e9 < swapped_ns):
+        return {}
+    return data
+
+
+def _load_claude_live_limit(window_key: str) -> dict:
+    try:
+        data = _claude_live_snapshot()
         limits = data.get("rate_limits") or {}
         return dict(limits.get(window_key) or {})
     except Exception:
@@ -1154,6 +1170,7 @@ _CLAUDE_USAGE_RETRY_S = 120.0       # wait after a failed fetch: the endpoint 42
 _CLAUDE_USAGE_MAX_AGE_S = 15 * 60   # keep showing the last good reading this long
 _claude_usage_cache: tuple[float, dict | None] = (0.0, None)
 _claude_usage_retry_at = 0.0
+_claude_usage_gen = 0               # claude_account.swap_generation() the cache was filled under
 _claude_usage_lock = threading.Lock()
 
 
@@ -1204,13 +1221,18 @@ def _load_claude_oauth_usage() -> tuple[dict, float]:
     A failed fetch keeps the last good reading and blocks retries for
     _CLAUDE_USAGE_RETRY_S, so a 429 neither blanks the cards nor gets re-hit on every poll.
     """
-    global _claude_usage_cache, _claude_usage_retry_at
+    global _claude_usage_cache, _claude_usage_retry_at, _claude_usage_gen
     with _claude_usage_lock:
+        gen = claude_account.swap_generation()
+        if gen != _claude_usage_gen:  # account swapped (CLI or dashboard): drop the old account's reading
+            _claude_usage_cache, _claude_usage_retry_at, _claude_usage_gen = (0.0, None), 0.0, gen
         cached_at, cached = _claude_usage_cache
         now = time.monotonic()
         expired = cached is None or now - cached_at >= _CLAUDE_USAGE_CACHE_TTL_S
         if expired and now >= _claude_usage_retry_at:
             usage = _fetch_claude_oauth_usage()
+            if claude_account.swap_generation() != gen:
+                return {}, 0.0  # swapped mid-fetch: the reply may belong to the old account
             if usage:
                 cached_at, cached = _claude_usage_cache = (time.monotonic(), usage)
             else:
@@ -1386,13 +1408,8 @@ def _load_claude_official_windows() -> dict:
             "snapshot_age_seconds": round(api_age_s),
         }
 
-    payload: dict = {}
-    captured_at: datetime | None = None
-    try:
-        payload = json.loads(CLAUDE_RATE_LIMITS_LIVE.read_text(encoding="utf-8"))
-        captured_at = _parse_run_started_at(payload.get("captured_at"))
-    except (OSError, ValueError, TypeError):
-        pass
+    payload = _claude_live_snapshot()
+    captured_at = _parse_run_started_at(payload.get("captured_at"))
 
     age_s = max(0.0, (now - captured_at).total_seconds()) if captured_at else None
     snapshot_is_fresh = age_s is not None and age_s <= _CLAUDE_LIVE_MAX_AGE_S
@@ -2207,6 +2224,10 @@ def index():
     windows_codex  = load_windows("codex")
     windows_gemini = load_windows("gemini")
     windows_deepseek = load_windows("deepseek")
+    try:
+        claude_accounts = claude_account.accounts()
+    except (OSError, subprocess.SubprocessError):
+        claude_accounts = {"accounts": [], "active": None}
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     return render_template(
@@ -2222,6 +2243,7 @@ def index():
         windows_codex=windows_codex,
         windows_gemini=windows_gemini,
         windows_deepseek=windows_deepseek,
+        claude_accounts=claude_accounts,
         registry=registry,
         now=now,
         request_token=REQUEST_TOKEN,
@@ -4857,6 +4879,20 @@ def api_project_confidential(key: str):
     except _projects.ProjectError as exc:
         return _project_error(exc)
     return jsonify({"ok": True, **result, "warning": _records_unsafe() if result["confidential"] else None})
+
+
+@app.route("/api/claude-accounts")
+def api_claude_accounts():
+    return jsonify(claude_account.accounts())
+
+
+@app.route("/api/claude-accounts/use", methods=["POST"])
+def api_claude_account_use():
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(claude_account.use(body.get("label")))
+    except claude_account.AccountError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
 
 
 @app.route("/api/projects/locate", methods=["POST"])

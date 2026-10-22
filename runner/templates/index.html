@@ -68,6 +68,7 @@
 
   /* Window cards — all agents stacked */
   .windows-row { display: flex; align-items: flex-start; gap: 6px; margin-bottom: 12px; }
+  .claude-account-select { display: block; margin: 4px 0 0 auto; max-width: 68px; font-size: calc(10px * var(--fs)); background: var(--bg); color: var(--accent); border: 1px solid var(--border); border-radius: 4px; }
   .win-agent-label { flex: 0 0 72px; font-size: calc(10px * var(--fs)); color: var(--accent); letter-spacing: .3px; padding: 14px 4px 0 0; text-align: right; opacity: .8; }
   .windows-row-cards { flex: 1; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
   .win-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
@@ -600,7 +601,16 @@
     <!-- Budget window cards — all agents visible -->
     {% macro win_row(agent_name, agent_label, w) %}
     <div class="windows-row" id="windows-row-{{ agent_name }}">
-      <div class="win-agent-label">{{ agent_label }}</div>
+      <div class="win-agent-label">{{ agent_label }}
+        {% if agent_name == "claude" and claude_accounts and claude_accounts.accounts|length > 1 %}
+        <select class="claude-account-select" title="Switch Claude account (AGE-125)" onchange="useClaudeAccount(this)">
+          {% if not claude_accounts.active %}<option value="" selected disabled>?</option>{% endif %}
+          {% for acc in claude_accounts.accounts %}
+          <option value="{{ acc.label }}" title="{{ acc.email }}" {% if acc.label == claude_accounts.active %}selected{% endif %}>{{ acc.label }}</option>
+          {% endfor %}
+        </select>
+        {% endif %}
+      </div>
       {% set w5 = w.window_5h %}
       {% set w7 = w.window_7d %}
       {% set wa = w.aux %}
@@ -6020,6 +6030,23 @@ async function submitNewIssue() {
   } catch (err) {
     status.textContent = 'Error: ' + err;
     btn.disabled = false;
+  }
+}
+
+async function useClaudeAccount(sel) {
+  sel.disabled = true;
+  try {
+    const r = await fetch('/api/claude-accounts/use', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: sel.value }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    if ((data.warnings || []).length) alert(`Switched to ${data.label}.\n${data.warnings.join('\n')}`);
+    location.reload();
+  } catch (e) {
+    alert(`Could not switch Claude account: ${e.message}`);
+    location.reload();
   }
 }
 </script>
