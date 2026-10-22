@@ -41,3 +41,7 @@
 - Mutations: _on_linear by flag only → fails; terminal guard off → fails; the rename recheck is a second guard (local branch already refuses a missing card). Full suite: 941 passed, 26 warnings in 343.67s (0:05:43).
 
 ## Inspection round 3
+- Result: /tmp/claudex-AGE-127/inspect3/claudex-u10dg4vg/result.json — verdict REVISE, cross_provider, fresh session 01a16418-23cb-7d73-af0e-8b69b9930bfb, 184 s.
+- 03-01 (high) session to-board ignored sticky confidentiality (worktree sidecar, session history) with a public registry entry — ACCEPTED: app.py passes session_confidential's decision into create_session_issue; anything but False makes the task local-only. Tests (Linear mode): sidecar- and history-confidential sessions → local_only, zero Linear calls; a public session still ensures its Linear label. Mutation (decision not passed) fails both. Full suite: 944 passed, 26 warnings in 363.59s (0:06:03).
+
+## Inspection round 4

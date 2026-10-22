@@ -924,3 +924,56 @@ def test_to_board_of_an_older_session_names_the_terminal_holding_its_card(stb, m
     app_mod._running_jobs["j"] = {"linear_issue_id": ISSUE, "state": "running", "agent": "claude"}
     assert to_board(client).get_json() == {"error": "still running"}  # headless: unchanged
     assert (log.read_text(), tasks(tmp)) == before
+
+
+# ── AGE-127: confidential sessions get local-only tasks while Linear is the tracker ──
+
+@pytest.fixture
+def stb_linear(stb, monkeypatch):
+    app_mod, mod, client, log, tmp, proj, conf, launches = stb
+    import linear_client
+    import runner.modules.linear as lin
+    calls = []
+
+    class NoLinear:
+        def __call__(self, *a, **k):
+            return self
+
+        def __getattr__(self, name):
+            return lambda *a, **k: calls.append((name, a, k))
+
+    monkeypatch.setattr(linear_client, "LinearClient", NoLinear())
+    monkeypatch.setattr(lin, "_post_linear_comment_raw", lambda *a: calls.append(("comment_raw", a)) or True)
+    monkeypatch.setenv("LINEAR_API_KEY", "dummy")
+    monkeypatch.setattr(lin, "_load_workflow_config", lambda: {"tracker": {
+        "kind": "linear", "api_key": "$LINEAR_API_KEY", "project_slug": "slug", "team_id": "team-a"}})
+    monkeypatch.setattr(mod, "_capability", {"available": True, "type": "linear"})
+    return stb, calls
+
+
+def test_sidecar_confidential_session_gets_a_local_only_task_in_linear_mode(stb_linear):
+    (app_mod, mod, client, log, tmp, proj, conf, launches), calls = stb_linear
+    import projects as pj
+    wt = pj.WORKTREE_ROOT / "demo" / "LOC-8"
+    wt.mkdir(parents=True)
+    (pj.WORKTREE_ROOT / "demo" / ".meta").mkdir(parents=True, exist_ok=True)
+    (pj.WORKTREE_ROOT / "demo" / ".meta" / "LOC-8.json").write_text(json.dumps({"confidential": True}))
+    claude_session(tmp, "wt-secret-2", wt, title="sidecar secret")
+    r = to_board(client, sid="wt-secret-2")
+    assert r.status_code == 200, r.get_json()
+    assert tasks(tmp)[r.get_json()["issue_id"]]["local_only"] is True and calls == []
+
+
+def test_history_confidential_session_gets_a_local_only_task_in_linear_mode(stb_linear):
+    (app_mod, mod, client, log, tmp, proj, conf, launches), calls = stb_linear
+    write_log(log, {"run_id": "old", "agent": "claude", "status": "review", "agent_session_id": SID,
+                    "linear_issue_id": "archived-card", "confidential": True})
+    r = to_board(client)
+    assert r.status_code == 200, r.get_json()
+    assert tasks(tmp)[r.get_json()["issue_id"]]["local_only"] is True and calls == []
+
+
+def test_public_session_still_goes_to_linear(stb_linear):
+    (app_mod, mod, client, log, tmp, proj, conf, launches), calls = stb_linear
+    to_board(client)
+    assert any(c[0] == "ensure_label" for c in calls)  # the public path is unchanged

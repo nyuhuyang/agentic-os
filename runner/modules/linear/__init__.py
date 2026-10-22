@@ -1308,18 +1308,21 @@ class LinearModule(AgenticModule):
         if self._socketio:
             self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
 
-    def create_session_issue(self, title: str, description: str, agent: str, project_key: str) -> dict:
+    def create_session_issue(self, title: str, description: str, agent: str, project_key: str,
+                             confidential: object = False) -> dict:
         """One Todo issue for a session that has no card (STB §2.5), composed like the "+" form:
         `project:<key>` label, agent marker, the project's Linear Project. Synchronous, so the
         record links to the final id. Raises (ValueError, RuntimeError, LinearError) with nothing
-        created on a refused label or Linear error."""
+        created on a refused label or Linear error. `confidential`: the session's own policy (its
+        worktree sidecar and history included); anything but False keeps the task local-only."""
         labels = _project_labels({"project": project_key})
         agent = canonical_agent(agent)
         desc = _compose_issue_description(description, agent)
         tc = _load_workflow_config().get("tracker", {})
         tid = tc.get("team_id", "")
         linear = self._capability.get("type") == "linear"
-        local_only = linear and _confidential_labels(labels)  # never on Linear, not even its label (AGE-127)
+        # never on Linear, not even its label: the registry or the session's sticky policy says so (AGE-127)
+        local_only = linear and (confidential is not False or _confidential_labels(labels))
         if linear and not local_only:
             client, tc = self._linear_client()
             tid, err = self._create_team_id(client, tid)

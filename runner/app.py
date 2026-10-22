@@ -4596,7 +4596,7 @@ def _to_board_locked(project, target: dict):
     conf = session_confidential(project, target["cwd"], sid=sid)  # its folder and history decide (SBI-001/008)
     title = target.get("title") or "untitled" if conf is False else f"Session {sid[:8]}"  # STB-025
     try:
-        issue = mod.create_session_issue(title, "" if conf is not False else title, agent, project.key)
+        issue = mod.create_session_issue(title, "" if conf is not False else title, agent, project.key, conf)
     except Exception as exc:  # label, Linear or registry refusal: nothing created (STB-041)
         return jsonify({"error": f"could not create the card: {exc}"}), 409
     gen = reset_gen.current(issue["id"])
