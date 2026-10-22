@@ -21,6 +21,8 @@ A project with no `verify` command auto-merges on the agent's own word.
 - [ ] Decide policy for `no check` projects: block auto-merge, require a reviewer pass, or opt-in flag
 - [ ] Spike: reviewer-agent pass (cross-provider, diff + ticket in, verdict JSON out) as a second gate after `verify`
 - [ ] Decide which verdicts block merge vs. only badge the card
+- [ ] Log each cross-provider reviewer catch that `verify` missed (run id, author/reviewer provider, finding, real or false alarm)
+- [ ] After 1–2 months, review the log: keep the reviewer layer if it catches real issues, drop it to save tokens if not
 - [ ] Write the Phase 1 plan + ticket
 
 ### Phase 2 · Exception inbox (board shows only what needs a human)
