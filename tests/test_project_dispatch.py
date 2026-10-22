@@ -84,7 +84,7 @@ def test_confidential_claude_settings_and_sources(proj):
     argv = cli("claude", repo, True)
     settings = json.loads(argv[argv.index("--settings") + 1])["sandbox"]
     assert settings["failIfUnavailable"] is True and settings["allowUnsandboxedCommands"] is False
-    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert argv[argv.index("--setting-sources") + 1] == "user" and "--strict-mcp-config" in argv
 
 
 def test_non_confidential_codex_uses_auto_review_without_sandbox_flag(proj):
