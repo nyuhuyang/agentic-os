@@ -1412,9 +1412,9 @@ async function _projectApi(method, url, body) {
 // The key is the folder name (same rules as projects.derive_key; the server re-checks).
 function _deriveKey(folder) {
   const base = (folder || '').replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[^A-Za-z0-9]+/, '') || 'project';
-  const taken = new Set((_projectData.projects || []).map(p => p.key));
+  const taken = new Set((_projectData.projects || []).map(p => p.key.toLowerCase()));  // case-insensitive, like derive_key
   let key = base, n = 1;
-  while (taken.has(key)) key = `${base}-${++n}`;
+  while (taken.has(key.toLowerCase())) key = `${base}-${++n}`;
   return key;
 }
 

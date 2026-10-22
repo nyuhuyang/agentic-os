@@ -467,8 +467,9 @@ def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = Fa
         old = projects.get(key) if isinstance(projects.get(key), dict) else {}
         if not lifecycle and _lifecycle_changed(old, entry):
             raise RegistryConflict("projects.yaml changed while saving; reload and try again")
-        if create and key in projects:
-            raise ProjectError(f"project {key!r} already exists")
+        clash = next((k for k in projects if k.lower() == key.lower()), None) if create else None
+        if clash:  # keys name case-insensitive worktree folders (AGE-127)
+            raise ProjectError(f"project {clash!r} already exists")
         if not create and key not in projects:
             raise ProjectError(f"unknown project {key!r}")
         created = (init_repo(str(entry.get("path") or ""), commit_existing)
@@ -685,11 +686,13 @@ def init_repo(raw_path: str, commit_existing: bool = False) -> Path:
 
 def derive_key(folder_name: str, taken) -> str:
     """The project key for a folder: its name made valid for _IDENT, `project` when nothing
-    usable is left (SAP-004), then -2, -3, ... on a clash."""
+    usable is left (SAP-004), then -2, -3, ... on a clash. Clashes ignore case: the worktree
+    folder is named by the key and macOS folders are case-insensitive (AGE-127)."""
     base = re.sub(r"[^A-Za-z0-9._-]", "-", folder_name or "")
     base = re.sub(r"^[^A-Za-z0-9]+", "", base) or "project"
+    taken = {t.lower() for t in taken}
     key, n = base, 1
-    while key in taken:
+    while key.lower() in taken:
         n += 1
         key = f"{base}-{n}"
     return key
@@ -1044,7 +1047,9 @@ def _is_worktree_of(project: Project, wt: Path) -> bool:
     top = _git(wt, "rev-parse", "--show-toplevel", check=False).stdout.strip()
     if not mine or not theirs or not top:
         return False
-    return (project.path / mine).resolve() == (wt / theirs).resolve() and Path(top).resolve() == wt.resolve()
+    with contextlib.suppress(OSError):  # samefile: git may report another letter case on macOS (AGE-127)
+        return os.path.samefile(project.path / mine, wt / theirs) and os.path.samefile(top, wt)
+    return False
 
 
 def _binding_path(project: Project, ident: str) -> Path:

@@ -494,9 +494,17 @@ def test_set_confidential_changes_only_that_field(reg):
 
 
 @pytest.mark.parametrize("name, want", [("my-repo", "my-repo"), ("My Repo!", "My-Repo-"), ("研究", "project"),
-                                        ("---", "project"), ("_x", "x"), ("alpha", "alpha-2")])
+                                        ("---", "project"), ("_x", "x"), ("alpha", "alpha-2"),
+                                        ("Alpha", "Alpha-2")])
 def test_derive_key(name, want):
     assert pj.derive_key(name, {"alpha": {}}) == want
+
+
+def test_create_refuses_a_key_differing_only_in_case(reg, tmp_path):
+    path, a, b = reg  # worktree folders are named by key; macOS folders ignore case (AGE-127)
+    with pytest.raises(pj.ProjectError, match="'alpha' already exists"):
+        pj.save_project("ALPHA", {"path": str(tmp_path / "new")}, h(path), create=True)
+    assert not (tmp_path / "new").exists()
 
 
 @pytest.fixture
