@@ -236,15 +236,29 @@ def _project_labels(data: dict) -> list[str]:
     return [f"{project_runs.LABEL_PREFIX}{key}"]
 
 
-def _refuse_confidential_on_linear(labels: list[str]) -> None:
-    """A confidential project's name never reaches Linear, not even as a label (AGE-127).
-    ponytail: refused outright; local-only routing for these tasks is plan 2026-10-22-confidential-local-tasks."""
+def _confidential_labels(labels: list[str]) -> bool:
+    """The labels name a registered confidential project: its tasks stay local-only (AGE-127)."""
     import projects
     import project_runs
     key = project_runs.project_key_from_labels(labels)
     project = projects.load_registry(errors={}).get(key) if key else None
-    if project is not None and project.confidential:
-        raise ValueError("confidential project: its tasks are not created on Linear")
+    return project is not None and project.confidential
+
+
+def local_only_id(issue_id: str | None) -> bool:
+    """A confidential project's task kept only in the local tracker, whatever the tracker type.
+    The persisted flag is authoritative: a cache entry without it never makes this false (AGE-127)."""
+    if not issue_id or not str(issue_id).startswith("local-"):
+        return False
+    from runner.core.module_registry import registry
+    mod = registry.get("linear")
+    if mod is None:
+        return False
+    if (mod.issues_cache.get(issue_id) or {}).get("local_only"):
+        return True
+    with contextlib.suppress(Exception):
+        return bool((mod.get_local_tracker().fetch_issue(issue_id) or {}).get("local_only"))
+    return False
 
 
 def archived_ids() -> set[str]:
@@ -327,7 +341,7 @@ def unsynced_local_id(issue_id: str | None) -> bool:
     from runner.core.module_registry import registry
     mod = registry.get("linear")
     return bool(issue_id and str(issue_id).startswith("local-") and mod is not None
-                and getattr(mod, "_capability", {}).get("type") == "linear")
+                and getattr(mod, "_capability", {}).get("type") == "linear" and not local_only_id(issue_id))
 
 
 def reserve_card(issue: dict | None, issue_id: str) -> contextlib.ExitStack:
@@ -527,6 +541,10 @@ class LinearModule(AgenticModule):
         return {"available": True, "reason": "LINEAR_API_KEY not set or tracker.kind != linear",
                 "type": "local", "local_fallback": True}
 
+    def _on_linear(self, issue_id: str | None) -> bool:
+        """This issue lives in Linear: the tracker is Linear and it is not local-only (AGE-127)."""
+        return self._capability.get("type") == "linear" and not local_only_id(issue_id)
+
     # ── Background polling ────────────────────────────────────────────────
 
     def start_background(self, app, socketio) -> list[threading.Thread]:
@@ -672,6 +690,7 @@ class LinearModule(AgenticModule):
                     terminal_issues = {
                         k: v for k, v in self.issues_cache.items()
                         if v.get("state") in ("Canceled", "Done", "Duplicate") and k not in gone
+                        and not v.get("local_only")  # tasks.json is their only truth (AGE-127)
                     }
                     gens_now = reset_gen.snapshot()
                     for iid in set(new_cache) | set(self.issues_cache):
@@ -708,6 +727,10 @@ class LinearModule(AgenticModule):
                         tid = issue.get("team_id") or ""
                         if tid:
                             self._issues_by_team.setdefault(tid, {})[iid] = issue
+                    # Local-only tasks are never in Linear: shown from tasks.json, re-read here (AGE-127)
+                    for issue in self.get_local_tracker().fetch_issues():
+                        if issue.get("local_only") and issue["id"] not in gone:
+                            self.issues_cache[issue["id"]] = issue
                     self._sync_cache_to_local()
                 _start_title_syncs(title_syncs)  # the issues are visible now (R7-01)
                 socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
@@ -735,8 +758,9 @@ class LinearModule(AgenticModule):
 
     def _remember_local_override(self, issue_id: str, data: dict, preferred_agent: str | None = None,
                                  ttl_s: float = 60.0) -> None:
-        """Keep local-first updates visible while Linear catches up."""
-        if not issue_id:
+        """Keep local-first updates visible while Linear catches up. A local-only task has no
+        Linear copy to catch up with: tasks.json is shown as it is (AGE-127)."""
+        if not issue_id or local_only_id(issue_id):
             return
         patch = dict((self._local_overrides.get(issue_id) or {}).get("patch") or {})
         if data.get("state_name"):
@@ -752,7 +776,7 @@ class LinearModule(AgenticModule):
         self._local_overrides[issue_id] = {"patch": patch, "expires_at": time.monotonic() + ttl_s}
 
     def _apply_local_override(self, issue_id: str, issue: dict | None) -> dict:
-        if not issue:
+        if not issue or issue.get("local_only"):
             return issue or {}
         override = self._local_overrides.get(issue_id)
         if not override:
@@ -786,7 +810,7 @@ class LinearModule(AgenticModule):
         cached = dict(self.issues_cache.get(issue_id) or {})
         cached["state"] = state_name
         self.issues_cache[issue_id] = cached
-        if self._capability.get("type") == "linear":
+        if self._on_linear(issue_id):
             import reset_gen
             from app import _start_counted
             _start_counted(self._linear_sync_patch, issue_id, {"state_name": state_name}, cfg, None,
@@ -1207,7 +1231,7 @@ class LinearModule(AgenticModule):
     def _ensure_linear_project(self, issue: dict, project_key: str) -> None:
         """A project ticket with no Linear Project goes into its project's one at dispatch (STB §10).
         Best effort: a Linear error is logged and the dispatch continues (STB-085)."""
-        if self._capability.get("type") != "linear" or not ("project_id" in issue and not issue["project_id"]):
+        if not self._on_linear(issue.get("id")) or not ("project_id" in issue and not issue["project_id"]):
             return
         try:
             client, tc = self._linear_client()
@@ -1225,7 +1249,7 @@ class LinearModule(AgenticModule):
         """Move a card back to Todo the way a board drag does, tracker state included (STB §2.4).
         The caller holds reset_gen.issue_lock and has bumped the generation. Raises on failure."""
         state = _BOARD_TO_LINEAR["todo"]
-        if self._capability.get("type") == "linear":
+        if self._on_linear(issue_id):
             client, _tc = self._linear_client()
             if not client.update_issue_state(issue_id, state):
                 raise RuntimeError(f"Linear did not accept state {state!r}")
@@ -1250,7 +1274,7 @@ class LinearModule(AgenticModule):
         import reset_gen
         with reset_gen.issue_lock(issue_id):
             stored = None
-            if self._capability.get("type") == "linear":
+            if self._on_linear(issue_id):
                 client, _tc = self._linear_client()
                 confirmed = client.update_title(issue_id, title)  # title-only mutation (DP-42)
                 from app import _confirm_linear_title
@@ -1283,8 +1307,9 @@ class LinearModule(AgenticModule):
         desc = _compose_issue_description(description, agent)
         tc = _load_workflow_config().get("tracker", {})
         tid = tc.get("team_id", "")
-        if self._capability.get("type") == "linear":
-            _refuse_confidential_on_linear(labels)
+        linear = self._capability.get("type") == "linear"
+        local_only = linear and _confidential_labels(labels)  # never on Linear, not even its label (AGE-127)
+        if linear and not local_only:
             client, tc = self._linear_client()
             tid, err = self._create_team_id(client, tid)
             if not tid:
@@ -1306,7 +1331,8 @@ class LinearModule(AgenticModule):
             with self.get_local_tracker().raw_transaction() as raw:
                 raw[issue["id"]] = dict(issue)
         else:
-            issue = self.get_local_tracker().create_issue(title, desc, preferred_agent=agent, team_id=tid, labels=labels)
+            issue = self.get_local_tracker().create_issue(title, desc, preferred_agent=agent, team_id=tid,
+                                                          labels=labels, local_only=local_only)
         self.issues_cache[issue["id"]] = dict(issue)
         self._fresh_ids[issue["id"]] = time.monotonic()
         if issue.get("team_id"):
@@ -1324,7 +1350,7 @@ class LinearModule(AgenticModule):
         return [i for i in src if _linear_state_key(i.get("state")) in ("canceled", "cancelled") and i.get("id") not in gone]
 
     def _still_canceled(self, issue_id: str) -> bool:
-        if self._capability.get("type") == "linear":
+        if self._on_linear(issue_id):
             state = (self.issues_cache.get(issue_id) or {}).get("state")
         else:
             state = (self.get_local_tracker().fetch_issue(issue_id) or {}).get("state")
@@ -1338,7 +1364,7 @@ class LinearModule(AgenticModule):
         {identifier: failure reason}) (STB §11)."""
         import reset_gen
         linear = self._capability.get("type") == "linear"
-        client = self._linear_client()[0] if linear else None
+        client = None  # built on the first Linear card: a local-only trash never needs one (AGE-127)
         done, failed = [], {}
         for issue in self.canceled_issues():
             iid = issue["id"]
@@ -1346,7 +1372,8 @@ class LinearModule(AgenticModule):
                 if not self._still_canceled(iid):
                     continue
                 try:
-                    if linear:
+                    if linear and self._on_linear(iid):
+                        client = client or self._linear_client()[0]
                         client.archive_issue(iid)
                     elif not self.get_local_tracker().delete_issue(iid):
                         continue
@@ -1417,18 +1444,21 @@ class LinearModule(AgenticModule):
                     except Exception:
                         pass
                 gone = archived_ids()  # a stray cache entry of an emptied card never shows (SBI-005)
+                # local-only tasks belong to no Linear team: every team view shows them (AGE-127)
+                local_only = [v for k, v in self.issues_cache.items() if v.get("local_only") and k not in gone]
                 if team_id and team_id in self._issues_by_team:
                     return jsonify([
                         self._apply_local_override(iid, issue)
-                        for iid, issue in self._issues_by_team[team_id].items() if iid not in gone
-                    ])
+                        for iid, issue in self._issues_by_team[team_id].items()
+                        if iid not in gone and not issue.get("local_only")
+                    ] + local_only)
                 # Fallback: filter issues_cache by team_id field if team specified
                 if team_id:
                     return jsonify([
                         self._apply_local_override(k, v)
                         for k, v in self.issues_cache.items()
-                        if v.get("team_id") == team_id and k not in gone
-                    ])
+                        if v.get("team_id") == team_id and k not in gone and not v.get("local_only")
+                    ] + local_only)
                 return jsonify([  # filtered by cache key: an incomplete value cannot slip through (SBI-012)
                     self._apply_local_override(k, v)
                     for k, v in self.issues_cache.items() if k not in gone
@@ -1470,10 +1500,15 @@ class LinearModule(AgenticModule):
                 if self._socketio:
                     self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
                 return jsonify({"ok": True, "issue": nd})
-            try:
-                _refuse_confidential_on_linear(labels)
-            except ValueError as exc:
-                return jsonify({"error": str(exc)}), 400
+            if _confidential_labels(labels):  # never on Linear, not even its label (AGE-127)
+                issue = self.get_local_tracker().create_issue(title, desc, preferred_agent=pa, team_id=tid,
+                                                              labels=labels, local_only=True)
+                nd = dict(issue)
+                self.issues_cache[issue["id"]] = nd
+                self._fresh_ids[issue["id"]] = time.monotonic()
+                if self._socketio:
+                    self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+                return jsonify({"ok": True, "issue": nd})
             ak = _linear_api_key_from_cfg(tc)
             if not ak:
                 return jsonify({"error": "Linear not configured"}), 503
@@ -1549,7 +1584,7 @@ class LinearModule(AgenticModule):
 
         @app.route("/api/linear/issues/<issue_id>")
         def _issues_detail(issue_id: str):
-            if self._capability.get("type") == "local":
+            if not self._on_linear(issue_id):
                 issue = self.get_local_tracker().fetch_issue(issue_id)
                 return jsonify(issue) if issue else (jsonify({"error": "not found"}), 404)
             cfg = _load_workflow_config()
@@ -1583,6 +1618,8 @@ class LinearModule(AgenticModule):
             local = self.get_local_tracker()
             preferred_agent = canonical_agent(data.get("preferred_agent"))
             self._remember_local_override(issue_id, data, preferred_agent)
+            if local_only_id(issue_id):
+                self._local_overrides.pop(issue_id, None)  # tasks.json is authoritative (AGE-127)
             updated = local.update_issue(
                 issue_id,
                 title=data.get("title"),
@@ -1592,7 +1629,7 @@ class LinearModule(AgenticModule):
             )
             # Only an authoritative local tracker renames sessions; in Linear mode this route is the
             # editor's parallel mirror and would rename on a failed Linear update (DP-10).
-            if updated and data.get("title") is not None and self._capability.get("type") == "local":
+            if updated and data.get("title") is not None and not self._on_linear(issue_id):
                 _title_changed(issue_id, updated.get("title"))
             if issue_id in self.issues_cache:
                 cached = dict(self.issues_cache[issue_id])
@@ -1627,7 +1664,7 @@ class LinearModule(AgenticModule):
                     and not unsynced_local_id(issue_id) and not self._issue_is_running(issue_id):
                 import projects
                 current = self.issues_cache.get(issue_id)
-                if current is None and self._capability.get("type") == "local":
+                if current is None and not self._on_linear(issue_id):
                     current = self.get_local_tracker().fetch_issue(issue_id)  # persisted, labels included (REV-01)
                 try:
                     box["hold"] = reserve_card(current, issue_id)
@@ -1646,7 +1683,8 @@ class LinearModule(AgenticModule):
             def _handoff():
                 hold, box["hold"] = box["hold"], None
                 return hold
-            if self._capability.get("type") == "local":
+            if not self._on_linear(issue_id):  # local mode, or a local-only task (AGE-127)
+                self._local_overrides.pop(issue_id, None)
                 previous_board_status = _linear_state_to_board(self.issues_cache.get(issue_id, {}).get("state"))
                 issue = self.get_local_tracker().update_issue(
                     issue_id,
@@ -1755,7 +1793,7 @@ class LinearModule(AgenticModule):
                 feedback=text,
                 attachments=attachments,
             )
-            if self._capability.get("type") == "local":
+            if not self._on_linear(issue_id):
                 return jsonify({"ok": self.get_local_tracker().post_comment(issue_id, body)})
             cfg = _load_workflow_config()
             tc = cfg.get("tracker", {})
@@ -1884,6 +1922,8 @@ class LinearModule(AgenticModule):
             with local.raw_transaction() as tasks:  # one locked load -> merge -> save (plan 4b)
                 for issue in list(self.issues_cache.values()):
                     existing = tasks.get(issue["id"])
+                    if issue.get("local_only") or (existing or {}).get("local_only"):
+                        continue  # tasks.json is their only truth: a stale copy never flows back (AGE-127)
                     if existing:
                         existing.update(issue)
                     else:
@@ -1906,6 +1946,8 @@ class LinearModule(AgenticModule):
             self._linear_sync_patch_locked(issue_id, data, cfg, preferred_agent)
 
     def _linear_sync_patch_locked(self, issue_id: str, data: dict, cfg: dict, preferred_agent: str | None) -> None:
+        if local_only_id(issue_id):
+            return  # never on Linear (AGE-127)
         tc = cfg.get("tracker", {})
         ak = _linear_api_key_from_cfg(tc)
         if not ak:
@@ -1957,8 +1999,10 @@ class LinearModule(AgenticModule):
             if not reset_gen.is_current(issue_id, gen) or issue_id in archived_ids():
                 return
             state_name = _BOARD_TO_LINEAR.get(board_status)
+            local_only = local_only_id(issue_id)
             if state_name:
-                cached = dict(self.issues_cache.get(issue_id) or {})
+                cached = dict(self.issues_cache.get(issue_id)
+                              or (local_only and self.get_local_tracker().fetch_issue(issue_id)) or {})
                 cached["state"] = state_name
                 cached.setdefault("id", issue_id)  # never an id-less entry (SBI-019)
                 self.issues_cache[issue_id] = cached
@@ -1966,6 +2010,9 @@ class LinearModule(AgenticModule):
                     self.dispatched.pop(issue_id, None)
                 if self._socketio:
                     self._socketio.emit("linear_issues_updated", {"count": len(self.issues_cache)})
+            if local_only:  # in call order under this lock: a late "running" never lands after "review" (AGE-127)
+                self.get_local_tracker().push_state(issue_id, board_status)
+                return
         from app import _start_counted, MaintenanceRefused
         try:  # counted until persisted; inherits the caller's admission (BUILD-005/008)
             _start_counted(self._push_sync, issue_id, board_status, gen)
@@ -1981,7 +2028,7 @@ class LinearModule(AgenticModule):
                 return
             cfg = _load_workflow_config()
             tc = cfg.get("tracker", {})
-            if tc.get("kind") == "linear" and _has_env_key("LINEAR_API_KEY"):
+            if tc.get("kind") == "linear" and _has_env_key("LINEAR_API_KEY") and not local_only_id(issue_id):
                 self._push_linear(issue_id, board_status, tc)
             else:
                 self.get_local_tracker().push_state(issue_id, board_status)
@@ -2008,7 +2055,7 @@ class LinearModule(AgenticModule):
     def post_comment(self, issue_id: str, body: str) -> bool:
         cfg = _load_workflow_config()
         tc = cfg.get("tracker", {})
-        if tc.get("kind") == "linear" and _has_env_key("LINEAR_API_KEY"):
+        if tc.get("kind") == "linear" and _has_env_key("LINEAR_API_KEY") and not local_only_id(issue_id):
             return _post_linear_comment_raw(issue_id, body, _linear_api_key_from_cfg(tc))
         return self.get_local_tracker().post_comment(issue_id, body)
 

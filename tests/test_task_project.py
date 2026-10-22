@@ -380,7 +380,33 @@ def test_raising_team_lookup_refuses_then_recovers(reg, monkeypatch):
     assert client.post("/api/linear/issues", json={"title": "t"}).status_code == 200 and ("create_team", "age") in calls
 
 
-def test_confidential_project_tasks_never_reach_linear(reg, monkeypatch):
+
+# ── confidential projects: local-only tasks while Linear is the tracker (AGE-127) ──
+
+class NoLinear:
+    """LinearClient stand-in for the poll: records every call; nothing may name a local-only task."""
+    def __init__(self, calls, on_fetch=None):
+        self.calls, self.on_fetch = calls, on_fetch
+
+    def __call__(self, *a, **k):
+        return self
+
+    def __getattr__(self, name):
+        def call(*a, **k):
+            self.calls.append((name, a, k))
+            if name == "fetch_issues" and self.on_fetch:
+                self.on_fetch()
+            return [] if name in ("fetch_issues", "fetch_teams") else None
+        return call
+
+
+class StopPoll(BaseException):
+    pass
+
+
+@pytest.fixture
+def lo(reg, monkeypatch):
+    """Linear mode, project `demo` confidential, every Linear transport recorded."""
     (app_mod, mod, client, log, events, tmp), path = reg
     import linear_client
     import runner.modules.linear as lin
@@ -388,15 +414,227 @@ def test_confidential_project_tasks_never_reach_linear(reg, monkeypatch):
     doc["projects"]["demo"]["confidential"] = True
     path.write_text(yaml.safe_dump(doc))
     calls = []
-    monkeypatch.setattr(linear_client, "LinearClient", FakeClient(True, calls))
-    monkeypatch.setattr(lin, "_linear_api_key_from_cfg", lambda tc: "key")
+    monkeypatch.setattr(linear_client, "LinearClient", NoLinear(calls))
+    monkeypatch.setattr(lin, "_post_linear_comment_raw", lambda *a: calls.append(("comment_raw", a, {})) or True)
+    monkeypatch.setenv("LINEAR_API_KEY", "dummy")
+    monkeypatch.setattr(lin, "_load_workflow_config", lambda: {"tracker": {
+        "kind": "linear", "api_key": "$LINEAR_API_KEY", "project_slug": "slug", "team_id": "team-a"}})
     monkeypatch.setattr(mod, "_capability", {"available": True, "type": "linear"})
-    monkeypatch.setattr(mod, "_linear_client", lambda: (FakeClient(True, calls), {}))
-    before = tasks(tmp) if (tmp / "tasks.json").exists() else {}
-    r = client.post("/api/linear/issues", json={"title": "t", "project": "demo", "team_id": "team"})
-    assert r.status_code == 400 and "confidential" in r.get_json()["error"]
-    with pytest.raises(ValueError, match="confidential"):
-        mod.create_session_issue("t", "", "claude", "demo")
-    assert calls == [] and (tasks(tmp) if (tmp / "tasks.json").exists() else {}) == before  # AGE-127
-    monkeypatch.setattr(mod, "_capability", {"available": True, "type": "local"})  # the local board still takes it
-    assert client.post("/api/linear/issues", json={"title": "t", "project": "demo"}).status_code == 200
+    mod._fresh_ids.clear(); mod._issues_by_team.clear()
+    return app_mod, mod, client, tmp, calls, path
+
+
+def _new_local(client, title="secret task"):
+    r = client.post("/api/linear/issues", json={"title": title, "project": "demo", "team_id": "team-a"})
+    assert r.status_code == 200, r.get_json()
+    return r.get_json()["issue"]
+
+
+def _named(calls, issue):
+    """Recorded Linear calls whose arguments name the issue."""
+    keys = (issue["id"], issue["identifier"], issue["title"])
+    return [c for c in calls if any(k in repr(c) for k in keys)]
+
+
+def _poll_once(mod, monkeypatch, client_fake=None):
+    import linear_client
+    import runner.modules.linear as lin
+    if client_fake is not None:
+        monkeypatch.setattr(linear_client, "LinearClient", client_fake)
+    monkeypatch.setattr(lin.time, "sleep", lambda s: (_ for _ in ()).throw(StopPoll()))
+    with pytest.raises(StopPoll):
+        mod._polling_loop(mod._socketio or __import__("app").socketio)
+
+
+def test_plus_form_creates_a_local_only_task_for_a_confidential_project(lo):
+    app_mod, mod, client, tmp, calls, _ = lo
+    issue = _new_local(client)
+    assert issue["id"].startswith("local-") and issue["identifier"].startswith("LOC-")
+    assert tasks(tmp)[issue["id"]]["local_only"] is True and tasks(tmp)[issue["id"]]["labels"] == ["project:demo"]
+    assert calls == []  # no Linear request at all, not even the label
+
+
+def test_session_to_board_creates_a_local_only_task(lo):
+    app_mod, mod, client, tmp, calls, _ = lo
+    issue = mod.create_session_issue("from a session", "", "claude", "demo")
+    assert tasks(tmp)[issue["id"]]["local_only"] is True and calls == []
+
+
+def test_non_confidential_task_still_goes_to_linear(lo, monkeypatch):
+    app_mod, mod, client, tmp, calls, _ = lo
+    import linear_client
+    import runner.modules.linear as lin
+    seen = []
+    monkeypatch.setattr(linear_client, "LinearClient", FakeClient(True, seen))
+    monkeypatch.setattr(lin, "record_id_alias", lambda *a: None)
+    r = client.post("/api/linear/issues", json={"title": "t", "project": "agentic-os", "team_id": "team-a"})
+    assert r.status_code == 200 and ("label", "project:agentic-os") in seen
+    assert not tasks(tmp).get("lin-1", {}).get("local_only")
+
+
+def test_poll_keeps_local_only_tasks_and_every_team_view_shows_them(lo, monkeypatch):
+    app_mod, mod, client, tmp, calls, _ = lo
+    issue = _new_local(client)
+    mod._fresh_ids.clear()  # beyond the fresh-create window: only the poll's own merge keeps it
+    mod.issues_cache.pop(issue["id"])
+    _poll_once(mod, monkeypatch)
+    assert any(c[0] == "fetch_issues" for c in calls)  # the poll really ran to its publish
+    assert mod.issues_cache[issue["id"]]["title"] == "secret task"
+    for team in ("team-a", "team-b", ""):
+        ids = [i["id"] for i in client.get(f"/api/linear/issues?team_id={team}").get_json()]
+        assert issue["id"] in ids, team
+    assert _named(calls, issue) == []
+
+
+def test_comment_written_during_a_poll_survives_also_for_a_canceled_task(lo, monkeypatch):
+    app_mod, mod, client, tmp, calls, _ = lo
+    live, gone = _new_local(client, "live"), _new_local(client, "gone")
+    local = mod.get_local_tracker()
+    local.update_issue_state(gone["id"], "Canceled")
+    mod.issues_cache[gone["id"]] = {**mod.issues_cache[gone["id"]], "state": "Canceled"}  # a stale copy
+    def comment():  # lands between the poll's fetch and its publish
+        local.post_comment(live["id"], "c1")
+        local.post_comment(gone["id"], "c2")
+    _poll_once(mod, monkeypatch, NoLinear(calls, on_fetch=comment))
+    assert any(c[0] == "fetch_issues" for c in calls)
+    assert [c["body"] for c in tasks(tmp)[live["id"]]["comment_log"]] == ["c1"]
+    assert [c["body"] for c in tasks(tmp)[gone["id"]]["comment_log"]] == ["c2"]
+    assert mod.issues_cache[gone["id"]]["state"] == "Canceled"
+
+
+def test_local_only_task_dispatches_into_its_project_worktree(lo, monkeypatch):
+    app_mod, mod, client, tmp, calls, _ = lo
+    issue = _new_local(client)
+    seen = {}
+    monkeypatch.setattr(app_mod, "_run_project_ticket", lambda **kw: seen.update(kw))
+    mod._dispatch_issue(mod.issues_cache[issue["id"]], {"agent": {"backend": "claude"}}, app_mod.socketio)
+    assert seen["project_key"] == "demo" and seen["ident"] == issue["identifier"]
+    assert tasks(tmp)[issue["id"]]["state"] == "In Progress" and _named(calls, issue) == []
+
+
+def test_push_state_without_a_cache_entry_stays_local_and_in_order(lo, monkeypatch):
+    app_mod, mod, client, tmp, calls, _ = lo
+    issue = _new_local(client)
+    mod.issues_cache.clear()
+    workers = []
+    monkeypatch.setattr(app_mod, "_start_counted", lambda fn, *a: workers.append(a[:1]))
+    mod.push_state(issue["id"], "running")
+    assert tasks(tmp)[issue["id"]]["state"] == "In Progress"
+    assert mod.issues_cache[issue["id"]]["local_only"] is True  # hydrated, never a bare {id, state}
+    mod.push_state(issue["id"], "review")
+    assert workers == [] and tasks(tmp)[issue["id"]]["state"] == "In Review"
+    _poll_once(mod, monkeypatch)
+    assert mod.issues_cache[issue["id"]]["state"] == "In Review" and _named(calls, issue) == []
+
+
+def test_todo_reset_then_run_shows_review_not_a_stale_override(lo, monkeypatch):
+    app_mod, mod, client, tmp, calls, _ = lo
+    issue = _new_local(client)
+    iid = issue["id"]
+    mod.push_state(iid, "review")
+    assert client.patch(f"/api/linear/issues/local/{iid}", json={"state_name": "Todo"}).status_code == 200
+    assert client.patch(f"/api/linear/issues/{iid}", json={"state_name": "Todo"}).status_code == 200
+    monkeypatch.setattr(app_mod, "_run_project_ticket", lambda **kw: mod.push_state(iid, "review"))
+    assert client.patch(f"/api/linear/issues/local/{iid}", json={"state_name": "In Progress"}).status_code == 200
+    assert client.patch(f"/api/linear/issues/{iid}", json={"state_name": "In Progress"}).status_code == 200
+    shown = {i["id"]: i for i in client.get("/api/linear/issues").get_json()}[iid]
+    assert shown["state"] == "In Review" and iid not in mod._local_overrides
+    assert _named(calls, issue) == []
+
+
+def test_feedback_on_a_declassified_local_only_task_stays_local(lo):
+    app_mod, mod, client, tmp, calls, path = lo
+    issue = _new_local(client)
+    r = client.post(f"/api/linear/issues/{issue['id']}/comment", json={"feedback": "f"})
+    assert r.status_code == 403  # still confidential: feedback stays in the run record (Decision 4)
+    doc = yaml.safe_load(path.read_text())
+    doc["projects"]["demo"]["confidential"] = False
+    path.write_text(yaml.safe_dump(doc))
+    r = client.post(f"/api/linear/issues/{issue['id']}/comment", json={"feedback": "f"})
+    assert r.status_code == 200 and len(tasks(tmp)[issue["id"]]["comment_log"]) == 1
+    mod.post_comment(issue["id"], "runner comment")
+    assert len(tasks(tmp)[issue["id"]]["comment_log"]) == 2 and _named(calls, issue) == [] and calls == []
+
+
+def test_rename_todo_retry_and_trash_stay_local(lo):
+    app_mod, mod, client, tmp, calls, _ = lo
+    import runner.modules.linear as lin
+    issue = _new_local(client)
+    iid = issue["id"]
+    mod.set_card_title(iid, "renamed")
+    assert tasks(tmp)[iid]["title"] == "renamed"
+    mod.push_state(iid, "review")
+    mod.move_to_todo(iid)
+    assert tasks(tmp)[iid]["state"] == "Todo"
+    mod.issues_cache.clear()  # retry gates: synced enough to run, and still a live card
+    assert not lin.unsynced_local_id(iid) and app_mod._tracker_issue(iid)["id"] == iid
+    assert client.patch(f"/api/linear/issues/{iid}", json={"state_name": "Canceled"}).status_code == 200
+    r = client.post("/api/linear/trash/empty")
+    assert r.get_json()["archived"] == 1 and iid not in tasks(tmp)
+    assert calls == []
+
+
+def test_cache_copy_never_overwrites_tasks_json_even_right_before_the_backup(lo, monkeypatch):
+    app_mod, mod, client, tmp, calls, _ = lo
+    live, gone = _new_local(client, "live"), _new_local(client, "gone")
+    local = mod.get_local_tracker()
+    local.update_issue_state(gone["id"], "Canceled")
+    for iid in (live["id"], gone["id"]):
+        local.post_comment(iid, "c0")  # the poll's copy holds this list: a write-back would drop c1/c2
+    real = mod._sync_cache_to_local
+    def late_comment():  # after the publish read tasks.json, before the cache backup runs (R2)
+        local.post_comment(live["id"], "c1")
+        local.post_comment(gone["id"], "c2")
+        real()
+    monkeypatch.setattr(mod, "_sync_cache_to_local", late_comment)
+    _poll_once(mod, monkeypatch)
+    assert len(tasks(tmp)[live["id"]]["comment_log"]) == 2 and len(tasks(tmp)[gone["id"]]["comment_log"]) == 2
+
+
+def test_a_deleted_local_only_task_is_not_resurrected_by_the_terminal_carry_over(lo, monkeypatch):
+    app_mod, mod, client, tmp, calls, _ = lo
+    issue = _new_local(client)
+    mod.issues_cache[issue["id"]] = {**mod.issues_cache[issue["id"]], "state": "Canceled"}
+    mod.get_local_tracker().delete_issue(issue["id"])
+    mod._fresh_ids.clear()
+    _poll_once(mod, monkeypatch)
+    assert issue["id"] not in mod.issues_cache
+
+
+def test_local_only_tasks_get_no_linear_override(lo):
+    app_mod, mod, client, tmp, calls, _ = lo
+    issue = _new_local(client)
+    iid = issue["id"]
+    assert client.patch(f"/api/linear/issues/local/{iid}", json={"title": "mirror"}).status_code == 200
+    assert iid not in mod._local_overrides  # nothing to catch up with: no override made (R3)
+    mod._local_overrides[iid] = {"patch": {"state": "Todo"}, "expires_at": float("inf")}  # e.g. left from before
+    mod.push_state(iid, "review")
+    shown = {i["id"]: i for i in client.get("/api/linear/issues").get_json()}[iid]
+    assert shown["state"] == "In Review"
+
+
+def test_description_and_agent_edits_stay_local(lo):
+    app_mod, mod, client, tmp, calls, _ = lo
+    issue = _new_local(client)
+    iid = issue["id"]
+    r = client.patch(f"/api/linear/issues/{iid}", json={"description": "new details", "preferred_agent": "codex"})
+    assert r.status_code == 200
+    assert tasks(tmp)[iid]["description"] == "new details" and tasks(tmp)[iid]["preferred_agent"] == "codex"
+    assert calls == []
+
+
+def test_retry_route_accepts_a_local_only_task(lo, monkeypatch):
+    app_mod, mod, client, tmp, calls, _ = lo
+    from test_reset_gen import capture_launches
+    issue = _new_local(client)
+    mod.push_state(issue["id"], "review")
+    seen = []
+    monkeypatch.setattr(app_mod, "_run_project_ticket", lambda **kw: seen.append(kw))
+    with (tmp / "run_log.jsonl").open("a") as f:
+        f.write(json.dumps({"run_id": "a", "task_id": "a", "agent": "claude", "status": "review", "skill": "_prompt",
+                            "prompt": "t", "linear_issue_id": issue["id"], "project_key": "demo",
+                            "issue_identifier": issue["identifier"]}) + "\n")
+    capture_launches(app_mod, monkeypatch)
+    r = client.post("/api/runs/a/retry", json={})
+    assert "not synced" not in (r.get_json() or {}).get("error", "") and r.status_code != 409, r.get_json()
+    assert calls == []

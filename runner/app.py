@@ -4067,7 +4067,8 @@ def _tracker_issue(issue_id: str) -> dict | None:
     if not mod or issue_id in archived_ids():
         return None
     issue = mod.issues_cache.get(issue_id)
-    if issue is None and mod._capability.get("type") != "linear":
+    from runner.modules.linear import local_only_id
+    if issue is None and (mod._capability.get("type") != "linear" or local_only_id(issue_id)):
         with contextlib.suppress(Exception):
             issue = mod.get_local_tracker().fetch_issue(issue_id)
     return issue
@@ -4261,7 +4262,8 @@ def _confirmed_title(issue_id: str) -> str | None:
     """The card title a native rename may use: never the display cache, which can hold an
     unconfirmed /local title (DP-31), and never the session's own title (DP-46)."""
     mod = _module_registry.get("linear")
-    if mod is not None and mod._capability.get("type") == "linear":
+    from runner.modules.linear import local_only_id
+    if mod is not None and mod._capability.get("type") == "linear" and not local_only_id(issue_id):
         if issue_id in _LINEAR_TITLES:
             return _LINEAR_TITLES[issue_id][0]
     elif mod is not None:

@@ -2759,7 +2759,8 @@ function _buildColCard(run) {
   const verifyHtml = warning ? `<span class="verify-badge bad" title="project ${_esc(run.project_key || '')}">${_esc(warning)}</span>` : '';
   const projectHtml = (run.issue_project || run.project_key)
     ? `<span class="verify-badge" title="Runs in a worktree of this project">${_esc(_projName(run.issue_project || run.project_key))}</span>` : '';
-  const syncHtml = run.unsynced ? '<span class="verify-badge" title="Not synced to Linear yet; it can be dispatched once it has its Linear id">syncing…</span>' : '';
+  const syncHtml = run.unsynced ? '<span class="verify-badge" title="Not synced to Linear yet; it can be dispatched once it has its Linear id">syncing…</span>'
+    : run.local_only ? '<span class="verify-badge" title="Confidential project: this task stays on this machine, never in Linear">local</span>' : '';
   const metaHtml = metaModelHtml || verifyHtml || projectHtml || syncHtml
     ? `<div class="job-card-meta">${metaModelHtml}${projectHtml}${syncHtml}${verifyHtml}</div>` : '';
   const footerControlsHtml = run._is_linear_issue && state === 'todo' ? todoAgentToggle : '';
@@ -2998,7 +2999,8 @@ async function refreshJobBoard(force = false) {
         waiting: latest?.waiting || '',
         resume_ok: !!latest?.resume_ok,  // precomputed by the server (§1)
         resume_agent: latest?.resume_agent || '',
-        unsynced: String(issue.id || '').startsWith('local-') && _trackerType === 'linear',
+        unsynced: String(issue.id || '').startsWith('local-') && _trackerType === 'linear' && !issue.local_only,
+        local_only: !!issue.local_only,
         _is_linear_issue: true,
       };
     });
