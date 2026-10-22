@@ -2226,7 +2226,7 @@ def index():
     windows_deepseek = load_windows("deepseek")
     try:
         claude_accounts = claude_account.accounts()
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError, claude_account.AccountError):
         claude_accounts = {"accounts": [], "active": None}
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
@@ -4883,7 +4883,10 @@ def api_project_confidential(key: str):
 
 @app.route("/api/claude-accounts")
 def api_claude_accounts():
-    return jsonify(claude_account.accounts())
+    try:
+        return jsonify(claude_account.accounts())
+    except claude_account.AccountError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 503
 
 
 @app.route("/api/claude-accounts/use", methods=["POST"])

@@ -317,3 +317,47 @@ def test_dashboard_select_needs_two_accounts(app_mod, monkeypatch, n, shown):
     assert ('class="claude-account-select"' in html) is shown
     if shown:
         assert '<option value="a" title="a@x" selected>' in html and '<option value="b" title="b@x" >' in html
+
+
+@pytest.mark.parametrize("live", ["not json", "{}", '{"claudeAiOauth": {}}'])
+def test_unparseable_live_login_refused_without_force(two, live):
+    two.items[(ca.LIVE_SERVICE, "me")] = live
+    with pytest.raises(ca.AccountError, match="not a saved account"):
+        ca.use("a")
+    assert two.items[(ca.LIVE_SERVICE, "me")] == live
+    ca.use("a", force=True)
+    assert two.live() == creds("rt-a", "at-a")
+
+
+def test_failed_keychain_read_refuses(two, monkeypatch):
+    real = two.__call__
+
+    def flaky(args, stdin=None):
+        if args[:1] == ["find-generic-password"] and ca.LIVE_SERVICE in args and "-w" in args:
+            return subprocess.CompletedProcess(args, 51, "", "user interaction not allowed")
+        return real(args, stdin)
+    monkeypatch.setattr(ca, "_security", flaky)
+    before = dict(two.items)
+    with pytest.raises(ca.AccountError, match="read failed"):
+        ca.use("a", force=True)
+    assert two.items == before
+
+
+def test_concurrent_claude_json_write_is_kept(two, monkeypatch):
+    path = ca.CLAUDE_JSON
+    hits = []
+
+    class Racy(type(path)):
+        def read_text(self, *a, **k):
+            text = super().read_text(*a, **k)
+            if not hits:  # Claude Code saves a setting right after our read
+                hits.append(1)
+                cfg = json.loads(text)
+                cfg["newSetting"] = True
+                time.sleep(0.01)
+                super().write_text(json.dumps(cfg))
+            return text
+    monkeypatch.setattr(ca, "CLAUDE_JSON", Racy(path))
+    ca.use("a")
+    cfg = json.loads(path.read_text())
+    assert cfg["newSetting"] is True and cfg["oauthAccount"]["accountUuid"] == UUID_A

@@ -56,9 +56,14 @@ def _security(args: list[str], stdin: str | None = None) -> subprocess.Completed
 
 
 def _kc_read(service: str, account: str | None = None) -> str | None:
+    """Secret, or None when the item does not exist. Any other failure raises: never guess."""
     args = ["find-generic-password", "-s", service] + (["-a", account] if account else []) + ["-w"]
     out = _security(args)
-    return out.stdout.rstrip("\n") if out.returncode == 0 else None
+    if out.returncode == 44:  # errSecItemNotFound
+        return None
+    if out.returncode != 0:
+        raise AccountError(f"keychain read failed for {service!r} (exit {out.returncode})")
+    return out.stdout.rstrip("\n")
 
 
 def _kc_write(service: str, account: str, secret: str) -> None:
@@ -82,12 +87,7 @@ def _live_account() -> str:
 
 def _snapshot(label: str) -> dict | None:
     """Saved credential blob of LABEL, or None."""
-    raw = _kc_read(SNAP_SERVICE, label)
-    try:
-        blob = json.loads(raw) if raw else None
-    except ValueError:
-        return None
-    return blob if isinstance(blob, dict) and _oauth(blob).get("refreshToken") else None
+    return _parse_blob(_kc_read(SNAP_SERVICE, label))
 
 
 def _save_snapshot(label: str, blob: dict) -> None:
@@ -166,13 +166,16 @@ def _profile_of(blob: dict) -> dict | None:
     return _fetch_profile(token)
 
 
-def _live_blob() -> dict | None:
-    raw = _kc_read(LIVE_SERVICE)
+def _parse_blob(raw: str | None) -> dict | None:
     try:
         blob = json.loads(raw) if raw else None
     except ValueError:
         return None
-    return blob if isinstance(blob, dict) else None
+    return blob if isinstance(blob, dict) and _oauth(blob).get("refreshToken") else None
+
+
+def _live_blob() -> dict | None:
+    return _parse_blob(_kc_read(LIVE_SERVICE))
 
 
 def _owner(blob: dict | None, idx: dict, snaps: dict) -> str | None:
@@ -229,6 +232,24 @@ def save(label: str) -> dict:
     return {"ok": True, "label": label, "email": email}
 
 
+def _set_oauth_account(meta: dict) -> None:
+    """Replace oauthAccount in ~/.claude.json without losing a concurrent Claude Code write:
+    re-check the file is unchanged right before the replace, retry from fresh content.
+    ponytail: a microsecond window remains; Claude Code has no lock to join."""
+    for _ in range(5):
+        before = CLAUDE_JSON.stat()
+        cfg = json.loads(CLAUDE_JSON.read_text(encoding="utf-8"))
+        if not isinstance(cfg, dict):
+            raise ValueError(f"{CLAUDE_JSON} is not a JSON object")
+        cfg["oauthAccount"] = meta
+        now = CLAUDE_JSON.stat()
+        if (now.st_mtime_ns, now.st_size, now.st_ino) == (before.st_mtime_ns, before.st_size, before.st_ino):
+            _write_json_atomic(CLAUDE_JSON, cfg, before.st_mode & 0o777)
+            return
+        time.sleep(0.05)
+    raise OSError(f"{CLAUDE_JSON} kept changing; left as is")
+
+
 def _running_claude() -> int:
     out = subprocess.run(["pgrep", "-x", "claude"], capture_output=True, text=True, timeout=5)
     return len(out.stdout.split())
@@ -245,9 +266,10 @@ def use(label: str, force: bool = False) -> dict:
         snaps = {name: _snapshot(name) for name in idx}
         if not snaps[label] or not isinstance(idx[label].get("oauthAccount"), dict):
             raise AccountError(f"snapshot {label!r} is unreadable; log in and `save {label}` again")
-        blob = _live_blob()
+        raw = _kc_read(LIVE_SERVICE)  # None only when no login exists at all: nothing to lose
+        blob = _parse_blob(raw)
         owner = _owner(blob, idx, snaps)
-        if blob and owner is None:
+        if raw is not None and owner is None:
             if not force:
                 raise AccountError("the current login is not a saved account (or could not be verified); "
                                    "`save <label>` it first, or pass --force to discard it")
@@ -257,11 +279,7 @@ def use(label: str, force: bool = False) -> dict:
             _save_snapshot(owner, blob)
         _kc_write(LIVE_SERVICE, _live_account(), json.dumps(snaps[label], separators=(",", ":")))
         try:
-            cfg = _read_json(CLAUDE_JSON)
-            if not cfg:
-                raise OSError(f"{CLAUDE_JSON} missing or unreadable")
-            cfg["oauthAccount"] = idx[label]["oauthAccount"]
-            _write_json_atomic(CLAUDE_JSON, cfg, CLAUDE_JSON.stat().st_mode & 0o777)
+            _set_oauth_account(idx[label]["oauthAccount"])
         except (OSError, ValueError) as exc:
             warnings.append(f"`claude auth status` may show the old email: {exc}")
         os.utime(INDEX)  # bump swap_generation(), even for a repair of the same label
