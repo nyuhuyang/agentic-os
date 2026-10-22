@@ -1,6 +1,7 @@
 ---
-status: in-progress
+status: completed
 created: 2026-10-22
+completed: 2026-10-22
 ---
 
 # Confidential project tasks stay on the local board (option A, AGE-127)
@@ -146,7 +147,7 @@ Local-only tasks get no Linear override: `_remember_local_override` ignores them
 - [x] Board UI: "local" chip on local-only cards
 - [x] Tests written for every Verification test item
 - [x] Verification checks run and ticked
-- [ ] Fresh Codex inspection of the build
-- [ ] Accepted inspection findings fixed and reinspected in a fresh session
-- [ ] `docs/context-maintenance.md` records the result and next action
-- [ ] Plan and review log archived to `docs/exec-plans/completed/`
+- [x] Fresh Codex inspection of the build
+- [x] Accepted inspection findings fixed and reinspected in a fresh session
+- [x] `docs/context-maintenance.md` records the result and next action
+- [x] Plan and review log archived to `docs/exec-plans/completed/`
