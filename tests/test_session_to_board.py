@@ -348,9 +348,7 @@ def test_session_card_terminal_opens_in_the_session_folder(stb):
 
 @pytest.mark.parametrize("commits, dirty, verify, changed, expected", [
     ("", [], None, False, None),                    # question-only, no check: no badge
-    ("", [], "pass", False, None),                  # question-only, pass: hidden too
-    ("", [], "fail", False, "fail"),                # a real failure still shows
-    ("", [], "timeout", False, "timeout"),
+    ("", [], "fail", False, None),                  # question-only: verify does not run (AGE-117)
     ("", [], None, True, "main checkout changed"),
     ("abc", [], None, False, "no check"),           # changed files, no check: neutral
 ])
@@ -363,11 +361,29 @@ def test_badge_for_a_run_that_changed_nothing(monkeypatch, tmp_path, commits, di
     monkeypatch.setattr(pr.projects, "confine_for", lambda p, wt: None)
     monkeypatch.setattr(pr.projects, "load_binding", lambda p, i: {})
     monkeypatch.setattr(pr.projects, "committed_seeds", lambda p, wt, base: [])
-    monkeypatch.setattr(pr.projects, "run_verify", lambda *a, **k: {"status": verify, "exit": 1, "duration_s": 0, "tail": ""})
+    ran = []
+    monkeypatch.setattr(pr.projects, "run_verify", lambda *a, **k: ran.append(1) or {"status": verify, "exit": 1, "duration_s": 0, "tail": ""})
     monkeypatch.setattr(pr, "closing_check", lambda p, e, b: {"main_checkout_changed": changed})
     binding = {"worktree": str(tmp_path), "issue_identifier": "LOC-1", "base_sha": "base"}
     result = pr.post_run(project, binding, "claude", "t", "fp", set(), start_sha="start")
     assert result.get("verify_badge") == expected
+    assert bool(ran) == bool((commits or dirty) and verify) and ("verify" in result) == bool(ran)  # only a run that changed something
+
+
+def test_verify_runs_when_the_run_committed(monkeypatch, tmp_path):
+    import project_runs as pr
+    import projects as pj
+    project = pj.Project(key="demo", path=tmp_path, verify="make test")
+    monkeypatch.setattr(pr.projects, "uncommitted", lambda p, wt: [])
+    monkeypatch.setattr(pr.projects, "_git", lambda wt, *a, **k: subprocess.CompletedProcess(a, 0, "abc", ""))
+    monkeypatch.setattr(pr.projects, "confine_for", lambda p, wt: None)
+    monkeypatch.setattr(pr.projects, "load_binding", lambda p, i: {})
+    monkeypatch.setattr(pr.projects, "committed_seeds", lambda p, wt, base: [])
+    monkeypatch.setattr(pr.projects, "run_verify", lambda *a, **k: {"status": "fail", "exit": 1, "duration_s": 0, "tail": ""})
+    monkeypatch.setattr(pr, "closing_check", lambda p, e, b: {"main_checkout_changed": False})
+    binding = {"worktree": str(tmp_path), "issue_identifier": "LOC-1", "base_sha": "base"}
+    result = pr.post_run(project, binding, "claude", "t", "fp", set(), start_sha="start")
+    assert result["verify"]["status"] == "fail" and result["verify_badge"] == "fail"
 
 
 # ── §8 model and cost ────────────────────────────────────────────────────────
