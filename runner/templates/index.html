@@ -106,7 +106,7 @@
   /* Chart */
   .chart-box { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 16px 20px; margin-bottom: 20px; }
   .chart-title { font-size: calc(12px * var(--fs)); color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 12px; }
-  .chart-wrap { height: 100px; }
+  .chart-wrap { height: 140px; }
 
   /* Job board — kanban columns */
   .job-board { margin-bottom: 24px; }
@@ -768,7 +768,7 @@
 
     <!-- Activity chart -->
     <div class="chart-box">
-      <div class="chart-title">Activity — last 30 days · {{ stats.total_runs }} total runs</div>
+      <div class="chart-title">Activity — last 30 days · {{ chart_data["values"] | sum }} conversations · {{ chart_data["work"] | sum }} outside AgenticOS</div>
       <div class="chart-wrap">
         <canvas id="activityChart"></canvas>
       </div>
@@ -999,24 +999,62 @@
 const pageDataEl = document.getElementById('page-data');
 const chartData = JSON.parse(pageDataEl?.dataset.chartData || '{"labels":[],"values":[]}');
 const errorRuns = JSON.parse(pageDataEl?.dataset.errorRuns || '[]');
+// Hover or click a day: a crosshair plus both counts for that day, like a stock chart
+const crosshair = {
+  id: 'crosshair',
+  afterDatasetsDraw(chart) {
+    const active = chart.tooltip?.getActiveElements?.() || [];
+    if (!active.length) return;
+    const x = active[0].element.x, { top, bottom } = chart.chartArea, ctx = chart.ctx;
+    ctx.save();
+    ctx.strokeStyle = '#555';
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+    ctx.restore();
+  }
+};
 new Chart(document.getElementById('activityChart'), {
   type: 'line',
   data: {
     labels: chartData.labels,
     datasets: [{
+      label: 'All conversations',
       data: chartData.values,
       borderColor: '#e8723a',
       backgroundColor: 'rgba(232,114,58,0.08)',
       borderWidth: 2,
       pointRadius: 0,
+      pointHoverRadius: 4,
+      fill: true,
+      tension: 0.3,
+    }, {
+      label: 'Outside AgenticOS',
+      data: chartData.work || [],
+      borderColor: '#4fa3e0',
+      backgroundColor: 'rgba(79,163,224,0.10)',
+      borderWidth: 2,
+      pointRadius: 0,
+      pointHoverRadius: 4,
       fill: true,
       tension: 0.3,
     }]
   },
+  plugins: [crosshair],
   options: {
     responsive: true,
     maintainAspectRatio: false,
-    plugins: { legend: { display: false } },
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: true, labels: { color: '#888', boxWidth: 10, font: { size: 11 } } },
+      tooltip: {
+        callbacks: {
+          footer: items => {
+            const all = items[0]?.parsed.y || 0, work = items[1]?.parsed.y || 0;
+            return all ? `AgenticOS: ${all - work} (${Math.round((all - work) / all * 100)}%)` : '';
+          }
+        }
+      }
+    },
     scales: {
       x: { grid: { color: '#1e1e1e' }, ticks: { color: '#555', font: { size: 11 }, maxTicksLimit: 6 } },
       y: { grid: { color: '#1e1e1e' }, ticks: { color: '#555', font: { size: 11 }, stepSize: 1 }, beginAtZero: true }

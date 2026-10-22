@@ -985,24 +985,26 @@ def load_vault_pulse(limit: int = 8) -> list[str]:
 
 
 def build_chart_data(runs: list[dict]) -> dict:
-    now = datetime.now(timezone.utc).date()
-    counts: dict = defaultdict(int)
+    """Conversations per local day over 30 days: all of them, and those outside AgenticOS
+    itself: a run bound to agentic-os, or an unbound prompt (it runs in the runner's own checkout).
+    Skill runs count as work."""
+    today = datetime.now().astimezone().date()
+    total: dict = defaultdict(int)
+    work: dict = defaultdict(int)
     for run in runs:
         try:
-            ts = run.get("started_at") or run.get("created_at") or ""
-            day = datetime.fromisoformat(ts).date()
-            counts[day] += 1
+            day = datetime.fromisoformat(run.get("started_at") or run.get("created_at") or "").astimezone().date()
         except Exception:
             continue
+        total[day] += 1
+        key = run.get("project_key") or run.get("session_project") or ("agentic-os" if run.get("skill") == "_prompt" else "")
+        if key.lower() != "agentic-os":
+            work[day] += 1
 
-    labels = []
-    values = []
-    for i in range(29, -1, -1):
-        day = now - timedelta(days=i)
-        labels.append(day.strftime("%b %d") if i % 5 == 0 else "")
-        values.append(counts.get(day, 0))
-
-    return {"labels": labels, "values": values}
+    days = [today - timedelta(days=i) for i in range(29, -1, -1)]
+    return {"labels": [d.strftime("%b %d") for d in days],
+            "values": [total.get(d, 0) for d in days],
+            "work": [work.get(d, 0) for d in days]}
 
 
 def _fmt_dt(iso: str | None) -> str:
@@ -2215,7 +2217,9 @@ def index():
         for r in all_runs[:15]
     ]
 
-    chart_data = build_chart_data(all_runs_with_linear)
+    # every conversation, archived ones included; not the 100-run window above, which holds
+    # under a month of runs. ponytail: reads the whole log, add a date cutoff if it gets slow
+    chart_data = build_chart_data(load_runs(1_000_000, include_archived=True))
     vault_pulse = load_vault_pulse()
     usage = load_usage()
     codex = load_codex()
