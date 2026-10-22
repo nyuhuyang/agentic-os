@@ -73,13 +73,24 @@ CLAUDE_SETTINGS = ["--settings", json.dumps(CLAUDE_INSTRUCTION_FILES)]
 CLAUDE_CONFIDENTIAL_SOURCES = ["--setting-sources", "user", "--strict-mcp-config"]
 
 
+# AGE-129: a confidential Claude can call Codex (claudex-loop's cross-model reviewer). Codex needs
+# its OpenAI endpoints and ~/.codex; the files Codex reads as config or code stay unwritable, so a
+# run cannot change what later Codex sessions load. SANDBOXED_BIN's `codex` (first on PATH) swaps
+# Codex's own sandbox, which macOS cannot nest, for this one.
+CODEX_DOMAINS = ["chatgpt.com", "*.chatgpt.com", "api.openai.com", "auth.openai.com"]
+CODEX_HOME_LOCKED = ("config.toml", "AGENTS.md", "rules", "hooks.json", "skills", "plugins", "packages", "vendor_imports")
+SANDBOXED_BIN = Path(__file__).resolve().parent / "scripts" / "sandboxed-bin"
+
+
 def claude_confidential_settings(common: Path) -> str:
+    codex_home = Path.home() / ".codex"
     return json.dumps({
         "sandbox": {
             "enabled": True, "failIfUnavailable": True, "allowUnsandboxedCommands": False,
             "autoAllowBashIfSandboxed": True, "excludedCommands": [],
-            "network": {"allowedDomains": [], "strictAllowlist": True},
-            "filesystem": {"allowWrite": [str(common)]},
+            "network": {"allowedDomains": CODEX_DOMAINS, "strictAllowlist": True},
+            "filesystem": {"allowWrite": [str(common), str(codex_home)],
+                           "denyWrite": [str(codex_home / name) for name in CODEX_HOME_LOCKED]},
         },
         "permissions": {"deny": ["Read(**/.env*)", "Read(~/.ssh/**)"]},
     })
