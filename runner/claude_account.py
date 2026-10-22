@@ -81,8 +81,12 @@ def _kc_write(service: str, account: str, secret: str) -> None:
 def _live_account() -> str:
     """Account attribute of the existing live item, so -U updates it instead of adding a twin."""
     out = _security(["find-generic-password", "-s", LIVE_SERVICE])
-    m = re.search(r'"acct"<blob>="([^"]*)"', out.stdout)
-    return m.group(1) if m else os.environ.get("USER", "")
+    if out.returncode == 44:  # no login item yet: create the one Claude Code would
+        return os.environ.get("USER", "")
+    m = re.search(r'"acct"<blob>="([^"]*)"', out.stdout) if out.returncode == 0 else None
+    if not m:
+        raise AccountError(f"could not read the {LIVE_SERVICE!r} keychain item's account")
+    return m.group(1)
 
 
 def _snapshot(label: str) -> dict | None:
@@ -104,13 +108,18 @@ def _read_json(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _write_json_atomic(path: Path, data: dict, mode: int) -> None:
+def _write_json_atomic(path: Path, data: dict, mode: int, unchanged=lambda: True) -> bool:
+    """Stage DATA fully, then replace PATH only if unchanged() still holds; False = discarded."""
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         os.chmod(tmp, mode)
+        if not unchanged():
+            os.unlink(tmp)
+            return False
         os.replace(tmp, path)
+        return True
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
@@ -178,6 +187,9 @@ def _live_blob() -> dict | None:
     return _parse_blob(_kc_read(LIVE_SERVICE))
 
 
+_profile_owner: dict[str, str] = {}  # refresh token -> uuid, so the dashboard poll calls the API once per rotation
+
+
 def _owner(blob: dict | None, idx: dict, snaps: dict) -> str | None:
     """Label owning the live login: refresh-token match, else the profile API. Never oauthAccount."""
     if not blob:
@@ -186,8 +198,13 @@ def _owner(blob: dict | None, idx: dict, snaps: dict) -> str | None:
     for label, snap in snaps.items():
         if rt and snap and _oauth(snap).get("refreshToken") == rt:
             return label
-    profile = _profile_of(blob)
-    uuid = profile["account"]["uuid"] if profile else None
+    uuid = _profile_owner.get(rt)
+    if not uuid:
+        profile = _profile_of(blob)
+        uuid = profile["account"]["uuid"] if profile else None
+        if uuid:
+            _profile_owner.clear()
+            _profile_owner[rt] = uuid
     return next((label for label, meta in idx.items() if uuid and meta.get("uuid") == uuid), None)
 
 
@@ -236,15 +253,15 @@ def _set_oauth_account(meta: dict) -> None:
     """Replace oauthAccount in ~/.claude.json without losing a concurrent Claude Code write:
     re-check the file is unchanged right before the replace, retry from fresh content.
     ponytail: a microsecond window remains; Claude Code has no lock to join."""
+    sig = lambda st: (st.st_mtime_ns, st.st_size, st.st_ino)
     for _ in range(5):
         before = CLAUDE_JSON.stat()
         cfg = json.loads(CLAUDE_JSON.read_text(encoding="utf-8"))
         if not isinstance(cfg, dict):
             raise ValueError(f"{CLAUDE_JSON} is not a JSON object")
         cfg["oauthAccount"] = meta
-        now = CLAUDE_JSON.stat()
-        if (now.st_mtime_ns, now.st_size, now.st_ino) == (before.st_mtime_ns, before.st_size, before.st_ino):
-            _write_json_atomic(CLAUDE_JSON, cfg, before.st_mode & 0o777)
+        if _write_json_atomic(CLAUDE_JSON, cfg, before.st_mode & 0o777,
+                              lambda: sig(CLAUDE_JSON.stat()) == sig(before)):
             return
         time.sleep(0.05)
     raise OSError(f"{CLAUDE_JSON} kept changing; left as is")
@@ -277,7 +294,10 @@ def use(label: str, force: bool = False) -> dict:
         if owner:
             snaps[owner] = blob  # keep its rotated refresh token; its verified identity stays in the index
             _save_snapshot(owner, blob)
-        _kc_write(LIVE_SERVICE, _live_account(), json.dumps(snaps[label], separators=(",", ":")))
+        secret = json.dumps(snaps[label], separators=(",", ":"))
+        _kc_write(LIVE_SERVICE, _live_account(), secret)
+        if _kc_read(LIVE_SERVICE) != secret:  # what `claude` reads: service only, no account
+            raise AccountError(f"another {LIVE_SERVICE!r} item shadows the switched login")
         try:
             _set_oauth_account(idx[label]["oauthAccount"])
         except (OSError, ValueError) as exc:

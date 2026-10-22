@@ -65,6 +65,7 @@ def kc(tmp_path, monkeypatch):
     monkeypatch.setattr(ca, "LOCK", tmp_path / "aos" / "claude-account.lock")
     monkeypatch.setattr(ca, "CLAUDE_JSON", tmp_path / ".claude.json")
     monkeypatch.setattr(ca, "_running_claude", lambda: 0)
+    monkeypatch.setattr(ca, "_profile_owner", {})
     for v in ca.OVERRIDE_ENV:
         monkeypatch.delenv(v, raising=False)
     k.profiles = {}  # access token -> uuid
@@ -185,10 +186,10 @@ def test_use_unknown_target_refused_before_writes(two):
 def test_oauthaccount_write_failure_is_warning(two, monkeypatch):
     real = ca._write_json_atomic
 
-    def fail(path, data, mode):
+    def fail(path, *a):
         if path == ca.CLAUDE_JSON:
             raise OSError("disk full")
-        return real(path, data, mode)
+        return real(path, *a)
     monkeypatch.setattr(ca, "_write_json_atomic", fail)
     r = ca.use("a")
     assert r["ok"] and two.live() == creds("rt-a", "at-a")
@@ -361,3 +362,52 @@ def test_concurrent_claude_json_write_is_kept(two, monkeypatch):
     ca.use("a")
     cfg = json.loads(path.read_text())
     assert cfg["newSetting"] is True and cfg["oauthAccount"]["accountUuid"] == UUID_A
+
+
+def test_concurrent_write_during_staging_is_kept(two, monkeypatch):
+    real_chmod, hits = os.chmod, []
+
+    def chmod(path, mode):
+        real_chmod(path, mode)
+        if not hits and str(path).startswith(str(ca.CLAUDE_JSON.parent / ".")):
+            hits.append(1)  # Claude Code saves while our temp file is being staged
+            cfg = json.loads(ca.CLAUDE_JSON.read_text())
+            cfg["newSetting"] = 2
+            time.sleep(0.01)
+            ca.CLAUDE_JSON.write_text(json.dumps(cfg))
+    monkeypatch.setattr(ca.os, "chmod", chmod)
+    ca.use("a")
+    cfg = json.loads(ca.CLAUDE_JSON.read_text())
+    assert hits and cfg["newSetting"] == 2 and cfg["oauthAccount"]["accountUuid"] == UUID_A
+    assert not [p for p in ca.CLAUDE_JSON.parent.iterdir() if p.name.startswith(".claude.json.")]
+
+
+def test_unreadable_live_account_attribute_refuses(two, monkeypatch):
+    real = two.__call__
+
+    def broken(args, stdin=None):
+        if args == ["find-generic-password", "-s", ca.LIVE_SERVICE]:
+            return subprocess.CompletedProcess(args, 0, "garbage", "")
+        return real(args, stdin)
+    monkeypatch.setattr(ca, "_security", broken)
+    with pytest.raises(ca.AccountError, match="account"):
+        ca.use("a")
+    assert two.live() == creds("rt-b", "at-b")
+
+
+def test_shadowing_live_item_detected(two, monkeypatch):
+    # A second login item that service-only lookups (what `claude` does) hit first.
+    two.items = {(ca.LIVE_SERVICE, "zz-other"): json.dumps(creds("rt-b", "at-b")), **two.items}
+    monkeypatch.setattr(ca, "_live_account", lambda: "me")
+    with pytest.raises(ca.AccountError, match="shadows"):
+        ca.use("a")
+
+
+def test_profile_lookup_cached_per_refresh_token(two, monkeypatch):
+    two.set_live(creds("rt-b-rotated", "at-b3"))
+    two.profiles["at-b3"] = UUID_B
+    calls = []
+    real = ca._fetch_profile
+    monkeypatch.setattr(ca, "_fetch_profile", lambda tok: calls.append(tok) or real(tok))
+    assert ca.accounts()["active"] == "b" and ca.accounts()["active"] == "b"
+    assert len(calls) == 1

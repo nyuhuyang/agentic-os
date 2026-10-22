@@ -4732,6 +4732,16 @@ setInterval(_sttTick, 1000);
 setInterval(refreshJobBoard, 15000);
 setInterval(_flushPendingBoardRefresh, 1000);
 setInterval(() => updateWindows(), 60000);
+// A CLI swap or another tab can change the account: keep the picker on the real login (AGE-125).
+setInterval(async () => {
+  const sel = document.querySelector('.claude-account-select');
+  if (!sel || sel.disabled) return;
+  const r = await fetch('/api/claude-accounts').catch(() => null);
+  const data = r && r.ok ? await r.json().catch(() => null) : null;
+  if (!data) return;
+  sel.value = data.active || '';
+  if (sel.value !== (data.active || '')) sel.selectedIndex = -1;
+}, 60000);
 setInterval(_updateRuntimeChip, 30000);
 setInterval(() => {
   document.querySelectorAll('.win-pace-marker').forEach(marker => {
