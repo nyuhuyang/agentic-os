@@ -106,7 +106,7 @@
   /* Chart */
   .chart-box { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 16px 20px; margin-bottom: 20px; }
   .chart-title { font-size: calc(12px * var(--fs)); color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 12px; }
-  .chart-wrap { height: 140px; }
+  .chart-wrap { height: 170px; }
 
   /* Job board — kanban columns */
   .job-board { margin-bottom: 24px; }
@@ -770,7 +770,8 @@
     <!-- Activity chart -->
     <div class="chart-box">
       {% set _w, _a, _o = chart_data["work"] | sum, chart_data["agentic"] | sum, chart_data["other"] | sum %}
-      <div class="chart-title">Activity — last 30 days · {{ _w + _a + _o }} conversations · {{ _w }} work · {{ _a }} AgenticOS · {{ _o }} other</div>
+      {% set _total = _w + _a + _o %}
+      <div class="chart-title">Activity — last 30 days · {{ _total }} conversations · {{ _w }} work{% if _total %} ({{ (_w / _total * 100) | round | int }}%){% endif %} · {{ _a }} AgenticOS · {{ _o }} other</div>
       <div class="chart-wrap">
         <canvas id="activityChart"></canvas>
       </div>
@@ -1019,13 +1020,16 @@ new Chart(document.getElementById('activityChart'), {
   type: 'line',
   data: {
     labels: chartData.labels,
+    // Stacked fill, bottom to top: AgenticOS, Work, Other. A band's thickness is that
+    // kind's conversations; the top line's height is the day's total (AGE-128).
     datasets: [
-      ['Work', chartData.work, '#4caf50'],
       ['AgenticOS', chartData.agentic, '#e8723a'],
+      ['Work', chartData.work, '#4caf50'],
       ['Other', chartData.other, '#4fa3e0'],
     ].map(([label, data, color]) => ({
       label, data: data || [], borderColor: color, backgroundColor: color,
-      borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, fill: false, tension: 0.3,
+      borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, pointBackgroundColor: color,
+      fill: true, tension: 0.25, cubicInterpolationMode: 'monotone',
     }))
   },
   plugins: [crosshair],
@@ -1047,7 +1051,7 @@ new Chart(document.getElementById('activityChart'), {
     },
     scales: {
       x: { grid: { color: '#1e1e1e' }, ticks: { color: '#555', font: { size: 11 }, maxTicksLimit: 6 } },
-      y: { grid: { color: '#1e1e1e' }, ticks: { color: '#555', font: { size: 11 }, stepSize: 1 }, beginAtZero: true }
+      y: { stacked: true, grid: { color: '#1e1e1e' }, ticks: { color: '#555', font: { size: 11 }, stepSize: 1 }, beginAtZero: true }
     }
   }
 });
