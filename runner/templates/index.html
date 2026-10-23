@@ -379,6 +379,7 @@
   .session-row { display: flex; gap: 10px; align-items: center; padding: 3px 0; font-size: calc(12px * var(--fs)); }
   .session-agent { font-size: calc(10px * var(--fs)); padding: 1px 4px; border-radius: 3px; border: 1px solid var(--border); }
   .session-agent.codex { color: var(--green); } .session-agent.claude { color: var(--accent); }
+  .session-agent.dsh { color: #5b9cf6; }
   .session-copy.commit-todo { color: var(--green); border-color: var(--green); }
   .session-copy.commit-clean { color: var(--text-dim); border-color: var(--border); opacity: .6; }
   .session-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -803,7 +804,7 @@
     <section class="skill-panel" id="skill-panel">
       <div class="skill-panel-header">
         <div class="skill-panel-title">Projects</div>
-        <div class="skill-panel-subtitle">Registered projects and their Claude / Codex sessions, newest first</div>
+        <div class="skill-panel-subtitle">Registered projects and their Claude / Codex / DeepSeek sessions, newest first</div>
       </div>
 
 
@@ -1271,13 +1272,15 @@ function _sessionRow(key, s, commit = true) {
     }
   } else if (ed && ed.mode === 'remove') {
     const where = s.agent === 'codex' ? "it is archived the way Codex archives (its rollout moves to ~/.codex/archived_sessions); restore with Codex's unarchive"
+      : s.agent === 'dsh' ? 'its session folder moves to ~/.agentic-os/session-trash/dsh; restore by moving it back'
       : 'its transcript moves to ~/.agentic-os/session-trash; restore by moving it back';
-    title = `<span class="session-title" style="white-space:normal">Remove "${_esc(s.title)}"? It leaves this panel and ${s.agent === 'codex' ? 'codex resume' : 'claude --resume'} — ${where}.</span>`;
+    const resume = { codex: 'codex resume', claude: 'claude --resume', dsh: 'dsh --resume' }[s.agent] || 'the session picker';
+    title = `<span class="session-title" style="white-space:normal">Remove "${_esc(s.title)}"? It leaves this panel and ${resume} — ${where}.</span>`;
     actions = `<button class="session-copy" data-saction="confirm" ${ids} style="color:var(--red)">Remove</button><button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
   }
   return `
       <div class="session-row">
-        <span class="session-agent ${s.agent}">${s.agent === 'codex' ? 'CX' : 'CC'}</span>
+        <span class="session-agent ${_esc(s.agent)}" title="${_esc({codex: 'Codex', claude: 'Claude', dsh: 'DeepSeek'}[s.agent] || s.agent)}">${{codex: 'CX', claude: 'CC', dsh: 'DS'}[s.agent] || _esc(s.agent)}</span>
         ${title}
         <span class="session-meta">${_esc(s.branch || '')} · ${_ago(s.updated)}</span>
         ${err}${actions}
