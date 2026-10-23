@@ -1808,19 +1808,44 @@ def claude_memory_names(project: Project) -> list[str]:
     return sorted(p.name for p in mem.glob("*.md")) if mem.is_dir() else []
 
 
+_CODEX_ROWS: tuple = (None, 0.0, [])  # (DB + WAL stat signature, monotonic time, rows)
+_CODEX_ROWS_MAX_AGE_S = 5  # a WAL commit can publish after the files settle (BL-004): never trust a memo longer
+
+
+def _codex_rows() -> list[tuple]:
+    """One query for all projects of a listing, not one per project; changes show within 5 s."""
+    import sqlite3
+    global _CODEX_ROWS
+    sig = (str(CODEX_DB), *((st.st_mtime_ns, st.st_size) if (st := _stat_or_none(p)) else None
+                            for p in (CODEX_DB, CODEX_DB.with_name(CODEX_DB.name + "-wal"))))
+    now = time.monotonic()
+    if _CODEX_ROWS[0] == sig and now - _CODEX_ROWS[1] < _CODEX_ROWS_MAX_AGE_S:
+        return _CODEX_ROWS[2]
+    db = sqlite3.connect(f"file:{CODEX_DB}?mode=ro", uri=True)
+    try:
+        rows = db.execute(
+            "SELECT id, cwd, name, title, first_user_message, updated_at, tokens_used, git_branch, source "
+            "FROM threads WHERE archived = 0 AND source IN ('cli', 'vscode', 'exec')").fetchall()
+    finally:
+        db.close()
+    _CODEX_ROWS = (sig, now, rows)
+    return rows
+
+
+def _stat_or_none(p: Path):
+    try:
+        return p.stat()
+    except OSError:
+        return None
+
+
 def codex_sessions(project: Project, board_ids=None, labels=None) -> list[dict]:
     import sqlite3
     if not CODEX_DB.exists():
         return []
     roots = _session_roots(project)
     try:
-        db = sqlite3.connect(f"file:{CODEX_DB}?mode=ro", uri=True)
-        try:
-            rows = db.execute(
-                "SELECT id, cwd, name, title, first_user_message, updated_at, tokens_used, git_branch, source "
-                "FROM threads WHERE archived = 0 AND source IN ('cli', 'vscode', 'exec')").fetchall()
-        finally:
-            db.close()
+        rows = _codex_rows()
     except sqlite3.Error:
         return []  # format drift: degrade to no Codex rows, never crash the view
     out = []

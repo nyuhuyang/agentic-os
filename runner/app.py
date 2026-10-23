@@ -4905,16 +4905,21 @@ def api_projects():
     except _projects.ProjectError as exc:
         return jsonify({"projects": [], "error": str(exc), "registry_hash": registry_hash})
     out = []
+    commit_jobs = []
     board_ids, labels = _board_sessions()  # board-launched headless sessions, with their card ids (§9)
     for key, p in reg.items():
         try:  # one project's reader failure never hides the others
             sessions = _projects.project_sessions(p, board_ids, labels)
+            if p.commit:
+                commit_jobs.append((p, [{"cwd": s.get("cwd")} for s in sessions]))
+                sessions = _cached_commit_states(p, sessions)
             out.append({"key": key, "name": p.path.name, "kind": p.kind, "confidential": p.confidential, "no_push": p.no_push,
                         "commit": p.commit, "note": p.note, "entry": raw.get(key), "baseline": _BASELINES.get(key),
-                        "sessions": _with_commit_state(p, sessions) if p.commit else sessions,
-                        "memory": _projects.claude_memory_names(p)})
+                        "sessions": sessions, "memory": _projects.claude_memory_names(p)})
         except Exception as exc:
             out.append({"key": key, "error": f"session readers failed: {exc}", "entry": raw.get(key)})
+    if commit_jobs:
+        _request_commit_pass(commit_jobs)  # git status runs on the worker, never here (board latency)
     out += [{"key": key, "error": msg, "entry": raw.get(key)} for key, msg in errors.items()]
     for row in out:  # the folder's own name is what the panel shows; the key stays internal
         path = (row.get("entry") or {}).get("path") if isinstance(row.get("entry"), dict) else None
@@ -5186,6 +5191,83 @@ def _manual_merge(project, ident: str) -> str:
             return expect["head"]
 
 
+_COMMIT_TTL_S = 30
+_commit_lock = threading.Lock()  # guards everything below together (BL-002)
+_commit_cache: dict[tuple[str, str | None], dict | None] = {}  # (project key, session cwd) -> commit_state
+_commit_gen = 0  # bumped by a commit: a pass that started earlier is obsolete
+_commit_published: tuple[int, float] = (-1, 0.0)  # (generation, monotonic time) of the cache
+_commit_jobs: list = []  # [(project, sessions)] from the latest projects listing
+_commit_worker = False
+
+
+def _cached_commit_states(project, sessions: list[dict]) -> list[dict]:
+    """Commit colours without git on the request thread: the last pass's, None until one lands."""
+    with _commit_lock:
+        for s in sessions:
+            s["commit_state"] = _commit_cache.get((project.key, s.get("cwd")))
+    return sessions
+
+
+def _request_commit_pass(jobs: list) -> None:
+    """Start the single worker when the cache is stale or invalidated; one at a time."""
+    global _commit_jobs, _commit_worker
+    with _commit_lock:
+        _commit_jobs = jobs
+        gen, at = _commit_published
+        if _commit_worker or (gen == _commit_gen and time.monotonic() - at < _COMMIT_TTL_S):
+            return
+        _commit_worker = True
+    _launch_commit_worker()
+
+
+def _launch_commit_worker() -> None:
+    """Start the worker the caller just claimed (_commit_worker set under the lock)."""
+    global _commit_worker
+    try:
+        _start_commit_worker()
+    except BaseException:
+        with _commit_lock:
+            _commit_worker = False
+        raise
+
+
+def _start_commit_worker() -> None:
+    threading.Thread(target=_commit_pass_loop, daemon=True, name="commit-state").start()
+
+
+def _commit_pass_loop() -> None:
+    """Recompute every listed row; publish only if no commit happened meanwhile, else run again."""
+    global _commit_cache, _commit_published, _commit_worker
+    try:
+        while True:
+            with _commit_lock:
+                gen, jobs = _commit_gen, _commit_jobs
+            fresh: dict = {}
+            for project, sessions in jobs:
+                for s in _with_commit_state(project, [dict(s) for s in sessions]):
+                    fresh[(project.key, s.get("cwd"))] = s["commit_state"]
+            with _commit_lock:
+                if gen == _commit_gen:
+                    _commit_cache, _commit_published, _commit_worker = fresh, (gen, time.monotonic()), False
+                    break
+    except BaseException:
+        with _commit_lock:
+            _commit_worker = False
+        raise
+    socketio.emit("projects_commit_state", {})
+
+
+def _invalidate_commit_states() -> None:
+    """After a commit: a running pass reruns; an idle worker starts now, no listing needed (BL-005)."""
+    global _commit_gen, _commit_worker
+    with _commit_lock:
+        _commit_gen += 1
+        if _commit_worker or not _commit_jobs:
+            return
+        _commit_worker = True
+    _launch_commit_worker()
+
+
 def _with_commit_state(project, sessions: list[dict]) -> list[dict]:
     """Each row's Commit colour: one read-only status per checkout, shared by its sessions."""
     by_root: dict = {}  # keyed by checkout root: sessions in its subfolders share one status (CM-003)
@@ -5208,6 +5290,14 @@ def _main_commit_guard(project):
 def api_session_commit(key: str, agent: str, sid: str):
     """Manual Commit on a session row: every change in that session's checkout, local only."""
     body = request.get_json(silent=True) or {}
+    try:
+        return _session_commit(key, agent, sid, body)
+    finally:
+        if not body.get("dry_run"):  # even a failed commit or merge may have moved something
+            _invalidate_commit_states()  # the page's reload after this starts a fresh pass
+
+
+def _session_commit(key: str, agent: str, sid: str, body: dict):
     try:
         # Shared lifecycle hold for the whole commit: no path or policy change can slip in (SC-002).
         with _projects.project_lock(key):
