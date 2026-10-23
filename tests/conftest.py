@@ -13,6 +13,9 @@ def _private_home_dirs(tmp_path, monkeypatch):
     import projects
     monkeypatch.setattr(projects, "CARD_LOCK_DIR", tmp_path / "card-locks")
     monkeypatch.setattr(projects, "SESSION_TRASH", tmp_path / "session-trash")
+    # AGE-137: never start a real ai-memory server from a test, even on a checkout where the
+    # developer installed one. Tests that exercise the client build their own instance.
+    monkeypatch.setenv("AGENTIC_OS_AI_MEMORY", "0")
     # Session-name syncs can write native names: never the real ~/.claude or ~/.codex stores.
     monkeypatch.setattr(projects, "CLAUDE_PROJECTS", tmp_path / "claude-store")
     monkeypatch.setattr(projects, "CODEX_DB", tmp_path / "codex-store" / "state_5.sqlite")
