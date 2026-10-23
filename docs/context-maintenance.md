@@ -61,3 +61,4 @@
 - AGE-125: user saves both Claude accounts (`claude auth login` → `runner/claude_account.py save a`, same for b), then confirms `use` + dashboard picker; then archive plan `2026-10-21-claude-account-swap`
 - Multi-Project Dispatch: run the cross-provider Codex inspection of the build (base a8ab382) and spike (d2) for Codex, then dogfood one labelled ticket per project
 - AGE-137: run `sh scripts/install_ai_memory.sh` once in the main checkout after the merge, then dogfood one non-confidential ticket across two agents and read the page with `python3 runner/ai_memory.py brief <project> <TICKET>`
+- AGE-142: after the runner restarts, confirm the project page's session badge colours: DeepSeek green (`#7ec8a0`), Codex blue (`#6fb5d4`), Claude orange (`#e8a87c`); the session row had CX/DS swapped
