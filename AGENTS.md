@@ -100,6 +100,8 @@ agentic-os/
 2. Read `docs/context-maintenance.md` and `docs/generated/ACTIVE_TASKS.md`; open the relevant active plan.
 3. Read `SPEC.md` before touching any FR/NFR/AC — it is the source of truth.
 4. Read only task-relevant files, then run Definition of Done checks; there is no formal test suite.
+   Announce a long test/build command before starting it (one line: what and roughly how long), so the
+   user does not mistake a quiet stretch for a hang.
 5. Escalate to human for anything below.
 
 ## Graphify Usage
