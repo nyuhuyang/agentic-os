@@ -63,6 +63,13 @@ def cli(agent, repo, confidential):
     return pr.agent_cli(agent, project(repo, confidential), "claude", lambda: ["dsh", "--profile", "headless"])
 
 
+def test_prompt_asks_the_agent_to_announce_a_long_test_run(proj):
+    """AGE-140: a silent test run must not read as a hang; the agent says it is about to test."""
+    repo, _ = proj
+    prompt = pr.project_prompt("do the ticket", project(repo), {"branch": "agent/DEMO-1"}, "claude")
+    assert "Before running the test suite" in prompt and "look like a hang" in prompt
+
+
 def test_confidential_argv_has_no_bypass(proj):
     repo, _ = proj
     for agent in ("claude", "codex"):
