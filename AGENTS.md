@@ -112,7 +112,7 @@ agentic-os/
 ## CodeGraph
 
 - Symbol/caller/blast-radius lookups: `codegraph_explore` MCP tool (or `codegraph explore "<symbols>"`) before grep/Read
-- Ticket worktrees get the index only when the project lists `.codegraph` under `seed` in `projects.yaml`; no `.codegraph/` = skip CodeGraph
+- A fresh ticket worktree gets a snapshot of the main checkout's index automatically (`_copy_codegraph`); no `.codegraph/` = skip CodeGraph
 
 ## DeepSeek Delegation
 

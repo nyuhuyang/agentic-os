@@ -24,6 +24,7 @@ import shlex
 import shutil
 import stat as stat_module
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -1043,6 +1044,29 @@ def _copy_seeds(wt: Path, project: Project) -> None:
             raise ProjectError(f"seed {rel!r} is not ignored by the worktree's committed .gitignore rules")
 
 
+def _copy_codegraph(wt: Path, project: Project) -> None:
+    """Give a fresh worktree a snapshot of the main checkout's CodeGraph index (AGE-134).
+
+    Automatic for every project with a `.codegraph/codegraph.db`; best effort — no index
+    just means agents fall back to grep. The copy's own .gitignore ignores itself too, so
+    the worktree stays clean without a rule in the project's committed .gitignore.
+    """
+    src, dest = project.path / ".codegraph" / "codegraph.db", wt / ".codegraph"
+    if ".codegraph" in project.seed or not src.is_file() or src.is_symlink() or dest.is_symlink():
+        return
+    try:
+        dest.mkdir(exist_ok=True)
+        # backup(), not a file copy: a consistent snapshot even while the daemon writes the WAL
+        with contextlib.closing(sqlite3.connect(f"{src.as_uri()}?mode=ro", uri=True, timeout=5)) as s, \
+                contextlib.closing(sqlite3.connect(dest / "codegraph.db")) as d:
+            s.backup(d)
+        if not os.path.lexists(dest / ".gitignore"):  # a committed one already ignores the db
+            (dest / ".gitignore").write_text("*\n", encoding="utf-8")
+    except (OSError, sqlite3.Error):
+        with contextlib.suppress(OSError):
+            (dest / "codegraph.db").unlink()
+
+
 def _is_worktree_of(project: Project, wt: Path) -> bool:
     """True only when `wt` is itself the top level of a worktree of this project's repo
     (a subdirectory of one does not count)."""
@@ -1150,6 +1174,7 @@ def create_worktree(project: Project, ident: str) -> dict:
     try:
         os.chmod(wt, 0o700)
         _copy_seeds(wt, project)
+        _copy_codegraph(wt, project)
         # The binding is the "ready" marker: written only once every seed is copied and checked.
         meta = _binding_path(project, ident)
         meta.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
