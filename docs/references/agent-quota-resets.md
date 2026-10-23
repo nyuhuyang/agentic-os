@@ -38,7 +38,10 @@ Global reset times come from the trackers below. Each one matches a reset seen i
 
 - The weekly window is **anchored to a fixed time per account**. On the personal account,
   `seven_day.resets_at` read `2026-10-23T00:59:59Z` on both 10-16 and 10-17, with
-  `seven_day_breakdown.window_started_at` at `2026-10-16T00:59:59Z`. The team account's
+  `seven_day_breakdown.window_started_at` at `2026-10-16T00:59:59Z`. On 10-23 it read
+  `2026-10-30T01:00:00Z`, with the window started at `2026-10-23T01:00:00Z`: exactly +7 days,
+  even with no use at the boundary. The expired grant now reports `ineligible_reason: no_grant`.
+  The team account's
   limit errors said "weekly limit resets Oct 5 at 1am" and later "Oct 19 at 1am"
   (America/New_York). Both are Sundays, two weeks apart.
 - `five_hour` is a rolling window that starts at the first message after the previous one ends.
