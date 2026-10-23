@@ -25,6 +25,7 @@ graphify-out/
 .playwright-mcp/
 outputs/
 state/
+.tools/
 .pnpm-store/
 
 # Project registry (names private/client projects; repo is public)

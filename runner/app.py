@@ -28,6 +28,7 @@ import re
 import select
 import selectors
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -53,6 +54,7 @@ from state_io import file_lock, json_transaction, read_json, write_json_atomic, 
 import reset_gen
 import projects as _projects
 import project_runs
+import ai_memory
 
 _HERE = Path(__file__).resolve().parent              # runner/
 _PROTO = _HERE.parent                                # agentic-os root
@@ -879,9 +881,17 @@ def _persist_and_publish(run_id: str, fmt: str, sf, line: str) -> None:
 def _publish_run_line(run_id: str, fmt: str, line: str) -> None:
     """Every streamed stdout line of every run feeds the live terminal view (ring + socket)
     and, once announced, the job's agent session id (C, A/R02)."""
-    for shown in project_runs.render_event(fmt, line):
+    shown_lines = project_runs.render_event(fmt, line)
+    for shown in shown_lines:
         seq = project_runs.ring_for(run_id).append(shown)
         socketio.emit("run_event", {"run_id": run_id, "line": shown, "seq": seq})
+    # AGE-140: the card says what is running, with the test-run heads-up first (a quiet suite
+    # must not look like a hang). Every later tool call replaces it, so it does not go stale.
+    snippet = next((x for x in shown_lines if project_runs.TEST_NOTE_MARK in x), None) \
+        or next((x for x in shown_lines if "[tool]" in x), None)
+    if snippet:
+        snippet = re.sub(r"\x1b\[[0-9;]*m", "", snippet).replace("[runner] ", "").strip()
+        socketio.emit("run_progress", {"run_id": run_id, "event": "tool_use", "snippet": snippet})
     project_runs.note_agent_error(run_id, fmt, line)  # the agent's own failure text, for the record (D6)
     job = _running_jobs.get(run_id)
     if job is not None:
@@ -2529,7 +2539,9 @@ def _stream_dsh_run(
                 progress = {"state": "running", "stream_log": str(stream_path), "last_event_type": ev_type}
                 if ev_type == "tool_call":
                     tool_name = str(ev.get("tool") or "tool")
-                    snippet = f"[tool] {tool_name}: {str(ev.get('input', {}))[:80]}"
+                    test_cmd = project_runs.test_command_of("dsh", line)  # AGE-140: keep the test note on the card
+                    snippet = project_runs.test_note_text(test_cmd) if test_cmd \
+                        else f"[tool] {tool_name}: {str(ev.get('input', {}))[:80]}"
                     socketio.emit("run_progress", {"run_id": run_id, "snippet": snippet, "event": "tool_use"})
                     progress["tool_name"] = tool_name
                 elif ev_type == "tool_result":
@@ -3250,6 +3262,12 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
 
     def _emit(event, payload):
         job["last_progress_at"] = time.monotonic()  # streaming agent = progress (I5-07)
+        line = re.sub(r"\x1b\[[0-9;]*m", "", str((payload or {}).get("line") or "")) \
+            if isinstance(payload, dict) else ""
+        if event == "run_event" and (project_runs.TEST_NOTE_MARK in line or "[tool]" in line):
+            # AGE-140: the test heads-up and later tool calls both keep the card's status line current.
+            snippet = line.replace("[runner] ", "").strip()
+            socketio.emit("run_progress", {"run_id": run_id, "snippet": snippet, "event": "tool_use"})
         socketio.emit(event, payload)
 
     try:
@@ -3311,7 +3329,12 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
                     out["main_checkout_changed"] = True  # changed before or during a sanctioned change (R05)
                 return out
             tab_open = _main_path_tab_open(project.key)
-            cmd = _project_cmd(agent, project, project_runs.project_prompt(prompt, project, binding, agent),
+            # AGE-137: a fresh run gets the ticket's earlier-run notes. A resumed session already
+            # has its own context, and a confidential prompt never reaches the wiki.
+            memory_brief = "" if (resume_session or project.confidential) else ai_memory.brief(project.key, ident)
+            cmd = _project_cmd(agent, project,
+                               project_runs.with_memory_brief(
+                                   project_runs.project_prompt(prompt, project, binding, agent), memory_brief),
                                resume_session)
             if resume_session:
                 job["agent_session_id"] = resume_session  # in the live set before launch (A, R02)
@@ -3393,6 +3416,11 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
         else:
             prompt_rec = prompt
             output_rec = (output or "") + (f"\n\n[verify tail]\n{result['verify_tail']}" if result.get("verify_tail") else "")
+        # AGE-137: leave the next agent (often another provider) the run's outcome. Unknown
+        # confidentiality is treated like confidential: never write a prompt-derived summary.
+        if binding["confidential"] is False:
+            ai_memory.record_run(project_key, ident, run_id=run_id, agent=agent, status=status, title=title,
+                                 summary=output, verify=verify, result=result)
         # a continuation keeps its session even when none was observed (failed early, timeout, SBI-011)
         _write_run_log(skill, status, started_at, time.monotonic() - t0, prompt=prompt_rec, output=output_rec,
                        error=error, input_tokens=it, output_tokens=ot, agent_session_id=sid or resume_session,
@@ -3966,6 +3994,209 @@ def _latest_record(run_id: str) -> dict:
 # `resume_session {agent, id, project_key, gen}`; replies to that card continue exactly that
 # session in its own folder, under the project's policy, until a reset to Todo (§1–§4).
 
+_DSH_SESSIONS = Path(os.environ.get("DSH_HOME", "~/.dsh")).expanduser() / "sessions"
+
+
+def _dsh_zstd(data: bytes, *, decompress: bool = False) -> bytes:
+    """Use dsh's Node runtime, without booting a profile (which writes its config).
+    Each persisted batch is a separate frame; Node decodes only one frame per call."""
+    node = shutil.which("node") or "/opt/homebrew/bin/node"
+    script = """const fs = require('node:fs'), z = require('node:zlib');
+let input = fs.readFileSync(0), chunks = [], size = 0;
+if (process.argv[1] === 'decode') {
+  while (input.length) {
+    const r = z.zstdDecompressSync(input, {info:true, maxOutputLength:64*1024*1024});
+    if (!r.engine.bytesWritten) throw Error('invalid zstd frame');
+    size += r.buffer.length;
+    if (size > 64*1024*1024) throw Error('session log exceeds read limit');
+    chunks.push(r.buffer); input = input.subarray(r.engine.bytesWritten);
+  }
+} else chunks.push(z.zstdCompressSync(input));
+process.stdout.write(Buffer.concat(chunks));
+"""
+    try:
+        return subprocess.run([node, "-e", script, "decode" if decompress else "encode"],
+                              input=data, capture_output=True, check=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise _projects.ProjectError("could not read/write DeepSeek session compression") from exc
+
+
+def _dsh_paths(sid: str | None = None) -> list[Path]:
+    """Newest supported generation per session directory; never follow store escapes."""
+    store = _DSH_SESSIONS.resolve()
+    out = []
+    for directory in _DSH_SESSIONS.glob(f"*/{sid or '*'}"):
+        if not directory.is_dir() or directory.is_symlink() or directory.parent.is_symlink() \
+                or not directory.resolve().is_relative_to(store):
+            continue
+        generations = []
+        for path in directory.glob("session*.jsonl*"):
+            match = re.fullmatch(r"session(?:\.v([1-9][0-9]*))?\.jsonl(?:\.zstd)?", path.name)
+            if match and path.is_file() and not path.is_symlink():
+                generations.append((int(match[1] or 0), path))
+        if generations:
+            version, path = max(generations)
+            if version <= 4:  # never edit or misinterpret a future physical format
+                out.append(path)
+    return out
+
+
+@functools.lru_cache(maxsize=128)
+def _dsh_summary(path: Path, mtime_ns: int, size: int) -> dict | None:
+    if size > 64 * 1024 * 1024:
+        return None
+    raw = path.read_bytes()
+    if path.suffix == ".zstd":
+        raw = _dsh_zstd(raw, decompress=True)
+    lines = raw.decode("utf-8").splitlines()
+    header = json.loads(lines[0]) if lines else None
+    if not isinstance(header, dict) or header.get("type") != "session" \
+            or header.get("id") != path.parent.name or header.get("parentSession") \
+            or header.get("delegationDepth", 0) != 0:
+        return None  # subagents do not have independent project rows
+    sid, cwd = header.get("id"), header.get("cwd")
+    if not isinstance(sid, str) or not _projects._SESSION_ID.fullmatch(sid) \
+            or not isinstance(cwd, str) or not os.path.isabs(cwd):
+        return None
+    title, first, seq = None, None, -1
+    appendable = raw.endswith(b"\n")
+    for line in lines[1:]:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            appendable = False
+            continue  # a live writer may not have completed the last line
+        if not isinstance(event, dict):
+            continue
+        if isinstance(event.get("seq"), int):
+            seq = max(seq, event["seq"])
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        if event.get("type") == "session/title" and isinstance(data.get("title"), str):
+            title = data["title"]
+        elif event.get("type") == "user/message" and first is None:
+            content = data.get("content")
+            if isinstance(content, list):
+                content = " ".join(b.get("text", "") for b in content
+                                   if isinstance(b, dict) and isinstance(b.get("text"), str))
+            if isinstance(content, str) and content.strip():
+                first = content.strip()[:200]
+    return {"agent": "dsh", "id": sid, "cwd": cwd, "path": path,
+            "title": title or first or "untitled", "native_title": title,
+            "updated": mtime_ns / 1e9, "seq": seq, "version": header.get("version"),
+            "appendable": appendable}
+
+
+def _dsh_read(path: Path) -> dict | None:
+    try:
+        st = path.stat()
+        row = _dsh_summary(path, st.st_mtime_ns, st.st_size)
+        return dict(row) if row else None
+    except (OSError, ValueError, _projects.ProjectError):
+        return None  # one corrupt or actively written log never hides the project
+
+
+def _find_session(agent: str, sid: str) -> dict | None:
+    if agent != "dsh":
+        return _projects.find_session(agent, sid)
+    if not isinstance(sid, str) or not _projects._SESSION_ID.fullmatch(sid):
+        return None
+    return max((row for path in _dsh_paths(sid) if (row := _dsh_read(path))),
+               key=lambda row: row["updated"], default=None)
+
+
+def _session_target(project, agent: str, sid: str, board_ids=None) -> dict:
+    if agent != "dsh":
+        return _projects.session_target(project, agent, sid, board_ids=board_ids)
+    target = _find_session(agent, sid)
+    if not target or not _projects._under_resolved(target["cwd"], _projects._session_roots(project)):
+        raise _projects.SessionNotFound("no such DeepSeek session in this project")
+    return target
+
+
+def _project_sessions(project, board_ids=None, labels=None) -> list[dict]:
+    rows = _projects.project_sessions(project, board_ids, labels)
+    for path in _dsh_paths():
+        target = _dsh_read(path)
+        if target and _projects._under_resolved(target["cwd"], _projects._session_roots(project)):
+            row = {k: target[k] for k in ("agent", "id", "cwd", "title", "updated")}
+            row.update(branch=None, tokens=None,
+                       resume=f"cd {shlex.quote(target['cwd'])} && dsh --profile tui --resume {shlex.quote(target['id'])}")
+            rows.append(_projects._with_label(row, labels))
+    rows.sort(key=lambda row: row["updated"], reverse=True)
+    return rows[:_projects.MAX_SESSIONS]
+
+
+@contextlib.contextmanager
+def _dsh_write_lease(target: dict):
+    """Share the native dsh kernel lock, including against idle external TUI sessions."""
+    path = target["path"]
+    if path not in _dsh_paths(target["id"]):
+        raise _projects.SessionNotFound("DeepSeek session was moved or removed")
+    fd = os.open(path.parent / "session.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise _projects.SessionBusy("DeepSeek session is open in another process") from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def _rename_session(target: dict, title: object) -> str:
+    if target["agent"] != "dsh":
+        return _projects.rename_session(target, title)
+    title = _projects._clean_title(title)
+    with _dsh_write_lease(target):
+        current = _dsh_read(target["path"])
+        if not current or current["version"] != 4 or not current["appendable"]:
+            raise _projects.ProjectError("DeepSeek session format does not support rename")
+        if current["native_title"] == title:
+            return title
+        line = (json.dumps({"type": "session/title", "seq": current["seq"] + 1,
+                            "time": int(time.time() * 1000),
+                            "data": {"title": title, "messageSeqs": [], "source": {"kind": "user"}}},
+                           ensure_ascii=False) + "\n").encode()
+        path = target["path"]
+        if path.suffix == ".zstd":
+            line = _dsh_zstd(line)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+        try:
+            st = os.fstat(fd)
+            try:
+                if os.write(fd, line) != len(line):
+                    raise OSError("short DeepSeek title write")
+                os.fsync(fd)
+            except BaseException:
+                os.ftruncate(fd, st.st_size)
+                raise
+            finally:
+                os.utime(fd, ns=(st.st_atime_ns, st.st_mtime_ns))
+        finally:
+            os.close(fd)
+    return title
+
+
+def _remove_session(target: dict) -> dict:
+    if target["agent"] != "dsh":
+        return _projects.remove_session(target)
+    with _dsh_write_lease(target):
+        directory = target["path"].parent
+        trash = _projects.SESSION_TRASH / "dsh" / directory.parent.name
+        if trash.parent.is_symlink() or trash.is_symlink():
+            raise _projects.ProjectError("DeepSeek session trash must not be a symlink")
+        trash.mkdir(parents=True, exist_ok=True)
+        if not trash.resolve().is_relative_to(_projects.SESSION_TRASH.resolve()):
+            raise _projects.ProjectError("DeepSeek session trash escapes its store")
+        destination = trash / directory.name
+        if destination.exists() or destination.is_symlink():
+            raise _projects.ProjectError("DeepSeek session already exists in trash")
+        os.rename(directory, destination)  # same-filesystem move, never delete conversation data
+    return {"removed": target["id"], "trash": str(destination)}
+
+
 _RECORDS_CACHE: dict = {}
 
 
@@ -4046,7 +4277,7 @@ def _valid_intent(rec: dict | None) -> dict | None:
     current (§1); None otherwise. Any reset to Todo bumps the generation and voids it."""
     rec = rec or {}
     intent, issue_id = rec.get("resume_session"), rec.get("linear_issue_id")
-    if not isinstance(intent, dict) or not issue_id or intent.get("agent") not in ("claude", "codex") \
+    if not isinstance(intent, dict) or not issue_id or intent.get("agent") not in _SESSION_AGENTS \
             or not intent.get("id") or not intent.get("project_key"):
         return None
     latest = _intent_latest(issue_id)
@@ -4200,7 +4431,7 @@ def api_session_to_board(key: str, agent: str, sid: str):
             project = _projects.get_project(key, _projects.load_registry(errors={}))
             board_ids, _labels = _board_sessions()
             with _projects.session_lock(agent, sid):  # everything below runs inside (STB-027)
-                target = _projects.session_target(project, agent, sid, board_ids=board_ids)
+                target = _session_target(project, agent, sid, board_ids=board_ids)
                 if (agent, sid) in _live_session_ids() or any(
                         j.get("agent_session_id") == sid for j in list(_running_jobs.values())):
                     return _card_refusal({"error": "still running"}, 409, agent=agent, session_id=sid)
@@ -4225,9 +4456,9 @@ def _session_card(agent: str, sid: str) -> str | None:
 
 # ── One task, one session, named by the card title (2026-10-16 plan §2–§4) ───────────────
 # A card-bound session is named by its card's title, natively too, and every launch of a card
-# continues the card's own session. Only claude and codex sessions; dsh is out of scope.
+# continues the card's own session, including DeepSeek sessions (AGE-142).
 
-_SESSION_AGENTS = ("claude", "codex")
+_SESSION_AGENTS = ("claude", "codex", "dsh")
 _CLOSING_SESSIONS: dict[tuple[str, str], int] = {}  # (agent, sid) -> pgid of a run still exiting (R6)
 _CLOSING_LOCK = threading.Lock()  # every marker read-check-remove and replacement (R7-02)
 
@@ -4333,7 +4564,7 @@ def _card_sessions(live_only: bool = True) -> dict[tuple[str, str], str]:
 def _card_session(issue_id: str | None, agent: str | None) -> tuple[str, dict] | None:
     """The card's own session for this agent: the newest record of the issue with that agent and
     a session id, across every reset generation (D3), skipping audits and archived records. None
-    when the card is gone (DP-43) or the agent is not claude/codex (DP-22)."""
+    when the card is gone (DP-43) or the agent is unsupported."""
     agent = canonical_agent(agent) or agent
     if not issue_id or agent not in _SESSION_AGENTS or _tracker_issue(issue_id) is None:
         return None
@@ -4424,7 +4655,7 @@ def _sync_card_session_names(issue_id: str | None, *, title: str | None = None, 
             for (agent, sid), iid in _card_sessions(live_only=False).items():
                 if iid != issue_id:
                     continue
-                target = _projects.find_session(agent, sid)
+                target = _find_session(agent, sid)
                 if not target or target.get("native_title") == name:
                     continue
                 try:
@@ -4432,7 +4663,7 @@ def _sync_card_session_names(issue_id: str | None, *, title: str | None = None, 
                         if not _rename_idle(target, issue_id, ended):
                             busy.add((agent, sid))
                             continue
-                        _projects.rename_session(target, name)
+                        _rename_session(target, name)
                 except _projects.SessionBusy:
                     busy.add((agent, sid))
                 except Exception as exc:
@@ -4520,7 +4751,7 @@ def _resumable_card_session(issue_id: str | None, agent: str | None, folder: str
     (None, reason) for the run view's `new session: <reason>` note (§4)."""
     agent = canonical_agent(agent) or agent
     if agent not in _SESSION_AGENTS:
-        return None, "only claude and codex sessions continue"
+        return None, "this agent does not support session continuation"
     found = _card_session(issue_id, agent)
     if not found:
         other = any(_card_session(issue_id, a) for a in _SESSION_AGENTS if a != agent)
@@ -4530,7 +4761,7 @@ def _resumable_card_session(issue_id: str | None, agent: str | None, folder: str
     other = latest and (canonical_agent(latest.get("agent")) or latest.get("agent"))
     if other and other != agent:  # switched away since: that session lacks the later turns (AGE-114 D4)
         return None, f"the card's latest session belongs to {other}"
-    target = _projects.find_session(agent, sid)
+    target = _find_session(agent, sid)
     if not target:
         return None, "the card's session was removed or archived"
     if folder is not None and os.path.realpath(target["cwd"]) != os.path.realpath(str(folder)):
@@ -4542,7 +4773,7 @@ def _resume_admission(issue_id: str | None, agent: str, sid: str, run_id: str) -
     """Why a dispatch may not continue this session now, or None: live in the dashboard, open
     outside it (DP-25), or held by a rename/sync (SessionBusy at claim, DP-13). On None the
     session is claimed for `run_id`."""
-    target = _projects.find_session(agent, sid)
+    target = _find_session(agent, sid)
     if not target:
         return "the card's session was removed or archived"
     if (agent, sid) in {(canonical_agent(a) or a, s) for a, s in _live_session_ids()}:
@@ -4678,7 +4909,7 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
     run_agent, run_sid = (switch_to, None) if switch_to else (agent, sid)  # who runs, resuming what
     try:
         project = _projects.get_project(intent["project_key"], _projects.load_registry(errors={}))
-        target = _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])
+        target = _session_target(project, agent, sid, board_ids=_board_sessions()[0])
     except _projects.ProjectError as exc:  # gone, moved outside the project, or unregistered
         return jsonify({"ok": False, "error": f"session not available: {exc}"}), 409
     # a dashboard terminal on this card or session: the page offers to end it, not "send anyway"
@@ -4921,7 +5152,7 @@ def api_projects():
     board_ids, labels = _board_sessions()  # board-launched headless sessions, with their card ids (§9)
     for key, p in reg.items():
         try:  # one project's reader failure never hides the others
-            sessions = _projects.project_sessions(p, board_ids, labels)
+            sessions = _project_sessions(p, board_ids, labels)
             if p.commit:
                 commit_jobs.append((p, [{"cwd": s.get("cwd")} for s in sessions]))
                 sessions = _cached_commit_states(p, sessions)
@@ -5100,7 +5331,7 @@ _SESSION_CLAIMS: dict[str, tuple[str, str]] = {}  # run_id -> (agent, session_id
 
 
 def _claim_session(agent: str, sid: str | None, run_id: str) -> None:
-    if sid and agent in ("claude", "codex"):
+    if sid and agent in _SESSION_AGENTS:
         with _projects.session_lock(agent, sid):
             if _closing_live(agent, sid):  # unconditional: no confirmation overrides live processes (R6-01)
                 raise _projects.SessionBusy(f"session {sid} still has processes from its last run; try again shortly")
@@ -5130,7 +5361,7 @@ def _session_action(key: str, agent: str, sid: str, act):
         project = _projects.get_project(key, _projects.load_registry(errors={}))
         board_ids = _board_sessions()[0]
         with _projects.session_lock(agent, sid):
-            target = _projects.session_target(project, agent, sid, board_ids=board_ids)
+            target = _session_target(project, agent, sid, board_ids=board_ids)
             _projects.check_session_idle(target, _live_session_ids())
             result = act(target)
     except _projects.SessionNotFound as exc:
@@ -5150,7 +5381,7 @@ def api_session_rename(key: str, agent: str, sid: str):
     issue_id = _card_sessions().get((canonical_agent(agent) or agent, sid))
     if issue_id:  # a card's session is named by the card: rename the card (D2, §3)
         return _rename_card_session(key, agent, sid, issue_id, title)
-    return _session_action(key, agent, sid, lambda t: {"title": _projects.rename_session(t, title)})
+    return _session_action(key, agent, sid, lambda t: {"title": _rename_session(t, title)})
 
 
 def _rename_card_session(key: str, agent: str, sid: str, issue_id: str, title: object):
@@ -5158,7 +5389,7 @@ def _rename_card_session(key: str, agent: str, sid: str, issue_id: str, title: o
     validate, change the card title through the tracker (strict), then rename the sessions."""
     try:
         project = _projects.get_project(key, _projects.load_registry(errors={}))
-        _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])  # this project's row
+        _session_target(project, agent, sid, board_ids=_board_sessions()[0])  # this project's row
         clean = _projects._clean_title(title)  # before any write (DP-17)
     except _projects.SessionNotFound as exc:
         return jsonify({"error": str(exc)}), 404
@@ -5316,7 +5547,7 @@ def _session_commit(key: str, agent: str, sid: str, body: dict):
             project = _projects.get_project(key, _projects.load_registry(errors={}))
             if not project.commit:
                 raise _projects.ProjectError("Commit is off for this project (Edit to turn it on)")
-            target = _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])
+            target = _session_target(project, agent, sid, board_ids=_board_sessions()[0])
             # commit_checkout always runs git sandboxed, so no policy snapshot can go stale (SC-001/006)
             result = _projects.commit_checkout(project, target["cwd"], body.get("message"),
                                                dry_run=bool(body.get("dry_run")),
@@ -5333,7 +5564,7 @@ def _session_commit(key: str, agent: str, sid: str, body: dict):
 
 @app.route("/api/projects/<key>/sessions/<agent>/<sid>/remove", methods=["POST"])
 def api_session_remove(key: str, agent: str, sid: str):
-    return _session_action(key, agent, sid, _projects.remove_session)
+    return _session_action(key, agent, sid, _remove_session)
 
 
 @app.route("/api/projects/<key>/tree")
@@ -5476,8 +5707,8 @@ def api_run_detail(run_id: str):
                     r["resume_agent"] = intent["agent"]
                     with contextlib.suppress(Exception):
                         project = _projects.get_project(intent["project_key"], _projects.load_registry(errors={}))
-                        target = _projects.session_target(project, intent["agent"], intent["id"],
-                                                          board_ids=_board_sessions()[0])
+                        target = _session_target(project, intent["agent"], intent["id"],
+                                                 board_ids=_board_sessions()[0])
                         r["session_cwd"] = target["cwd"]
                         r["in_use_elsewhere"] = session_in_use(target, None, _own_activity_end(r["linear_issue_id"]))
                 return jsonify(r)
@@ -5815,7 +6046,7 @@ def api_run_retry(run_id: str):
         if _newest and _newest != run_id:
             return jsonify({"ok": False, "error": "a newer attempt exists on this card; reply from the latest attempt"}), 409
     intent = _valid_intent(original)
-    if intent and _projects.find_session(intent["agent"], intent["id"]) is None:
+    if intent and _find_session(intent["agent"], intent["id"]) is None:
         # removed or archived (or a Codex thread without its rollout): the card starts fresh, with
         # the reason, through the ordinary admission below (R12-01)
         intent = None
@@ -5881,7 +6112,7 @@ def api_run_retry(run_id: str):
         if _lock_session_id and _card_sessions(live_only=False).get((sess_agent, _lock_session_id)) not in (None, linear_issue_id):
             _lock_session_id = None  # the lock's session now belongs to another card (R3-03)
         sid = _lock_session_id or (_card_session(linear_issue_id, sess_agent) or (None, None))[0]
-        target = _projects.find_session(sess_agent, sid) if sid else None
+        target = _find_session(sess_agent, sid) if sid else None
         project_key = (bound or {}).get("project_key") or original.get("session_project")
         if not sid:
             card_note = "new session: " + (_resumable_card_session(linear_issue_id, sess_agent, None)[1] or "no session yet")
