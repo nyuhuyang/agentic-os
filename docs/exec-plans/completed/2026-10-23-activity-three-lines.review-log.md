@@ -27,3 +27,25 @@ Result: /tmp/age128-claudex/r2/claudex-6ds6zy1l/result.json.
 ## Plan review round 3 — codex — APPROVED
 
 Result: /tmp/age128-claudex/r3/claudex-ceqc0_db/result.json; `check` confirms approval matches the current plan (cross_provider).
+
+## Build — claude (host) — base e4c8a78
+
+Changed: runner/app.py (build_chart_data three-way split, _confidential_keys), runner/modules/pty/__init__.py (handoff records persist `confidential`), runner/templates/index.html (three lines, footer, title), tests/test_activity_chart.py (new), tests/test_terminals.py (handoff flag assertion).
+
+## Code inspection round 1 — codex — REVISE
+
+Result: /tmp/age128-claudex/i1/claudex-wc52pdpt/result.json (cross_provider).
+
+- AGE128-R1 (medium) tooltip footer summed only legend-visible lines → ACCEPTED: footer now reads the day's three data arrays. Browser check: Work 2 / AgenticOS 3 / Other 5 → "Total: 10 · Work: 20%" with all lines shown, Other hidden, and Work+Other hidden.
+
+## Code inspection round 2 — codex — APPROVED
+
+Result: /tmp/age128-claudex/i2/claudex-jektn7wv/result.json (cross_provider, fresh session, base e4c8a78). No findings.
+
+## Proof
+
+- py_compile runner/*.py + pty module: pass.
+- Full suite (main venv): 949 passed.
+- Isolated runner 8599 + Chrome: three lines, hover/click tooltip and footer correct, crosshair active, broken registry still 200.
+
+Completed 2026-10-23; plan rounds 3, inspection rounds 2, assurance cross_provider.

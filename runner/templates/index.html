@@ -768,7 +768,8 @@
 
     <!-- Activity chart -->
     <div class="chart-box">
-      <div class="chart-title">Activity — last 30 days · {{ chart_data["values"] | sum }} conversations · {{ chart_data["work"] | sum }} outside AgenticOS</div>
+      {% set _w, _a, _o = chart_data["work"] | sum, chart_data["agentic"] | sum, chart_data["other"] | sum %}
+      <div class="chart-title">Activity — last 30 days · {{ _w + _a + _o }} conversations · {{ _w }} work · {{ _a }} AgenticOS · {{ _o }} other</div>
       <div class="chart-wrap">
         <canvas id="activityChart"></canvas>
       </div>
@@ -997,9 +998,9 @@
 <script>
 // Activity chart
 const pageDataEl = document.getElementById('page-data');
-const chartData = JSON.parse(pageDataEl?.dataset.chartData || '{"labels":[],"values":[]}');
+const chartData = JSON.parse(pageDataEl?.dataset.chartData || '{"labels":[]}');
 const errorRuns = JSON.parse(pageDataEl?.dataset.errorRuns || '[]');
-// Hover or click a day: a crosshair plus both counts for that day, like a stock chart
+// Hover or click a day: a crosshair plus that day's counts, like a stock chart
 const crosshair = {
   id: 'crosshair',
   afterDatasetsDraw(chart) {
@@ -1017,27 +1018,14 @@ new Chart(document.getElementById('activityChart'), {
   type: 'line',
   data: {
     labels: chartData.labels,
-    datasets: [{
-      label: 'All conversations',
-      data: chartData.values,
-      borderColor: '#e8723a',
-      backgroundColor: 'rgba(232,114,58,0.08)',
-      borderWidth: 2,
-      pointRadius: 0,
-      pointHoverRadius: 4,
-      fill: true,
-      tension: 0.3,
-    }, {
-      label: 'Outside AgenticOS',
-      data: chartData.work || [],
-      borderColor: '#4fa3e0',
-      backgroundColor: 'rgba(79,163,224,0.10)',
-      borderWidth: 2,
-      pointRadius: 0,
-      pointHoverRadius: 4,
-      fill: true,
-      tension: 0.3,
-    }]
+    datasets: [
+      ['Work', chartData.work, '#4caf50'],
+      ['AgenticOS', chartData.agentic, '#e8723a'],
+      ['Other', chartData.other, '#4fa3e0'],
+    ].map(([label, data, color]) => ({
+      label, data: data || [], borderColor: color, backgroundColor: color,
+      borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, fill: false, tension: 0.3,
+    }))
   },
   plugins: [crosshair],
   options: {
@@ -1048,9 +1036,10 @@ new Chart(document.getElementById('activityChart'), {
       legend: { display: true, labels: { color: '#888', boxWidth: 10, font: { size: 11 } } },
       tooltip: {
         callbacks: {
-          footer: items => {
-            const all = items[0]?.parsed.y || 0, work = items[1]?.parsed.y || 0;
-            return all ? `AgenticOS: ${all - work} (${Math.round((all - work) / all * 100)}%)` : '';
+          footer: items => {  // from the day's data, so a line hidden in the legend still counts
+            const i = items[0]?.dataIndex, work = chartData.work?.[i] || 0;
+            const total = work + (chartData.agentic?.[i] || 0) + (chartData.other?.[i] || 0);
+            return total ? `Total: ${total} · Work: ${Math.round(work / total * 100)}%` : '';
           }
         }
       }

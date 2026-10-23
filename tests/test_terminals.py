@@ -272,11 +272,12 @@ def test_confidential_tab_refused_and_handoff_withheld_when_records_unsafe(env, 
     assert "outside the checkout" in out["error"]
     a = open_tab(c, kind="shell", project_key="alpha")  # non-confidential: allowed
     logged = []
-    monkeypatch.setattr(tpty, "_write_run_log", lambda *args, **kw: logged.append(kw["prompt"]))
+    monkeypatch.setattr(tpty, "_write_run_log", lambda *args, **kw: logged.append(kw))
     t = tpty.TERMINALS[a["term_id"]]
     t.project_key, t.pending_handoff = "beta", {"skill": "s", "run_id": "r"}  # registry says confidential
     tpty._record_pending_handoff(t, f"run {SENTINEL}", app_mod.socketio)
-    assert logged and SENTINEL not in logged[0]
+    assert logged and SENTINEL not in logged[0]["prompt"]
+    assert logged[0]["extra"]["confidential"] is True  # stays work on the Activity chart (AGE-128)
 
 
 def test_project_tab_holds_the_project_lifecycle_lock(env):
