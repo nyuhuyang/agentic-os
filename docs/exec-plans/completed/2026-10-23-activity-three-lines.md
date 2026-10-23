@@ -117,3 +117,7 @@ The chart exposes only per-day counts on the local dashboard; no project names o
 - [x] Fresh cross-provider code inspection of the change.
 - [x] Record validation in `docs/context-maintenance.md`.
 - [x] Commit on `agent/AGE-128`.
+
+## Revision 2026-10-23 — one stacked chart
+
+User feedback after completion: do not show three separate curves. Use one combined chart, AgenticOS at the bottom, Work in the middle, Other on top, where a band's thickness is that kind's conversations and the top line's height is the day's total. Implemented in the same three datasets with `fill` plus `y.stacked` (no server change), title now carries the Work share. Checked in headless Chromium against this chart code with sample data: Oct 20 = AgenticOS 2 / Work 4 / Other 2, `Total: 8 · Work: 50%`; legend toggles re-stack cleanly once the animation settles.
