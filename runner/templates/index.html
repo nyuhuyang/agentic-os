@@ -1280,7 +1280,7 @@ function _sessionRow(key, s, commit = true) {
   }
   return `
       <div class="session-row">
-        <span class="session-agent ${_esc(s.agent)}" title="${_esc({codex: 'Codex', claude: 'Claude', dsh: 'DeepSeek'}[s.agent] || s.agent)}">${{codex: 'CX', claude: 'CC', dsh: 'DS'}[s.agent] || _esc(s.agent)}</span>
+        <span class="session-agent ${_esc(s.agent)}" title="${_esc(_agentName(s.agent) || s.agent)}">${({codex: 'CX', claude: 'CC', dsh: 'DS'})[s.agent] || _esc(s.agent)}</span>
         ${title}
         <span class="session-meta">${_esc(s.branch || '')} · ${_ago(s.updated)}</span>
         ${err}${actions}
