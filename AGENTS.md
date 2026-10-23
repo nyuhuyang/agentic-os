@@ -119,7 +119,7 @@ agentic-os/
 Delegate reviews, metric analysis, strategy comparisons, second opinions, and docs synthesis with `runner/scripts/ask_deepseek.py`.
 Key: env or `~/.deepseek/config.toml`. Only the direct-API mode works: `--agentic` needs the removed Rust `deepseek` CLI.
 
-Dashboard agents are `claude`, `codex` and `dsh` (labelled "DeepSeek", runs `dsh --profile headless --json`). Old ids `deepseek`, `deepseek-tui` and `aider` are aliased to `dsh` on read; stored records are never rewritten. `dsh` is rejected for confidential projects (its sandbox leaves shell network open).
+Dashboard agents are `claude`, `codex` and `dsh` (labelled "DeepSeek", runs `dsh --profile headless --json`). Old ids `deepseek`, `deepseek-tui` and `aider` are aliased to `dsh` on read; stored records are never rewritten. `dsh` is allowed for confidential projects only through the runner's Seatbelt runner (`runner/dsh_confine.py` + `runner/scripts/dsh-confidential.yml`): shell network and the DNS/trustd/nsurlsessiond proxy paths are closed, writes stay in the worktree (or a session's own folder) and `/private/tmp`; the runner's spill directory is intentionally not shell-writable, the web/working-directory/native-fs tools are off, sessions are not resumed, and the runner commits leftover changes. Non-confidential dsh keeps its native sandbox.
 Do not delegate visual/chart/browser/clipboard tasks.
 
 ## Escalation — Do Not Proceed Without Human Confirmation

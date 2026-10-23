@@ -31,6 +31,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 import uuid
@@ -2701,7 +2702,14 @@ def _claude_bin() -> str:
 
 
 def _project_cmd(agent: str, project, prompt: str, resume_session: str | None) -> list[str]:
-    cli = project_runs.agent_cli(agent, project, _claude_bin(), dsh_cli.cli_prefix)
+    if agent == "dsh" and project.confidential and resume_session:
+        # AGE-139: a stored dsh session can carry its own sandbox/approval events; the patch
+        # cannot prove the effective mode. A fresh session is the only confidential form.
+        raise project_runs.ProjectRunError(
+            "confidential dsh does not resume a stored session (it can carry a wider sandbox mode); "
+            "start a new session")
+    cli = project_runs.agent_cli(agent, project, _claude_bin(), dsh_cli.cli_prefix,
+                                 dsh_cli.confidential_cli_prefix)
     if agent == "claude":
         resume = ["--resume", resume_session] if resume_session else []
         return cli + resume + [prompt, "--output-format", "stream-json"]
@@ -2742,12 +2750,156 @@ def _parse_project_output(agent: str, lines: list[str], stderr: str, returncode:
     return events.final or "", it, ot, None, events.session_id, bool(ok and events.final is not None), err
 
 
-def _project_exec_env(agent: str, project) -> dict:
+_CONFINE_TEMP_PREFIXES = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
+# AGE-139: these names make a child load code or configuration before dsh's sandbox exists.
+# They are removed after project env, not trusted as project configuration.
+_CONFINE_BOOTSTRAP_ENV = frozenset({
+    "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED",
+    "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "DYLD_INSERT_LIBRARIES",
+    "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS",
+    "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+    "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
+    "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EXTERNAL_DIFF", "GIT_PAGER", "GIT_EDITOR",
+    "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT",
+    "EDITOR", "VISUAL", "PAGER", "BROWSER", "DEEPSEEK_BASE_URL", "DEEPSEEK_SEARCH_BASE_URL",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+})
+
+
+def _under(path: str, *roots: str) -> bool:
+    return any(path == root or path.startswith(root + os.sep) for root in roots)
+
+
+def _expand_home(raw: str, home: Path) -> Path:
+    if raw == "~":
+        return home
+    if raw.startswith("~/"):
+        return home / raw[2:]
+    return Path(raw)
+
+
+def _confine_home(env: dict[str, str], name: str, default: Path, root: str, tmp: str,
+                  effective_home: Path) -> Path:
+    """Resolve and validate one dsh user-data root from the final launch environment."""
+    raw = env.get(name)
+    if raw is not None and raw.strip():
+        if raw.startswith("~") and raw != "~" and not raw.startswith("~/"):
+            raise project_runs.ProjectRunError(
+                f"confidential dsh: {name} must be an absolute path or ~/...")
+        if not os.path.isabs(os.path.expanduser(raw)) and raw != "~" and not raw.startswith("~/"):
+            raise project_runs.ProjectRunError(
+                f"confidential dsh: {name} must be absolute")
+        home = Path(os.path.realpath(_expand_home(raw, effective_home)))
+    else:
+        home = Path(os.path.realpath(default))
+    if _under(str(home), root, tmp, os.path.realpath(str(_projects.WORKTREE_ROOT)),
+              *_CONFINE_TEMP_PREFIXES):
+        raise project_runs.ProjectRunError(
+            f"confidential dsh: {name} must not be inside the ticket worktree or a temp area")
+    return home
+
+
+def _trusted_temp_root() -> str:
+    """The runner's temp area, only when it is a real macOS temp root (AGE-139).
+
+    dsh loads unset `TMPDIR`/`TMP`/`TEMP` from a repository `.env`, and
+    `projects.sandbox_profile` trusts `tempfile.gettempdir()`. A wider temp root would make
+    an agent-writable directory (or the home directory) writable inside the sandbox.
+    """
+    tmp = os.path.realpath(tempfile.gettempdir())
+    if not _under(tmp, *_CONFINE_TEMP_PREFIXES):
+        raise project_runs.ProjectRunError(
+            "confidential dsh: the runner's temp root is not a trusted temporary area")
+    return tmp
+
+
+def _cleanup_dsh_spill(env: dict) -> None:
+    """Remove only a per-run child of the runner's own spill root."""
+    raw = env.get("AGENTICOS_DSH_SPILL_DIR")
+    if not raw:
+        return
+    root = Path(os.path.realpath(OUTPUTS_DIR / "dsh-spill"))
+    path = Path(os.path.realpath(raw))
+    if path.parent == root and path.name not in ("", ".", ".."):
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _project_exec_env(agent: str, project, worktree: str | None = None,
+                      run_id: str | None = None) -> dict:
     env = _registry_exec_env(agent, _load_registry(agent))
     for k, v in project.env.items():
         env[k] = f"{v}{os.pathsep}{env.get('PATH', '')}" if k == "PATH" else v
+    env.pop("AGENTICOS_DSH_SPILL_DIR", None)  # never inherited from a project or the runner
     if agent == "claude" and project.confidential:  # AGE-129: Codex inside Claude's sandbox
         env["PATH"] = f"{project_runs.SANDBOXED_BIN}{os.pathsep}{env.get('PATH', '')}"
+    if agent == "dsh" and project.confidential:
+        if not worktree:
+            raise project_runs.ProjectRunError("confidential dsh: the ticket worktree is unknown")
+        root = os.path.realpath(worktree)
+        tmp = _trusted_temp_root()
+        project_keys = set(project.env)
+        # The launch composition must be the one the preflight checked: drop every ambient
+        # DSH_* switch (DSH_SNAPSHOT, DSH_TOOLS_MODE, telemetry, ...) except the two homes
+        # that are validated and pinned below.
+        for name in [k for k in env if k.upper().startswith("DSH_")
+                     and k not in ("DSH_HOME", "DSH_AGENTS_HOME")]:
+            env.pop(name, None)
+        for name in project_keys:
+            if name in _CONFINE_BOOTSTRAP_ENV or name.upper().startswith("DYLD_"):
+                env.pop(name, None)
+        home_raw = env.get("HOME")
+        if home_raw and not os.path.isabs(home_raw):
+            raise project_runs.ProjectRunError("confidential dsh: HOME must be absolute")
+        effective_home = Path(os.path.realpath(home_raw)) if home_raw else Path.home()
+        protected = (root, tmp, os.path.realpath(str(_projects.WORKTREE_ROOT)), *_CONFINE_TEMP_PREFIXES)
+        if _under(str(effective_home), *protected):
+            raise project_runs.ProjectRunError(
+                "confidential dsh: HOME must not be inside the ticket worktree or a temp area")
+        env["HOME"] = str(effective_home)
+        dsh_home = _confine_home(env, "DSH_HOME", effective_home / ".dsh", root, tmp, effective_home)
+        agents_home = _confine_home(env, "DSH_AGENTS_HOME", effective_home / ".agents", root, tmp,
+                                    effective_home)
+        # A repository .env is loaded for unset variables, so pin these after project env.
+        env["DSH_HOME"] = str(dsh_home)
+        env["DSH_AGENTS_HOME"] = str(agents_home)
+        # dsh's unsandboxed spill writers cache a directory under tmpdir(); keep that directory
+        # outside every shell-writable root so a confined shell cannot redirect it with a symlink.
+        problem = _records_unsafe()
+        if problem:
+            raise project_runs.ProjectRunError(f"confidential dsh: {problem}")
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", run_id) if run_id else f"adhoc-{os.getpid()}-{time.time_ns()}"
+        spill_root = Path(os.path.realpath(OUTPUTS_DIR / "dsh-spill"))
+        if _under(str(spill_root), root, *_CONFINE_TEMP_PREFIXES):
+            raise project_runs.ProjectRunError(
+                "confidential dsh: the spill directory must be outside the worktree and temp")
+        # Best-effort sweep of crash residue; a live run's directory is recent.
+        if spill_root.is_dir():
+            cutoff = time.time() - 24 * 3600
+            for child in spill_root.iterdir():
+                try:
+                    stale = child.is_dir() and child.stat().st_mtime < cutoff
+                except OSError:
+                    continue
+                if stale:
+                    shutil.rmtree(child, ignore_errors=True)
+        spill = spill_root / name
+        spill.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            env["TMPDIR"] = env["TMP"] = env["TEMP"] = str(spill)
+            env["AGENTICOS_DSH_SPILL_DIR"] = str(spill)
+            env["DSH_PERMISSION_MODE"] = dsh_cli.DSH_PERMISSION_MODE
+            env["DSH_TELEMETRY_DISABLED"] = "1"
+            env[dsh_cli.DSH_CONFINE_RUNNER_ENV] = json.dumps(
+                [sys.executable, "-I", str(dsh_cli.DSH_CONFINE_RUNNER)])
+            dsh_cli.verify_confidential_launch(env, root)
+        except RuntimeError as exc:
+            _cleanup_dsh_spill(env)
+            raise project_runs.ProjectRunError(str(exc)) from exc
+        except Exception:
+            _cleanup_dsh_spill(env)
+            raise
     return env
 
 
@@ -3327,14 +3479,16 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
             log_path.parent.mkdir(parents=True, exist_ok=True)
             write_json_atomic(_stream_meta_path(run_id), {"format": agent})
             sink = _StderrSink(run_id)  # written only where this run's log may be (checked above)
+            exec_env = _project_exec_env(agent, project, binding["worktree"], run_id)
             try:
                 lines, stderr_s, code, timed_out = project_runs.run_agent(
-                    cmd, binding["worktree"], _project_exec_env(agent, project), run_id, agent,
+                    cmd, binding["worktree"], exec_env, run_id, agent,
                     timeout, _emit, on_start=_track,
                     on_session=lambda sid: job.update(agent_session_id=sid), log_path=log_path,
                     on_stderr=sink.feed, note=note)  # stderr live as it arrives (IR9-02)
             finally:
                 sink.close()
+                _cleanup_dsh_spill(exec_env)
             _running_procs.pop(run_id, None)
             output, it, ot, model, sid, ok, error = _parse_project_output(agent, lines, stderr_s, code)
             agent_error, turn_failed = project_runs.pop_agent_failure(run_id)
@@ -4838,9 +4992,14 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
                     return
                 try:
                     cmd = _project_cmd(run_agent, eff, prompt, run_sid)  # the sandboxed CLI for a confidential project
-                    output, it, ot, model, _new_sid, stderr_s, ok = run_agent_process(
-                        new_run_id, cmd, stream=run_agent, cwd=target["cwd"], env=_project_exec_env(run_agent, eff),
-                        on_proc=procs.append, timeout=AI_SESSION_TIMEOUT_S)
+                    exec_env = _project_exec_env(run_agent, eff, target["cwd"], new_run_id)
+                    try:
+                        output, it, ot, model, _new_sid, stderr_s, ok = run_agent_process(
+                            new_run_id, cmd, stream=run_agent, cwd=target["cwd"],
+                            env=exec_env,
+                            on_proc=procs.append, timeout=AI_SESSION_TIMEOUT_S)
+                    finally:
+                        _cleanup_dsh_spill(exec_env)
                     agent_error, turn_failed = project_runs.pop_agent_failure(new_run_id)
                     # a reported failure, or no reply at all, fails the continuation (R4-03, R14-01)
                     ok = ok and not turn_failed and project_runs.pop_replied(new_run_id)

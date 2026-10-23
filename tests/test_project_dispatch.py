@@ -18,6 +18,7 @@ sys.path.insert(0, str(RUNNER))
 sys.path.insert(0, str(RUNNER.parent))
 
 import projects as pj  # noqa: E402
+import dsh_cli
 import project_runs as pr  # noqa: E402
 
 SENTINEL = "SENTINEL-CONFIDENTIAL-4242"
@@ -59,8 +60,14 @@ def project(repo, confidential=False):
 
 # ── argv policy (Decision 9) ─────────────────────────────────────────────────
 
+def _confidential_dsh_prefix():
+    return ["/opt/homebrew/bin/node", "/opt/homebrew/lib/dsh/bin.js", "--profile", "headless",
+            "--patch", str(dsh_cli.DSH_CONFIDENTIAL_PATCH)]
+
+
 def cli(agent, repo, confidential):
-    return pr.agent_cli(agent, project(repo, confidential), "claude", lambda: ["dsh", "--profile", "headless"])
+    return pr.agent_cli(agent, project(repo, confidential), "claude",
+                        lambda: ["dsh", "--profile", "headless"], _confidential_dsh_prefix)
 
 
 def test_confidential_argv_has_no_bypass(proj):
@@ -112,14 +119,14 @@ def test_sandboxed_codex_shim(tmp_path):
     assert run(*jail, "codex", "--version") == "/etc/ssl/cert.pem|--version"
 
 
-def test_confidential_claude_exec_env_puts_sandboxed_codex_first(monkeypatch):
+def test_confidential_claude_exec_env_puts_sandboxed_codex_first(monkeypatch, tmp_path):
     import app
     monkeypatch.setattr(app, "_registry_exec_env", lambda agent, reg: {"PATH": "/usr/bin"})
     monkeypatch.setattr(app, "_load_registry", lambda agent: {})
     project = SimpleNamespace(env={}, confidential=True)
-    assert app._project_exec_env("claude", project)["PATH"] == f"{pr.SANDBOXED_BIN}{os.pathsep}/usr/bin"
-    assert app._project_exec_env("codex", project)["PATH"] == "/usr/bin"
-    assert app._project_exec_env("claude", SimpleNamespace(env={}, confidential=False))["PATH"] == "/usr/bin"
+    assert app._project_exec_env("claude", project, str(tmp_path))["PATH"] == f"{pr.SANDBOXED_BIN}{os.pathsep}/usr/bin"
+    assert app._project_exec_env("codex", project, str(tmp_path))["PATH"] == "/usr/bin"
+    assert app._project_exec_env("claude", SimpleNamespace(env={}, confidential=False), str(tmp_path))["PATH"] == "/usr/bin"
 
 
 def test_non_confidential_codex_uses_auto_review_without_sandbox_flag(proj):
@@ -136,10 +143,18 @@ def test_non_confidential_claude_and_dsh_unchanged(proj):
     assert cli("dsh", repo, False) == ["dsh", "--profile", "headless"]
 
 
+def test_confidential_dsh_gets_the_sandbox_patch(proj):
+    """AGE-139: dsh is allowed for a confidential project through the runner's Seatbelt patch."""
+    repo, _ = proj
+    argv = cli("dsh", repo, True)
+    assert argv[:2] == ["/opt/homebrew/bin/node", "/opt/homebrew/lib/dsh/bin.js"]
+    assert argv[2:4] == ["--profile", "headless"]
+    assert argv[4:6] == ["--patch", str(dsh_cli.DSH_CONFIDENTIAL_PATCH)]
+    assert dsh_cli.DSH_CONFIDENTIAL_PATCH.is_file()
+
+
 def test_rejected_backends(proj, monkeypatch):
     repo, _ = proj
-    with pytest.raises(pr.ProjectRunError, match="dsh is not allowed"):
-        cli("dsh", repo, True)
     with pytest.raises(pr.ProjectRunError, match="cannot run project tickets"):
         cli("deepseek-direct", repo, False)
     monkeypatch.setattr(pr, "CONFIDENTIAL_SANDBOX_VERIFIED", False)
