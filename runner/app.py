@@ -3252,6 +3252,7 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
         "project_key": project_key, "phase": "agent"}
     socketio.emit("run_state_change", {"run_id": run_id, "state": "running", "skill": skill})
     status, output, error, result, sid, it, ot, model = "error", "", "", {}, None, None, None, None
+    lines: list[str] = []  # the raw agent stream, for the last-message extraction below
 
     def _track(proc):
         _running_procs[run_id] = proc
@@ -3416,11 +3417,18 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
         else:
             prompt_rec = prompt
             output_rec = (output or "") + (f"\n\n[verify tail]\n{result['verify_tail']}" if result.get("verify_tail") else "")
+        # The memory service's bearer token is not part of any run record; scrub it from every
+        # textual field the runner persists (the agent's own stream is separate).
+        prompt_rec = ai_memory.scrub_token(prompt_rec)
+        output_rec = ai_memory.scrub_token(output_rec)
+        error = ai_memory.scrub_token(error)
+        extra = ai_memory.scrub_record(extra)
         # AGE-137: leave the next agent (often another provider) the run's outcome. Unknown
         # confidentiality is treated like confidential: never write a prompt-derived summary.
         if binding["confidential"] is False:
             ai_memory.record_run(project_key, ident, run_id=run_id, agent=agent, status=status, title=title,
-                                 summary=output, verify=verify, result=result)
+                                 summary=project_runs.closing_summary(agent, lines) or output,
+                                 verify=verify, result=result)
         # a continuation keeps its session even when none was observed (failed early, timeout, SBI-011)
         _write_run_log(skill, status, started_at, time.monotonic() - t0, prompt=prompt_rec, output=output_rec,
                        error=error, input_tokens=it, output_tokens=ot, agent_session_id=sid or resume_session,
@@ -4121,7 +4129,7 @@ def _project_sessions(project, board_ids=None, labels=None) -> list[dict]:
         target = _dsh_read(path)
         if target and _projects._under_resolved(target["cwd"], _projects._session_roots(project)):
             row = {k: target[k] for k in ("agent", "id", "cwd", "title", "updated")}
-            row.update(branch=None, tokens=None,
+            row.update(branch=_projects.session_branch(target["cwd"]), tokens=None,
                        resume=f"cd {shlex.quote(target['cwd'])} && dsh --profile tui --resume {shlex.quote(target['id'])}")
             rows.append(_projects._with_label(row, labels))
     rows.sort(key=lambda row: row["updated"], reverse=True)

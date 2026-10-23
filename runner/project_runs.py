@@ -566,6 +566,25 @@ def note_agent_error(run_id: str, fmt: str, line: str) -> None:
         AGENT_FAILED.add(run_id)
 
 
+def closing_summary(agent: str, lines: list[str]) -> str:
+    """The last assistant message of a Codex run. `_parse_agent_output` joins every message, so
+    storing its first bytes would keep the opening commentary and drop the closing outcome."""
+    if agent != "codex":
+        return ""  # Claude's result event / dsh's final event already is the closing text
+    last = ""
+    for line in lines or []:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        item = ev.get("item") or {}
+        if ev.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
+            last = item.get("text") or last
+    return last
+
+
 def _subagent(ev: dict, lines: list[str]) -> list[str]:
     """A subagent's turns are indented under the Agent call that started them."""
     return [f"{_DIM}  │{_RESET} {ln}" for ln in lines] if ev.get("parent_tool_use_id") else lines
