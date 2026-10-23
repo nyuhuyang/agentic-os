@@ -30,6 +30,7 @@ projects:
       PATH: ~/miniforge3/bin
     seed:
       - data/fixtures
+      - .codegraph        # CodeGraph index: agents get codegraph_explore in the worktree
     confidential: true
     no_push: true
     note: laptop only; tests need the miniforge R
