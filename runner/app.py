@@ -984,27 +984,39 @@ def load_vault_pulse(limit: int = 8) -> list[str]:
     return [item for _, item in _load_log_pulse(limit)]
 
 
-def build_chart_data(runs: list[dict]) -> dict:
-    """Conversations per local day over 30 days: all of them, and those outside AgenticOS
-    itself: a run bound to agentic-os, or an unbound prompt (it runs in the runner's own checkout).
-    Skill runs count as work."""
+def build_chart_data(runs: list[dict], confidential_keys=frozenset()) -> dict:
+    """Conversations per local day over 30 days, split three ways (AGE-128):
+    agentic — AgenticOS itself: bound to agentic-os, or an unbound prompt (it runs in the
+    runner's own checkout); work — a confidential project (the record's flag, or a project the
+    registry now marks confidential, keys lowercase); other — everything else."""
     today = datetime.now().astimezone().date()
-    total: dict = defaultdict(int)
-    work: dict = defaultdict(int)
+    days = [today - timedelta(days=i) for i in range(29, -1, -1)]
+    counts = {name: {d: 0 for d in days} for name in ("agentic", "work", "other")}
     for run in runs:
         try:
             day = datetime.fromisoformat(run.get("started_at") or run.get("created_at") or "").astimezone().date()
         except Exception:
             continue
-        total[day] += 1
-        key = run.get("project_key") or run.get("session_project") or ("agentic-os" if run.get("skill") == "_prompt" else "")
-        if key.lower() != "agentic-os":
-            work[day] += 1
-
-    days = [today - timedelta(days=i) for i in range(29, -1, -1)]
+        if day not in counts["other"]:
+            continue
+        key = str(run.get("project_key") or run.get("session_project") or "").lower()
+        if key == "agentic-os" or (not key and run.get("skill") == "_prompt"):
+            name = "agentic"
+        elif run.get("confidential") is True or key in confidential_keys:
+            name = "work"
+        else:
+            name = "other"
+        counts[name][day] += 1
     return {"labels": [d.strftime("%b %d") for d in days],
-            "values": [total.get(d, 0) for d in days],
-            "work": [work.get(d, 0) for d in days]}
+            **{name: [c[d] for d in days] for name, c in counts.items()}}
+
+
+def _confidential_keys() -> frozenset:
+    """Lowercase keys of registry projects marked confidential; empty when the registry is unreadable."""
+    try:
+        return frozenset(k.lower() for k, p in _projects.load_registry(errors={}).items() if p.confidential)
+    except Exception:
+        return frozenset()
 
 
 def _fmt_dt(iso: str | None) -> str:
@@ -2219,7 +2231,7 @@ def index():
 
     # every conversation, archived ones included; not the 100-run window above, which holds
     # under a month of runs. ponytail: reads the whole log, add a date cutoff if it gets slow
-    chart_data = build_chart_data(load_runs(1_000_000, include_archived=True))
+    chart_data = build_chart_data(load_runs(1_000_000, include_archived=True), _confidential_keys())
     vault_pulse = load_vault_pulse()
     usage = load_usage()
     codex = load_codex()
