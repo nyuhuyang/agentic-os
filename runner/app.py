@@ -53,6 +53,7 @@ from state_io import file_lock, json_transaction, read_json, write_json_atomic, 
 import reset_gen
 import projects as _projects
 import project_runs
+import ai_memory
 
 _HERE = Path(__file__).resolve().parent              # runner/
 _PROTO = _HERE.parent                                # agentic-os root
@@ -3311,7 +3312,12 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
                     out["main_checkout_changed"] = True  # changed before or during a sanctioned change (R05)
                 return out
             tab_open = _main_path_tab_open(project.key)
-            cmd = _project_cmd(agent, project, project_runs.project_prompt(prompt, project, binding, agent),
+            # AGE-137: a fresh run gets the ticket's earlier-run notes. A resumed session already
+            # has its own context, and a confidential prompt never reaches the wiki.
+            memory_brief = "" if (resume_session or project.confidential) else ai_memory.brief(project.key, ident)
+            cmd = _project_cmd(agent, project,
+                               project_runs.with_memory_brief(
+                                   project_runs.project_prompt(prompt, project, binding, agent), memory_brief),
                                resume_session)
             if resume_session:
                 job["agent_session_id"] = resume_session  # in the live set before launch (A, R02)
@@ -3393,6 +3399,11 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
         else:
             prompt_rec = prompt
             output_rec = (output or "") + (f"\n\n[verify tail]\n{result['verify_tail']}" if result.get("verify_tail") else "")
+        # AGE-137: leave the next agent (often another provider) the run's outcome. Unknown
+        # confidentiality is treated like confidential: never write a prompt-derived summary.
+        if binding["confidential"] is False:
+            ai_memory.record_run(project_key, ident, run_id=run_id, agent=agent, status=status, title=title,
+                                 summary=output, verify=verify, result=result)
         # a continuation keeps its session even when none was observed (failed early, timeout, SBI-011)
         _write_run_log(skill, status, started_at, time.monotonic() - t0, prompt=prompt_rec, output=output_rec,
                        error=error, input_tokens=it, output_tokens=ot, agent_session_id=sid or resume_session,
