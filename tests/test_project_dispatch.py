@@ -122,6 +122,19 @@ def test_confidential_claude_exec_env_puts_sandboxed_codex_first(monkeypatch):
     assert app._project_exec_env("claude", SimpleNamespace(env={}, confidential=False))["PATH"] == "/usr/bin"
 
 
+def test_dsh_leaves_the_commit_and_git_writes_to_the_runner(proj):
+    """AGE-138: a linked worktree's git metadata is outside dsh's workspace-write root."""
+    repo, _ = proj
+    binding = {"branch": "agent/T-1"}
+    dsh = pr.project_prompt("task", project(repo), binding, "dsh")
+    assert "Leave your changes uncommitted" in dsh and "Commit your work" not in dsh
+    assert "`git commit`" in dsh and "runner commits" in dsh
+    codex = pr.project_prompt("task", project(repo), binding, "codex")
+    assert "Leave your changes uncommitted" in codex and "git commit" not in codex
+    claude = pr.project_prompt("task", project(repo), binding, "claude")
+    assert "Commit your work on this branch" in claude and "Leave your changes uncommitted" not in claude
+
+
 def test_non_confidential_codex_uses_auto_review_without_sandbox_flag(proj):
     repo, _ = proj
     argv = cli("codex", repo, False)
@@ -313,10 +326,11 @@ def test_dispatch_records_binding_verify_and_badge(helper):
     assert subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True).stdout == ""
 
 
-def test_sandboxed_codex_gets_a_runner_commit_without_the_seed(helper):
+@pytest.mark.parametrize("agent", ["codex", "dsh"])
+def test_agent_that_cannot_write_git_gets_a_runner_commit_without_the_seed(helper, agent):
     app_mod, run, records, state, *_ = helper
     state["mode"] = "uncommitted"
-    run(agent="codex")
+    run(agent=agent)
     rec = records()[-1]
     assert rec["runner_commit"] and rec["verify"]["status"] == "pass" and rec["seed_committed"] == []
     names = subprocess.run(["git", "-C", rec["worktree"], "show", "--name-only", "--format=", rec["runner_commit"]],

@@ -4648,7 +4648,7 @@ def _retry_session_card(run_id: str, original: dict, intent: dict, data: dict, c
     attachments = data.get("attachments") or []
     prompt = (reply + _format_prompt_attachments(attachments)).strip()  # the reply only (§3.5)
     if switch_to:
-        prompt = _handoff_prompt(original, reply, attachments, agent)
+        prompt = _handoff_prompt(original, reply, attachments, agent, agent=switch_to)
     elif not prompt and card_sourced:  # a plain Retry of a card continuing its session: the task again (PVST-02)
         prompt = (original.get("prompt") or "").strip()
     if not prompt:
@@ -5713,11 +5713,12 @@ def _cut(text: str, n: int) -> str:
 
 
 def _handoff_prompt(original: dict, reply: str, attachments: list, switched_from: str | None = None,
-                    task: str | None = None) -> str:
+                    task: str | None = None, agent: str | None = None) -> str:
     """A new session's prompt on a card that already ran: the task, every earlier turn of the run
     chain whichever agent ran it, the reply, and where the earlier sessions' transcripts are
     (AGE-114 D2). On a switch of agent (AGE-113), who had the task. A resumed session gets the
-    reply only: it has all this already (D1)."""
+    reply only: it has all this already (D1). `agent`: who runs next, for sandbox-aware git advice
+    (a dsh worktree cannot write the git metadata outside it — AGE-138)."""
     attach_note = _format_prompt_attachments(attachments)
     chain = _record_chain(original)
     task = (task if task is not None else chain[0].get("prompt") or "").strip()  # `task`: the issue's text now
@@ -5732,9 +5733,9 @@ def _handoff_prompt(original: dict, reply: str, attachments: list, switched_from
     if not turns and not reply and not attach_note:
         return task
     blocks = []
-    for n, (agent, human, out) in enumerate(turns, 1):
+    for n, (turn_agent, human, out) in enumerate(turns, 1):
         cut = _HANDOFF_CUT if n <= len(turns) - _HANDOFF_FULL_TURNS else None
-        blocks.append(f"--- Turn {n} ({agent})"
+        blocks.append(f"--- Turn {n} ({turn_agent})"
                       + (f"\nHuman: {_cut(human, cut) if cut else human}" if human else "")
                       + (f"\nAgent: {_cut(out, cut) if cut else out}" if out else ""))
     dropped = 0
@@ -5758,7 +5759,12 @@ def _handoff_prompt(original: dict, reply: str, attachments: list, switched_from
         parts.append("Earlier sessions' full conversations (JSONL), read them if you need more context:\n"
                      + "\n".join(transcripts))
     if len(chain) > 1 or switched_from:
-        parts.append("Changes from earlier turns are already in this folder: check `git status` and `git log` first.")
+        if agent == "dsh":
+            # Read-only orientation: project-bound worktree runs are told separately that the runner
+            # commits for them (project_runs.project_prompt); a main-checkout session may still commit.
+            parts.append("Changes from earlier turns are already in this folder: check `git log` and `git diff` first.")
+        else:
+            parts.append("Changes from earlier turns are already in this folder: check `git status` and `git log` first.")
     return "\n\n".join(parts)
 
 
@@ -5819,7 +5825,6 @@ def api_run_retry(run_id: str):
         return _retry_session_card(run_id, original, intent, req_data)
     reply = (req_data.get("reply") or "").strip()
     attachments = req_data.get("attachments") or []
-    prompt = _handoff_prompt(original, reply, attachments)
 
     # Guard: reject if already running
     if run_id in _running_procs or any(j.get("skill") == skill for j in _running_jobs.values()):
@@ -5848,6 +5853,7 @@ def api_run_retry(run_id: str):
         else:
             agent = locked_agent
     sess_agent = switch_from or agent  # whose session routes this retry to its folder
+    prompt = _handoff_prompt(original, reply, attachments, agent=agent)  # after the lock resolves who runs
     if strict and _same_session and _newest_attempt(linear_issue_id, task_id) == run_id:
         # the answered attempt is the card's newest by history order: its own session is the card's
         # current one, whatever an appended status copy of an older attempt left last (QR-R6-001)
@@ -5909,7 +5915,7 @@ def api_run_retry(run_id: str):
                         return jsonify({"ok": False, "in_use_elsewhere": why}), 409
                 _lock_session_id, card_session = sid, True
     if switch_from:  # a new session of the chosen agent, in the folder chosen above, told what came before
-        prompt = _handoff_prompt(original, reply, attachments, switch_from)
+        prompt = _handoff_prompt(original, reply, attachments, switch_from, agent=agent)
         card_note, _lock_session_id, card_session = f"new session: switched from {switch_from}", None, False
     fresh_prompt = prompt  # a new session's, e.g. the fallback after a failed resume
     if _lock_session_id:  # the resumed session has the history already: the reply only (AGE-114 D1, as §3.5)

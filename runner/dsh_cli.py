@@ -87,11 +87,14 @@ def key_fp(key: str | None) -> str | None:
 
 
 def dsh_env(env: dict[str, str]) -> dict[str, str]:
-    """Add the API key and permission mode to a child env (in place, returned)."""
+    """Add the API key, permission mode and read-only git hint to a child env (in place, returned)."""
     key = resolve_api_key()
     if key:
         env["DEEPSEEK_API_KEY"] = key
     env["DSH_PERMISSION_MODE"] = DSH_PERMISSION_MODE
+    # AGE-138: a ticket worktree's git metadata is outside the workspace-write root. Without this,
+    # `git status` refreshes the index and is denied; with it, status/log/diff never write .git.
+    env["GIT_OPTIONAL_LOCKS"] = "0"
     return env
 
 

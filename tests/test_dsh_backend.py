@@ -114,8 +114,10 @@ def test_env_has_key_and_mode_not_argv(app_mod, fake_prefix, monkeypatch, tmp_pa
     monkeypatch.setattr(app_mod, "REGISTRY_CACHE_DIR", tmp_path)
     env = app_mod._registry_exec_env("dsh", {})
     assert env["DEEPSEEK_API_KEY"] == KEY and env["DSH_PERMISSION_MODE"] == "workspace-write"
+    assert env["GIT_OPTIONAL_LOCKS"] == "0"  # AGE-138: read-only git never writes .git outside the workspace
     assert KEY not in " ".join(app_mod._ai_command("dsh", "p"))
-    assert "DSH_PERMISSION_MODE" not in app_mod._registry_exec_env("codex", {})
+    codex = app_mod._registry_exec_env("codex", {})
+    assert "DSH_PERMISSION_MODE" not in codex and "GIT_OPTIONAL_LOCKS" not in codex
 
 
 def test_key_falls_back_to_config(monkeypatch, tmp_path):

@@ -96,9 +96,12 @@ def claude_confidential_settings(common: Path) -> str:
     })
 
 
-def is_sandboxed_codex(agent: str, project: projects.Project) -> bool:
-    """Codex under workspace-write cannot write .git (spike), so the runner commits for it."""
-    return agent == "codex"  # confidential: workspace-write; otherwise --approve-for-me
+def leaves_commit_to_runner(agent: str, project: projects.Project) -> bool:
+    """Agents whose sandbox cannot write the worktree's git metadata, so the runner commits for
+    them. A linked worktree keeps that metadata in the main checkout's .git, outside the
+    workspace the agent may write: Codex under workspace-write (spike) and dsh under its
+    workspace-write (AGE-138)."""
+    return agent in ("codex", "dsh")
 
 
 def agent_cli(agent: str, project: projects.Project, claude_bin: str, dsh_prefix: Callable[[], list[str]]) -> list[str]:
@@ -127,8 +130,12 @@ def agent_cli(agent: str, project: projects.Project, claude_bin: str, dsh_prefix
 
 def project_prompt(prompt: str, project: projects.Project, binding: dict, agent: str) -> str:
     rules = [f"You are working in a git worktree of project '{project.key}' on branch {binding['branch']}."]
-    if is_sandboxed_codex(agent, project):
+    if leaves_commit_to_runner(agent, project):
         rules.append("Leave your changes uncommitted; the runner commits them on this branch after you finish.")
+        if agent == "dsh":
+            rules.append("Do not run `git commit` or `git add`: this worktree's git metadata lives in the "
+                         "main checkout's .git, outside the workspace your sandbox may write. "
+                         "`git status`, `git log` and `git diff` are read-only and fine.")
     else:
         rules.append("Commit your work on this branch. Do not switch branches.")
     if project.auto_merge:
