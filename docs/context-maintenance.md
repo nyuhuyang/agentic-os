@@ -2,7 +2,7 @@
 
 ## Current WIP (WIP = 1)
 <!-- One active task at a time. What is it? -->
-- AGE-137 ai-memory: assessed and wired at the dispatch boundary (`runner/ai_memory.py`, brief before a fresh project run, run summary after it; confidential skipped). Install with `sh scripts/install_ai_memory.sh`; docs `docs/references/ai-memory.md`. Not yet dogfooded on live tickets
+- AGE-137 ai-memory: assessed and wired at the dispatch boundary (`runner/ai_memory.py`, brief before a fresh project run, run summary after it; confidential skipped). Claudex-loop review by Codex: plan approved (20 rounds), final code inspection approved with no findings after R6–R29 were fixed (transport deadlines/cancellation, per-checkout ports, token isolation, redaction, retention idempotency, lazy env). 36 tests. Install with `sh scripts/install_ai_memory.sh`; docs `docs/references/ai-memory.md`. Not yet dogfooded on live tickets
 - STT two-pass: done, plan archived in completed/ (2026-10-14); optional follow-ups = one cross-provider Codex inspection, low-severity Open Issues in its review log
 - Multi-Project Dispatch — `docs/exec-plans/active/2026-10-13-multi-project-dispatch.md`: Phases 0–3 built on `feat/multi-project-dispatch` (2026-10-14). Open: the cross-provider Codex inspection of the build (Codex quota), spike (d2) for Codex, dogfood tickets, one user decision (`/run` free prompts), one project's committed .gitignore
 
