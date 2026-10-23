@@ -121,3 +121,5 @@ The chart exposes only per-day counts on the local dashboard; no project names o
 ## Revision 2026-10-23 — one stacked chart
 
 User feedback after completion: do not show three separate curves. Use one combined chart, AgenticOS at the bottom, Work in the middle, Other on top, where a band's thickness is that kind's conversations and the top line's height is the day's total. Implemented in the same three datasets with `fill` plus `y.stacked` (no server change), title now carries the Work share. Checked in headless Chromium against this chart code with sample data: Oct 20 = AgenticOS 2 / Work 4 / Other 2, `Total: 8 · Work: 50%`; legend toggles re-stack cleanly once the animation settles.
+
+Second feedback: the green/blue boundary was hard to see. All three boundary lines are now black (`borderColor: '#000'`) while each band keeps its solid colour fill; the legend swatches still carry the colour. Re-checked in headless Chromium: the black separators are visible along both interior boundaries and the outer edge.
