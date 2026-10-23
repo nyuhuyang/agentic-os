@@ -102,8 +102,7 @@ def _sb_str(path: str) -> str:
     return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def sandbox_profile(writable: list[Path], temp: bool = True, temp_root: str | None = None,
-                    protected: tuple[Path, ...] = ()) -> str:
+def sandbox_profile(writable: list[Path], temp: bool = True, temp_root: str | None = None) -> str:
     """macOS sandbox-exec profile: no network, writes only under `writable` and (temp) temp dirs.
 
     `temp_root` lets a caller name the shell temp area explicitly instead of the process
@@ -117,8 +116,6 @@ def sandbox_profile(writable: list[Path], temp: bool = True, temp_root: str | No
     # by which sandboxed code asks something outside the sandbox to act for it.
     # ponytail: deny-list, not deny-default; spike (g2) probes `open URL`, osascript and
     # launchctl submit. Move to deny-default if a new escape route shows up.
-    deny = " ".join(f'(subpath {_sb_str(root)}) (literal {_sb_str(root)})'
-                    for root in sorted({str(Path(os.path.realpath(path))) for path in protected}))
     profile = ("(version 1)(allow default)(deny network*)(deny file-write*)"
                "(deny lsopen)(deny appleevent-send)"
                '(deny mach-lookup (global-name "com.apple.dnssd.service")'
@@ -127,12 +124,11 @@ def sandbox_profile(writable: list[Path], temp: bool = True, temp_root: str | No
                ' (global-name "com.apple.coreservices.launchservicesd")'
                ' (global-name "com.apple.coreservices.appleevents") (global-name-regex #"^com\\.apple\\.lsd\\."))'
                f'(allow file-write* {allow} (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/fd/"))')
-    return profile + (f'(deny file-write* {deny})' if deny else "")
+    return profile
 
 
-def sandbox_prefix(writable: list[Path], temp: bool = True, temp_root: str | None = None,
-                   protected: tuple[Path, ...] = ()) -> list[str]:
-    return ["/usr/bin/sandbox-exec", "-p", sandbox_profile(writable, temp, temp_root, protected)]
+def sandbox_prefix(writable: list[Path], temp: bool = True, temp_root: str | None = None) -> list[str]:
+    return ["/usr/bin/sandbox-exec", "-p", sandbox_profile(writable, temp, temp_root)]
 
 
 def readonly_status(cwd: Path) -> list[str]:

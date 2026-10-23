@@ -62,8 +62,10 @@ def _workspace_write(profile_args: list[str], root: str) -> bool:
 def build_argv(argv: list[str], env: dict[str, str] | None = None) -> list[str]:
     """(sandbox-exec profile, command) for one dsh command. Raises ConfineError on refusal.
 
-    `argv` is dsh's launcher tail: `root, bwrap-profile... , "--", command...`. `env` is
-    accepted for callers/tests; the root is deliberately not read from it.
+    `argv` is dsh's launcher tail: `root, git-common-dir-or-"-", bwrap-profile... , "--",
+    command...`. The git common dir is writable when dsh grants workspace-write, so the
+    agent can `git add`/`git commit` in its worktree; the runner still commits leftovers.
+    `env` is accepted for callers/tests; paths are deliberately not read from it.
     """
     if sys.platform != "darwin":
         raise ConfineError("the confidential dsh sandbox is macOS-only")
@@ -74,8 +76,20 @@ def build_argv(argv: list[str], env: dict[str, str] | None = None) -> list[str]:
         raise ConfineError("the worktree root must be an absolute path")
     if not os.path.isdir(root):
         raise ConfineError("the worktree root does not exist")
+    git_dir = None
+    start = 1
+    if len(argv) > 1:
+        candidate = argv[1]
+        if candidate == "-":
+            start = 2
+        elif candidate != "--" and not candidate.startswith("-"):
+            if os.path.isabs(candidate) and os.path.isdir(candidate):
+                git_dir = candidate
+                start = 2
+            else:
+                raise ConfineError("the git common dir must be an absolute existing path or -")
     try:
-        sep = argv.index("--")
+        sep = argv.index("--", start)
     except ValueError:
         raise ConfineError("missing command separator") from None
     command = argv[sep + 1:]
@@ -87,13 +101,13 @@ def build_argv(argv: list[str], env: dict[str, str] | None = None) -> list[str]:
         raise ConfineError("untrusted temporary root")
     if projects is None:
         raise ConfineError(f"cannot import the runner modules: {_IMPORT_ERROR}")
-    profile_args = argv[1:sep]
+    profile_args = argv[start:sep]
     writable = [Path(root)] if _workspace_write(profile_args, root) else []
+    if writable and git_dir:
+        writable.append(Path(git_dir))
     temp = "--tmpfs" in profile_args
     try:
-        protected = (Path(root) / ".git",) if writable else ()
-        prefix = projects.sandbox_prefix(writable, temp=temp, temp_root=_temp_root() if temp else None,
-                                         protected=protected)
+        prefix = projects.sandbox_prefix(writable, temp=temp, temp_root=_temp_root() if temp else None)
     except Exception as exc:
         raise ConfineError(f"cannot build the sandbox profile: {exc}") from exc
     return [*prefix, *command]

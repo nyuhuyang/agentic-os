@@ -134,9 +134,7 @@ def agent_cli(agent: str, project: projects.Project, claude_bin: str, dsh_prefix
 
 def project_prompt(prompt: str, project: projects.Project, binding: dict, agent: str) -> str:
     rules = [f"You are working in a git worktree of project '{project.key}' on branch {binding['branch']}."]
-    if is_sandboxed_codex(agent, project) or (agent == "dsh" and project.confidential):
-        # AGE-139: a confidential dsh shell cannot write the shared git dir, and the runner
-        # already commits leftovers for every agent. Never ask the agent to commit there.
+    if is_sandboxed_codex(agent, project):
         rules.append("Leave your changes uncommitted; the runner commits them on this branch after you finish.")
     else:
         rules.append("Commit your work on this branch. Do not switch branches.")

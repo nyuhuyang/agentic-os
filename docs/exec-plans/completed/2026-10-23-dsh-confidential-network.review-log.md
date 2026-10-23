@@ -260,3 +260,17 @@ this dsh host and the claudex-loop workflow explicitly.
 - Final focused proof: 87 tests in `tests/test_dsh_confidential.py` + `tests/test_dsh_backend.py`
   pass; 9 selected sandbox-independent dispatch tests pass; `py_compile runner/*.py` passes.
   Live Seatbelt/OCSP checks remain owner-run because nested `sandbox-exec` is refused here.
+
+### Post-approval change — allow git in confidential dsh (user request)
+
+- The user opposed the `.git` write denial and asked for `git add` / `git commit` to work in
+  confidential worktrees (no push).
+- `runner/dsh_confine.py` now accepts the repo git common dir as the second launcher argument
+  and adds it to the writable roots when dsh sends `--bind <root> <root>`.
+- `runner/scripts/dsh-confidential.yml` appends `process.env.AGENTICOS_DSH_CONFINE_GIT || "-"`.
+- `runner/app.py` resolves the common dir with `project_runs.common_dir(project)` and pins it.
+- `runner/project_runs.project_prompt` again asks confidential dsh to commit; the runner still
+  commits leftovers.
+- `projects.sandbox_profile` no longer has the `protected`/`.git` deny feature.
+- Focused tests updated: 38 `test_dsh_confidential.py` + 49 `test_dsh_backend.py` pass; 9
+  sandbox-independent dispatch tests pass. No new inspection after this user-requested change.

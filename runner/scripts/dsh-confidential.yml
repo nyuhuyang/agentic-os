@@ -3,9 +3,10 @@
 # and home patch layers, so it pins the security-relevant entries and disables the tools that
 # would bypass the shell sandbox.
 #
-# The worktree root is appended to `runnerCommand` from `process.cwd()`: dsh starts in the
-# ticket worktree, and argv survives the child-environment scrubbing that removes ambient
-# variables for bash and PTC/workflow workers.
+# The worktree root is appended to `runnerCommand` from `process.cwd()` and the repo's git
+# common dir from `AGENTICOS_DSH_CONFINE_GIT`: dsh starts in the ticket worktree, and argv
+# survives the child-environment scrubbing that removes ambient variables for bash and
+# PTC/workflow workers. `-` means "no git dir" (non-repo).
 - id: sandbox-policy
   name: '@deepseek-ai/dsh-sandbox-policy'
   disabled: false
@@ -17,7 +18,7 @@
   name: '@deepseek-ai/dsh-sandbox-local'
   disabled: false
   config:
-    runnerCommand: !!js (() => { const raw = process.env.AGENTICOS_DSH_CONFINE_RUNNER; if (!raw) throw new Error("AGENTICOS_DSH_CONFINE_RUNNER is required"); return [...JSON.parse(raw), process.cwd()]; })()
+    runnerCommand: !!js (() => { const raw = process.env.AGENTICOS_DSH_CONFINE_RUNNER; if (!raw) throw new Error("AGENTICOS_DSH_CONFINE_RUNNER is required"); return [...JSON.parse(raw), process.cwd(), process.env.AGENTICOS_DSH_CONFINE_GIT || "-"]; })()
     runnerFailureSignatures:
       - "dsh-confine:"
 

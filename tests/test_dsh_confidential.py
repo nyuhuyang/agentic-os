@@ -23,6 +23,9 @@ def _isolated_outputs(monkeypatch, tmp_path):
     import app
     out = Path(__file__).resolve().parents[1] / f"outputs-test-{tmp_path.name}"
     monkeypatch.setattr(app, "OUTPUTS_DIR", out)
+    git = tmp_path / "git-common"
+    git.mkdir()
+    monkeypatch.setattr(app.project_runs, "common_dir", lambda project: str(git))
     yield
     shutil.rmtree(out, ignore_errors=True)
 
@@ -124,8 +127,9 @@ def _worktree(tmp_path):
 def test_wrapper_builds_the_seatbelt_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(dsh_confine, "_temp_root", lambda: "/private/tmp")
     root = _worktree(tmp_path)
+    git = tmp_path / "git-common"
     argv = dsh_confine.build_argv(
-        [root, "--ro-bind", "/", "/", "--tmpfs", "/tmp", "--bind", root, root, "--",
+        [root, str(git), "--ro-bind", "/", "/", "--tmpfs", "/tmp", "--bind", root, root, "--",
          "bash", "-c", "echo hi"])
     assert argv[0] == "/usr/bin/sandbox-exec" and argv[1] == "-p"
     profile = argv[2]
@@ -133,7 +137,7 @@ def test_wrapper_builds_the_seatbelt_profile(tmp_path, monkeypatch):
     assert 'global-name "com.apple.dnssd.service"' in profile
     assert f'(subpath "{os.path.realpath(root)}")' in profile
     assert '(subpath "/private/tmp")' in profile
-    assert '(deny file-write* (subpath "{}")'.format(str(Path(os.path.realpath(root)) / ".git")) in profile
+    assert f'(subpath "{os.path.realpath(git)}")' in profile
     assert argv[-3:] == ["bash", "-c", "echo hi"]
 
 
@@ -199,7 +203,7 @@ def test_wrapper_gives_the_shell_its_own_temp_root(tmp_path, monkeypatch):
     monkeypatch.setattr(dsh_confine.os, "execve", fake_execve)
     root = _worktree(tmp_path)
     with pytest.raises(SystemExit):
-        dsh_confine.main([root, "--bind", root, root, "--", "true"])
+        dsh_confine.main([root, "-", "--bind", root, root, "--", "true"])
     assert captured["env"]["TMPDIR"] == captured["env"]["TMP"] == captured["env"]["TEMP"] == "/tmp"
     assert captured["argv"][-1] == "true"
 
@@ -239,6 +243,7 @@ def test_confidential_dsh_env_pins_temp_and_runner(monkeypatch, tmp_path):
     monkeypatch.setattr(app, "_records_unsafe", lambda: None)
     project = SimpleNamespace(env={"TMPDIR": "/Users/someone", "DSH_HOME": ""}, confidential=True)
     env = app._project_exec_env("dsh", project, str(tmp_path), "run-1")
+    assert env["AGENTICOS_DSH_CONFINE_GIT"] == str(tmp_path / "git-common")
     spill = str(Path(os.path.realpath(app.OUTPUTS_DIR / "dsh-spill")) / "run-1")
     assert env["TMPDIR"] == env["TMP"] == env["TEMP"] == spill
     assert not spill.startswith(os.path.realpath(tmp_path))
@@ -369,10 +374,11 @@ def test_agent_cli_uses_the_confidential_prefix(monkeypatch):
     assert called
 
 
-def test_confidential_dsh_prompt_leaves_changes_uncommitted():
+def test_confidential_dsh_prompt_asks_for_a_commit():
     project = SimpleNamespace(key="demo", auto_merge=False, no_push=True, verify="true", confidential=True)
     confidential = pr.project_prompt("task", project, {"branch": "agent/T-1"}, "dsh")
-    assert "Leave your changes uncommitted" in confidential
+    assert "Commit your work on this branch" in confidential
+    assert "Leave your changes uncommitted" not in confidential
     plain = pr.project_prompt("task", SimpleNamespace(**{**project.__dict__, "confidential": False}),
                               {"branch": "agent/T-1"}, "dsh")
     assert "Commit your work on this branch" in plain

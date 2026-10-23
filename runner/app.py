@@ -2869,6 +2869,10 @@ def _project_exec_env(agent: str, project, worktree: str | None = None,
         problem = _records_unsafe()
         if problem:
             raise project_runs.ProjectRunError(f"confidential dsh: {problem}")
+        git_dir = os.path.realpath(project_runs.common_dir(project))
+        if not os.path.isdir(git_dir):
+            raise project_runs.ProjectRunError(
+                "confidential dsh: the repository git directory is missing")
         name = re.sub(r"[^A-Za-z0-9._-]", "_", run_id) if run_id else f"adhoc-{os.getpid()}-{time.time_ns()}"
         spill_root = Path(os.path.realpath(OUTPUTS_DIR / "dsh-spill"))
         if _under(str(spill_root), root, *_CONFINE_TEMP_PREFIXES):
@@ -2891,6 +2895,7 @@ def _project_exec_env(agent: str, project, worktree: str | None = None,
             env["AGENTICOS_DSH_SPILL_DIR"] = str(spill)
             env["DSH_PERMISSION_MODE"] = dsh_cli.DSH_PERMISSION_MODE
             env["DSH_TELEMETRY_DISABLED"] = "1"
+            env["AGENTICOS_DSH_CONFINE_GIT"] = git_dir
             env[dsh_cli.DSH_CONFINE_RUNNER_ENV] = json.dumps(
                 [sys.executable, "-I", str(dsh_cli.DSH_CONFINE_RUNNER)])
             dsh_cli.verify_confidential_launch(env, root)

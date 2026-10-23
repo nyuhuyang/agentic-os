@@ -313,3 +313,16 @@ the main dsh process, outside the shell sandbox.
 - [x] Archive this plan to `docs/exec-plans/completed/`.
 - [x] Archive this review log to `docs/exec-plans/completed/`.
 - [x] Commit on `agent/AGE-139`. — direct `git` commit is blocked by the workspace-write sandbox; the runner's post_run commits uncommitted worktree changes.
+
+## Post-completion change (2026-10-23, user request)
+
+The user rejected the `.git` write denial: confidential runs still need `git add` / `git commit`
+(they simply do not push). The wrapper now receives the repo's git common dir as its second
+launcher argument and adds it to the writable roots when dsh grants `workspace-write`; the
+prompt asks a confidential dsh run to commit its work. The runner still commits any leftovers.
+The `.git` deny clause was removed from `projects.sandbox_profile` and the wrapper. This
+supersedes the `.git`-denial statements in the inspection log above; the APPROVED inspection
+covered the pre-change snapshot, and the focused tests were rerun after this change.
+Trade-off: this grants the repo's git common dir (refs, config, hooks, objects) to the
+confined shell, matching confidential Claude/Codex `--add-dir common`; the prompt still says
+not to push.
