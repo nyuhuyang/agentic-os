@@ -4129,7 +4129,7 @@ def _project_sessions(project, board_ids=None, labels=None) -> list[dict]:
         target = _dsh_read(path)
         if target and _projects._under_resolved(target["cwd"], _projects._session_roots(project)):
             row = {k: target[k] for k in ("agent", "id", "cwd", "title", "updated")}
-            row.update(branch=None, tokens=None,
+            row.update(branch=_projects.session_branch(target["cwd"]), tokens=None,
                        resume=f"cd {shlex.quote(target['cwd'])} && dsh --profile tui --resume {shlex.quote(target['id'])}")
             rows.append(_projects._with_label(row, labels))
     rows.sort(key=lambda row: row["updated"], reverse=True)
