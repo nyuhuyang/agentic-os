@@ -880,9 +880,17 @@ def _persist_and_publish(run_id: str, fmt: str, sf, line: str) -> None:
 def _publish_run_line(run_id: str, fmt: str, line: str) -> None:
     """Every streamed stdout line of every run feeds the live terminal view (ring + socket)
     and, once announced, the job's agent session id (C, A/R02)."""
-    for shown in project_runs.render_event(fmt, line):
+    shown_lines = project_runs.render_event(fmt, line)
+    for shown in shown_lines:
         seq = project_runs.ring_for(run_id).append(shown)
         socketio.emit("run_event", {"run_id": run_id, "line": shown, "seq": seq})
+    # AGE-140: the card says what is running, with the test-run heads-up first (a quiet suite
+    # must not look like a hang). Every later tool call replaces it, so it does not go stale.
+    snippet = next((x for x in shown_lines if project_runs.TEST_NOTE_MARK in x), None) \
+        or next((x for x in shown_lines if "[tool]" in x), None)
+    if snippet:
+        snippet = re.sub(r"\x1b\[[0-9;]*m", "", snippet).replace("[runner] ", "").strip()
+        socketio.emit("run_progress", {"run_id": run_id, "event": "tool_use", "snippet": snippet})
     project_runs.note_agent_error(run_id, fmt, line)  # the agent's own failure text, for the record (D6)
     job = _running_jobs.get(run_id)
     if job is not None:
@@ -2530,7 +2538,9 @@ def _stream_dsh_run(
                 progress = {"state": "running", "stream_log": str(stream_path), "last_event_type": ev_type}
                 if ev_type == "tool_call":
                     tool_name = str(ev.get("tool") or "tool")
-                    snippet = f"[tool] {tool_name}: {str(ev.get('input', {}))[:80]}"
+                    test_cmd = project_runs.test_command_of("dsh", line)  # AGE-140: keep the test note on the card
+                    snippet = project_runs.test_note_text(test_cmd) if test_cmd \
+                        else f"[tool] {tool_name}: {str(ev.get('input', {}))[:80]}"
                     socketio.emit("run_progress", {"run_id": run_id, "snippet": snippet, "event": "tool_use"})
                     progress["tool_name"] = tool_name
                 elif ev_type == "tool_result":
@@ -3251,6 +3261,12 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
 
     def _emit(event, payload):
         job["last_progress_at"] = time.monotonic()  # streaming agent = progress (I5-07)
+        line = re.sub(r"\x1b\[[0-9;]*m", "", str((payload or {}).get("line") or "")) \
+            if isinstance(payload, dict) else ""
+        if event == "run_event" and (project_runs.TEST_NOTE_MARK in line or "[tool]" in line):
+            # AGE-140: the test heads-up and later tool calls both keep the card's status line current.
+            snippet = line.replace("[runner] ", "").strip()
+            socketio.emit("run_progress", {"run_id": run_id, "snippet": snippet, "event": "tool_use"})
         socketio.emit(event, payload)
 
     try:

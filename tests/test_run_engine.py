@@ -120,6 +120,35 @@ def test_renderer_shows_what_an_interactive_session_shows():  # AGE-136
     assert r("dsh", {"type": "thinking", "text": "hmm"}) == ["✻ hmm"] and r("dsh", {"type": "text", "text": "hi"}) == ["hi"]
 
 
+# ── a test run is announced before it starts (AGE-140) ───────────────────────
+
+def test_test_commands_are_recognised():
+    yes = ["pytest -q", "cd repo && .venv/bin/python3 -m pytest -q tests/", "npm test", "npm run test",
+           "pnpm run test:unit", "go test ./...", "cargo test", "make check", "bash tests/check.sh",
+           "sh -c 'pytest -q'", "npx jest --ci", "uv run pytest -q"]
+    no = ["ls -la", "cat tests/test_foo.py", "git grep pytest", "python3 runner/app.py", "make build"]
+    assert [c for c in yes if not pr.is_test_command(c)] == []
+    assert [c for c in no if pr.is_test_command(c)] == []
+
+
+def test_renderer_announces_a_test_run_before_the_call():
+    r = lambda fmt, ev: plain(pr.render_event(fmt, json.dumps(ev)))
+    asst = lambda cmd: {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Bash", "input": {"command": cmd}}]}}
+    out = r("claude", asst(".venv/bin/python3 -m pytest -q tests/"))
+    assert out[0].startswith("[runner] ▶ running tests: .venv/bin/python3 -m pytest") and "still alive" in out[0]
+    assert out[1] == '[tool] Bash {"command": ".venv/bin/python3 -m pytest -q tests/"}'
+    assert r("claude", asst("ls -la")) == ['[tool] Bash {"command": "ls -la"}']  # a plain command adds no note
+    codex = {"type": "item.started", "item": {"type": "command_execution", "command": "npm test"}}
+    assert r("codex", codex)[0].startswith("[runner] ▶ running tests: npm test")
+    jest = {"type": "item.started", "item": {"type": "command_execution", "command": "npx jest --ci"}}
+    assert r("codex", jest)[0].startswith("[runner] ▶ running tests: npx jest")
+    dsh = {"type": "tool_call", "tool": "bash", "input": {"command": "go test ./..."}}
+    assert r("dsh", dsh)[0].startswith("[runner] ▶ running tests: go test ./...")
+    # results and completed calls never repeat the note
+    assert r("dsh", {"type": "tool_result", "status": "ok", "result": "pytest passed"}) == ["  ↳ [ok] pytest passed"]
+
+
 # ── engine through the real launch paths ─────────────────────────────────────
 
 @pytest.fixture
