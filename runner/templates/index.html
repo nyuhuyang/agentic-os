@@ -1400,7 +1400,19 @@ async function _filesOpenFile(key, path) {
   _renderProjects();
 }
 
-async function loadProjects() {
+// One /api/projects in flight per page; calls meanwhile share one follow-up load that starts
+// after it, so `await loadProjects()` still sees data fetched after the call (board latency).
+let _projectsInflight = null, _projectsQueued = null;
+function loadProjects() {
+  if (!_projectsInflight) {
+    _projectsInflight = _loadProjectsOnce().finally(() => { _projectsInflight = null; });
+    return _projectsInflight;
+  }
+  if (!_projectsQueued) _projectsQueued = _projectsInflight.then(() => { _projectsQueued = null; return loadProjects(); });
+  return _projectsQueued;
+}
+
+async function _loadProjectsOnce() {
   try {
     const res = await fetch('/api/projects');
     _projectData = res.ok ? await res.json() : { projects: [], error: `HTTP ${res.status}` };
@@ -5745,6 +5757,10 @@ let _projectsReloadTimer = null;  // a card title change shows in the session ro
 socket.on('linear_issues_updated', (data) => {
   if (data && data.id_map) _sttApplyAliases(data.id_map);
   if (_linearConfigured) _requestBoardRefresh();
+  clearTimeout(_projectsReloadTimer);
+  _projectsReloadTimer = setTimeout(loadProjects, 500);
+});
+socket.on('projects_commit_state', () => {  // a commit-colour pass landed: show it
   clearTimeout(_projectsReloadTimer);
   _projectsReloadTimer = setTimeout(loadProjects, 500);
 });

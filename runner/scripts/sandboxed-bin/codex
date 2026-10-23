@@ -1,0 +1,24 @@
+#!/bin/sh
+# AGE-129: Codex inside a confidential Claude run. Claude's sandbox already confines files and
+# network, and macOS refuses a nested sandbox-exec, so Codex's own sandbox cannot start there
+# (`sandbox_apply: Operation not permitted`) and the system trust store is unreachable. Only in that
+# case: skip Codex's inner sandbox and use the bundled CA file. Anywhere else this is plain codex.
+self_dir=$(cd "$(dirname "$0")" && pwd)
+real=
+IFS=:
+for d in $PATH; do
+  [ "$d" = "$self_dir" ] && continue
+  [ -x "$d/codex" ] && { real="$d/codex"; break; }
+done
+unset IFS
+[ -n "$real" ] || { echo "codex: no codex on PATH besides $self_dir" >&2; exit 127; }
+if /usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true 2>/dev/null; then
+  exec "$real" "$@"
+fi
+export CODEX_CA_CERTIFICATE="${CODEX_CA_CERTIFICATE:-/etc/ssl/cert.pem}"
+[ "$1" = exec ] || exec "$real" "$@"  # ponytail: only `codex exec` (what claudex-loop runs) is adapted
+shift
+if [ "$1" = resume ]; then
+  shift; exec "$real" exec resume --dangerously-bypass-approvals-and-sandbox "$@"
+fi
+exec "$real" exec --dangerously-bypass-approvals-and-sandbox "$@"

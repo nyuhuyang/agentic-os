@@ -627,7 +627,11 @@ def open_terminal(data: dict, socketio) -> dict:
             # A card's session ends with its agent, so the card's lock goes with it (no shell is
             # left holding it); an unbound resume keeps a shell in its folder afterwards.
             tail = "" if rec is not None else f"; exec {shlex.quote(argv[0])} -l"
-            argv = [argv[0], "-l", "-c", shlex.join(resume) + tail]
+            # AGE-129: after the login profile has set PATH, so the sandboxed `codex` stays first
+            import project_runs
+            path = (f"PATH={shlex.quote(str(project_runs.SANDBOXED_BIN))}:\"$PATH\" "
+                    if t.agent == "claude" and project and project.confidential else "")
+            argv = [argv[0], "-l", "-c", path + shlex.join(resume) + tail]
         short = (t.ticket or Path(t.cwd).name)[:16]
         t.label = f"{key or 'runner'} · {kind} · {short}"
         # An agent tab starts and registers under its checkout's merge gate: never between a manual

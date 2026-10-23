@@ -21,6 +21,7 @@
 
 # Generated / runtime
 graphify-out/
+.codegraph/
 .playwright-mcp/
 outputs/
 state/

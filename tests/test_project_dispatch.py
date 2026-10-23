@@ -85,6 +85,41 @@ def test_confidential_claude_settings_and_sources(proj):
     settings = json.loads(argv[argv.index("--settings") + 1])["sandbox"]
     assert settings["failIfUnavailable"] is True and settings["allowUnsandboxedCommands"] is False
     assert argv[argv.index("--setting-sources") + 1] == "user" and "--strict-mcp-config" in argv
+    codex_home = Path.home() / ".codex"
+    assert settings["network"]["allowedDomains"] == pr.CODEX_DOMAINS and settings["network"]["strictAllowlist"]
+    assert str(codex_home) in settings["filesystem"]["allowWrite"]
+    assert str(codex_home / "config.toml") in settings["filesystem"]["denyWrite"]
+
+
+def test_sandboxed_codex_shim(tmp_path):
+    """Passes through outside a sandbox; inside one (nested sandbox-exec refused) it drops Codex's
+    own sandbox for the outer one and points Codex at the bundled CA file."""
+    if sys.platform != "darwin":
+        pytest.skip("macOS seatbelt only")
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "codex").write_text('#!/bin/sh\necho "$CODEX_CA_CERTIFICATE|$*"\n')
+    (fake / "codex").chmod(0o755)
+    env = {**os.environ, "PATH": f"{pr.SANDBOXED_BIN}:{fake}:/usr/bin:/bin"}
+    env.pop("CODEX_CA_CERTIFICATE", None)
+    run = lambda *argv: subprocess.run(argv, env=env, capture_output=True, text=True).stdout.strip()
+    assert run("codex", "exec", "-s", "read-only", "-") == "|exec -s read-only -"
+    jail = ["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny mach-lookup)"]  # refuses nesting
+    assert run(*jail, "codex", "exec", "-s", "read-only", "-") == (
+        "/etc/ssl/cert.pem|exec --dangerously-bypass-approvals-and-sandbox -s read-only -")
+    assert run(*jail, "codex", "exec", "resume", "sid", "-") == (
+        "/etc/ssl/cert.pem|exec resume --dangerously-bypass-approvals-and-sandbox sid -")
+    assert run(*jail, "codex", "--version") == "/etc/ssl/cert.pem|--version"
+
+
+def test_confidential_claude_exec_env_puts_sandboxed_codex_first(monkeypatch):
+    import app
+    monkeypatch.setattr(app, "_registry_exec_env", lambda agent, reg: {"PATH": "/usr/bin"})
+    monkeypatch.setattr(app, "_load_registry", lambda agent: {})
+    project = SimpleNamespace(env={}, confidential=True)
+    assert app._project_exec_env("claude", project)["PATH"] == f"{pr.SANDBOXED_BIN}{os.pathsep}/usr/bin"
+    assert app._project_exec_env("codex", project)["PATH"] == "/usr/bin"
+    assert app._project_exec_env("claude", SimpleNamespace(env={}, confidential=False))["PATH"] == "/usr/bin"
 
 
 def test_non_confidential_codex_uses_auto_review_without_sandbox_flag(proj):

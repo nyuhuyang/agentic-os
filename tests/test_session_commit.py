@@ -292,9 +292,20 @@ def test_commit_state_foreign_folder_is_neutral(repo, tmp_path):
     assert pj.commit_state(project, tmp_path) is None  # not a git checkout at all
 
 
-def test_api_projects_rows_carry_commit_state(repo, tmp_path, monkeypatch):
-    project, root = repo
+@pytest.fixture
+def commit_pass(monkeypatch):
+    """The commit-colour worker under test control: passes run only when the test says so."""
     import app as app_mod
+    for name, value in (("_commit_cache", {}), ("_commit_gen", 0), ("_commit_published", (-1, 0.0)),
+                        ("_commit_jobs", []), ("_commit_worker", False)):
+        monkeypatch.setattr(app_mod, name, value)
+    started, emitted = [], []
+    monkeypatch.setattr(app_mod, "_start_commit_worker", lambda: started.append(1))
+    monkeypatch.setattr(app_mod.socketio, "emit", lambda event, *a, **k: emitted.append(event))
+    return app_mod, started, emitted
+
+
+def _alpha_listing(tmp_path, root, monkeypatch):
     reg = tmp_path / "projects.yaml"
     reg.write_text(f"projects:\n  alpha:\n    path: {root}\n    verify: 'true'\n")
     monkeypatch.setattr(pj, "REGISTRY_PATH", reg)
@@ -303,13 +314,65 @@ def test_api_projects_rows_carry_commit_state(repo, tmp_path, monkeypatch):
     for sid in ("s1", "s2"):  # two sessions, one checkout: one status
         (d / f"{sid}.jsonl").write_text(json.dumps({"type": "user", "cwd": str(root), "entrypoint": "cli",
                                                     "message": {"role": "user", "content": "hi"}}) + "\n")
+
+
+def _alpha_rows(app_mod):
+    r = app_mod.app.test_client().get("/api/projects", headers={"X-AgenticOS-Token": app_mod.REQUEST_TOKEN})
+    return next(p for p in r.get_json()["projects"] if p["key"] == "alpha")["sessions"]
+
+
+def test_api_projects_rows_carry_commit_state(repo, tmp_path, monkeypatch, commit_pass):
+    project, root = repo
+    app_mod, started, emitted = commit_pass
+    _alpha_listing(tmp_path, root, monkeypatch)
     (root / "a.txt").write_text("c\n")
     calls = []
     real = pj.readonly_status
     monkeypatch.setattr(pj, "readonly_status", lambda cwd: calls.append(cwd) or real(cwd))
-    r = app_mod.app.test_client().get("/api/projects", headers={"X-AgenticOS-Token": app_mod.REQUEST_TOKEN})
-    rows = next(p for p in r.get_json()["projects"] if p["key"] == "alpha")["sessions"]
-    assert {s["commit_state"]["state"] for s in rows} == {"dirty"} and len(calls) == 1
+    rows = _alpha_rows(app_mod)
+    assert {s["commit_state"] for s in rows} == {None} and not calls and started == [1]  # neutral, no git here
+    app_mod._commit_pass_loop()
+    assert len(calls) == 1 and emitted == ["projects_commit_state"]
+    assert {s["commit_state"]["state"] for s in _alpha_rows(app_mod)} == {"dirty"}
+    assert started == [1]  # inside the TTL: no second pass
+
+
+def test_commit_during_a_pass_reruns_it(repo, tmp_path, monkeypatch, commit_pass):
+    project, root = repo
+    app_mod, started, emitted = commit_pass
+    _alpha_listing(tmp_path, root, monkeypatch)
+    _alpha_rows(app_mod)
+    passes = []
+    real = app_mod._with_commit_state
+
+    def with_state(p, sessions):
+        passes.append(1)
+        if len(passes) == 1:  # a commit lands while the first pass runs
+            (root / "a.txt").write_text("c\n")
+            app_mod._invalidate_commit_states()
+        return real(p, sessions)
+
+    monkeypatch.setattr(app_mod, "_with_commit_state", with_state)
+    app_mod._commit_pass_loop()
+    assert len(passes) == 2 and emitted == ["projects_commit_state"]  # obsolete pass discarded, rerun published
+    assert {s["commit_state"]["state"] for s in _alpha_rows(app_mod)} == {"dirty"}
+    app_mod._invalidate_commit_states()
+    assert started == [1, 1]  # a commit with the worker idle starts a pass itself, no listing needed (BL-005)
+    _alpha_rows(app_mod)
+    assert started == [1, 1]  # that pass is still running: the listing starts no second one
+
+
+def test_api_projects_spawns_only_registry_git(repo, tmp_path, monkeypatch, commit_pass):
+    import threading
+    project, root = repo
+    app_mod, _, _ = commit_pass
+    _alpha_listing(tmp_path, root, monkeypatch)
+    me, seen = threading.get_ident(), []
+    real = pj.spawn
+    monkeypatch.setattr(pj, "spawn", lambda argv, **kw: (threading.get_ident() == me and seen.append(argv))
+                        or real(argv, **kw))
+    _alpha_rows(app_mod)
+    assert seen and all("--git-dir" in argv for argv in seen)  # load_registry's per-project check only
 
 
 # ── Commit & merge from a worktree row ───────────────────────────────────────

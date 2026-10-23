@@ -109,6 +109,11 @@ agentic-os/
 - After modifying code: run `graphify update .` (AST-only, no API cost)
 - CLI: `pip install graphifyy` (double y); command is `graphify`; `/graphify` is the Claude Code skill
 
+## CodeGraph
+
+- Symbol/caller/blast-radius lookups: `codegraph_explore` MCP tool (or `codegraph explore "<symbols>"`) before grep/Read
+- A fresh ticket worktree gets a snapshot of the main checkout's index automatically (`_copy_codegraph`); no `.codegraph/` = skip CodeGraph
+
 ## DeepSeek Delegation
 
 Delegate reviews, metric analysis, strategy comparisons, second opinions, and docs synthesis with `runner/scripts/ask_deepseek.py`.

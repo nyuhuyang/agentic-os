@@ -24,6 +24,7 @@ import shlex
 import shutil
 import stat as stat_module
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -1043,6 +1044,29 @@ def _copy_seeds(wt: Path, project: Project) -> None:
             raise ProjectError(f"seed {rel!r} is not ignored by the worktree's committed .gitignore rules")
 
 
+def _copy_codegraph(wt: Path, project: Project) -> None:
+    """Give a fresh worktree a snapshot of the main checkout's CodeGraph index (AGE-134).
+
+    Automatic for every project with a `.codegraph/codegraph.db`; best effort — no index
+    just means agents fall back to grep. The copy's own .gitignore ignores itself too, so
+    the worktree stays clean without a rule in the project's committed .gitignore.
+    """
+    src, dest = project.path / ".codegraph" / "codegraph.db", wt / ".codegraph"
+    if ".codegraph" in project.seed or not src.is_file() or src.is_symlink() or dest.is_symlink():
+        return
+    try:
+        dest.mkdir(exist_ok=True)
+        # backup(), not a file copy: a consistent snapshot even while the daemon writes the WAL
+        with contextlib.closing(sqlite3.connect(f"{src.as_uri()}?mode=ro", uri=True, timeout=5)) as s, \
+                contextlib.closing(sqlite3.connect(dest / "codegraph.db")) as d:
+            s.backup(d)
+        if not os.path.lexists(dest / ".gitignore"):  # a committed one already ignores the db
+            (dest / ".gitignore").write_text("*\n", encoding="utf-8")
+    except (OSError, sqlite3.Error):
+        with contextlib.suppress(OSError):
+            (dest / "codegraph.db").unlink()
+
+
 def _is_worktree_of(project: Project, wt: Path) -> bool:
     """True only when `wt` is itself the top level of a worktree of this project's repo
     (a subdirectory of one does not count)."""
@@ -1150,6 +1174,7 @@ def create_worktree(project: Project, ident: str) -> dict:
     try:
         os.chmod(wt, 0o700)
         _copy_seeds(wt, project)
+        _copy_codegraph(wt, project)
         # The binding is the "ready" marker: written only once every seed is copied and checked.
         meta = _binding_path(project, ident)
         meta.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1783,19 +1808,44 @@ def claude_memory_names(project: Project) -> list[str]:
     return sorted(p.name for p in mem.glob("*.md")) if mem.is_dir() else []
 
 
+_CODEX_ROWS: tuple = (None, 0.0, [])  # (DB + WAL stat signature, monotonic time, rows)
+_CODEX_ROWS_MAX_AGE_S = 5  # a WAL commit can publish after the files settle (BL-004): never trust a memo longer
+
+
+def _codex_rows() -> list[tuple]:
+    """One query for all projects of a listing, not one per project; changes show within 5 s."""
+    import sqlite3
+    global _CODEX_ROWS
+    sig = (str(CODEX_DB), *((st.st_mtime_ns, st.st_size) if (st := _stat_or_none(p)) else None
+                            for p in (CODEX_DB, CODEX_DB.with_name(CODEX_DB.name + "-wal"))))
+    now = time.monotonic()
+    if _CODEX_ROWS[0] == sig and now - _CODEX_ROWS[1] < _CODEX_ROWS_MAX_AGE_S:
+        return _CODEX_ROWS[2]
+    db = sqlite3.connect(f"file:{CODEX_DB}?mode=ro", uri=True)
+    try:
+        rows = db.execute(
+            "SELECT id, cwd, name, title, first_user_message, updated_at, tokens_used, git_branch, source "
+            "FROM threads WHERE archived = 0 AND source IN ('cli', 'vscode', 'exec')").fetchall()
+    finally:
+        db.close()
+    _CODEX_ROWS = (sig, now, rows)
+    return rows
+
+
+def _stat_or_none(p: Path):
+    try:
+        return p.stat()
+    except OSError:
+        return None
+
+
 def codex_sessions(project: Project, board_ids=None, labels=None) -> list[dict]:
     import sqlite3
     if not CODEX_DB.exists():
         return []
     roots = _session_roots(project)
     try:
-        db = sqlite3.connect(f"file:{CODEX_DB}?mode=ro", uri=True)
-        try:
-            rows = db.execute(
-                "SELECT id, cwd, name, title, first_user_message, updated_at, tokens_used, git_branch, source "
-                "FROM threads WHERE archived = 0 AND source IN ('cli', 'vscode', 'exec')").fetchall()
-        finally:
-            db.close()
+        rows = _codex_rows()
     except sqlite3.Error:
         return []  # format drift: degrade to no Codex rows, never crash the view
     out = []
