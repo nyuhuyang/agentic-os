@@ -2157,11 +2157,13 @@ let _boardItemsByRunId = {};
 let _trashOpen = false;
 let _cancelledItems = [];
 let _pendingBoardRefresh = false;
+let _boardRefreshSeq = 0;
 let _optimisticBoardHoldUntil = 0;
 let _heldBoardRefreshTimer = null;
 let _optimisticLinearIssuePatches = {};
 // Live interactive card sessions, term_id -> card key, refreshed with the board (AC4).
 let _liveCardTerms = new Map();
+let _liveCardTermsSeq = 0;
 // A card terminal that still holds its card: live, or its cleanup failed (still owns the card, ICS-29).
 function _holdsCard(i) { return i.kind === 'resume' && !!i.card_key && (i.alive !== false || !!i.cleanup_failed); }
 function _cardHasSession(key) { return !!key && [..._liveCardTerms.values()].includes(key); }
@@ -2172,9 +2174,17 @@ async function _termListBounded(ms = 1500) {
   return Promise.race([_cardTermList(), new Promise(r => setTimeout(() => r(null), ms))]);
 }
 async function _refreshLiveCardTerms() {  // never holds the board up: no answer = unchanged
+  const seq = ++_liveCardTermsSeq;
   const list = await _termListBounded();
-  if (list) _liveCardTerms = new Map(list.filter(i => _holdsCard(i))
-                                         .map(i => [i.term_id, i.card_key]));
+  if (!list || seq !== _liveCardTermsSeq) return;
+  const next = new Map(list.filter(i => _holdsCard(i)).map(i => [i.term_id, i.card_key]));
+  if (next.size === _liveCardTerms.size && [...next].every(([id, key]) => _liveCardTerms.get(id) === key)) return;
+  _liveCardTerms = next;
+  if (_shouldDeferBoardRefresh() || Date.now() < _optimisticBoardHoldUntil) {
+    _pendingBoardRefresh = true;
+    return;
+  }
+  _renderBoardItems(_boardItems);
 }
 let _detailLinearInitial = null;
 let _detailLinearUpdatedAt = '';
@@ -2978,16 +2988,21 @@ async function refreshJobBoard(force = false) {
     _pendingBoardRefresh = true;
     return;
   }
+  const seq = ++_boardRefreshSeq;
   try {
     const teamParam = _currentTeamId ? `?team_id=${encodeURIComponent(_currentTeamId)}` : '';
     const fetches = [fetch('/api/runs?state=running'), fetch('/api/runs?limit=80'), fetch(`/api/linear/issues${teamParam}`),
                      fetch('/api/runs/latest-by-issue')];
     const results = await Promise.all(fetches);
-    await _refreshLiveCardTerms();
     const running = await results[0].json();
     const recent = await results[1].json();
     const linearIssues = results[2] ? await results[2].json() : [];
     const olderLatest = results[3] && results[3].ok ? await results[3].json() : {};  // beyond the 80-run window (REV23-01)
+    if (seq !== _boardRefreshSeq) return;
+    if (!force && _shouldDeferBoardRefresh()) {
+      _pendingBoardRefresh = true;
+      return;
+    }
 
     const latestRuns = _latestLinearRuns([
       ...running.map(r => ({ ...r, status: 'running' })),
@@ -3045,6 +3060,7 @@ async function refreshJobBoard(force = false) {
     });
 
     _renderBoardItems(all);
+    void _refreshLiveCardTerms().catch(() => {});
     _cardTermSyncLatest();  // the open card gained an attempt elsewhere? (QR-004)
   } catch (_) {}
 }
