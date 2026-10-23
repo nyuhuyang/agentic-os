@@ -294,7 +294,7 @@ def normalize_event(agent: str, line: str) -> str | None:
     return None
 
 
-_DIM, _RED, _CYAN, _RESET = "\x1b[2m", "\x1b[31m", "\x1b[36m", "\x1b[0m"
+_DIM, _RED, _CYAN, _YELLOW, _RESET = "\x1b[2m", "\x1b[31m", "\x1b[36m", "\x1b[33m", "\x1b[0m"
 TOOL_RESULT_CHARS = 200
 
 
@@ -315,6 +315,58 @@ def _args(value) -> str:
     """Tool arguments for the run view, cut visibly (…) past TOOL_ARGS_CHARS (UI-12)."""
     text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
     return text if len(text) <= TOOL_ARGS_CHARS else text[:TOOL_ARGS_CHARS] + "…"
+
+
+def _first_line(value, n: int = 120) -> str:
+    text = str(value or "").strip().split("\n", 1)[0]
+    return text if len(text) <= n else text[:n] + "…"
+
+
+def _claude_system_lines(ev: dict) -> list[str]:
+    """The Claude system events an interactive session shows and `-p` only streams (AGE-136):
+    model, retries, denials, compaction and subagent/background task progress. Hooks, thinking
+    token counts and task bookkeeping stay hidden."""
+    s = ev.get("subtype")
+    if s == "init":
+        return [f"{_DIM}[init] {ev.get('model', '?')} · {ev.get('permissionMode', '')} · {ev.get('cwd', '')}{_RESET}"]
+    if s == "api_retry":
+        why = ev.get("error_status") or ev.get("error") or "error"
+        return [f"{_YELLOW}[retry] API {why}: attempt {ev.get('attempt')}/{ev.get('max_retries')} "
+                f"in {(ev.get('retry_delay_ms') or 0) / 1000:.1f}s{_RESET}"]
+    if s == "permission_denied":
+        return [f"{_RED}[denied] {ev.get('tool_name')}: {_first_line(ev.get('decision_reason') or ev.get('message'), 200)}{_RESET}"]
+    if s == "compact_boundary":
+        pre = (ev.get("compact_metadata") or {}).get("pre_tokens")
+        return [f"{_YELLOW}[compact] context compacted{f' ({pre} tokens before)' if pre else ''}{_RESET}"]
+    if s == "task_started":
+        return [f"{_DIM}[task] started: {_first_line(ev.get('description'))}{_RESET}"]
+    if s == "task_progress":
+        tool = f" · {ev['last_tool_name']}" if ev.get("last_tool_name") else ""
+        return [f"{_DIM}[task] {_first_line(ev.get('description'))}{tool}{_RESET}"]
+    if s == "task_notification":
+        color = _DIM if ev.get("status") in (None, "completed") else _RED
+        return [f"{color}[task] {ev.get('status')}: {_first_line(ev.get('summary'))}{_RESET}"]
+    return []
+
+
+def _todo_lines(todos) -> list[str]:
+    marks = {"completed": "☒", "in_progress": "▶"}
+    return [f"{_CYAN}[todo]{_RESET}"] + [
+        f"{_CYAN}  {marks.get(t.get('status'), '☐')} {t.get('content', '')}{_RESET}"
+        for t in todos if isinstance(t, dict)]
+
+
+def _result_stats(ev: dict) -> str:
+    """Duration, turns and cost of a finished Claude turn, as the interactive CLI reports them."""
+    parts = []
+    if isinstance(ev.get("duration_ms"), (int, float)):
+        m, s = divmod(int(ev["duration_ms"] / 1000), 60)
+        parts.append(f"{m}m{s:02d}s" if m else f"{s}s")
+    if ev.get("num_turns"):
+        parts.append(f"{ev['num_turns']} turns")
+    if isinstance(ev.get("total_cost_usd"), (int, float)):
+        parts.append(f"${ev['total_cost_usd']:.2f}")
+    return "".join(f" · {p}" for p in parts)
 
 
 _CODEX_TOOL_ITEMS = {"mcp_tool_call", "file_change", "web_search", "collab_tool_call"}
@@ -499,6 +551,11 @@ def note_agent_error(run_id: str, fmt: str, line: str) -> None:
         AGENT_FAILED.add(run_id)
 
 
+def _subagent(ev: dict, lines: list[str]) -> list[str]:
+    """A subagent's turns are indented under the Agent call that started them."""
+    return [f"{_DIM}  │{_RESET} {ln}" for ln in lines] if ev.get("parent_tool_use_id") else lines
+
+
 def render_event(fmt: str, line: str) -> list[str]:
     """One raw stdout line -> terminal lines for the live/replay run view (shared by both).
     fmt: claude (stream-json), codex (exec --json), dsh (--json) or text (plain output).
@@ -523,7 +580,15 @@ def render_event(fmt: str, line: str) -> list[str]:
             if isinstance(block, dict) and block.get("type") == "tool_result":
                 color = _RED if block.get("is_error") else _DIM
                 extra.append(f"{color}  ↳ {_tool_result_text(block.get('content'))}{_RESET}")
-        return extra
+        return _subagent(ev, extra)
+    if fmt == "claude" and t == "system":
+        return _claude_system_lines(ev)
+    if fmt == "claude" and t == "tool_progress" and ev.get("elapsed_time_seconds"):  # a long tool is alive
+        return [f"{_DIM}  … {ev.get('tool_name')} still running ({int(ev['elapsed_time_seconds'])}s){_RESET}"]
+    if fmt == "claude" and t == "rate_limit_event" and (ev.get("rate_limit_info") or {}).get("status") == "rejected":
+        return [f"{_RED}[limit] usage limit hit ({ev['rate_limit_info'].get('rateLimitType', '?')}){_RESET}"]
+    if fmt == "dsh" and t in ("text", "thinking") and ev.get("text"):
+        return [f"{_DIM}✻ {ln}{_RESET}" if t == "thinking" else ln for ln in ev["text"].split("\n")]
     item = ev.get("item") or {}
     if fmt == "codex" and t in ("item.started", "item.completed") and item.get("type") in _CODEX_TOOL_ITEMS:
         return _codex_tool_lines(t, item)  # every tool kind of the Codex exec event schema (UI28-01)
@@ -547,9 +612,14 @@ def render_event(fmt: str, line: str) -> list[str]:
         for block in (ev.get("message") or {}).get("content") or []:
             if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
                 lines.extend(block["text"].split("\n"))
+            elif isinstance(block, dict) and block.get("type") == "thinking" and block.get("thinking"):
+                lines.extend(f"{_DIM}✻ {ln}{_RESET}" for ln in block["thinking"].strip().split("\n"))
+            elif isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "TodoWrite" \
+                    and isinstance((block.get("input") or {}).get("todos"), list):
+                lines.extend(_todo_lines(block["input"]["todos"]))
             elif isinstance(block, dict) and block.get("type") == "tool_use":
                 lines.append(f"{_CYAN}[tool] {block.get('name')} {_args(block.get('input'))}{_RESET}")
-        return lines
+        return _subagent(ev, lines)
     if fmt in ("codex", "dsh") and t == "error":  # errors are always visible, live and in replay (UI2-09)
         return [f"{_RED}[error] {_tool_result_text(ev.get('message') or 'error')}{_RESET}"]
     if fmt == "codex" and t == "turn.failed":  # the reason, not just "error" (REV30-01)
@@ -558,6 +628,8 @@ def render_event(fmt: str, line: str) -> list[str]:
         return [f"{_RED}[result] error: {_tool_result_text(msg or 'turn failed')}{_RESET}"]
     if fmt == "claude" and t == "result" and ev.get("is_error"):  # likewise for a failed Claude turn
         return [f"{_RED}[result] error: {_tool_result_text(ev.get('result') or ev.get('subtype') or 'error')}{_RESET}"]
+    if fmt == "claude" and t == "result":
+        return [f"{_DIM}[result] ok{_result_stats(ev)}{_RESET}"]
     shown = normalize_event(fmt, line)
     if not shown:
         return extra

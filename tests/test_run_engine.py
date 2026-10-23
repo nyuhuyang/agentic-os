@@ -96,6 +96,30 @@ def test_renderer_turns_each_format_into_terminal_lines():
     assert pr.session_id_of("claude", json.dumps({"type": "system", "session_id": "s"})) == "s"
 
 
+def test_renderer_shows_what_an_interactive_session_shows():  # AGE-136
+    r = lambda fmt, ev: plain(pr.render_event(fmt, json.dumps(ev)))
+    asst = lambda *blocks, **kw: {"type": "assistant", "message": {"content": list(blocks)}, **kw}
+    assert r("claude", asst({"type": "thinking", "thinking": "plan A\nplan B"})) == ["✻ plan A", "✻ plan B"]
+    todos = [{"content": "read", "status": "completed"}, {"content": "fix", "status": "in_progress"},
+             {"content": "test", "status": "pending"}]
+    assert r("claude", asst({"type": "tool_use", "name": "TodoWrite", "input": {"todos": todos}})) \
+        == ["[todo]", "  ☒ read", "  ▶ fix", "  ☐ test"]
+    assert r("claude", asst({"type": "text", "text": "sub"}, parent_tool_use_id="t1")) == ["  │ sub"]
+    sys_ev = lambda **kw: r("claude", {"type": "system", **kw})
+    assert sys_ev(subtype="permission_denied", tool_name="Bash", decision_reason="no approval surface") \
+        == ["[denied] Bash: no approval surface"]
+    assert sys_ev(subtype="api_retry", attempt=2, max_retries=10, retry_delay_ms=1500, error_status=529) \
+        == ["[retry] API 529: attempt 2/10 in 1.5s"]
+    assert sys_ev(subtype="task_progress", description="Reading a.py", last_tool_name="Read") == ["[task] Reading a.py · Read"]
+    assert sys_ev(subtype="hook_started", hook_name="x") == [] and sys_ev(subtype="thinking_tokens") == []
+    assert r("claude", {"type": "tool_progress", "tool_name": "Bash", "elapsed_time_seconds": 30}) \
+        == ["  … Bash still running (30s)"]
+    assert r("claude", {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning"}}) == []
+    assert r("claude", {"type": "result", "duration_ms": 397281, "num_turns": 8, "total_cost_usd": 2.749}) \
+        == ["[result] ok · 6m37s · 8 turns · $2.75"]
+    assert r("dsh", {"type": "thinking", "text": "hmm"}) == ["✻ hmm"] and r("dsh", {"type": "text", "text": "hi"}) == ["hi"]
+
+
 # ── engine through the real launch paths ─────────────────────────────────────
 
 @pytest.fixture
