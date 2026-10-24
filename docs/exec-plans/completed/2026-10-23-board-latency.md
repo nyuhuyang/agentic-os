@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: completed
 created: 2026-10-23
 ---
 
@@ -54,7 +54,7 @@ Non-goals: `/api/windows/all` (10.5 s live, agy quota timeouts, 60 s timer — s
 
 ## Verification
 
-- [x] `.venv/bin/python -m pytest tests -q -x` passes. — 949 passed; 1 pre-existing failure (`test_claude_account.py::test_dashboard_select_needs_two_accounts[2-True]`, sandbox denies reading the KB `wiki/log.md`) fails identically on base bed5c17.
+- [x] `.venv/bin/python -m pytest tests -q -x` passes. — 950 passed after the BL-004/BL-005 fixes; 1 pre-existing failure (`test_claude_account.py::test_dashboard_select_needs_two_accounts[2-True]`, sandbox denies reading the KB `wiki/log.md`) fails identically on base bed5c17.
 - [x] Test: first GET returns neutral rows and starts one pass.
 - [x] Test: after the pass, a GET returns the same states the synchronous code produced.
 - [x] Test: a second GET inside the TTL starts no pass.
@@ -65,9 +65,9 @@ Non-goals: `/api/windows/all` (10.5 s live, agy quota timeouts, 60 s timer — s
 - [x] Isolated-copy timing: warm `GET /api/projects` < 2 s (was 8.5–10.5 s).
 - [x] Isolated-copy timing: `GET /api/projects` < 2 s while a pass is running.
 - [x] Timings recorded in the review log.
-- [ ] Manual check after a user-approved live runner restart: `/api/projects` < 2 s.
-- [ ] Manual check after the restart: dispatching a card responds promptly.
-- [ ] Manual check after the restart: creating a Todo responds promptly.
+- [x] Manual check after a user-approved live runner restart: `/api/projects` < 2 s. — live runner restarted 2026-10-23 23:15 (after 9a993fc); spaced live calls on 2026-10-24 took 0.87 / 0.87 / 1.00 / 0.99 / 1.13 s warm (cold first call 3.24 s), 139 of 142 session rows had `commit_state`.
+- [x] Manual check after the restart: dispatching a card responds promptly. — live `POST /api/runs/c1ed8ac0-.../retry` returned 200 at 10:01:42 and the board refreshed in the same second; the new run `9eac22d6` (AGE-141) started at 10:01:41 and is the one running this check.
+- [x] Manual check after the restart: creating a Todo responds promptly. — live `POST /api/linear/issues` returned 200 at 09:45:02 and the board refreshed in the same second; AGE-145 appeared (Linear's `created_at` landed at 09:45:07, after the local-first response).
 
 ## Progress Checklist
 
