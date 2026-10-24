@@ -18,6 +18,7 @@ sys.path.insert(0, str(RUNNER))
 sys.path.insert(0, str(RUNNER.parent))
 
 import projects as pj  # noqa: E402
+import dsh_cli
 import project_runs as pr  # noqa: E402
 
 SENTINEL = "SENTINEL-CONFIDENTIAL-4242"
@@ -59,8 +60,21 @@ def project(repo, confidential=False):
 
 # ── argv policy (Decision 9) ─────────────────────────────────────────────────
 
+def _confidential_dsh_prefix():
+    return ["/opt/homebrew/bin/node", "/opt/homebrew/lib/dsh/bin.js", "--profile", "headless",
+            "--patch", str(dsh_cli.DSH_CONFIDENTIAL_PATCH)]
+
+
 def cli(agent, repo, confidential):
-    return pr.agent_cli(agent, project(repo, confidential), "claude", lambda: ["dsh", "--profile", "headless"])
+    return pr.agent_cli(agent, project(repo, confidential), "claude",
+                        lambda: ["dsh", "--profile", "headless"], _confidential_dsh_prefix)
+
+
+def test_prompt_asks_the_agent_to_announce_a_long_test_run(proj):
+    """AGE-140: a silent test run must not read as a hang; the agent says it is about to test."""
+    repo, _ = proj
+    prompt = pr.project_prompt("do the ticket", project(repo), {"branch": "agent/DEMO-1"}, "claude")
+    assert "Before running the test suite" in prompt and "look like a hang" in prompt
 
 
 def test_prompt_asks_the_agent_to_announce_a_long_test_run(proj):
@@ -119,14 +133,27 @@ def test_sandboxed_codex_shim(tmp_path):
     assert run(*jail, "codex", "--version") == "/etc/ssl/cert.pem|--version"
 
 
-def test_confidential_claude_exec_env_puts_sandboxed_codex_first(monkeypatch):
+def test_confidential_claude_exec_env_puts_sandboxed_codex_first(monkeypatch, tmp_path):
     import app
     monkeypatch.setattr(app, "_registry_exec_env", lambda agent, reg: {"PATH": "/usr/bin"})
     monkeypatch.setattr(app, "_load_registry", lambda agent: {})
     project = SimpleNamespace(env={}, confidential=True)
-    assert app._project_exec_env("claude", project)["PATH"] == f"{pr.SANDBOXED_BIN}{os.pathsep}/usr/bin"
-    assert app._project_exec_env("codex", project)["PATH"] == "/usr/bin"
-    assert app._project_exec_env("claude", SimpleNamespace(env={}, confidential=False))["PATH"] == "/usr/bin"
+    assert app._project_exec_env("claude", project, str(tmp_path))["PATH"] == f"{pr.SANDBOXED_BIN}{os.pathsep}/usr/bin"
+    assert app._project_exec_env("codex", project, str(tmp_path))["PATH"] == "/usr/bin"
+    assert app._project_exec_env("claude", SimpleNamespace(env={}, confidential=False), str(tmp_path))["PATH"] == "/usr/bin"
+
+
+def test_dsh_leaves_the_commit_and_git_writes_to_the_runner(proj):
+    """AGE-138: a linked worktree's git metadata is outside dsh's workspace-write root."""
+    repo, _ = proj
+    binding = {"branch": "agent/T-1"}
+    dsh = pr.project_prompt("task", project(repo), binding, "dsh")
+    assert "Leave your changes uncommitted" in dsh and "Commit your work" not in dsh
+    assert "`git commit`" in dsh and "runner commits" in dsh
+    codex = pr.project_prompt("task", project(repo), binding, "codex")
+    assert "Leave your changes uncommitted" in codex and "git commit" not in codex
+    claude = pr.project_prompt("task", project(repo), binding, "claude")
+    assert "Commit your work on this branch" in claude and "Leave your changes uncommitted" not in claude
 
 
 def test_dsh_leaves_the_commit_and_git_writes_to_the_runner(proj):
@@ -156,10 +183,18 @@ def test_non_confidential_claude_and_dsh_unchanged(proj):
     assert cli("dsh", repo, False) == ["dsh", "--profile", "headless"]
 
 
+def test_confidential_dsh_gets_the_sandbox_patch(proj):
+    """AGE-139: dsh is allowed for a confidential project through the runner's Seatbelt patch."""
+    repo, _ = proj
+    argv = cli("dsh", repo, True)
+    assert argv[:2] == ["/opt/homebrew/bin/node", "/opt/homebrew/lib/dsh/bin.js"]
+    assert argv[2:4] == ["--profile", "headless"]
+    assert argv[4:6] == ["--patch", str(dsh_cli.DSH_CONFIDENTIAL_PATCH)]
+    assert dsh_cli.DSH_CONFIDENTIAL_PATCH.is_file()
+
+
 def test_rejected_backends(proj, monkeypatch):
     repo, _ = proj
-    with pytest.raises(pr.ProjectRunError, match="dsh is not allowed"):
-        cli("dsh", repo, True)
     with pytest.raises(pr.ProjectRunError, match="cannot run project tickets"):
         cli("deepseek-direct", repo, False)
     monkeypatch.setattr(pr, "CONFIDENTIAL_SANDBOX_VERIFIED", False)

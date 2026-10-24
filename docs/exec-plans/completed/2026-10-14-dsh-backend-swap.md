@@ -57,6 +57,7 @@ This plan replaces both with **one** agent, `dsh`, backed by the official DeepSe
    - A version gate requires `dsh >= 0.2.0-rc.2`, the first version with `--json` and `--session-id`. rc builds can change the CLI, so the gate compares the full semver including the pre-release tag.
 3. **Permission mode is decided by the spike, and it fails closed.**
    - **Confidential projects: `dsh` is always rejected**, in every permission mode. The installed Seatbelt profile leaves shell network open (see Verified facts), so it cannot meet the dispatch plan's Decision 9 "no shell network" rule. This changes only if a later dsh release adds network confinement *and* a rerun of spike items (c) and (d) proves it.
+     - **Superseded by AGE-139 (2026-10-23):** allowed through the runner's own Seatbelt runner (`runner/dsh_confine.py` + `runner/scripts/dsh-confidential.yml`), which supplies the missing network denial; see `docs/exec-plans/active/2026-10-23-dsh-confidential-network.md`.
    - The permission mode below therefore covers non-confidential runs only.
    - **If headless `ask` auto-denies without hanging,** use `workspace-write`. Writes are then confined to the cwd and the agent never asks, which is the same model as Codex `approval_policy="never"`.
    - **If headless `ask` hangs or errors,** use `danger-full-access`, which matches today's `deepseek exec --auto`.

@@ -105,7 +105,8 @@ def leaves_commit_to_runner(agent: str, project: projects.Project) -> bool:
     return agent in ("codex", "dsh")
 
 
-def agent_cli(agent: str, project: projects.Project, claude_bin: str, dsh_prefix: Callable[[], list[str]]) -> list[str]:
+def agent_cli(agent: str, project: projects.Project, claude_bin: str, dsh_prefix: Callable[[], list[str]],
+              dsh_confidential_prefix: Callable[[], list[str]] | None = None) -> list[str]:
     """Headless CLI prefix for a project-bound run. Raises ProjectRunError for a backend the
     binding does not allow."""
     if agent not in PROJECT_AGENTS:
@@ -115,7 +116,13 @@ def agent_cli(agent: str, project: projects.Project, claude_bin: str, dsh_prefix
         if not CONFIDENTIAL_SANDBOX_VERIFIED:
             raise ProjectRunError("confidential dispatch is disabled: the verify/git sandbox failed its spike")
         if agent == "dsh":
-            raise ProjectRunError("dsh is not allowed for confidential projects (its sandbox leaves shell network open)")
+            # AGE-139: the runner's Seatbelt runner closes shell network; dsh's own sandbox
+            # confines writes only. Never fall back to the shebang launch: a project PATH
+            # `node` would run before the sandbox, and the version floor would be skipped.
+            if dsh_confidential_prefix is None:
+                raise ProjectRunError(
+                    "confidential dsh needs the runner's absolute-node prefix (no shebang fallback)")
+            return dsh_confidential_prefix()
         if agent == "codex":
             return ["codex", "exec", "--json", "--sandbox", "workspace-write", "--add-dir", common,
                     "-c", 'approval_policy="never"', "-c", "sandbox_workspace_write.network_access=false",
