@@ -1020,14 +1020,15 @@ new Chart(document.getElementById('activityChart'), {
   data: {
     labels: chartData.labels,
     // Stacked fill, bottom to top: AgenticOS, Work, Other. A band's thickness is that
-    // kind's conversations; the top line's height is the day's total. Every boundary is
-    // drawn in black so the coloured areas stay clearly separated (AGE-128).
+    // kind's conversations; the top line's height is the day's total. Boundaries are a
+    // translucent light hairline: it separates the bands without a hard black outline
+    // that fights the dark theme (AGE-128).
     datasets: [
       ['AgenticOS', chartData.agentic, '#e8723a'],
       ['Work', chartData.work, '#4caf50'],
       ['Other', chartData.other, '#4fa3e0'],
     ].map(([label, data, color]) => ({
-      label, data: data || [], borderColor: '#000', backgroundColor: color,
+      label, data: data || [], borderColor: 'rgba(255,255,255,0.3)', backgroundColor: color,
       borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, pointBackgroundColor: color,
       fill: true, tension: 0.25, cubicInterpolationMode: 'monotone',
     }))
