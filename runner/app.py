@@ -2857,6 +2857,10 @@ def _project_exec_env(agent: str, project, worktree: str | None = None,
         env["AGENTICOS_DSH_CONFINE_GIT"] = git_dir
         env[dsh_cli.DSH_CONFINE_RUNNER_ENV] = json.dumps(
             [sys.executable, "-I", str(dsh_cli.DSH_CONFINE_RUNNER)])
+        identity = _projects.commit_identity_env(Path(root)) or {}
+        for key in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+            if key in identity:
+                env[key] = identity[key]
         try:
             dsh_cli.verify_workspace_launch(env, root)
         except RuntimeError as exc:
@@ -6992,6 +6996,8 @@ def favicon():
 
 
 def main() -> None:
+    # AGE-146: a child's confinement marker must never disarm the runner's own git sandbox.
+    _projects.clear_inherited_sandbox_marker()
     parser = argparse.ArgumentParser(description="AgenticOS web dashboard.")
     parser.add_argument("--port", type=int, default=8510)
     parser.add_argument("--host", default="127.0.0.1")

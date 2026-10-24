@@ -31,6 +31,16 @@ strand work.
   network/app-service denials; workspace mirrors dsh's native write-only profile and adds the
   git common dir. `GIT_OPTIONAL_LOCKS=0` does not block `add`/`commit` (they take required
   locks); it only stops optional index refreshes.
+- A survey of recent dsh sessions (`docs/references/dsh-commit-failures.md`) found the same
+  denial in AGE-110/117/120/123/125/126/128/137/138/140/142/143/144: `index.lock` and
+  `ORIG_HEAD.lock` under the main checkout's `.git/worktrees/<id>`, plus the dead-end
+  `danger-full-access` escalation ("no approval channel"). Agents worked around it with
+  `GIT_INDEX_FILE`, throwaway clones and copied trees. Those land the files, but the runner's
+  `post_run` then makes a **single-parent** commit; `main` never becomes an ancestor and the
+  next merge conflicts (AGE-126/137).
+- The recent prompts made this worse: AGE-117/120/126 were told "leave uncommitted / do not run
+  `git commit` or `git add`" while their task was "merge main". A merge requires those writes,
+  so the agent obeyed the letter of one rule and reconstructed the tree in a clone.
 - Everything after the agent still runs `project_runs.post_run`, which commits leftovers for
   every agent; that safety net stays.
 
@@ -79,6 +89,56 @@ The workspace overlay is selected by an explicit ticket-dispatch flag on the sha
 helpers. A native session continuation passes false, so it keeps today's prefix and no git
 grant; only a validated ticket worktree gets the overlay and its leftover-commit path.
 
+The dsh project prompt for a macOS ticket adds the missing merge guidance: the worktree git
+metadata is writable, a merge task must run a real `git merge` in the worktree, and a clone,
+`git archive`, `GIT_INDEX_FILE` or a copied tree is not a substitute because the runner's
+leftover commit would lose the merge parent. `_project_exec_env` also exports the same
+fallback author/committer identity the runner already uses, so a repo with no `user.email`
+does not fail dsh's own commit.
+
+Nested sandboxing is skipped **only for non-confidential workspace git**, and only when the
+marker is `workspace` **and** an actual `/usr/bin/sandbox-exec` probe is refused (a parent
+Seatbelt is active). The marker is child-controlled, so it is never trusted for a confidential
+operation: confidential git, verify and manual commit always attempt the inner profile and
+fail closed if it cannot start. The runner clears any inherited marker at startup; a spoofed
+or `confidential` value is ignored. A failed probe with no marker still attempts the inner
+profile.
+
+`runner_commit` inspects the git operation state before staging. An unresolved merge, a
+rebase/cherry-pick/revert, a pending sequencer (multi-commit cherry-pick/revert), or unmerged
+index entries are refused without touching the index.
+A fully resolved merge proceeds and `MERGE_HEAD` makes the fallback a real two-parent commit.
+An empty pending merge is refused instead of leaving `MERGE_HEAD` behind. `post_run` also
+refuses a clean tree that still has an operation in progress, so it cannot report success or
+auto-merge an unfinished merge.
+
+The `.codegraph` snapshot copy is hardened too: the DB is built in runner-owned
+`WORKTREE_ROOT/<key>/.meta`, and the copy/rename is anchored to an `O_DIRECTORY|O_NOFOLLOW`
+descriptor of the destination (`.gitignore` uses `O_EXCL|O_NOFOLLOW`), so a planted symlink or
+a path swap during the copy cannot redirect the write. A planted `codegraph.db` link is
+replaced, not followed.
+Off macOS, a non-confidential project keeps the old unsandboxed fallback; a confidential
+project still returns writable roots, so the missing Seatbelt fails closed instead of running
+an unconfined filter/hook.
+
+The canonical git common dir is resolved from the trusted main checkout (`git_common_dir`),
+pinned in runner-owned `WORKTREE_ROOT/<key>/.meta/project.json` at the first grant, and never
+accepted from the agent-writable ticket worktree. A later live value that disagrees with the
+pin is refused, so a `commondir`/`.git` redirect cannot widen a grant. The binding also records
+it, and `load_binding` refuses a worktree whose absolute git dir is no longer under that pinned
+directory. The manual `commit_checkout` grant also comes from this pin. The pin's
+lookup/compare/publish runs under a thread lock plus `state_io.file_lock` and is written with
+`write_json_atomic`, so the dashboard and CLI cannot race on a fixed temp name. The operation
+check gives rebase/sequencer state precedence over `MERGE_HEAD`, because
+`rebase --rebase-merges` can have both.
+
+Runner-owned git sets `GIT_NO_LAZY_FETCH=1` and the binding `cat-file` plus the post-run
+`rev-list` run under `read_git_confine`, so a repo-configured promisor remote cannot make a
+missing object trigger `core.sshCommand`. `GitConfine` also carries the profile policy:
+non-confidential git keeps the write-only profile (network open for a downloading smudge/clean
+filter); confidential git keeps the hostile profile (network closed).
+
+
 ## Non-goals
 
 - Interactive/native dsh sessions launched outside project dispatch (their cwd is not the
@@ -106,6 +166,9 @@ grant; only a validated ticket worktree gets the overlay and its leftover-commit
 - [ ] A read-only dsh call under `workspace` grants no writable roots.
 - [ ] Confidential dsh keeps its network/app-service denials and `/tmp` TMPDIR.
 - [ ] The dsh project prompt asks for a commit and no longer says to leave it to the runner.
+- [ ] The dsh prompt requires a real `git merge` for a merge task and forbids tree-copy/clone
+      workarounds.
+- [ ] A repo with no configured identity gets the runner's fallback commit identity in dsh's env.
 - [ ] The Codex prompt still leaves the commit to the runner.
 - [ ] `post_run` still commits leftover changes for every agent.
 - [ ] Non-macOS keeps the leave-it-to-the-runner prompt and native prefix.
@@ -119,7 +182,11 @@ grant; only a validated ticket worktree gets the overlay and its leftover-commit
 - [ ] The dsh workspace overlay is selected only for ticket dispatch.
 - [ ] Read-only git consumers are write-confined for non-confidential projects on macOS.
 - [ ] Ticket worktree creation is write-confined on macOS, so a smudge filter cannot escape.
-- [ ] Non-macOS keeps the old unsandboxed read/commit fallback (no `sandbox-exec`).
+- [ ] Non-confidential non-macOS keeps the old unsandboxed read/commit fallback (no
+      `sandbox-exec`); confidential fails closed instead.
+- [ ] A planted CodeGraph DB/`.gitignore` symlink is replaced or skipped, never followed.
+- [ ] A redirected worktree git dir is refused by `load_binding`.
+- [ ] A rebase/sequencer state is refused even when `MERGE_HEAD` is also present.
 
 ## Verification
 
@@ -132,7 +199,9 @@ grant; only a validated ticket worktree gets the overlay and its leftover-commit
       no `(deny network*)`, contains the git-dir subpath, and contains the worktree subpath.
 - [ ] A unit check prints `dsh_confine.build_argv` for a read-only workspace call and asserts no
       writable roots are granted.
-- [ ] `git diff --check` exits 0.
+- [x] `docs/references/dsh-commit-failures.md` records the recent sessions, signatures and
+      remaining edge cases.
+- [x] `git diff --check` exits 0.
 
 ## Risks
 
@@ -144,47 +213,98 @@ grant; only a validated ticket worktree gets the overlay and its leftover-commit
   runner's post-run commit (`--no-verify`) remains the net.
 - A live `git commit` cannot be exercised from inside this dsh session (nested
   `sandbox-exec` is denied); the runner-side launch is the first live check after restart.
+- The live runner must be restarted after this merges; otherwise queued/running sessions keep
+  the old prompt and the old overlay, and the failure looks unchanged (the AGE-138 restart
+  gap is why AGE-140 still asked for a commit).
+- Native dsh sessions in a linked worktree still have no overlay; only project dispatch does.
+- A failing hook/signature, a stale lock left by a killed `git`, or an agent that ignores the
+  merge guidance remains outside the runner's control; the `post_run` commit is the net.
+- The nested-sandbox probe costs one cached `sandbox-exec` call per process; the marker is
+  cleared at runner startup, so only the dsh wrapper's child carries it.
 
 ## Progress Checklist
 
-- [ ] Add `write_only` to `projects.sandbox_profile`.
-- [ ] Add `write_only` pass-through to `projects.sandbox_prefix`.
-- [ ] Add the optional mode token to `dsh_confine.build_argv`, defaulting to `confidential`.
-- [ ] Build the `workspace` profile with the worktree, temp roots and git common dir.
-- [ ] Keep the ambient TMPDIR for `workspace` and `/tmp` for `confidential`.
-- [ ] Add `runner/scripts/dsh-workspace.yml` with the pinned runner command.
-- [ ] Add `dsh_cli.workspace_cli_prefix`.
-- [ ] Add `dsh_cli.workspace_problem`.
-- [ ] Add `dsh_cli.verify_workspace_launch` and refuse an unapplied or replaced runner.
-- [ ] Add the workspace-prefix parameter to `project_runs.agent_cli`.
-- [ ] Select the workspace prefix in `app._project_cmd` by ticket dispatch.
-- [ ] Set the runner/git env for non-confidential dsh in `app._project_exec_env`.
-- [ ] Pass `ticket_dispatch=False` from the native session continuation.
-- [ ] Add the macOS-gated `read_git_confine` helper.
-- [ ] Add the macOS-gated `write_git_confine` helper.
-- [ ] Use `read_git_confine` in `uncommitted`.
-- [ ] Use `read_git_confine` in `fingerprint_parts`.
-- [ ] Use `read_git_confine` in `_browse_root`.
-- [ ] Use `read_git_confine` in `_ignored_by_committed_rule`.
-- [ ] Use `write_git_confine` in `runner_commit` staging and commit.
-- [ ] Use `write_git_confine` in `merge_into_checkout` merge-tree and merge.
-- [ ] Use `write_git_confine` in `create_worktree`.
-- [ ] Keep `None` on non-macOS so the fallback commit does not need `sandbox-exec`.
-- [ ] Add a regression test for a clean filter run by status/uncommitted.
-- [ ] Add a regression test for a clean filter run by the fingerprint.
-- [ ] Add a regression test for a smudge filter run by a second worktree creation.
-- [ ] Add a unit test that `runner_commit` passes a non-None confine for a non-confidential project.
-- [ ] Change `leaves_commit_to_runner` to let dsh commit on macOS.
-- [ ] Change the dsh project prompt to ask for a commit.
-- [ ] Remove `dsh_cli.confidential_prompt`.
-- [ ] Remove the `dsh_cli.confidential_prompt` call from `app.py`.
-- [ ] Update `tests/test_dsh_confidential.py` for the removed helper.
-- [ ] Update `tests/test_project_dispatch.py` for the dsh prompt and prefix.
-- [ ] Add workspace-profile and read-only coverage in `tests/test_dsh_confidential.py`.
-- [ ] Add workspace-prefix and env coverage in `tests/test_project_dispatch.py`.
-- [ ] Run `.venv/bin/python3 -m py_compile runner/*.py`.
-- [ ] Run the focused dsh/dispatch pytest file set.
-- [ ] Run `git diff --check`.
-- [ ] Update `docs/context-maintenance.md`.
-- [ ] Update the dsh note in `AGENTS.md`.
-- [ ] Have Codex inspect the final diff against the pre-build commit.
+- [x] Add `write_only` to `projects.sandbox_profile`.
+- [x] Add `write_only` pass-through to `projects.sandbox_prefix`.
+- [x] Add the optional mode token to `dsh_confine.build_argv`, defaulting to `confidential`.
+- [x] Build the `workspace` profile with the worktree, temp roots and git common dir.
+- [x] Keep the ambient TMPDIR for `workspace` and `/tmp` for `confidential`.
+- [x] Add `runner/scripts/dsh-workspace.yml` with the pinned runner command.
+- [x] Add `dsh_cli.workspace_cli_prefix`.
+- [x] Add `dsh_cli.workspace_problem`.
+- [x] Add `dsh_cli.verify_workspace_launch` and refuse an unapplied or replaced runner.
+- [x] Add the workspace-prefix parameter to `project_runs.agent_cli`.
+- [x] Select the workspace prefix in `app._project_cmd` by ticket dispatch.
+- [x] Set the runner/git env for non-confidential dsh in `app._project_exec_env`.
+- [x] Pass `ticket_dispatch=False` from the native session continuation.
+- [x] Add the macOS-gated `read_git_confine` helper.
+- [x] Add the macOS-gated `write_git_confine` helper.
+- [x] Use `read_git_confine` in `uncommitted`.
+- [x] Use `read_git_confine` in `fingerprint_parts`.
+- [x] Use `read_git_confine` in `_browse_root`.
+- [x] Use `read_git_confine` in `_ignored_by_committed_rule`.
+- [x] Use `write_git_confine` in `runner_commit` staging and commit.
+- [x] Use `write_git_confine` in `merge_into_checkout` merge-tree and merge.
+- [x] Use `write_git_confine` in `create_worktree`.
+- [x] Keep `None` on non-macOS so the fallback commit does not need `sandbox-exec`.
+- [x] Add a regression test for a clean filter run by status/uncommitted.
+- [x] Add a regression test for a clean filter run by the fingerprint.
+- [x] Add a regression test for a smudge filter run by a second worktree creation.
+- [x] Add a unit test that `runner_commit` passes a non-None confine for a non-confidential project.
+- [x] Change `leaves_commit_to_runner` to let dsh commit on macOS.
+- [x] Change the dsh project prompt to ask for a commit.
+- [x] Add the merge-task guidance to the dsh project prompt.
+- [x] Export the fallback commit identity to the non-confidential dsh env.
+- [x] Require both a valid marker and a refused nested-sandbox probe for the bypass.
+- [x] Clear an inherited marker at runner startup.
+- [x] Refuse an unresolved/non-merge operation in `runner_commit` without staging.
+- [x] Finish a fully resolved merge as a two-parent commit.
+- [x] Refuse an empty pending merge in `runner_commit`.
+- [x] Refuse a clean unfinished operation in `post_run` before and after verify.
+- [x] Add the session/edge-case evidence to `docs/references/dsh-commit-failures.md`.
+- [x] Remove `dsh_cli.confidential_prompt`.
+- [x] Remove the `dsh_cli.confidential_prompt` call from `app.py`.
+- [x] Update `tests/test_dsh_confidential.py` for the removed helper.
+- [x] Update `tests/test_project_dispatch.py` for the dsh prompt and prefix.
+- [x] Add workspace-profile and read-only coverage in `tests/test_dsh_confidential.py`.
+- [x] Add workspace-prefix and env coverage in `tests/test_project_dispatch.py`.
+- [x] Run `python3 -m py_compile runner/*.py` (no `.venv` in this worktree).
+- [x] Run the focused dsh/dispatch pytest file set with `AGENTICOS_DSH_SANDBOX=workspace`
+      (simulates the new wrapper): 147 passed, 1 pre-existing Codex-shim failure.
+- [x] Run `git diff --check`.
+- [x] Update `docs/context-maintenance.md`.
+- [x] Update the dsh note in `AGENTS.md`.
+- [x] Add a regression test for the marker/probe bypass.
+- [x] Add a regression test for an unresolved merge.
+- [x] Add a regression test for a fully resolved merge with both parents.
+- [x] Add a regression test for an empty pending merge.
+- [x] Add a regression test for a clean pending merge left by verify.
+- [x] Trust the workspace-parent shortcut only for non-confidential git.
+- [x] Add the sequencer directory to `_git_operation`.
+- [x] Move filter probes outside the granted temp roots and prove the filter ran.
+- [x] Build the CodeGraph snapshot in a temp file and replace the destination atomically.
+- [x] Keep confidential fail-closed off macOS; only non-confidential keeps the fallback.
+- [x] Add a planted CodeGraph symlink regression test.
+- [x] Add a non-macOS confidential fail-closed assertion.
+- [x] Prove the preview filter ran with a failing filter instead of a sentinel write.
+- [x] Resolve the common dir from the trusted main checkout and pin it in the binding.
+- [x] Refuse a worktree whose absolute git dir moved outside the pin.
+- [x] Give rebase/sequencer state precedence over `MERGE_HEAD`.
+- [x] Set `filter.spy.required` so the preview test's failing filter really fails.
+- [x] Add redirected-gitdir, rebase-precedence and rebase-with-merge-head tests.
+- [x] Pin the project common dir in runner-owned `.meta/project.json` and refuse live redirects.
+- [x] Build the CodeGraph DB in `.meta` and rename with `dst_dir_fd`/`O_NOFOLLOW`.
+- [x] Add a path-swap test for the descriptor-anchored CodeGraph copy.
+- [x] Build the manual-commit grant from `git_common_dir`, not a fresh `rev-parse`.
+- [x] Make the pin read/compare/publish cross-process safe (`file_lock` + `write_json_atomic`).
+- [x] Add manual-commit redirect and threaded-pin tests.
+- [x] Set `GIT_NO_LAZY_FETCH=1` and confine the binding `cat-file` / post-run `rev-list`.
+- [x] Keep network open for non-confidential git with `GitConfine(write_only=...)`.
+- [x] Add lazy-fetch and non-confidential-network tests.
+- [ ] Copy seeds through descriptor-anchored traversal or a write-confined worker
+      — BLOCKED: residual inspection finding I12-002 (a smudge-filter detached child can swap
+      a seed destination before `shutil` copies); not in this change.
+- [ ] Restart the live runner after this merges (`launchctl kickstart -k gui/$(id -u)/com.agenticos.runner`).
+- [ ] Dispatch one fresh ticket and confirm the new prompt + overlay are live.
+- [ ] Have Codex inspect the final diff against the pre-build commit (last verdict REVISE on
+      the residual I12-002).

@@ -137,10 +137,11 @@ def sandbox_prefix(writable: list[Path], temp: bool = True, temp_root: str | Non
     return ["/usr/bin/sandbox-exec", "-p", sandbox_profile(writable, temp, temp_root, write_only)]
 
 
-def readonly_status(cwd: Path) -> list[str]:
+def readonly_status(cwd: Path, confidential: bool = False) -> list[str]:
     """`uncommitted` under a write-nothing sandbox: no writable roots, not even temp. A clean
     filter that status runs can neither touch the checkout nor its git dir (SC-011)."""
-    prefix = [] if already_confined() else sandbox_prefix([], temp=False)
+    prefix = ([] if not confidential and already_confined()
+              else sandbox_prefix([], temp=False, write_only=not confidential))
     argv = [*prefix, "git", *_GIT_HARDENING, "-C", str(cwd), "--no-optional-locks",
             "status", "--porcelain", "-z", "--untracked-files=all"]
     try:
@@ -224,11 +225,21 @@ def _run_bounded(argv: list[str], timeout: float, cwd: Path | None = None, env: 
     return proc.returncode, out or b"", err or b""
 
 
+class GitConfine(list):
+    """Writable roots for one runner git command plus its profile policy."""
+
+    def __init__(self, roots, *, write_only: bool = False):
+        super().__init__(roots)
+        self.write_only = write_only
+
+
 def _git_argv(cwd: Path, args: tuple, confine: list[Path] | None, hardening: tuple = _GIT_HARDENING) -> list[str]:
     if args and args[0] == "diff":  # repo-configured diff drivers/textconv never run
         args = ("diff", "--no-ext-diff", "--no-textconv", *[a for a in args[1:] if a not in ("--no-ext-diff", "--no-textconv")])
     argv = ["git", *hardening, "-C", str(cwd), *args]
-    return [*sandbox_prefix(confine), *argv] if confine is not None else argv
+    if confine is None:
+        return argv
+    return [*sandbox_prefix(confine, write_only=bool(getattr(confine, "write_only", False))), *argv]
 
 
 def _git(cwd: Path, *args: str, check: bool = True, confine: list[Path] | None = None,
@@ -237,8 +248,10 @@ def _git(cwd: Path, *args: str, check: bool = True, confine: list[Path] | None =
     """Every runner-owned git command goes through here: hardened, bounded, own process group,
     and confined when `confine` is set."""
     argv = _git_argv(cwd, args, confine)
+    child_env = dict(os.environ if env is None else env)
+    child_env["GIT_NO_LAZY_FETCH"] = "1"  # never fetch an object from a repo-configured promisor
     try:
-        code, out, err = _run_bounded(argv, timeout, env=env, stdin=stdin)
+        code, out, err = _run_bounded(argv, timeout, env=child_env, stdin=stdin)
     except subprocess.TimeoutExpired:
         raise ProjectError(f"git {args[0]} timed out after {timeout:.0f} s in {cwd}") from None
     proc = subprocess.CompletedProcess(argv, code, out.decode("utf-8", "replace"), err.decode("utf-8", "replace"))
@@ -247,12 +260,74 @@ def _git(cwd: Path, *args: str, check: bool = True, confine: list[Path] | None =
     return proc
 
 
+_PROJECT_PIN_LOCK = threading.Lock()
+
+
+def _project_pin_path(project: "Project") -> Path:
+    return WORKTREE_ROOT / _check_ident(project.key) / ".meta" / "project.json"
+
+
+def _read_common_pin(path: Path) -> tuple[Path | None, str | None]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return Path(data["git_common_dir"]).resolve(), data.get("project_path")
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, None
+
+
+def _binding_common_pin(project: "Project") -> Path | None:
+    """An existing binding's pinned common dir, for projects pinned before `project.json`."""
+    root = WORKTREE_ROOT / _check_ident(project.key) / ".meta"
+    try:
+        for f in root.glob("*.json"):
+            if f.name == "project.json":
+                continue
+            pinned, binding_path = _read_common_pin(f)
+            if pinned is not None and binding_path == str(project.path):
+                return pinned
+    except OSError:
+        return None
+    return None
+
+
+def _write_common_pin(path: Path, common: Path, project_path: Path) -> None:
+    from state_io import write_json_atomic
+    write_json_atomic(path, {"git_common_dir": str(common), "project_path": str(project_path)})
+
+
+def git_common_dir(project: "Project") -> Path:
+    """The project's canonical git common dir, pinned in runner-owned state (AGE-146).
+
+    The live value comes from the trusted main checkout, but its `.git` is writable by a
+    confined agent (a `commondir` file there can redirect every later grant). The first call
+    pins the value under `WORKTREE_ROOT/<key>/.meta/project.json`, outside every agent
+    workspace; later calls refuse a live value that disagrees with the pin.
+    """
+    common = _git(project.path, "rev-parse", "--git-common-dir").stdout.strip()
+    live = (project.path / common).resolve()
+    path = _project_pin_path(project)
+    from state_io import file_lock
+    with _PROJECT_PIN_LOCK, file_lock(path):  # threads here + the dashboard/CLI processes
+        pinned, pinned_project = _read_common_pin(path)
+        if pinned is not None and pinned_project not in (None, str(project.path)):
+            pinned = None  # a registry path change is a new checkout, not a redirect
+        if pinned is None:
+            pinned = _binding_common_pin(project)
+        if pinned is not None:
+            if pinned != live:
+                raise ProjectError(f"{project.key}: git common dir moved from {pinned} to {live}; refusing")
+            if not path.exists() or pinned_project != str(project.path):
+                _write_common_pin(path, pinned, project.path)
+            return pinned
+        _write_common_pin(path, live, project.path)
+        return live
+
+
 def confine_for(project: "Project", *paths: Path) -> list[Path] | None:
     """Writable roots for confined commands on a confidential project; None otherwise (Decision 9)."""
-    if not project.confidential or already_confined():
+    if not project.confidential:
         return None
-    common = _git(project.path, "rev-parse", "--git-common-dir").stdout.strip()
-    return [(project.path / common).resolve(), *paths]
+    return [git_common_dir(project), *paths]
 
 
 # The runner is single-host macOS today. The new AGE-146 confinement must not require
@@ -262,22 +337,66 @@ GIT_SANDBOX = sys.platform == "darwin"
 # the parent Seatbelt profile already enforces the same write boundary, so a process that
 # carries this marker must not wrap git in a second one (AGE-146).
 DSH_SANDBOX_ENV = "AGENTICOS_DSH_SANDBOX"
+_DSH_SANDBOX_MODES = ("confidential", "workspace")
+_NESTED_SANDBOX: bool | None = None
+
+
+def _nested_sandbox_unavailable() -> bool:
+    """True when applying a sandbox profile is refused (a parent Seatbelt is active).
+
+    Cached: the process's sandbox state does not change. A missing `sandbox-exec` is False
+    (not nested); an unexpected probe error is also False so the caller fails closed by
+    attempting the inner profile rather than silently skipping it.
+    """
+    global _NESTED_SANDBOX
+    if _NESTED_SANDBOX is None:
+        exe = "/usr/bin/sandbox-exec"
+        if not Path(exe).exists():
+            _NESTED_SANDBOX = False
+        else:
+            try:
+                proc = subprocess.run([exe, "-p", "(version 1)(allow default)", "/usr/bin/true"],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                _NESTED_SANDBOX = proc.returncode != 0
+            except (OSError, subprocess.SubprocessError):
+                _NESTED_SANDBOX = False
+    return _NESTED_SANDBOX
 
 
 def already_confined() -> bool:
-    """True inside the runner's dsh Seatbelt: no second sandbox-exec (it would be denied)."""
-    return bool(os.environ.get(DSH_SANDBOX_ENV))
+    """A non-confidential process may skip the *inner* workspace git profile.
+
+    Only the write-only workspace boundary can be inferred this way: the marker is
+    child-controlled, so it is never trusted for a confidential operation (those always
+    attempt the inner profile and fail closed if it cannot start). The marker is also
+    validated, the runner clears any inherited copy at startup, and the probe must be
+    refused; a spoofed value is ignored.
+    """
+    mode = os.environ.get(DSH_SANDBOX_ENV)
+    return mode == "workspace" and _nested_sandbox_unavailable()
 
 
-def read_git_confine() -> list[Path] | None:
+def clear_inherited_sandbox_marker() -> None:
+    """The dashboard/runner is not inside a dsh child; never trust an inherited marker."""
+    os.environ.pop(DSH_SANDBOX_ENV, None)
+
+
+def read_git_confine(confidential: bool = False) -> list[Path] | None:
     """No writable roots (temp only) for git readers that can run clean filters (AGE-146).
 
     `git status` and working-tree `git diff` execute repository-configured clean filters even
     with `--no-optional-locks`; an agent can plant one in the shared config. The empty root
     list still wraps the command in a Seatbelt profile, so a filter cannot write the checkout
-    or the git dir. None off macOS, where the profile runner does not exist.
+    or the git dir. None off macOS, where the profile runner does not exist. A confidential
+    project never takes the workspace-parent shortcut.
     """
-    return None if not GIT_SANDBOX or already_confined() else []
+    if not GIT_SANDBOX:
+        return [] if confidential else None  # confidential attempts Seatbelt and fails closed
+    if not confidential and already_confined():
+        return None
+    # Confidential keeps the hostile profile; a non-confidential project keeps network for
+    # repository smudge/clean filters that download content.
+    return [] if confidential else GitConfine([], write_only=True)
 
 
 def write_git_confine(project: "Project", *paths: Path) -> list[Path] | None:
@@ -287,10 +406,11 @@ def write_git_confine(project: "Project", *paths: Path) -> list[Path] | None:
     creation (`git worktree add` smudge filters). None off macOS, preserving AGE-138's
     runner commit there.
     """
-    if not GIT_SANDBOX or already_confined():
+    if not project.confidential and (not GIT_SANDBOX or already_confined()):
         return None
-    common = _git(project.path, "rev-parse", "--git-common-dir").stdout.strip()
-    return [(project.path / common).resolve(), *paths]
+    # A confidential project returns roots even off macOS: the missing Seatbelt then fails
+    # closed instead of silently running an unconfined hook/filter.
+    return GitConfine([git_common_dir(project), *paths], write_only=not project.confidential)
 
 
 # ── Registry ─────────────────────────────────────────────────────────────────
@@ -1110,17 +1230,47 @@ def _copy_codegraph(wt: Path, project: Project) -> None:
     src, dest = project.path / ".codegraph" / "codegraph.db", wt / ".codegraph"
     if ".codegraph" in project.seed or not src.is_file() or src.is_symlink() or dest.is_symlink():
         return
+    dir_fd = None
     try:
-        dest.mkdir(exist_ok=True)
-        # backup(), not a file copy: a consistent snapshot even while the daemon writes the WAL
-        with contextlib.closing(sqlite3.connect(f"{src.as_uri()}?mode=ro", uri=True, timeout=5)) as s, \
-                contextlib.closing(sqlite3.connect(dest / "codegraph.db")) as d:
-            s.backup(d)
-        if not os.path.lexists(dest / ".gitignore"):  # a committed one already ignores the db
-            (dest / ".gitignore").write_text("*\n", encoding="utf-8")
+        if dest.is_symlink():
+            return
+        try:
+            dir_fd = os.open(dest, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            dest.mkdir(exist_ok=True)
+            dir_fd = os.open(dest, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        # A smudge filter can leave a detached child behind and swap paths during the copy.
+        # Anchor every operation to the opened directory and build the DB in runner-owned
+        # `.meta`, outside the agent's writable roots.
+        meta = WORKTREE_ROOT / _check_ident(project.key) / ".meta"
+        meta.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, raw = tempfile.mkstemp(dir=meta, prefix="codegraph-", suffix=".db")
+        os.close(fd)
+        tmp = Path(raw)
+        try:
+            # backup(), not a file copy: a consistent snapshot even while the daemon writes the WAL
+            with contextlib.closing(sqlite3.connect(f"{src.as_uri()}?mode=ro", uri=True, timeout=5)) as s, \
+                    contextlib.closing(sqlite3.connect(tmp)) as d:
+                s.backup(d)
+            os.rename(tmp, "codegraph.db", dst_dir_fd=dir_fd)  # replaces a link itself
+        finally:
+            tmp.unlink(missing_ok=True)
+        try:
+            ifd = os.open(".gitignore", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                          0o600, dir_fd=dir_fd)
+        except (FileExistsError, OSError):
+            pass
+        else:
+            try:
+                os.write(ifd, b"*\n")
+            finally:
+                os.close(ifd)
     except (OSError, sqlite3.Error):
-        with contextlib.suppress(OSError):
-            (dest / "codegraph.db").unlink()
+        pass
+    finally:
+        if dir_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(dir_fd)
 
 
 def _is_worktree_of(project: Project, wt: Path) -> bool:
@@ -1151,11 +1301,19 @@ def load_binding(project: Project, ident: str) -> dict:
         raise ProjectError(f"{project.key}/{ident}: worktree binding metadata is missing; run cleanup") from None
     if not isinstance(meta, dict) or meta.get("project_path") != str(project.path) or meta.get("branch") != branch:
         raise ProjectError(f"{project.key}/{ident}: worktree belongs to a different project or branch; run cleanup")
+    expected = git_common_dir(project)
+    pinned = meta.get("git_common_dir")
+    if pinned is not None and Path(pinned).resolve() != expected:
+        raise ProjectError(f"{project.key}/{ident}: recorded git common dir moved; run cleanup")
+    actual_git = _git(wt, "rev-parse", "--absolute-git-dir", check=False).stdout.strip()
+    if not actual_git or not Path(actual_git).resolve().is_relative_to(expected):
+        raise ProjectError(f"{project.key}/{ident}: worktree git metadata moved outside {expected}; run cleanup")
     actual = _git(wt, "symbolic-ref", "--short", "HEAD", check=False).stdout.strip()
     if actual != branch:
         raise ProjectError(f"{project.key}/{ident}: worktree is on {actual or 'a detached HEAD'}, not {branch}")
     base = meta.get("base_sha")
-    if not isinstance(base, str) or _git(wt, "cat-file", "-e", f"{base}^{{commit}}", check=False).returncode != 0:
+    if not isinstance(base, str) or _git(wt, "cat-file", "-e", f"{base}^{{commit}}", check=False,
+                                        confine=read_git_confine(project.confidential)).returncode != 0:
         raise ProjectError(f"{project.key}/{ident}: recorded base commit is missing; run cleanup")
     return meta
 
@@ -1237,6 +1395,7 @@ def create_worktree(project: Project, ident: str) -> dict:
         fd = os.open(meta, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             json.dump({"project_path": str(project.path), "branch": branch, "base_sha": base,
+                       "git_common_dir": str(git_common_dir(project)),
                        "created_at": time.time(), "confidential": project.confidential}, f)
     except BaseException as exc:
         with contextlib.suppress(Exception):
@@ -1270,21 +1429,40 @@ def runner_commit(project: Project, wt: Path, message: str) -> str | None:
     """
     load_binding(project, ticket_from_worktree(project, wt))  # still the bound branch (I5-10)
     confine = write_git_confine(project, wt)
+    operation = _git_operation(wt, confine)
+    if operation and operation != "a merge":
+        raise ProjectError(f"{wt} has {operation} in progress; finish it by hand, the runner will not stage across it")
+    if operation == "a merge":
+        if _git(wt, "--no-optional-locks", "ls-files", "-u", confine=confine).stdout.strip():
+            raise ProjectError(f"{wt} has unresolved merge conflicts; resolve and stage them by hand")
+        # A fully resolved merge is finished below; MERGE_HEAD keeps both parents in the commit.
     # Staging can run repo-configured clean filters, so it is bounded like the commit.
     _git(wt, "add", "-A", confine=confine, timeout=COMMIT_TIMEOUT_S)
     if _git(wt, "diff", "--cached", "--quiet", "--no-ext-diff", check=False, confine=confine).returncode == 0:
+        if operation == "a merge":
+            raise ProjectError(f"{wt} has an empty merge in progress; abort it by hand")
         return None
     _git(wt, "commit", "--no-verify", "--no-gpg-sign", "-q", "-m", message, confine=confine, timeout=COMMIT_TIMEOUT_S,
          env=_identity_env(wt))
     return _git(wt, "rev-parse", "HEAD").stdout.strip()
 
 
-def _identity_env(cwd: Path) -> dict | None:
-    """A fallback committer when the repo has none configured."""
+def commit_identity_env(cwd: Path) -> dict | None:
+    """A fallback committer when the repo has none configured.
+
+    The runner's own commit has always used this; AGE-146 also exports the four GIT_* values
+    to a non-confidential dsh run so its own commit does not fail with "Author identity
+    unknown". The returned dict is a full environment (for `_git`); callers that merge into a
+    child env copy only the GIT_* keys.
+    """
     if _git(cwd, "config", "user.email", check=False).stdout.strip():
         return None
     return {**os.environ, "GIT_AUTHOR_NAME": "AgenticOS", "GIT_AUTHOR_EMAIL": "agentic-os@localhost",
             "GIT_COMMITTER_NAME": "AgenticOS", "GIT_COMMITTER_EMAIL": "agentic-os@localhost"}
+
+
+def _identity_env(cwd: Path) -> dict | None:
+    return commit_identity_env(cwd)
 
 
 _MERGE_LOCK = threading.Lock()  # ponytail: one per process; runs of different projects rarely finish at once
@@ -1325,7 +1503,7 @@ def _commit_state(project: Project, repo: Path) -> dict | None:
             _check_bound_branch(project, ident, br)
         except ProjectError:
             return None  # not this ticket's work as bound: neutral, never "clean" (CM-001)
-    files = len(readonly_status(repo))  # write-nothing sandbox: status can run clean filters (SC-011)
+    files = len(readonly_status(repo, project.confidential))  # status can run clean filters (SC-011)
     if files:
         return {"state": "dirty", "files": files, "ahead": 0}
     ahead = _ahead(project, ident) if ident else 0
@@ -1401,8 +1579,12 @@ def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry
     msg = message.strip() if isinstance(message, str) else ""
     # Always sandboxed, whatever the policy says: staging can run repo-configured clean filters,
     # and a policy read before the ticket lock could be stale by the time git runs (SC-006).
-    common = _git(project.path, "rev-parse", "--git-common-dir").stdout.strip()
-    confine = None if already_confined() else [(project.path / common).resolve(), repo]
+    # The trusted pin, not a fresh agent-writable commondir, decides the grant (AGE-146).
+    common = git_common_dir(project)
+    # A non-confidential manual commit may skip the inner profile under a workspace parent;
+    # confidential never takes that shortcut.
+    confine = (None if not project.confidential and already_confined()
+               else GitConfine([common, repo], write_only=not project.confidential))
     expect = None
     with contextlib.ExitStack() as stack:
         if ident:
@@ -1421,7 +1603,7 @@ def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry
         branch = _git(repo, "symbolic-ref", "--short", "HEAD", confine=confine).stdout.strip()
         if ident:
             _check_bound_branch(project, ident, branch)  # a switched worktree is not that ticket's work (CM-001)
-        files = readonly_status(repo)  # preview and count: nothing writable (SC-011)
+        files = readonly_status(repo, project.confidential)  # preview and count (SC-011)
         into = None
         if ident:
             r = _git(project.path, "symbolic-ref", "-q", "--short", "HEAD", check=False)
@@ -1471,13 +1653,16 @@ def _ahead(project: Project, ident: str) -> int:
 
 def _git_operation(repo: Path, confine: list[Path] | None) -> str | None:
     """An unfinished merge / cherry-pick / revert / rebase, or unmerged index entries, else None."""
+    # Rebase/sequencer state outranks MERGE_HEAD: `rebase --rebase-merges` can have both, and
+    # committing the merge would finish the rebase's step behind its back.
+    for d, what in (("rebase-merge", "a rebase"), ("rebase-apply", "a rebase"),
+                    ("sequencer", "a cherry-pick/revert sequence")):
+        p = _git(repo, "rev-parse", "--git-path", d, confine=confine).stdout.strip()
+        if (repo / p if not os.path.isabs(p) else Path(p)).exists():
+            return what
     for ref, what in (("MERGE_HEAD", "a merge"), ("CHERRY_PICK_HEAD", "a cherry-pick"), ("REVERT_HEAD", "a revert")):
         if _git(repo, "rev-parse", "-q", "--verify", ref, check=False, confine=confine).returncode == 0:
             return what
-    for d in ("rebase-merge", "rebase-apply"):
-        p = _git(repo, "rev-parse", "--git-path", d, confine=confine).stdout.strip()
-        if (repo / p if not os.path.isabs(p) else Path(p)).exists():
-            return "a rebase"
     if _git(repo, "--no-optional-locks", "ls-files", "-u", confine=confine).stdout.strip():
         return "unresolved conflicts"
     return None
@@ -1506,7 +1691,8 @@ def committed_seeds(project: Project, wt: Path, base: str) -> list[str]:
 def _git_bytes(cwd: Path, *args: str, confine: list[Path] | None = None,
                hardening: tuple = _GIT_HARDENING) -> bytes:
     try:
-        code, out, err = _run_bounded(_git_argv(cwd, args, confine, hardening), GIT_TIMEOUT_S)
+        child_env = {**os.environ, "GIT_NO_LAZY_FETCH": "1"}
+        code, out, err = _run_bounded(_git_argv(cwd, args, confine, hardening), GIT_TIMEOUT_S, env=child_env)
     except subprocess.TimeoutExpired:
         raise ProjectError(f"git {args[0]} timed out in {cwd}") from None
     if code != 0:
@@ -1555,7 +1741,7 @@ def fingerprint_parts(project: Project, exclude: set[str] = frozenset()) -> dict
     prefixes = tuple(e for e in exclude if e.endswith("/"))
     skip = lambda rel: rel in exclude or (rel + "/") in exclude or rel.startswith(prefixes)
     root = project.path
-    confine = read_git_confine()  # status/diff can run clean filters: no write roots
+    confine = read_git_confine(project.confidential)  # status/diff can run clean filters: no write roots
     g = lambda *a: _git_bytes(root, *a, confine=confine)
     digest = lambda b: hashlib.sha256(b).hexdigest()
     parts = {"head": g("rev-parse", "HEAD").decode().strip()}
@@ -1623,7 +1809,7 @@ def uncommitted(project: Project, wt: Path, confine: list[Path] | None = None) -
     Read-only: --no-optional-locks keeps status from refreshing the index (SC-004). Status can
     run clean filters, so it gets the no-writes profile by default (AGE-146, SC-008)."""
     out = _git_bytes(wt, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all",
-                     confine=confine if confine is not None else read_git_confine())
+                     confine=confine if confine is not None else read_git_confine(project.confidential))
     return _porcelain_paths(out)
 
 
@@ -1661,7 +1847,7 @@ def run_verify(project: Project, worktree: Path, base: str | None = None, prefix
         if not base:
             raise ProjectError(f"{project.key}: verify uses {{base}} but no --base was given")
         cmd = cmd.replace("{base}", shlex.quote(base))
-    if prefix is None and project.confidential and not already_confined():
+    if prefix is None and project.confidential:
         prefix = sandbox_prefix(verify_writable_roots(wt))
     prefix = prefix or []
     argv = [*prefix, "/bin/sh", "-c", cmd]
@@ -2373,11 +2559,12 @@ def browse_worktrees(project: Project) -> list[str]:
 
 def _browse_root(project: Project, wt: str | None) -> tuple[Path, list[Path] | None]:
     if wt in (None, "", "main"):
-        return project.path.resolve(), read_git_confine()
+        return project.path.resolve(), read_git_confine(project.confidential)
     root = worktree_path(project, wt)
     if root.is_symlink() or not _is_worktree_of(project, root):
         raise ProjectError(f"{wt} is not a worktree of {project.key}")
-    return root.resolve(), read_git_confine()
+    confidential = project.confidential or sidecar_confidential(project.key, wt) is not False
+    return root.resolve(), read_git_confine(confidential)
 
 
 def _browse_path(root: Path, rel: str | None) -> tuple[str, Path]:
@@ -2395,7 +2582,7 @@ def _browse_path(root: Path, rel: str | None) -> tuple[str, Path]:
 
 
 def _browse_env() -> dict:
-    return {**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
+    return {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1"}
 
 
 def _browse_git(root: Path, confine: list[Path] | None, *args: str) -> subprocess.CompletedProcess:

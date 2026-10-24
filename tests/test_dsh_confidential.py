@@ -327,6 +327,20 @@ def test_non_confidential_dsh_project_gets_the_git_env(monkeypatch, tmp_path):
     assert "AGENTICOS_DSH_CONFINE_GIT" not in off
 
 
+def test_non_confidential_dsh_env_exports_a_fallback_identity(monkeypatch, tmp_path):
+    import app
+    monkeypatch.setattr(app, "_registry_exec_env", lambda agent, reg: {"PATH": "/usr/bin"})
+    monkeypatch.setattr(app, "_load_registry", lambda agent: {})
+    monkeypatch.setattr(pr, "DSH_GIT_OVERLAY", True)
+    monkeypatch.setattr(dsh_cli, "verify_workspace_launch", lambda env, root: None)
+    monkeypatch.setattr(app._projects, "commit_identity_env", lambda cwd: {
+        "GIT_AUTHOR_NAME": "AgenticOS", "GIT_AUTHOR_EMAIL": "agentic-os@localhost",
+        "GIT_COMMITTER_NAME": "AgenticOS", "GIT_COMMITTER_EMAIL": "agentic-os@localhost"})
+    env = app._project_exec_env("dsh", SimpleNamespace(env={}, confidential=False), str(tmp_path), "run-1")
+    assert env["GIT_AUTHOR_NAME"] == "AgenticOS"
+    assert env["GIT_COMMITTER_EMAIL"] == "agentic-os@localhost"
+
+
 def test_session_continuation_does_not_get_the_workspace_overlay(monkeypatch):
     import app
     seen = {}

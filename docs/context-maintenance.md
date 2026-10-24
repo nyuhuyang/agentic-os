@@ -2,12 +2,29 @@
 
 ## Current WIP (WIP = 1)
 <!-- One active task at a time. What is it? -->
-- AGE-137 ai-memory: assessed and wired at the dispatch boundary (`runner/ai_memory.py`, brief before a fresh project run, run summary after it; confidential skipped). Claudex-loop review by Codex: plan approved (20 rounds), final code inspection approved with no findings after R6–R29 were fixed (transport deadlines/cancellation, per-checkout ports, token isolation, redaction, retention idempotency, lazy env). 36 tests. Install with `sh scripts/install_ai_memory.sh`; docs `docs/references/ai-memory.md`. Not yet dogfooded on live tickets
+- AGE-146 dsh commit: non-confidential dsh project runs get a macOS write-only overlay
+  (`runner/scripts/dsh-workspace.yml` + `dsh_confine.py` `workspace` mode) that adds the
+  linked worktree's git common dir, so the agent can `git add`/`commit`/`merge` itself. The
+  project prompt now asks for a real `git merge` on merge tasks and forbids clone/tree-copy
+  workarounds; `runner_commit` refuses unresolved, non-merge and empty pending operations and
+  finishes a resolved merge with both parents. Evidence and remaining edge cases:
+  `docs/references/dsh-commit-failures.md`. Live runner restart, one fresh-ticket check and
+  the residual I12-002 seed-copy race follow-up remain.
 - STT two-pass: done, plan archived in completed/ (2026-10-14); optional follow-ups = one cross-provider Codex inspection, low-severity Open Issues in its review log
 - Multi-Project Dispatch — `docs/exec-plans/active/2026-10-13-multi-project-dispatch.md`: Phases 0–3 built on `feat/multi-project-dispatch` (2026-10-14). Open: the cross-provider Codex inspection of the build (Codex quota), spike (d2) for Codex, dogfood tickets, one user decision (`/run` free prompts), one project's committed .gitignore
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- AGE-146 dsh commit: `tests/test_projects.py` + `tests/test_dsh_confidential.py` +
+  `tests/test_project_dispatch.py` = 236 passed / 14 failed / 3 skipped. The 14 are the
+  confidential nested-`sandbox-exec` class and the Codex shim (HEAD has 11 in the dispatch file
+  alone); every AGE-146 regression passes. `python3 -m py_compile runner/*.py` and
+  `git diff --check` pass. Codex plan review approved the design before the session-evidence
+  round; six fresh code inspections hardened the grant (pin, merge state, CodeGraph,
+  lazy-fetch, network policy). The last verdict is **REVISE** on residual I12-002: a
+  smudge-filter detached child can still swap a seed destination before `shutil` copies; the
+  follow-up is descriptor-anchored seed copying or a write-confined worker. Live runner must
+  be restarted after merge, then one fresh ticket must show the new prompt/overlay — 2026-10-24
 - AGE-141 board latency, closed 2026-10-24 (`completed/2026-10-23-board-latency.md`): `/api/projects` no longer runs per-session commit git on the request thread — it reads a cache filled by one worker with a generation re-run, `codex_sessions` rows are memoized by DB/WAL stat (5 s cap), and `loadProjects()` is single-flight. Live runner restarted 2026-10-23 23:15 after the fix; live checks on 2026-10-24: warm `GET /api/projects` 0.87 / 0.87 / 1.00 / 0.99 / 1.13 s (was 135 s), 139 of 142 session rows carried `commit_state`, a dispatch retry returned 200 in the same second and started run `9eac22d6` (this session), and creating a Todo returned 200 before Linear's created_at landed 5 s later. Full suite 950 pass / 1 pre-existing sandbox failure; Codex inspection 2 APPROVED — 2026-10-24
 - AGE-138 switch Claude → DeepSeek: dsh runs `workspace-write`, whose root is the worktree; a linked worktree's git metadata lives in the main checkout's `.git`, so `git commit`/`git add` were denied and the switch looked broken. dsh now gets the same "leave your changes uncommitted" rule as sandboxed Codex (the runner already commits leftovers in `post_run`), switch/reply handoffs use `git log`/`git diff` instead of `git status`, and `GIT_OPTIONAL_LOCKS=0` keeps status from refreshing an unwritable index. Merged `main` (through `df7e019`) into the branch, keeping main's AGE-137/140/142/143/144 entries and re-applying the AGE-138 prompt/env changes on top; full suite 1008 pass from the merged worktree. Live runner needs a restart after merge — 2026-10-23
 - AGE-143 a card's sessions after an agent switch: the project panel still lists every real session, but groups same-card rows and shows the card's current session on top (newest run record naming a session, or a launch started after it), with earlier sessions folded under an "N earlier sessions" toggle. Both stay resumable; nothing is hidden or removed. `runner/app.py` adds `_current_card_sessions` and a `current` label flag plus `card_current` on rows; `index.html` folds only rows sharing a card identifier. Main merged in; 210 session/ai-memory tests pass on the merged tree; `node --check` on the three inline scripts and `py_compile` pass. Full suite 918 pass / 87 fail, all in test_session_commit, test_terminals, test_project_dispatch, test_task_project and related git/PTY modules (detached-HEAD worktrees and sandbox limits; same environmental class as AGE-137, untouched by this change). Live runner needs a restart after merge — 2026-10-23

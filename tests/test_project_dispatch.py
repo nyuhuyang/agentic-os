@@ -151,6 +151,8 @@ def test_dsh_commits_while_codex_leaves_it_to_the_runner(proj, monkeypatch):
     dsh = pr.project_prompt("task", project(repo), binding, "dsh")
     assert "Commit your work on this branch" in dsh and "Leave your changes uncommitted" not in dsh
     assert "`git commit`" not in dsh
+    assert "real `git merge" in dsh and "GIT_INDEX_FILE" in dsh
+    assert "git metadata is writable" in dsh
     codex = pr.project_prompt("task", project(repo), binding, "codex")
     assert "Leave your changes uncommitted" in codex and "git commit" not in codex
     claude = pr.project_prompt("task", project(repo), binding, "claude")
@@ -386,6 +388,34 @@ def test_agent_that_cannot_write_git_gets_a_runner_commit_without_the_seed(helpe
     names = subprocess.run(["git", "-C", rec["worktree"], "show", "--name-only", "--format=", rec["runner_commit"]],
                            capture_output=True, text=True).stdout.split()
     assert names == ["feature.txt"]
+
+
+def test_post_run_refuses_a_clean_pending_merge_left_by_verify(proj, monkeypatch):
+    repo, _ = proj
+    base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    (repo / "feature.txt").write_text("x\n")
+    git(repo, "add", "feature.txt")
+    git(repo, "commit", "-qm", "work")
+    p = project(repo)
+    monkeypatch.setattr(pj, "load_binding", lambda *a, **k: None)
+    monkeypatch.setattr(pj, "committed_seeds", lambda *a, **k: [])
+
+    def fake_verify(project, wt, base=None, on_start=None):
+        git(wt, "checkout", "-q", "-b", "empty-side")
+        git(wt, "commit", "--allow-empty", "-qm", "empty")
+        git(wt, "checkout", "-q", "main")
+        subprocess.run(["git", "-C", str(wt), "merge", "--no-commit", "--no-ff", "empty-side"],
+                       check=True, capture_output=True)
+        assert (Path(wt) / ".git" / "MERGE_HEAD").exists()
+        return {"status": "pass", "exit": 0, "duration_s": 0.0, "tail": ""}
+
+    monkeypatch.setattr(pj, "run_verify", fake_verify)
+    out = pr.post_run(p, {"worktree": str(repo), "issue_identifier": "T-1", "base_sha": base},
+                      "claude", "title", None, set(), start_sha=base,
+                      closing=lambda: {"main_checkout_changed": False})
+    assert "merge" in out.get("post_run_error", "").lower()
+    assert out.get("verify_badge") == "error"
 
 
 def test_successful_run_is_merged_into_the_main_checkout(helper):

@@ -55,8 +55,7 @@ def binding_fields(project: projects.Project, ident: str, wt_info: dict) -> dict
 
 
 def common_dir(project: projects.Project) -> Path:
-    out = projects._git(project.path, "rev-parse", "--git-common-dir").stdout.strip()
-    return (project.path / out).resolve()
+    return projects.git_common_dir(project)
 
 
 # ── agent command (Decision 9) ───────────────────────────────────────────────
@@ -152,6 +151,12 @@ def project_prompt(prompt: str, project: projects.Project, binding: dict, agent:
         rules.append("Leave your changes uncommitted; the runner commits them on this branch after you finish.")
     else:
         rules.append("Commit your work on this branch. Do not switch branches.")
+        if agent == "dsh" and DSH_GIT_OVERLAY:
+            rules.append(
+                "This worktree's git metadata is writable. If the task asks you to merge a branch, "
+                "run a real `git merge <branch>` here; do not rebuild the tree with a clone, "
+                "`git archive`, `GIT_INDEX_FILE` or a manual copy, and keep scratch clones outside "
+                "the worktree. A copied tree loses the merge parent and the next merge will conflict.")
     if project.auto_merge:
         rules.append(f"When you finish, the runner merges this branch into {project.path}; "
                      "do not ask the user to merge or copy files there.")
@@ -917,6 +922,13 @@ def post_run(project: projects.Project, binding: dict, agent: str, title: str,
     changed_nothing = False  # this run (from start_sha) left no commit and no change (§7)
     try:
         dirty = projects.uncommitted(project, wt)
+        if not dirty:
+            # A clean tree can still hide MERGE_HEAD/rebase state; never report success or
+            # auto-merge while an operation is unfinished (AGE-146, Codex R8).
+            operation = projects._git_operation(wt, projects.write_git_confine(project, wt))
+            if operation:
+                raise projects.ProjectError(
+                    f"{operation} is in progress in {wt}; finish or abort it by hand")
         if dirty:  # any agent: leftover work lands on the branch, never stranded in the worktree (AGE-111)
             result["runner_commit"] = projects.runner_commit(project, wt, f"{binding['issue_identifier']}: {title}"[:200])
             dirty = projects.uncommitted(project, wt)
@@ -924,7 +936,8 @@ def post_run(project: projects.Project, binding: dict, agent: str, title: str,
         if start_sha:  # before verify: its own artifacts never count as this run's change (STB-081)
             confine = projects.confine_for(project, wt)
             changed_nothing = not dirty and not projects._git(
-                wt, "rev-list", f"{start_sha}..HEAD", confine=confine).stdout.strip()
+                wt, "rev-list", f"{start_sha}..HEAD",
+                confine=projects.read_git_confine(project.confidential)).stdout.strip()
         if not stopped():  # a cancel skips verify, never the closing check and badge (I8-05)
             # optional: without it the agent ran the project's own tests. Skipped when this run changed
             # nothing: its tests would re-check the code the previous run already checked (AGE-117)
@@ -935,6 +948,10 @@ def post_run(project: projects.Project, binding: dict, agent: str, title: str,
             projects.load_binding(project, binding["issue_identifier"])  # still on agent/<id> after verify
             dirty = sorted(set(dirty) | set(projects.uncommitted(project, wt)))  # verify may dirty it too (I6-09)
             result["uncommitted"] = dirty[:50]
+            operation = projects._git_operation(wt, projects.write_git_confine(project, wt))
+            if operation:  # verify can leave a clean MERGE_HEAD/rebase after the pre-verify check
+                raise projects.ProjectError(
+                    f"{operation} is in progress in {wt} after verify; finish or abort it by hand")
             seeds = projects.committed_seeds(project, wt, binding["base_sha"])
             result["seed_committed"] = seeds  # the ticket's whole history, kept in the record
             if start_sha:  # the badge judges this run only, verify's commits included (SBI-006)
