@@ -3490,9 +3490,11 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
             # AGE-137: a fresh run gets the ticket's earlier-run notes. A resumed session already
             # has its own context, and a confidential prompt never reaches the wiki.
             memory_brief = "" if (resume_session or project.confidential) else ai_memory.brief(project.key, ident)
+            prompt_text = project_runs.project_prompt(prompt, project, binding, agent)
+            if agent == "dsh" and project.confidential:
+                prompt_text = dsh_cli.confidential_prompt(prompt_text)
             cmd = _project_cmd(agent, project,
-                               project_runs.with_memory_brief(
-                                   project_runs.project_prompt(prompt, project, binding, agent), memory_brief),
+                               project_runs.with_memory_brief(prompt_text, memory_brief),
                                resume_session)
             if resume_session:
                 job["agent_session_id"] = resume_session  # in the live set before launch (A, R02)

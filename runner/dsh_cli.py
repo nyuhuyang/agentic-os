@@ -315,6 +315,23 @@ def verify_confidential_launch(env: dict[str, str], worktree: str) -> None:
         raise RuntimeError(f"confidential dsh: {problem}")
 
 
+def confidential_prompt(prompt: str) -> str:
+    """Replace the AGE-138 leave-it-to-the-runner rules for a confidential dsh run.
+
+    Main's `project_runs.project_prompt` still emits the "leave uncommitted / do not run git"
+    pair for dsh; a confidential run uses the runner's wrapper and may write the git common
+    dir, so it is asked to commit instead. Keep this separate so a merge with main does not
+    rewrite main's shared prompt helper.
+    """
+    head, sep, tail = prompt.partition("\n\n")
+    lines = [line for line in head.splitlines()
+             if not line.startswith("Leave your changes uncommitted")
+             and not line.startswith("Do not run `git commit`")]
+    if lines:
+        lines.insert(1, "Commit your work on this branch. Do not switch branches.")
+    return "\n".join(lines) + sep + tail
+
+
 def resolve_api_key() -> str | None:
     """DEEPSEEK_API_KEY from the environment first, else ~/.deepseek/config.toml api_key."""
     key = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()

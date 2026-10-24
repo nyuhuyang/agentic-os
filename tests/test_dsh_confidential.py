@@ -376,9 +376,12 @@ def test_agent_cli_uses_the_confidential_prefix(monkeypatch):
 
 def test_confidential_dsh_prompt_asks_for_a_commit():
     project = SimpleNamespace(key="demo", auto_merge=False, no_push=True, verify="true", confidential=True)
-    confidential = pr.project_prompt("task", project, {"branch": "agent/T-1"}, "dsh")
+    shared = pr.project_prompt("task", project, {"branch": "agent/T-1"}, "dsh")
+    assert "Leave your changes uncommitted" in shared  # main's shared helper
+    confidential = dsh_cli.confidential_prompt(shared)
     assert "Commit your work on this branch" in confidential
     assert "Leave your changes uncommitted" not in confidential
+    assert "Do not run `git commit`" not in confidential
     plain = pr.project_prompt("task", SimpleNamespace(**{**project.__dict__, "confidential": False}),
                               {"branch": "agent/T-1"}, "dsh")
     assert "Leave your changes uncommitted" in plain

@@ -100,10 +100,9 @@ def claude_confidential_settings(common: Path) -> str:
 def leaves_commit_to_runner(agent: str, project: projects.Project) -> bool:
     """Agents whose sandbox cannot write the worktree's git metadata, so the runner commits for
     them. A linked worktree keeps that metadata in the main checkout's .git, outside the
-    workspace the agent may write: Codex under workspace-write (spike) and dsh under its own
-    workspace-write (AGE-138). A confidential dsh run uses the runner's wrapper, which grants
-    the git common dir (AGE-139), so it commits its own work."""
-    return agent == "codex" or (agent == "dsh" and not project.confidential)
+    workspace the agent may write: Codex under workspace-write (spike) and dsh under its
+    workspace-write (AGE-138)."""
+    return agent in ("codex", "dsh")
 
 
 def agent_cli(agent: str, project: projects.Project, claude_bin: str, dsh_prefix: Callable[[], list[str]],

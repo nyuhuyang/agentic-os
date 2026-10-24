@@ -332,10 +332,16 @@ not to push.
 - Base `1ab614d`, main `fe466a5`, branch `agent/AGE-139`.
 - Seven textual conflicts (AGENTS.md, context-maintenance, app.py, dsh_cli.py,
   project_runs.py, projects.py, test_project_dispatch.py). Main's version was kept and the
-  AGE-139 changes were re-applied with `git merge-file`; `leaves_commit_to_runner` now leaves
-  only non-confidential dsh and Codex to the runner, because confidential dsh gets the git
-  common dir and commits its own work.
+  AGE-139 changes were re-applied with `git merge-file`. Main's `leaves_commit_to_runner`
+  stays exactly as main wrote it; the confidential-dsh prompt override is applied separately
+  by `dsh_cli.confidential_prompt` from `app.py`, so the shared helper does not need a
+  conflicting edit.
 - Full suite: 960 passed / 87 failed, the same DSH-sandbox/PTY environment class as main.
   Focused dsh: 87 passed; `test_project_dispatch.py`: 88 passed / 11 nested-sandbox failures.
 - The resolved tree is uncommitted because the agent sandbox cannot write the shared `.git`;
   the runner's `post_run` commits it. No push.
+- Follow-up: main's `leaves_commit_to_runner` was kept exactly as main wrote it (shared
+  Codex/dsh rule); the confidential-dsh prompt override now lives in
+  `dsh_cli.confidential_prompt`, called from `app.py`. The AGE-139 context note was inserted
+  in a non-overlapping part of `context-maintenance.md`. A real `git merge-tree --write-tree
+  main <temp-commit>` of the resolved tree now exits 0 (clean merge).

@@ -279,9 +279,15 @@ this dsh host and the claudex-loop workflow explicitly.
 
 - Merged `main` at `fe466a5` over base `1ab614d` with a temporary index; kept main's version
   for all seven textual conflicts and re-applied AGE-139 with `git merge-file`.
-- Adjusted main's AGE-138 `leaves_commit_to_runner`: Codex and non-confidential dsh still
-  leave the commit to the runner; confidential dsh gets the git common dir and commits.
+- Initially adjusted main's AGE-138 `leaves_commit_to_runner`, then reverted it to main's
+  exact version to keep the merge clean: Codex and dsh still leave the commit to the runner
+  in the shared helper. The confidential-dsh prompt override lives in
+  `dsh_cli.confidential_prompt`, called from `app.py`.
 - Full suite 960 pass / 87 fail (same DSH sandbox/PTY class as main); focused dsh 87 pass;
   dispatch 88 pass / 11 nested-sandbox failures.
 - The merge tree is left in the worktree for the runner's `post_run` commit because the agent
   sandbox cannot write the main checkout's `.git`.
+- Follow-up resolution: kept main's `leaves_commit_to_runner` unchanged, moved the
+  confidential-dsh prompt override to `dsh_cli.confidential_prompt` (called by app), and put
+  the AGE-139 context note in a non-overlapping section. `git merge-tree --write-tree main
+  <temp-commit>` exits 0, so main merges the resolved branch without conflicts.
