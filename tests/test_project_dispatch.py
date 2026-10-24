@@ -1,5 +1,6 @@
 """Phase 2: project-bound dispatch — argv policy, comment gate, location guard, the launch helper."""
 
+import contextlib
 import json
 import os
 import subprocess
@@ -17,6 +18,7 @@ sys.path.insert(0, str(RUNNER))
 sys.path.insert(0, str(RUNNER.parent))
 
 import projects as pj  # noqa: E402
+import dsh_cli
 import project_runs as pr  # noqa: E402
 
 SENTINEL = "SENTINEL-CONFIDENTIAL-4242"
@@ -58,8 +60,28 @@ def project(repo, confidential=False):
 
 # ── argv policy (Decision 9) ─────────────────────────────────────────────────
 
+def _confidential_dsh_prefix():
+    return ["/opt/homebrew/bin/node", "/opt/homebrew/lib/dsh/bin.js", "--profile", "headless",
+            "--patch", str(dsh_cli.DSH_CONFIDENTIAL_PATCH)]
+
+
 def cli(agent, repo, confidential):
-    return pr.agent_cli(agent, project(repo, confidential), "claude", lambda: ["dsh", "--profile", "headless"])
+    return pr.agent_cli(agent, project(repo, confidential), "claude",
+                        lambda: ["dsh", "--profile", "headless"], _confidential_dsh_prefix)
+
+
+def test_prompt_asks_the_agent_to_announce_a_long_test_run(proj):
+    """AGE-140: a silent test run must not read as a hang; the agent says it is about to test."""
+    repo, _ = proj
+    prompt = pr.project_prompt("do the ticket", project(repo), {"branch": "agent/DEMO-1"}, "claude")
+    assert "Before running the test suite" in prompt and "look like a hang" in prompt
+
+
+def test_prompt_asks_the_agent_to_announce_a_long_test_run(proj):
+    """AGE-140: a silent test run must not read as a hang; the agent says it is about to test."""
+    repo, _ = proj
+    prompt = pr.project_prompt("do the ticket", project(repo), {"branch": "agent/DEMO-1"}, "claude")
+    assert "Before running the test suite" in prompt and "look like a hang" in prompt
 
 
 def test_confidential_argv_has_no_bypass(proj):
@@ -83,7 +105,68 @@ def test_confidential_claude_settings_and_sources(proj):
     argv = cli("claude", repo, True)
     settings = json.loads(argv[argv.index("--settings") + 1])["sandbox"]
     assert settings["failIfUnavailable"] is True and settings["allowUnsandboxedCommands"] is False
-    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert argv[argv.index("--setting-sources") + 1] == "user" and "--strict-mcp-config" in argv
+    codex_home = Path.home() / ".codex"
+    assert settings["network"]["allowedDomains"] == pr.CODEX_DOMAINS and settings["network"]["strictAllowlist"]
+    assert str(codex_home) in settings["filesystem"]["allowWrite"]
+    assert str(codex_home / "config.toml") in settings["filesystem"]["denyWrite"]
+
+
+def test_sandboxed_codex_shim(tmp_path):
+    """Passes through outside a sandbox; inside one (nested sandbox-exec refused) it drops Codex's
+    own sandbox for the outer one and points Codex at the bundled CA file."""
+    if sys.platform != "darwin":
+        pytest.skip("macOS seatbelt only")
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "codex").write_text('#!/bin/sh\necho "$CODEX_CA_CERTIFICATE|$*"\n')
+    (fake / "codex").chmod(0o755)
+    env = {**os.environ, "PATH": f"{pr.SANDBOXED_BIN}:{fake}:/usr/bin:/bin"}
+    env.pop("CODEX_CA_CERTIFICATE", None)
+    run = lambda *argv: subprocess.run(argv, env=env, capture_output=True, text=True).stdout.strip()
+    assert run("codex", "exec", "-s", "read-only", "-") == "|exec -s read-only -"
+    jail = ["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny mach-lookup)"]  # refuses nesting
+    assert run(*jail, "codex", "exec", "-s", "read-only", "-") == (
+        "/etc/ssl/cert.pem|exec --dangerously-bypass-approvals-and-sandbox -s read-only -")
+    assert run(*jail, "codex", "exec", "resume", "sid", "-") == (
+        "/etc/ssl/cert.pem|exec resume --dangerously-bypass-approvals-and-sandbox sid -")
+    assert run(*jail, "codex", "--version") == "/etc/ssl/cert.pem|--version"
+
+
+def test_confidential_claude_exec_env_puts_sandboxed_codex_first(monkeypatch, tmp_path):
+    import app
+    monkeypatch.setattr(app, "_registry_exec_env", lambda agent, reg: {"PATH": "/usr/bin"})
+    monkeypatch.setattr(app, "_load_registry", lambda agent: {})
+    project = SimpleNamespace(env={}, confidential=True)
+    assert app._project_exec_env("claude", project, str(tmp_path))["PATH"] == f"{pr.SANDBOXED_BIN}{os.pathsep}/usr/bin"
+    assert app._project_exec_env("codex", project, str(tmp_path))["PATH"] == "/usr/bin"
+    assert app._project_exec_env("claude", SimpleNamespace(env={}, confidential=False), str(tmp_path))["PATH"] == "/usr/bin"
+
+
+def test_dsh_leaves_the_commit_and_git_writes_to_the_runner(proj):
+    """AGE-138: a linked worktree's git metadata is outside dsh's workspace-write root."""
+    repo, _ = proj
+    binding = {"branch": "agent/T-1"}
+    dsh = pr.project_prompt("task", project(repo), binding, "dsh")
+    assert "Leave your changes uncommitted" in dsh and "Commit your work" not in dsh
+    assert "`git commit`" in dsh and "runner commits" in dsh
+    codex = pr.project_prompt("task", project(repo), binding, "codex")
+    assert "Leave your changes uncommitted" in codex and "git commit" not in codex
+    claude = pr.project_prompt("task", project(repo), binding, "claude")
+    assert "Commit your work on this branch" in claude and "Leave your changes uncommitted" not in claude
+
+
+def test_dsh_leaves_the_commit_and_git_writes_to_the_runner(proj):
+    """AGE-138: a linked worktree's git metadata is outside dsh's workspace-write root."""
+    repo, _ = proj
+    binding = {"branch": "agent/T-1"}
+    dsh = pr.project_prompt("task", project(repo), binding, "dsh")
+    assert "Leave your changes uncommitted" in dsh and "Commit your work" not in dsh
+    assert "`git commit`" in dsh and "runner commits" in dsh
+    codex = pr.project_prompt("task", project(repo), binding, "codex")
+    assert "Leave your changes uncommitted" in codex and "git commit" not in codex
+    claude = pr.project_prompt("task", project(repo), binding, "claude")
+    assert "Commit your work on this branch" in claude and "Leave your changes uncommitted" not in claude
 
 
 def test_non_confidential_codex_uses_auto_review_without_sandbox_flag(proj):
@@ -100,10 +183,18 @@ def test_non_confidential_claude_and_dsh_unchanged(proj):
     assert cli("dsh", repo, False) == ["dsh", "--profile", "headless"]
 
 
+def test_confidential_dsh_gets_the_sandbox_patch(proj):
+    """AGE-139: dsh is allowed for a confidential project through the runner's Seatbelt patch."""
+    repo, _ = proj
+    argv = cli("dsh", repo, True)
+    assert argv[:2] == ["/opt/homebrew/bin/node", "/opt/homebrew/lib/dsh/bin.js"]
+    assert argv[2:4] == ["--profile", "headless"]
+    assert argv[4:6] == ["--patch", str(dsh_cli.DSH_CONFIDENTIAL_PATCH)]
+    assert dsh_cli.DSH_CONFIDENTIAL_PATCH.is_file()
+
+
 def test_rejected_backends(proj, monkeypatch):
     repo, _ = proj
-    with pytest.raises(pr.ProjectRunError, match="dsh is not allowed"):
-        cli("dsh", repo, True)
     with pytest.raises(pr.ProjectRunError, match="cannot run project tickets"):
         cli("deepseek-direct", repo, False)
     monkeypatch.setattr(pr, "CONFIDENTIAL_SANDBOX_VERIFIED", False)
@@ -277,10 +368,11 @@ def test_dispatch_records_binding_verify_and_badge(helper):
     assert subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True).stdout == ""
 
 
-def test_sandboxed_codex_gets_a_runner_commit_without_the_seed(helper):
+@pytest.mark.parametrize("agent", ["codex", "dsh"])
+def test_agent_that_cannot_write_git_gets_a_runner_commit_without_the_seed(helper, agent):
     app_mod, run, records, state, *_ = helper
     state["mode"] = "uncommitted"
-    run(agent="codex")
+    run(agent=agent)
     rec = records()[-1]
     assert rec["runner_commit"] and rec["verify"]["status"] == "pass" and rec["seed_committed"] == []
     names = subprocess.run(["git", "-C", rec["worktree"], "show", "--name-only", "--format=", rec["runner_commit"]],
@@ -311,13 +403,135 @@ def test_merge_waits_for_the_projects_other_runs(helper, monkeypatch):
     app_mod, *_ = helper
     p = SimpleNamespace(key="demo", auto_merge=True)
     merged = []
-    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t: merged.append(t) or "sha")
+    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t, sha=None: merged.append((t, sha)) or "sha")
+    monkeypatch.setattr(pj, "branch_head", lambda project, t: f"head-of-{t}")
+    checked = []
+    monkeypatch.setattr(pj, "check_queued_merge", lambda project, t, sha: checked.append(t))
     a, b = {"project_key": "demo"}, {"project_key": "demo"}
     monkeypatch.setattr(app_mod, "_running_jobs", {"a": a, "b": b, "c": {"project_key": "other"}})
     assert app_mod._merge_when_last(p, "T-1", a, eligible=True) == {"merge": "waiting for this project's other runs"}
     assert merged == []
     assert app_mod._merge_when_last(p, "T-2", b, eligible=True) == {"merged_head": "sha", "merged": ["T-1", "T-2"]}
+    assert merged == [("T-1", "head-of-T-1"), ("T-2", "head-of-T-2")]  # the verified commits, not branch tips (SC-007)
+    assert checked == ["T-1", "T-2"]  # every queued entry re-checked before it merges (SC-009)
     assert app_mod._merge_when_last(SimpleNamespace(key="demo", auto_merge=False), "T-3", b, eligible=True) == {}
+
+
+def test_queued_merge_waits_for_a_finalizing_ticket_then_keeps_it(helper, monkeypatch):
+    """SC-010: a queued ticket whose run still holds its lock is waited for, and kept (not dropped) on timeout."""
+    app_mod, *_ = helper
+    p = SimpleNamespace(key="demo", auto_merge=True)
+    merged = []
+    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t, sha=None: merged.append(t) or "sha")
+    monkeypatch.setattr(pj, "branch_head", lambda project, t: f"head-of-{t}")
+    monkeypatch.setattr(pj, "check_queued_merge", lambda project, t, sha: None)
+    monkeypatch.setattr(app_mod, "_PENDING_MERGES", {"demo": [("T-1", "head-of-T-1")]})
+    b = {"project_key": "demo"}
+    monkeypatch.setattr(app_mod, "_running_jobs", {"b": b})
+    real = app_mod._wait_ticket_lock
+    monkeypatch.setattr(app_mod, "_wait_ticket_lock", lambda key, t: real(key, t, timeout=0.6))
+    with pj.ticket_lock("demo", "T-1"):  # T-1's run is still finalizing
+        out = app_mod._merge_when_last(p, "T-2", b, eligible=True)
+    assert merged == ["T-2"] and "T-1 waits for this project's next run" in out["merge"]
+    assert app_mod._PENDING_MERGES["demo"] == [("T-1", "head-of-T-1")]  # kept for the next run
+
+
+def test_queued_merge_uses_each_tickets_own_policy_and_newest_entry(helper, monkeypatch):
+    """SC-012: a confidential ticket drained by a public one merges under its own policy.
+    SC-013: a timed-out old entry never displaces a newer verification of the same ticket."""
+    app_mod, *_ = helper
+    p = SimpleNamespace(key="demo", auto_merge=True, confidential=False)
+    seen = []
+    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t, sha=None: seen.append((t, project.confidential)) or "sha")
+    monkeypatch.setattr(pj, "branch_head", lambda project, t: f"head-of-{t}")
+    monkeypatch.setattr(pj, "check_queued_merge", lambda project, t, sha: None)
+    monkeypatch.setattr(app_mod, "_ticket_confidential", lambda key, ident, *a: ident == "T-1")
+    monkeypatch.setattr(app_mod.dataclasses, "replace", lambda obj, **kw: SimpleNamespace(**{**vars(obj), **kw}))
+    monkeypatch.setattr(app_mod, "_PENDING_MERGES", {"demo": [("T-1", "old")]})
+    b = {"project_key": "demo"}
+    monkeypatch.setattr(app_mod, "_running_jobs", {"b": b})
+    app_mod._merge_when_last(p, "T-2", b, eligible=True)
+    assert ("T-1", True) in seen and ("T-2", False) in seen
+    # SC-013: T-1 busy until timeout, while a newer T-1 verification is already queued again
+    seen.clear()
+    monkeypatch.setattr(app_mod, "_PENDING_MERGES", {"demo": [("T-1", "old")]})
+    real = app_mod._wait_ticket_lock
+
+    def slow(key, t):
+        app_mod._PENDING_MERGES.setdefault("demo", []).append(("T-1", "new"))  # T-1 re-ran and queued meanwhile
+        return real(key, t, timeout=0.3)
+
+    monkeypatch.setattr(app_mod, "_wait_ticket_lock", slow)
+    b2 = {"project_key": "demo"}
+    monkeypatch.setattr(app_mod, "_running_jobs", {"b2": b2})
+    with pj.ticket_lock("demo", "T-1"):
+        app_mod._merge_when_last(p, "T-3", b2, eligible=True)
+    assert app_mod._PENDING_MERGES["demo"] == [("T-1", "new")]
+
+
+def test_queued_merge_deferred_when_a_run_starts_during_the_wait(helper, monkeypatch):
+    """SC-016: a run admitted while the drain waited keeps the queued entry from merging under it."""
+    app_mod, *_ = helper
+    p = SimpleNamespace(key="demo", auto_merge=True, confidential=False)
+    merged = []
+    monkeypatch.setattr(pj, "merge_into_checkout", lambda project, t, sha=None: merged.append(t) or "sha")
+    monkeypatch.setattr(pj, "branch_head", lambda project, t: f"head-of-{t}")
+    monkeypatch.setattr(pj, "check_queued_merge", lambda project, t, sha: None)
+    monkeypatch.setattr(app_mod, "_PENDING_MERGES", {"demo": [("T-1", "v1")]})
+    b = {"project_key": "demo"}
+    jobs = {"b": b}
+    monkeypatch.setattr(app_mod, "_running_jobs", jobs)
+    real = app_mod._wait_ticket_lock
+
+    @contextlib.contextmanager
+    def admitting(key, t):
+        jobs["c"] = {"project_key": "demo"}  # a new run takes its fingerprint during the wait
+        with real(key, t, timeout=0.3):
+            yield
+
+    monkeypatch.setattr(app_mod, "_wait_ticket_lock", admitting)
+    out = app_mod._merge_when_last(p, "T-2", b, eligible=True)
+    assert merged == []  # neither T-1 nor the drainer's own T-2 merges under T-3's fingerprint (SC-018)
+    assert app_mod._PENDING_MERGES["demo"] == [("T-1", "v1"), ("T-2", "head-of-T-2")]
+    assert "waits for this project's next run" in out["merge"]
+
+
+def test_run_fingerprint_waits_for_a_merge_holding_the_gate(helper, monkeypatch):
+    """SC-019: a merge blocked on the global merge lock still holds its project's gate, so a run
+    admitted meanwhile fingerprints only after the merge completed."""
+    app_mod, *_ = helper
+    p = SimpleNamespace(key="demo", auto_merge=True, confidential=False)
+    order = []
+    release = threading.Event()
+
+    def slow_merge(project, t, sha=None):
+        order.append("merge-start")
+        release.wait(2)  # e.g. waiting on _MERGE_LOCK held by a manual commit elsewhere
+        order.append("merge-end")
+        return "sha"
+
+    monkeypatch.setattr(pj, "merge_into_checkout", slow_merge)
+    monkeypatch.setattr(pj, "branch_head", lambda project, t: f"head-of-{t}")
+    monkeypatch.setattr(pj, "check_queued_merge", lambda project, t, sha: None)
+    monkeypatch.setattr(app_mod, "_PENDING_MERGES", {})
+    b = {"project_key": "demo"}
+    monkeypatch.setattr(app_mod, "_running_jobs", {"b": b})
+    drain = threading.Thread(target=app_mod._merge_when_last, args=(p, "T-2", b, True))
+    drain.start()
+    while "merge-start" not in order:
+        time.sleep(0.01)
+
+    def admit():
+        with app_mod._merge_gate("demo"):  # what a new run's opening fingerprint takes
+            order.append("fingerprint")
+
+    t3 = threading.Thread(target=admit)
+    t3.start()
+    time.sleep(0.2)
+    assert "fingerprint" not in order  # blocked behind the merge
+    release.set()
+    drain.join(5); t3.join(5)
+    assert order == ["merge-start", "merge-end", "fingerprint"]
 
 
 def test_background_writer_is_gone_before_verify(helper, tmp_path):
@@ -802,13 +1016,8 @@ def test_relocated_worktree_root_is_refused(helper, monkeypatch, tmp_path):
 def test_failed_closing_snapshot_is_recorded(helper, monkeypatch):
     """I7-07: a closing fingerprint that fails is recorded and badges the run, on success and cancel."""
     app_mod, run, records, state, *_ = helper
-    real, calls = pj.fingerprint, []
-
-    def flaky(project, exclude=frozenset()):
-        calls.append(1)
-        if len(calls) % 2 == 0:
-            raise pj.ProjectError("index is corrupt")
-        return real(project, exclude=exclude)
+    def flaky(project, exclude=frozenset()):  # the opening uses fingerprint_parts: only the closing fails (AGE-124)
+        raise pj.ProjectError("index is corrupt")
     monkeypatch.setattr(pj, "fingerprint", flaky)
     run()
     rec = records()[-1]

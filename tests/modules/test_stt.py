@@ -173,3 +173,33 @@ def test_id_alias_persisted_and_served(tmp_path, monkeypatch):
     app = Flask(__name__)
     lin.LinearModule()._register_linear_routes(app)
     assert app.test_client().get("/api/linear/id-aliases").get_json() == {"local-1": "uuid-1", "local-2": "uuid-2"}
+
+
+def test_live_text_is_polished_without_transcription(client):
+    body = client.post("/api/stt", data={"text": "我想用 OpenAI", "language": "zh-CN"}).get_json()
+    assert [name for name, _ in FakeClient.calls] == ["polish"]
+    assert (body["text"], body["raw"], body["polished"], body["model"]) == (
+        "我想用 OpenAI。", "我想用 OpenAI", True, stt.LIVE_MODEL)
+
+
+def test_live_token_mints_transcription_session(client, monkeypatch):
+    seen = {}
+
+    def fake_mint(api_key, session):
+        seen.update(key=api_key, session=session)
+        return "ek_test"
+    monkeypatch.setattr(stt, "mint_live_secret", fake_mint)
+    body = client.post("/api/stt/live-token", json={"language": "zh-CN"}).get_json()
+    assert body["value"] == "ek_test" and seen["key"] == "test-key"
+    inp = seen["session"]["audio"]["input"]
+    assert seen["session"]["type"] == "transcription" and inp["turn_detection"] is None
+    assert inp["transcription"]["model"] == stt.LIVE_MODEL and inp["transcription"]["languages"] == ["zh"]
+    assert "OpenAI" in inp["transcription"]["keywords"]
+
+
+def test_live_token_error_is_502(client, monkeypatch):
+    def boom(*_a):
+        raise OSError("offline")
+    monkeypatch.setattr(stt, "mint_live_secret", boom)
+    r = client.post("/api/stt/live-token", json={})
+    assert r.status_code == 502 and "offline" in r.get_json()["error"]

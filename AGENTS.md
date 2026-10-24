@@ -100,6 +100,8 @@ agentic-os/
 2. Read `docs/context-maintenance.md` and `docs/generated/ACTIVE_TASKS.md`; open the relevant active plan.
 3. Read `SPEC.md` before touching any FR/NFR/AC — it is the source of truth.
 4. Read only task-relevant files, then run Definition of Done checks; there is no formal test suite.
+   Announce a long test/build command before starting it (one line: what and roughly how long), so the
+   user does not mistake a quiet stretch for a hang.
 5. Escalate to human for anything below.
 
 ## Graphify Usage
@@ -109,12 +111,17 @@ agentic-os/
 - After modifying code: run `graphify update .` (AST-only, no API cost)
 - CLI: `pip install graphifyy` (double y); command is `graphify`; `/graphify` is the Claude Code skill
 
+## CodeGraph
+
+- Symbol/caller/blast-radius lookups: `codegraph_explore` MCP tool (or `codegraph explore "<symbols>"`) before grep/Read
+- A fresh ticket worktree gets a snapshot of the main checkout's index automatically (`_copy_codegraph`); no `.codegraph/` = skip CodeGraph
+
 ## DeepSeek Delegation
 
 Delegate reviews, metric analysis, strategy comparisons, second opinions, and docs synthesis with `runner/scripts/ask_deepseek.py`.
 Key: env or `~/.deepseek/config.toml`. Only the direct-API mode works: `--agentic` needs the removed Rust `deepseek` CLI.
 
-Dashboard agents are `claude`, `codex` and `dsh` (labelled "DeepSeek", runs `dsh --profile headless --json`). Old ids `deepseek`, `deepseek-tui` and `aider` are aliased to `dsh` on read; stored records are never rewritten. `dsh` is rejected for confidential projects (its sandbox leaves shell network open).
+Dashboard agents are `claude`, `codex` and `dsh` (labelled "DeepSeek", runs `dsh --profile headless --json`). Old ids `deepseek`, `deepseek-tui` and `aider` are aliased to `dsh` on read; stored records are never rewritten. `dsh` is allowed for confidential projects only through the runner's Seatbelt runner (`runner/dsh_confine.py` + `runner/scripts/dsh-confidential.yml`): shell network and the DNS/trustd/nsurlsessiond proxy paths are closed, writes stay in the worktree (or a session's own folder), `/private/tmp` and the repo's git common dir so the agent can `git add`/commit; the runner's spill directory is intentionally not shell-writable, the web/working-directory/native-fs tools are off, sessions are not resumed, and the runner still commits any leftovers. Non-confidential dsh keeps its native sandbox.
 Do not delegate visual/chart/browser/clipboard tasks.
 
 ## Escalation — Do Not Proceed Without Human Confirmation

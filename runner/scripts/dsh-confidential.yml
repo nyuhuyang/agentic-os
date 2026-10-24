@@ -1,0 +1,90 @@
+# AGE-139: confidential dsh overlay. The runner passes this with `--patch` only for a
+# confidential project. It is applied after the shipped bundles and after the user's profile
+# and home patch layers, so it pins the security-relevant entries and disables the tools that
+# would bypass the shell sandbox.
+#
+# The worktree root is appended to `runnerCommand` from `process.cwd()` and the repo's git
+# common dir from `AGENTICOS_DSH_CONFINE_GIT`: dsh starts in the ticket worktree, and argv
+# survives the child-environment scrubbing that removes ambient variables for bash and
+# PTC/workflow workers. `-` means "no git dir" (non-repo).
+- id: sandbox-policy
+  name: '@deepseek-ai/dsh-sandbox-policy'
+  disabled: false
+  config:
+    mode: workspace-write
+    workspaceRoot: !!js process.cwd()
+
+- id: sandbox
+  name: '@deepseek-ai/dsh-sandbox-local'
+  disabled: false
+  config:
+    runnerCommand: !!js (() => { const raw = process.env.AGENTICOS_DSH_CONFINE_RUNNER; if (!raw) throw new Error("AGENTICOS_DSH_CONFINE_RUNNER is required"); return [...JSON.parse(raw), process.cwd(), process.env.AGENTICOS_DSH_CONFINE_GIT || "-"]; })()
+    runnerFailureSignatures:
+      - "dsh-confine:"
+
+# workspace-write + never matches no shipped permission preset, and dsh throws when the
+# composed defaults do not derive one. Keep the stock workspace-write/ask pair (headless has
+# no approval answerer, so ask fails closed) and do not expose danger-full-access.
+- id: approval
+  name: '@deepseek-ai/dsh-user-approval'
+  disabled: false
+  config:
+    policy: ask
+
+- id: permission
+  name: '@deepseek-ai/dsh-permission-presets'
+  disabled: false
+  config:
+    defaultPreset: workspace-write
+    presets:
+      read-only:
+        sandbox: read-only
+        approval: ask
+        name: read-only
+        description: Read-only; wider retries require approval.
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+        name: workspace-write
+        description: Write inside the workspace and permitted temporary directories; wider retries require approval.
+
+- id: bash-sandbox
+  name: '@deepseek-ai/dsh-bash-sandbox'
+  disabled: false
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: false
+- id: fs-sandbox
+  name: '@deepseek-ai/dsh-fs-sandbox'
+  disabled: false
+- id: fs-observation-policy
+  name: '@deepseek-ai/dsh-fs-observation-policy'
+  disabled: false
+- id: subprocess
+  name: '@deepseek-ai/dsh-subprocess-local'
+  disabled: false
+- id: shell-env
+  name: '@deepseek-ai/dsh-shell-env'
+  disabled: false
+- id: working-directory
+  name: '@deepseek-ai/dsh-working-directory'
+  disabled: false
+
+# Direct egress and cwd changes stay out of a confidential run. Native fs mutations are a
+# trusted-code containment check with a documented ancestor-symlink TOCTOU, not a kernel
+# boundary; the confined shell is the only mutation path.
+- id: otel
+  name: '@deepseek-ai/dsh-otel'
+  disabled: true
+- id: session-telemetry-otel
+  name: '@deepseek-ai/dsh-session-telemetry-otel'
+  disabled: true
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  disabled: true
+- id: tool-working-directory
+  name: '@deepseek-ai/dsh-tool-working-directory'
+  disabled: true
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+  disabled: true

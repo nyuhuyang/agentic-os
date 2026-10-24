@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -24,6 +25,7 @@ import shlex
 import shutil
 import stat as stat_module
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -41,7 +43,7 @@ REGISTRY_PATH = Path(os.environ.get("AGENTIC_OS_PROJECTS", str(_PROTO / "project
 WORKTREE_ROOT = Path(os.environ.get("AGENTIC_OS_WORKTREES", "~/.agentic-os/worktrees")).expanduser()
 
 _FIELDS = {"path", "kind", "verify", "env", "confidential", "no_push", "seed", "verify_timeout_s", "note",
-           "auto_merge"}
+           "auto_merge", "commit"}
 _IDENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 DEFAULT_VERIFY_TIMEOUT_S = 600
 TAIL_CHARS = 4000
@@ -63,6 +65,10 @@ class RegistryConflict(ProjectError):
     """projects.yaml changed since the caller read it."""
 
 
+class NeedsCommit(ProjectError):
+    """The folder holds files with no commit yet; the dashboard offers to commit them (AGE-127)."""
+
+
 class WorktreesRemain(ProjectError):
     def __init__(self, msg: str, worktrees: list[str]):
         super().__init__(msg)
@@ -82,6 +88,7 @@ class Project:
     verify_timeout_s: int = DEFAULT_VERIFY_TIMEOUT_S
     note: str = ""
     auto_merge: bool = True
+    commit: bool = True  # false: no Commit button on its session rows (notes, a wiki: not code)
 
 
 # An agent can write the shared git config (e.g. core.fsmonitor -> a script in its
@@ -89,24 +96,54 @@ class Project:
 _GIT_HARDENING = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
 
 
-def sandbox_profile(writable: list[Path]) -> str:
-    """macOS sandbox-exec profile: no network, writes only under `writable` and temp dirs."""
-    tmp = {Path("/private/tmp"), Path(os.path.realpath(tempfile.gettempdir()))}
+def _sb_str(path: str) -> str:
+    """A path as a sandbox-profile string literal: quotes and backslashes escaped (SC-015)."""
+    if any(ord(c) < 32 or c == "\x7f" for c in path):
+        raise ProjectError(f"path {path!r} has control characters; the sandbox cannot name it")
+    return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def sandbox_profile(writable: list[Path], temp: bool = True, temp_root: str | None = None) -> str:
+    """macOS sandbox-exec profile: no network, writes only under `writable` and (temp) temp dirs.
+
+    `temp_root` lets a caller name the shell temp area explicitly instead of the process
+    `TMPDIR`; the dsh confinement wrapper uses `/tmp` while dsh's own spill directory lives
+    outside every shell-writable root (AGE-139).
+    """
+    tmp = {Path("/private/tmp"), Path(os.path.realpath(temp_root or tempfile.gettempdir()))} if temp else set()
     roots = sorted({str(Path(os.path.realpath(p))) for p in [*writable, *tmp]})
-    allow = " ".join(f'(subpath "{r}")' for r in roots)
+    allow = " ".join(f'(subpath {_sb_str(r)})' for r in roots) or '(literal "/dev/null")'
     # allow-default keeps git, shells and test runtimes working; the denials close the routes
     # by which sandboxed code asks something outside the sandbox to act for it.
     # ponytail: deny-list, not deny-default; spike (g2) probes `open URL`, osascript and
     # launchctl submit. Move to deny-default if a new escape route shows up.
-    return ("(version 1)(allow default)(deny network*)(deny file-write*)"
-            "(deny lsopen)(deny appleevent-send)"
-            '(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd")'
-            ' (global-name "com.apple.coreservices.appleevents") (global-name-regex #"^com\\.apple\\.lsd\\."))'
-            f'(allow file-write* {allow} (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/fd/"))')
+    profile = ("(version 1)(allow default)(deny network*)(deny file-write*)"
+               "(deny lsopen)(deny appleevent-send)"
+               '(deny mach-lookup (global-name "com.apple.dnssd.service")'
+               ' (global-name "com.apple.trustd") (global-name "com.apple.trustd.agent")'
+               ' (global-name "com.apple.nsurlsessiond")'
+               ' (global-name "com.apple.coreservices.launchservicesd")'
+               ' (global-name "com.apple.coreservices.appleevents") (global-name-regex #"^com\\.apple\\.lsd\\."))'
+               f'(allow file-write* {allow} (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/fd/"))')
+    return profile
 
 
-def sandbox_prefix(writable: list[Path]) -> list[str]:
-    return ["/usr/bin/sandbox-exec", "-p", sandbox_profile(writable)]
+def sandbox_prefix(writable: list[Path], temp: bool = True, temp_root: str | None = None) -> list[str]:
+    return ["/usr/bin/sandbox-exec", "-p", sandbox_profile(writable, temp, temp_root)]
+
+
+def readonly_status(cwd: Path) -> list[str]:
+    """`uncommitted` under a write-nothing sandbox: no writable roots, not even temp. A clean
+    filter that status runs can neither touch the checkout nor its git dir (SC-011)."""
+    argv = [*sandbox_prefix([], temp=False), "git", *_GIT_HARDENING, "-C", str(cwd), "--no-optional-locks",
+            "status", "--porcelain", "-z", "--untracked-files=all"]
+    try:
+        code, out, err = _run_bounded(argv, GIT_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise ProjectError(f"git status timed out in {cwd}") from None
+    if code != 0:
+        raise ProjectError(f"git status failed in {cwd}: {err.decode(errors='replace').strip()}")
+    return _porcelain_paths(out)
 
 
 GIT_TIMEOUT_S = 120
@@ -262,6 +299,7 @@ def _parse_project(key: str, entry: object) -> Project:
         key=key, path=root, verify=(verify or "").strip(), kind=str(entry.get("kind") or ""),
         env=env, confidential=bool(entry.get("confidential", False)),
         no_push=bool(entry.get("no_push", False)), auto_merge=bool(entry.get("auto_merge", True)),
+        commit=bool(entry.get("commit", True)),
         seed=tuple(_seed_path(root, s, key) for s in seeds), verify_timeout_s=timeout, note=note,
     )
 
@@ -420,11 +458,12 @@ def _lifecycle_changed(old: dict, new: dict) -> bool:
 
 
 def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = False,
-                 path: Path | None = None) -> dict:
+                 path: Path | None = None, commit_existing: bool = False) -> dict:
     """Create or edit one registry entry from the dashboard, validated like dispatch.
     The key is immutable: worktrees, sidecars and bindings are keyed by it. On create, a
     missing or empty folder that is not its own repo root is made one after the key/hash/
-    duplicate checks (REGUI-B005); a non-empty one is refused. If the save then fails the
+    duplicate checks (REGUI-B005); a folder with uncommitted files (no repo yet, or a repo with
+    no commits) raises NeedsCommit unless `commit_existing` (AGE-127). If the save then fails the
     folder is kept, never deleted (B006), and the error carries `initialized`."""
     path = Path(path or REGISTRY_PATH)
     _check_key(key)
@@ -441,11 +480,13 @@ def save_project(key: str, entry: dict, expected_hash: str, *, create: bool = Fa
         old = projects.get(key) if isinstance(projects.get(key), dict) else {}
         if not lifecycle and _lifecycle_changed(old, entry):
             raise RegistryConflict("projects.yaml changed while saving; reload and try again")
-        if create and key in projects:
-            raise ProjectError(f"project {key!r} already exists")
+        clash = next((k for k in projects if k.lower() == key.lower()), None) if create else None
+        if clash:  # keys name case-insensitive worktree folders (AGE-127)
+            raise ProjectError(f"project {clash!r} already exists")
         if not create and key not in projects:
             raise ProjectError(f"unknown project {key!r}")
-        created = init_repo(str(entry.get("path") or "")) if create and _needs_init(entry.get("path")) else None
+        created = (init_repo(str(entry.get("path") or ""), commit_existing)
+                   if create and _needs_init(entry.get("path")) else None)
         try:
             project = _validate_for_save(key, entry, old, create)
             projects[key] = entry
@@ -590,64 +631,97 @@ def _is_repo_root(root: Path) -> bool:
     return bool(proc and proc.returncode == 0 and Path(proc.stdout.strip()).resolve() == root.resolve())
 
 
+def _has_commit(root: Path) -> bool:
+    return _git(root, "rev-parse", "--verify", "-q", "HEAD", check=False).returncode == 0
+
+
 def _needs_init(raw_path: object) -> bool:
-    """True for a missing folder or an empty one that is not its own repo root; a non-empty
-    non-root folder is refused (its files would otherwise be committed blind)."""
+    """True for a missing folder, one that is not its own repo root, or a repo root with no
+    commit yet. A non-empty folder inside another repo is refused: add that repo instead."""
     if not isinstance(raw_path, str) or not raw_path.strip():
         return False  # _parse_project reports the missing path
     root = Path(raw_path).expanduser()
     if not root.is_absolute() or not os.path.lexists(root):
         return root.is_absolute()
-    if not root.is_dir() or _is_repo_root(root):
+    if not root.is_dir():
         return False
-    if any(root.iterdir()):
-        raise ProjectError(f"{root} is not a git repository root and is not empty; run git init and commit first")
+    if _is_repo_root(root):
+        return not _has_commit(root)
+    top = _git(root, "rev-parse", "--show-toplevel", check=False)
+    if top.returncode == 0 and any(root.iterdir()):
+        raise ProjectError(f"{root} is inside the git repository {top.stdout.strip()}; add that folder instead")
     return True
 
 
-def init_repo(raw_path: str) -> Path:
-    """Make a missing or empty folder a repo: git init + empty initial commit. On failure it
-    removes only what it created (the folder it made, else just .git)."""
+MAX_INIT_FILE_BYTES = 50 * 1024 * 1024  # ponytail: per-file cap only; bulky data belongs in .gitignore
+
+
+def init_repo(raw_path: str, commit_existing: bool = False) -> Path:
+    """Make a folder a repo with one initial commit: git init when it is not a repo root yet,
+    then commit every file .gitignore keeps. Files present and not `commit_existing` raise
+    NeedsCommit; files over MAX_INIT_FILE_BYTES are refused. On failure it removes only what
+    it created (the folder it made, else just the .git it made)."""
     root = Path(raw_path or "").expanduser()
     if not root.is_absolute():
         raise ProjectError("path must be absolute or ~-relative")
     existed = os.path.lexists(root)
-    if existed and (not root.is_dir() or root.is_symlink() or any(root.iterdir())):
-        raise ProjectError(f"{root} is not an empty folder")
+    if existed and (not root.is_dir() or root.is_symlink()):
+        raise ProjectError(f"{root} is not a folder")
     if not existed and not root.parent.is_dir():
         raise ProjectError(f"parent folder {root.parent} does not exist")
     if (root if existed else root.parent).resolve().is_relative_to(WORKTREE_ROOT.resolve()):
         raise ProjectError(f"path must not be inside {WORKTREE_ROOT}")
+    fresh = not existed or not _is_repo_root(root)
+    if not fresh and _has_commit(root):
+        raise ProjectError(f"{root} is already a git repository with commits")
     if not existed:
         root.mkdir()
     try:
-        _git(root, "init", "-q")
+        if fresh:
+            _git(root, "init", "-q")
+        files = [f for f in _git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").stdout.split("\0") if f]
+        if files and not commit_existing:
+            raise NeedsCommit(f"{root} holds {len(files)} file(s) with no git commit yet")
+        big = [f for f in files if (root / f).is_file() and not (root / f).is_symlink()
+               and (root / f).stat().st_size > MAX_INIT_FILE_BYTES]
+        if big:
+            raise ProjectError(f"{len(big)} file(s) over {MAX_INIT_FILE_BYTES >> 20} MB would be committed "
+                               f"({', '.join(big[:5])}); add them to .gitignore and save again")
+        if files:
+            _git(root, "add", "-A")
         _git(root, "commit", "-q", "--allow-empty", "-m", "Initial commit")
     except BaseException:
-        shutil.rmtree(root / ".git" if existed else root, ignore_errors=True)
+        if fresh:
+            shutil.rmtree(root / ".git" if existed else root, ignore_errors=True)
         raise
     return root
 
 
 def derive_key(folder_name: str, taken) -> str:
     """The project key for a folder: its name made valid for _IDENT, `project` when nothing
-    usable is left (SAP-004), then -2, -3, ... on a clash."""
+    usable is left (SAP-004), then -2, -3, ... on a clash. Clashes ignore case: the worktree
+    folder is named by the key and macOS folders are case-insensitive (AGE-127)."""
     base = re.sub(r"[^A-Za-z0-9._-]", "-", folder_name or "")
     base = re.sub(r"^[^A-Za-z0-9]+", "", base) or "project"
+    taken = {t.lower() for t in taken}
     key, n = base, 1
-    while key in taken:
+    while key.lower() in taken:
         n += 1
         key = f"{base}-{n}"
     return key
 
 
-def set_confidential(key: str, value: bool, expected_hash: str, path: Path | None = None) -> dict:
-    """Change only `confidential` on the stored entry; every other field stays as written
-    (no _clean_entry, SAP-007). A lifecycle change: needs the exclusive project lock."""
+def set_flags(key: str, flags: dict, expected_hash: str, path: Path | None = None) -> dict:
+    """Change only the given `confidential` / `commit` flags on the stored entry; every other
+    field stays as written (no _clean_entry, SAP-007). A lifecycle change: needs the exclusive
+    project lock."""
     path = Path(path or REGISTRY_PATH)
     _check_key(key)
-    if not isinstance(value, bool):
-        raise ProjectError("confidential must be true or false")
+    if not flags or set(flags) - {"confidential", "commit"}:
+        raise ProjectError("only confidential and commit can be changed here")
+    for name, value in flags.items():
+        if not isinstance(value, bool):
+            raise ProjectError(f"{name} must be true or false")
     from state_io import file_lock
     with project_lock(key, exclusive=True, blocking=False), file_lock(path):
         doc = _locked_doc(path, expected_hash)
@@ -655,10 +729,10 @@ def set_confidential(key: str, value: bool, expected_hash: str, path: Path | Non
         if not isinstance(entry, dict):
             raise ProjectError(f"unknown project {key!r}")
         # A copy: a YAML alias may share this mapping with another project (SAP-B001).
-        entry = doc["projects"][key] = {**entry, "confidential": value}
+        entry = doc["projects"][key] = {**entry, **flags}
         project = _parse_project(key, entry)
         _write_registry(path, doc, expected_hash)
-    return {"key": key, "confidential": project.confidential}
+    return {"key": key, "confidential": project.confidential, "commit": project.commit}
 
 
 _SCAN_ROOTS = ("Documents", "code", "Projects", "Developer", "src", "repos", "work", "")
@@ -980,6 +1054,29 @@ def _copy_seeds(wt: Path, project: Project) -> None:
             raise ProjectError(f"seed {rel!r} is not ignored by the worktree's committed .gitignore rules")
 
 
+def _copy_codegraph(wt: Path, project: Project) -> None:
+    """Give a fresh worktree a snapshot of the main checkout's CodeGraph index (AGE-134).
+
+    Automatic for every project with a `.codegraph/codegraph.db`; best effort — no index
+    just means agents fall back to grep. The copy's own .gitignore ignores itself too, so
+    the worktree stays clean without a rule in the project's committed .gitignore.
+    """
+    src, dest = project.path / ".codegraph" / "codegraph.db", wt / ".codegraph"
+    if ".codegraph" in project.seed or not src.is_file() or src.is_symlink() or dest.is_symlink():
+        return
+    try:
+        dest.mkdir(exist_ok=True)
+        # backup(), not a file copy: a consistent snapshot even while the daemon writes the WAL
+        with contextlib.closing(sqlite3.connect(f"{src.as_uri()}?mode=ro", uri=True, timeout=5)) as s, \
+                contextlib.closing(sqlite3.connect(dest / "codegraph.db")) as d:
+            s.backup(d)
+        if not os.path.lexists(dest / ".gitignore"):  # a committed one already ignores the db
+            (dest / ".gitignore").write_text("*\n", encoding="utf-8")
+    except (OSError, sqlite3.Error):
+        with contextlib.suppress(OSError):
+            (dest / "codegraph.db").unlink()
+
+
 def _is_worktree_of(project: Project, wt: Path) -> bool:
     """True only when `wt` is itself the top level of a worktree of this project's repo
     (a subdirectory of one does not count)."""
@@ -990,7 +1087,9 @@ def _is_worktree_of(project: Project, wt: Path) -> bool:
     top = _git(wt, "rev-parse", "--show-toplevel", check=False).stdout.strip()
     if not mine or not theirs or not top:
         return False
-    return (project.path / mine).resolve() == (wt / theirs).resolve() and Path(top).resolve() == wt.resolve()
+    with contextlib.suppress(OSError):  # samefile: git may report another letter case on macOS (AGE-127)
+        return os.path.samefile(project.path / mine, wt / theirs) and os.path.samefile(top, wt)
+    return False
 
 
 def _binding_path(project: Project, ident: str) -> Path:
@@ -1085,6 +1184,7 @@ def create_worktree(project: Project, ident: str) -> dict:
     try:
         os.chmod(wt, 0o700)
         _copy_seeds(wt, project)
+        _copy_codegraph(wt, project)
         # The binding is the "ready" marker: written only once every seed is copied and checked.
         meta = _binding_path(project, ident)
         meta.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1144,23 +1244,197 @@ def _identity_env(cwd: Path) -> dict | None:
 _MERGE_LOCK = threading.Lock()  # ponytail: one per process; runs of different projects rarely finish at once
 
 
-def merge_into_checkout(project: Project, ident: str) -> str:
+def branch_head(project: Project, ident: str) -> str:
+    """The commit agent/<ident> points at now: what a queued merge must merge (SC-007)."""
+    return _git(project.path, "rev-parse", "--verify", f"refs/heads/agent/{_check_ident(ident)}^{{commit}}",
+                confine=confine_for(project, project.path)).stdout.strip()
+
+
+def commit_state(project: Project, cwd: str | Path, cache: dict | None = None) -> dict | None:
+    """What the session row's Commit button reflects, read-only: {state, files, ahead}.
+    dirty = uncommitted changes; unmerged = a clean worktree whose agent/<id> has commits the
+    main checkout's HEAD lacks; clean = nothing to commit and nothing left to merge. None when
+    the folder is not this project's checkout or worktree (the button stays neutral)."""
+    top = _git(Path(cwd), "rev-parse", "--show-toplevel", check=False)
+    if top.returncode:
+        return None
+    repo = Path(top.stdout.strip()).resolve()
+    if cache is not None and repo in cache:  # one status per checkout, whatever subfolder (CM-003)
+        return cache[repo]
+    try:
+        state = _commit_state(project, repo)
+    except ProjectError:  # e.g. a status timeout: neutral, and not retried for the next row (CM-006)
+        state = None
+    if cache is not None:
+        cache[repo] = state
+    return state
+
+
+def _commit_state(project: Project, repo: Path) -> dict | None:
+    ident = None
+    if repo != project.path.resolve():
+        try:
+            ident = ticket_from_worktree(project, repo)
+            br = _git(repo, "symbolic-ref", "-q", "--short", "HEAD", check=False).stdout.strip()
+            _check_bound_branch(project, ident, br)
+        except ProjectError:
+            return None  # not this ticket's work as bound: neutral, never "clean" (CM-001)
+    files = len(readonly_status(repo))  # write-nothing sandbox: status can run clean filters (SC-011)
+    if files:
+        return {"state": "dirty", "files": files, "ahead": 0}
+    ahead = _ahead(project, ident) if ident else 0
+    return {"state": "unmerged" if ahead else "clean", "files": 0, "ahead": ahead}
+
+
+def check_queued_merge(project: Project, ident: str, sha: str) -> None:
+    """A queued (ticket, verified sha) is still that ticket's work: its binding exists and its
+    branch still contains the sha. Cleanup or a replaced branch refuses the merge (SC-009).
+    Caller holds the ticket's lock."""
+    load_binding(project, ident)  # raises when the worktree/binding was cleaned up
+    if _git(project.path, "merge-base", "--is-ancestor", sha, f"refs/heads/agent/{_check_ident(ident)}",
+            check=False, confine=confine_for(project, project.path)).returncode:
+        raise ProjectError(f"agent/{ident} no longer contains the verified commit; merge it by hand")
+
+
+def merge_into_checkout(project: Project, ident: str, rev: str | None = None) -> str:
     """Merge agent/<ident> into the branch the main checkout has checked out (AGE-111).
 
     Only a conflict-free merge is made: merge-tree checks first, so no merge is ever left
     half done and no `merge --abort` can touch the user's own uncommitted edits. Git itself
     refuses when the merge would overwrite a local change. Returns the checkout's new HEAD."""
     branch = f"agent/{_check_ident(ident)}"
+    if rev is not None and not re.fullmatch(r"[0-9a-f]{40}([0-9a-f]{24})?", rev):
+        raise ProjectError(f"not a commit id: {rev!r}")
+    target = rev or f"refs/heads/{branch}"  # rev: the verified commit; never a bare name a tag could shadow (CM-002)
     root = project.path
     confine = confine_for(project, root)
     with _MERGE_LOCK:
         if _git(root, "symbolic-ref", "-q", "HEAD", check=False, confine=confine).returncode:
             raise ProjectError(f"{root} is on a detached HEAD; merge {branch} by hand")
-        if _git(root, "merge-tree", "--write-tree", "HEAD", branch, check=False, confine=confine).returncode:
+        busy = _git_operation(root, confine)  # before touching it: never merge into a paused rebase etc. (CM-009)
+        if busy:
+            raise ProjectError(f"{root} has {busy} in progress; merge {branch} by hand after finishing it")
+        pre = _git(root, "merge-tree", "--write-tree", "HEAD", target, check=False, confine=confine)
+        if pre.returncode:
             raise ProjectError(f"{branch} conflicts with {root}; merge it by hand")
-        _git(root, "merge", "--no-edit", "--no-verify", "--no-gpg-sign", "-q", branch, confine=confine,
-             timeout=COMMIT_TIMEOUT_S, env=_identity_env(root))
-        return _git(root, "rev-parse", "HEAD", confine=confine).stdout.strip()
+        tree = pre.stdout.split("\n", 1)[0].strip()
+        # the full ref, minus exactly refs/heads/: --short can say heads/main when a tag main exists (CM-012)
+        current = _git(root, "symbolic-ref", "HEAD", confine=confine).stdout.strip().removeprefix("refs/heads/")
+        # Exactly the merge the preflight checked: no inherited branch.<name>.mergeOptions
+        # (-s ours, --no-commit, --squash) and no autostash of the user's edits (CM-005/007/008).
+        # --strategy=ort: what merge-tree checked, never pull.twohead's choice (CM-015);
+        # --no-overwrite-ignore: an ignored local file (.env) is never replaced by a tracked one (CM-016)
+        _git(root, "-c", f"branch.{current}.mergeOptions=", "-c", "merge.autoStash=false", "merge",
+             "--strategy=ort", "--no-overwrite-ignore",
+             "--no-edit", "--no-verify", "--no-gpg-sign", "--commit", "--no-squash", "--no-autostash", "-q",
+             "-m", f"Merge branch '{branch}'", target, confine=confine, timeout=COMMIT_TIMEOUT_S, env=_identity_env(root))
+        head = _git(root, "rev-parse", "HEAD", confine=confine).stdout.strip()  # read once: what is checked is returned (AGE124-I03)
+        if (_git_operation(root, confine)
+                or _git(root, "merge-base", "--is-ancestor", target, head, check=False, confine=confine).returncode
+                or _git(root, "rev-parse", f"{head}^{{tree}}", confine=confine).stdout.strip() != tree):
+            raise ProjectError(f"{branch} did not merge into {root} as checked; inspect it by hand")
+        return head
+
+
+def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry_run: bool = False,
+                    merger=None, main_guard=None) -> dict:
+    """The user's manual Commit on a session row: stage every change in the session's checkout
+    (the project's folder or one of its AgenticOS worktrees) and commit it locally. Never pushes.
+    In a worktree, `merger(ident)` then merges agent/<ident> into the main checkout, still under
+    the ticket lock so the branch cannot move in between; its refusal never undoes the commit.
+    A dry run only reports {repo, branch, files, ahead, into}. Hooks off and unsigned.
+    `main_guard()`: a context entered around a real commit in the main checkout; it yields a dict
+    that gets {"head": the new commit} (AGE-124)."""
+    top = _git(Path(cwd), "rev-parse", "--show-toplevel", check=False)
+    if top.returncode:
+        raise ProjectError(f"{cwd} is not inside a git checkout")
+    repo = Path(top.stdout.strip()).resolve()
+    ident = None
+    if repo != project.path.resolve():
+        ident = ticket_from_worktree(project, repo)  # refuses anything else (a nested or foreign repo)
+    msg = message.strip() if isinstance(message, str) else ""
+    # Always sandboxed, whatever the policy says: staging can run repo-configured clean filters,
+    # and a policy read before the ticket lock could be stale by the time git runs (SC-006).
+    common = _git(project.path, "rev-parse", "--git-common-dir").stdout.strip()
+    confine = [(project.path / common).resolve(), repo]
+    expect = None
+    with contextlib.ExitStack() as stack:
+        if ident:
+            stack.enter_context(ticket_lock(project.key, ident))  # a run, verify or terminal owns it now
+        else:
+            if main_guard and not dry_run:
+                expect = stack.enter_context(main_guard())  # lock order: gate before _MERGE_LOCK
+            if not _MERGE_LOCK.acquire(blocking=False):
+                raise TicketLocked(f"a merge into {repo} is in progress; try again in a moment")
+            stack.callback(_MERGE_LOCK.release)
+        if _git(repo, "symbolic-ref", "-q", "HEAD", check=False, confine=confine).returncode:
+            raise ProjectError(f"{repo} is on a detached HEAD; commit there by hand")
+        busy = _git_operation(repo, confine)
+        if busy:  # git add -A would mark conflicts resolved and commit their markers (SC-003)
+            raise ProjectError(f"{repo} has {busy} in progress; finish or abort it by hand first")
+        branch = _git(repo, "symbolic-ref", "--short", "HEAD", confine=confine).stdout.strip()
+        if ident:
+            _check_bound_branch(project, ident, branch)  # a switched worktree is not that ticket's work (CM-001)
+        files = readonly_status(repo)  # preview and count: nothing writable (SC-011)
+        into = None
+        if ident:
+            r = _git(project.path, "symbolic-ref", "-q", "--short", "HEAD", check=False)
+            into = r.stdout.strip() if r.returncode == 0 else None  # the main checkout's branch
+        out = {"repo": str(repo), "branch": branch, "files": files, "into": into,
+               "ahead": _ahead(project, ident) + (1 if files else 0) if ident else 0, "committed": None}
+        if dry_run:
+            return out
+        if files:
+            if not msg:
+                raise ProjectError("a commit message is required")
+            _git(repo, "add", "-A", confine=confine, timeout=COMMIT_TIMEOUT_S)
+            if _git(repo, "diff", "--cached", "--quiet", "--no-ext-diff", check=False, confine=confine).returncode:
+                parent = _git(repo, "rev-parse", "HEAD", confine=confine).stdout.strip()
+                tree = _git(repo, "write-tree", confine=confine).stdout.strip()  # what this commit must hold
+                _git(repo, "commit", "--no-verify", "--no-gpg-sign", "-q", "-m", msg, confine=confine,
+                     timeout=COMMIT_TIMEOUT_S, env=_identity_env(repo))
+                head = _git(repo, "rev-parse", "HEAD", confine=confine).stdout.strip()  # read once (AGE124-I05)
+                if (_git(repo, "rev-parse", f"{head}^{{tree}}", confine=confine).stdout.strip() != tree
+                        or _git(repo, "rev-parse", f"{head}^@", check=False,  # every parent: exactly one (I06)
+                                confine=confine).stdout.split() != [parent]):
+                    raise ProjectError(f"{repo} moved while committing; inspect it by hand")
+                out["committed"] = head
+                if expect is not None:
+                    expect["head"] = head  # the guard checks the checkout ends exactly here
+        if ident and merger and _ahead(project, ident):
+            try:
+                out["merged_head"] = merger(ident)
+            except ProjectError as exc:  # the commit stands; the row says why it did not merge
+                out["merge_error"] = str(exc)[:500]
+        return out
+
+
+def _check_bound_branch(project: Project, ident: str, branch: str) -> None:
+    """The worktree is still bound to its ticket and on agent/<ident>."""
+    meta = load_binding(project, ident)  # raises for a missing or foreign binding
+    want = meta.get("branch") or f"agent/{ident}"
+    if branch != want:
+        raise ProjectError(f"{ident}'s worktree is on {branch}, not {want}; commit and merge there by hand")
+
+
+def _ahead(project: Project, ident: str) -> int:
+    """Commits on agent/<ident> that the main checkout's HEAD lacks."""
+    r = _git(project.path, "rev-list", "--count", f"HEAD..refs/heads/agent/{_check_ident(ident)}", check=False)
+    return int(r.stdout.strip() or 0) if r.returncode == 0 else 0
+
+
+def _git_operation(repo: Path, confine: list[Path] | None) -> str | None:
+    """An unfinished merge / cherry-pick / revert / rebase, or unmerged index entries, else None."""
+    for ref, what in (("MERGE_HEAD", "a merge"), ("CHERRY_PICK_HEAD", "a cherry-pick"), ("REVERT_HEAD", "a revert")):
+        if _git(repo, "rev-parse", "-q", "--verify", ref, check=False, confine=confine).returncode == 0:
+            return what
+    for d in ("rebase-merge", "rebase-apply"):
+        p = _git(repo, "rev-parse", "--git-path", d, confine=confine).stdout.strip()
+        if (repo / p if not os.path.isabs(p) else Path(p)).exists():
+            return "a rebase"
+    if _git(repo, "--no-optional-locks", "ls-files", "-u", confine=confine).stdout.strip():
+        return "unresolved conflicts"
+    return None
 
 
 def committed_seeds(project: Project, wt: Path, base: str) -> list[str]:
@@ -1205,11 +1479,30 @@ CLAUDE_STAGING = ".claude/.cc-writes"
 
 
 def fingerprint(project: Project, exclude: set[str] = frozenset()) -> str:
-    """Hash of everything an agent might change in the main checkout (Decision 1).
+    """Hash of everything an agent might change in the main checkout (Decision 1)."""
+    return fingerprint_of(fingerprint_parts(project, exclude))
 
-    HEAD, staged and unstaged diffs, every untracked/ignored file's (path, size, mode,
-    mtime_ns), the effective git config and the effective hooks dir. `exclude` holds
-    runner bookkeeping paths (relative); an entry ending in "/" excludes that whole directory.
+
+# A checkout with nothing staged, changed or untracked (what a manual commit leaves, AGE-124).
+CLEAN_PARTS = {"staged": hashlib.sha256(b"").hexdigest(), "unstaged": hashlib.sha256(b"").hexdigest(),
+               "untracked": hashlib.sha256(b"[]").hexdigest()}
+
+
+def fingerprint_of(parts: dict) -> str:
+    return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
+
+
+def fingerprint_parts(project: Project, exclude: set[str] = frozenset()) -> dict:
+    """The main-checkout fingerprint, one hash per component, so a sanctioned change (a manual
+    merge or commit) can move only the components it may touch (AGE-124).
+
+    head/branch: HEAD and what it points at; refs: shared refs every worktree can change (stash,
+    other branches, tags) minus the ticket's own agent/* branches, remote-tracking refs and the
+    checked-out branch (head covers it); tracked: the tracked paths; flags: the entries carrying
+    skip-worktree / assume-unchanged (any tag but H); staged and
+    unstaged diffs; untracked / ignored: every such file's (path, size, mode, mtime_ns);
+    config: the effective git config; hooks: the effective hooks dir. `exclude` holds runner
+    bookkeeping paths (relative); an entry ending in "/" excludes that whole directory.
     ponytail: ignored dirs are walked in full; a huge node_modules makes this slow, cache by
     dir mtime if it ever matters.
     """
@@ -1218,19 +1511,21 @@ def fingerprint(project: Project, exclude: set[str] = frozenset()) -> str:
     root = project.path
     confine = confine_for(project)
     g = lambda *a: _git_bytes(root, *a, confine=confine)
-    h = hashlib.sha256()
-    h.update(g("rev-parse", "HEAD"))
-    h.update(_git_bytes(root, "symbolic-ref", "-q", "HEAD", confine=confine) if
-             _git(root, "symbolic-ref", "-q", "HEAD", check=False, confine=confine).returncode == 0 else b"detached")
-    # Shared refs every worktree can change (stash, other branches, tags); the ticket's own
-    # agent/* branches and remote-tracking refs are expected to move.
+    digest = lambda b: hashlib.sha256(b).hexdigest()
+    parts = {"head": g("rev-parse", "HEAD").decode().strip()}
+    on_branch = _git(root, "symbolic-ref", "-q", "HEAD", check=False, confine=confine).returncode == 0
+    branch = _git_bytes(root, "symbolic-ref", "-q", "HEAD", confine=confine).strip() if on_branch else b"detached"
+    parts["branch"] = branch.decode("utf-8", "surrogateescape")
     refs = g("for-each-ref", "--format=%(refname) %(objectname)")
-    h.update(b"\n".join(l for l in refs.splitlines()
-                        if not l.startswith((b"refs/heads/agent/", b"refs/remotes/"))))
-    h.update(hashlib.sha256(g("ls-files", "-v", "-z")).digest())  # skip-worktree / assume-unchanged flags
-    h.update(hashlib.sha256(g("diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv")).digest())
-    h.update(hashlib.sha256(g("diff", "--binary", "--no-ext-diff", "--no-textconv")).digest())
-    files = []
+    parts["refs"] = digest(b"\n".join(l for l in refs.splitlines()
+                                      if not l.startswith((b"refs/heads/agent/", b"refs/remotes/"))
+                                      and l.split(b" ", 1)[0] != branch))
+    listed = g("ls-files", "-v", "-z").split(b"\0")
+    parts["tracked"] = digest(b"\0".join(e[2:] for e in listed))  # which paths: a merge or commit moves it
+    parts["flags"] = digest(b"\0".join(e for e in listed if e and not e.startswith(b"H ")))  # skip-worktree etc.: never sanctioned
+    parts["staged"] = digest(g("diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"))
+    parts["unstaged"] = digest(g("diff", "--binary", "--no-ext-diff", "--no-textconv"))
+    files = {b"??": [], b"!!": []}  # untracked / ignored: a commit takes the first, never the second
     for entry in g("status", "--porcelain", "-z", "-uall", "--ignored=matching").split(b"\0"):
         if len(entry) < 4 or entry[:2] not in (b"??", b"!!"):
             continue
@@ -1246,19 +1541,20 @@ def fingerprint(project: Project, exclude: set[str] = frozenset()) -> str:
                     if r == CLAUDE_STAGING and sub.is_dir() and not sub.is_symlink():
                         continue  # its own metadata only; anything inside still counts
                     if not skip(r):
-                        files.append(_stat_entry(sub, r))
+                        files[entry[:2]].append(_stat_entry(sub, r))
         elif os.path.lexists(path):
-            files.append(_stat_entry(path, rel))
-    h.update(json.dumps(sorted(files)).encode())
-    h.update(g("config", "--list", "--show-origin", "--includes"))
+            files[entry[:2]].append(_stat_entry(path, rel))
+    parts["untracked"] = digest(json.dumps(sorted(files[b"??"])).encode())
+    parts["ignored"] = digest(json.dumps(sorted(files[b"!!"])).encode())
+    parts["config"] = digest(g("config", "--list", "--show-origin", "--includes"))
     # The hardening's own core.hooksPath=/dev/null would hide the real hooks dir;
     # rev-parse runs no hooks, so only fsmonitor is switched off for this lookup.
     hooks = Path(_git_bytes(root, "rev-parse", "--git-path", "hooks", confine=confine,
                             hardening=("-c", "core.fsmonitor=false")).decode().strip())
     hooks = hooks if hooks.is_absolute() else root / hooks
-    if hooks.is_dir():
-        h.update(json.dumps(sorted(_stat_entry(f, f.name) for f in hooks.iterdir())).encode())
-    return h.hexdigest()
+    parts["hooks"] = digest(json.dumps(sorted(_stat_entry(f, f.name) for f in hooks.iterdir())).encode()
+                            if hooks.is_dir() else b"")
+    return parts
 
 
 # ── Verify ───────────────────────────────────────────────────────────────────
@@ -1276,10 +1572,27 @@ def verify_writable_roots(wt: Path) -> list[Path]:
     return [wt, Path(_git(wt, "rev-parse", "--absolute-git-dir").stdout.strip())]
 
 
-def uncommitted(project: Project, wt: Path) -> list[str]:
-    """Tracked or non-ignored untracked changes left in the worktree (seeds are ignored)."""
-    out = _git_bytes(wt, "status", "--porcelain", "-z", "--untracked-files=all", confine=confine_for(project, wt))
-    return [e[3:].decode("utf-8", "surrogateescape") for e in out.split(b"\0") if len(e) > 3]
+def uncommitted(project: Project, wt: Path, confine: list[Path] | None = None) -> list[str]:
+    """Tracked or non-ignored untracked changes left in the worktree (seeds are ignored).
+    Read-only: --no-optional-locks keeps status from refreshing the index (SC-004). `confine`
+    overrides the policy's confinement (status can run clean filters, SC-008)."""
+    out = _git_bytes(wt, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all",
+                     confine=confine if confine is not None else confine_for(project, wt))
+    return _porcelain_paths(out)
+
+
+def _porcelain_paths(out: bytes) -> list[str]:
+    """Paths of `status --porcelain -z`: a rename/copy record is followed by its source path,
+    a bare token that is consumed, not counted (SC-005)."""
+    tokens, paths, i = out.split(b"\0"), [], 0
+    while i < len(tokens):
+        e = tokens[i]
+        i += 1
+        if len(e) > 3:
+            paths.append(e[3:].decode("utf-8", "surrogateescape"))
+            if e[0:1] in (b"R", b"C") or e[1:2] in (b"R", b"C"):
+                i += 1  # the source path
+    return paths
 
 
 def run_verify(project: Project, worktree: Path, base: str | None = None, prefix: list[str] | None = None,
@@ -1389,6 +1702,62 @@ def _under_resolved(cwd: str, roots: list[str]) -> bool:
 
 def _session_roots(project: Project) -> list[str]:
     return [str(project.path), str(WORKTREE_ROOT / project.key)]
+
+
+_GIT_HEAD_LIMIT = 4096  # a HEAD is one short line; anything bigger is not one
+
+
+@functools.lru_cache(maxsize=512)
+def _head_file(cwd: str) -> str | None:
+    """The HEAD file of the checkout enclosing cwd: a path walk, never a git process, because
+    the session list runs on every /api/projects request. A linked worktree's `.git` file
+    points at its own git dir, whose HEAD is that worktree's branch."""
+    path = Path(cwd)
+    while True:
+        marker = path / ".git"
+        try:
+            if marker.is_dir():
+                return str(marker / "HEAD")
+            if marker.is_file():
+                line = marker.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
+                raw = line[len("gitdir:"):].strip() if line.startswith("gitdir:") else ""
+                if not raw:
+                    return None
+                target = Path(raw)
+                return str((target if target.is_absolute() else path / target) / "HEAD")
+        except (OSError, ValueError):
+            return None
+        if path.parent == path:
+            return None
+        path = path.parent
+
+
+@functools.lru_cache(maxsize=512)
+def _branch_at(head: str, mtime_ns: int, size: int) -> str | None:
+    """The branch named by a HEAD file, cached by its (mtime, size); None when detached."""
+    try:
+        if size > _GIT_HEAD_LIMIT:
+            return None
+        ref = Path(head).read_text(encoding="utf-8", errors="replace").strip()
+    except (OSError, ValueError):
+        return None
+    prefix = "ref: refs/heads/"
+    return ref[len(prefix):] if ref.startswith(prefix) else None
+
+
+def session_branch(cwd: object) -> str | None:
+    """The branch checked out where a session ran, shown as its row's worktree label. A missing
+    folder, a plain folder or a detached HEAD gives None (the row then shows only the time)."""
+    if not isinstance(cwd, str) or not os.path.isabs(cwd):
+        return None
+    head = _head_file(cwd)
+    if head is None:
+        return None
+    try:
+        st = os.stat(head)
+    except (OSError, ValueError):
+        return None
+    return _branch_at(head, st.st_mtime_ns, st.st_size)
 
 
 def _user_text(msg: object) -> str:
@@ -1505,19 +1874,44 @@ def claude_memory_names(project: Project) -> list[str]:
     return sorted(p.name for p in mem.glob("*.md")) if mem.is_dir() else []
 
 
+_CODEX_ROWS: tuple = (None, 0.0, [])  # (DB + WAL stat signature, monotonic time, rows)
+_CODEX_ROWS_MAX_AGE_S = 5  # a WAL commit can publish after the files settle (BL-004): never trust a memo longer
+
+
+def _codex_rows() -> list[tuple]:
+    """One query for all projects of a listing, not one per project; changes show within 5 s."""
+    import sqlite3
+    global _CODEX_ROWS
+    sig = (str(CODEX_DB), *((st.st_mtime_ns, st.st_size) if (st := _stat_or_none(p)) else None
+                            for p in (CODEX_DB, CODEX_DB.with_name(CODEX_DB.name + "-wal"))))
+    now = time.monotonic()
+    if _CODEX_ROWS[0] == sig and now - _CODEX_ROWS[1] < _CODEX_ROWS_MAX_AGE_S:
+        return _CODEX_ROWS[2]
+    db = sqlite3.connect(f"file:{CODEX_DB}?mode=ro", uri=True)
+    try:
+        rows = db.execute(
+            "SELECT id, cwd, name, title, first_user_message, updated_at, tokens_used, git_branch, source "
+            "FROM threads WHERE archived = 0 AND source IN ('cli', 'vscode', 'exec')").fetchall()
+    finally:
+        db.close()
+    _CODEX_ROWS = (sig, now, rows)
+    return rows
+
+
+def _stat_or_none(p: Path):
+    try:
+        return p.stat()
+    except OSError:
+        return None
+
+
 def codex_sessions(project: Project, board_ids=None, labels=None) -> list[dict]:
     import sqlite3
     if not CODEX_DB.exists():
         return []
     roots = _session_roots(project)
     try:
-        db = sqlite3.connect(f"file:{CODEX_DB}?mode=ro", uri=True)
-        try:
-            rows = db.execute(
-                "SELECT id, cwd, name, title, first_user_message, updated_at, tokens_used, git_branch, source "
-                "FROM threads WHERE archived = 0 AND source IN ('cli', 'vscode', 'exec')").fetchall()
-        finally:
-            db.close()
+        rows = _codex_rows()
     except sqlite3.Error:
         return []  # format drift: degrade to no Codex rows, never crash the view
     out = []

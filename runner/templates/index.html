@@ -68,6 +68,7 @@
 
   /* Window cards — all agents stacked */
   .windows-row { display: flex; align-items: flex-start; gap: 6px; margin-bottom: 12px; }
+  .claude-account-select { display: block; margin: 4px 0 0 auto; max-width: 68px; font-size: calc(10px * var(--fs)); background: var(--bg); color: var(--accent); border: 1px solid var(--border); border-radius: 4px; }
   .win-agent-label { flex: 0 0 72px; font-size: calc(10px * var(--fs)); color: var(--accent); letter-spacing: .3px; padding: 14px 4px 0 0; text-align: right; opacity: .8; }
   .windows-row-cards { flex: 1; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
   .win-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
@@ -105,7 +106,7 @@
   /* Chart */
   .chart-box { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 16px 20px; margin-bottom: 20px; }
   .chart-title { font-size: calc(12px * var(--fs)); color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 12px; }
-  .chart-wrap { height: 100px; }
+  .chart-wrap { height: 170px; }
 
   /* Job board — kanban columns */
   .job-board { margin-bottom: 24px; }
@@ -377,12 +378,19 @@
   .session-list { padding: 0 4px 8px 20px; }
   .session-row { display: flex; gap: 10px; align-items: center; padding: 3px 0; font-size: calc(12px * var(--fs)); }
   .session-agent { font-size: calc(10px * var(--fs)); padding: 1px 4px; border-radius: 3px; border: 1px solid var(--border); }
-  .session-agent.codex { color: var(--green); } .session-agent.claude { color: var(--accent); }
+  .session-agent.claude { color: #e8a87c; } .session-agent.codex { color: #6fb5d4; }
+  .session-agent.dsh { color: #7ec8a0; }
+  .session-copy.commit-todo { color: var(--green); border-color: var(--green); }
+  .session-copy.commit-clean { color: var(--text-dim); border-color: var(--border); opacity: .6; }
   .session-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .session-meta { color: var(--text-dim); font-size: calc(11px * var(--fs)); margin-left: auto; white-space: nowrap; }
   .session-copy { background: none; border: 1px solid var(--border); color: var(--text-dim); border-radius: 3px; cursor: pointer; font-family: inherit; font-size: calc(10px * var(--fs)); }
   .session-copy:hover { color: var(--accent); border-color: var(--accent); }
   .session-empty { color: var(--text-dim); font-size: calc(12px * var(--fs)); padding: 4px 0; }
+  .session-earlier-toggle { padding: 1px 0 1px 26px; }
+  .session-earlier { margin-left: 12px; padding-left: 14px; border-left: 1px solid var(--border); }
+  .session-row.is-earlier { opacity: .7; }
+  .session-earlier-tag { border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; font-size: calc(10px * var(--fs)); }
   .proj-tabs { display: flex; gap: 6px; padding: 0 4px 6px 20px; }
   .proj-tabs button.active { color: var(--accent); border-color: var(--accent); }
   .files-view { padding: 0 4px 8px 20px; font-size: calc(12px * var(--fs)); }
@@ -598,7 +606,16 @@
     <!-- Budget window cards — all agents visible -->
     {% macro win_row(agent_name, agent_label, w) %}
     <div class="windows-row" id="windows-row-{{ agent_name }}">
-      <div class="win-agent-label">{{ agent_label }}</div>
+      <div class="win-agent-label">{{ agent_label }}
+        {% if agent_name == "claude" and claude_accounts and claude_accounts.accounts|length > 1 %}
+        <select class="claude-account-select" title="Switch Claude account (AGE-125)" onchange="useClaudeAccount(this)">
+          {% if not claude_accounts.active %}<option value="" selected disabled>?</option>{% endif %}
+          {% for acc in claude_accounts.accounts %}
+          <option value="{{ acc.label }}" title="{{ acc.email }}" {% if acc.label == claude_accounts.active %}selected{% endif %}>{{ acc.label }}</option>
+          {% endfor %}
+        </select>
+        {% endif %}
+      </div>
       {% set w5 = w.window_5h %}
       {% set w7 = w.window_7d %}
       {% set wa = w.aux %}
@@ -756,7 +773,9 @@
 
     <!-- Activity chart -->
     <div class="chart-box">
-      <div class="chart-title">Activity — last 30 days · {{ stats.total_runs }} total runs</div>
+      {% set _w, _a, _o = chart_data["work"] | sum, chart_data["agentic"] | sum, chart_data["other"] | sum %}
+      {% set _total = _w + _a + _o %}
+      <div class="chart-title">Activity — last 30 days · {{ _total }} conversations · {{ _w }} work{% if _total %} ({{ (_w / _total * 100) | round | int }}%){% endif %} · {{ _a }} AgenticOS · {{ _o }} other</div>
       <div class="chart-wrap">
         <canvas id="activityChart"></canvas>
       </div>
@@ -790,7 +809,7 @@
     <section class="skill-panel" id="skill-panel">
       <div class="skill-panel-header">
         <div class="skill-panel-title">Projects</div>
-        <div class="skill-panel-subtitle">Registered projects and their Claude / Codex sessions, newest first</div>
+        <div class="skill-panel-subtitle">Registered projects and their Claude / Codex / DeepSeek sessions, newest first; a card's earlier sessions fold under its current one</div>
       </div>
 
 
@@ -807,6 +826,7 @@
           <select id="project-history" style="display:none"></select>
           <div class="key-preview" id="project-key-preview"></div>
           <label class="check"><input type="checkbox" name="confidential" checked> Confidential (sandboxed; only template comments reach Linear)</label>
+          <label class="check"><input type="checkbox" name="commit" checked> Commit button on session rows (untick for notes or a wiki that is not code)</label>
           <div class="error" id="project-form-error"></div>
           <div class="actions">
             <button type="button" class="session-copy" id="project-form-cancel">Cancel</button>
@@ -984,29 +1004,60 @@
 <script>
 // Activity chart
 const pageDataEl = document.getElementById('page-data');
-const chartData = JSON.parse(pageDataEl?.dataset.chartData || '{"labels":[],"values":[]}');
+const chartData = JSON.parse(pageDataEl?.dataset.chartData || '{"labels":[]}');
 const errorRuns = JSON.parse(pageDataEl?.dataset.errorRuns || '[]');
+// Hover or click a day: a crosshair plus that day's counts, like a stock chart
+const crosshair = {
+  id: 'crosshair',
+  afterDatasetsDraw(chart) {
+    const active = chart.tooltip?.getActiveElements?.() || [];
+    if (!active.length) return;
+    const x = active[0].element.x, { top, bottom } = chart.chartArea, ctx = chart.ctx;
+    ctx.save();
+    ctx.strokeStyle = '#555';
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+    ctx.restore();
+  }
+};
 new Chart(document.getElementById('activityChart'), {
   type: 'line',
   data: {
     labels: chartData.labels,
-    datasets: [{
-      data: chartData.values,
-      borderColor: '#e8723a',
-      backgroundColor: 'rgba(232,114,58,0.08)',
-      borderWidth: 2,
-      pointRadius: 0,
-      fill: true,
-      tension: 0.3,
-    }]
+    // Stacked fill, bottom to top: AgenticOS, Work, Other. A band's thickness is that
+    // kind's conversations; the top line's height is the day's total. Boundaries are a
+    // translucent light hairline: it separates the bands without a hard black outline
+    // that fights the dark theme (AGE-128).
+    datasets: [
+      ['AgenticOS', chartData.agentic, '#e8723a'],
+      ['Work', chartData.work, '#4caf50'],
+      ['Other', chartData.other, '#4fa3e0'],
+    ].map(([label, data, color]) => ({
+      label, data: data || [], borderColor: 'rgba(255,255,255,0.3)', backgroundColor: color,
+      borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, pointBackgroundColor: color,
+      fill: true, tension: 0.25, cubicInterpolationMode: 'monotone',
+    }))
   },
+  plugins: [crosshair],
   options: {
     responsive: true,
     maintainAspectRatio: false,
-    plugins: { legend: { display: false } },
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: true, labels: { color: '#888', boxWidth: 10, font: { size: 11 } } },
+      tooltip: {
+        callbacks: {
+          footer: items => {  // from the day's data, so a line hidden in the legend still counts
+            const i = items[0]?.dataIndex, work = chartData.work?.[i] || 0;
+            const total = work + (chartData.agentic?.[i] || 0) + (chartData.other?.[i] || 0);
+            return total ? `Total: ${total} · Work: ${Math.round(work / total * 100)}%` : '';
+          }
+        }
+      }
+    },
     scales: {
       x: { grid: { color: '#1e1e1e' }, ticks: { color: '#555', font: { size: 11 }, maxTicksLimit: 6 } },
-      y: { grid: { color: '#1e1e1e' }, ticks: { color: '#555', font: { size: 11 }, stepSize: 1 }, beginAtZero: true }
+      y: { stacked: true, grid: { color: '#1e1e1e' }, ticks: { color: '#555', font: { size: 11 }, stepSize: 1 }, beginAtZero: true }
     }
   }
 });
@@ -1158,7 +1209,7 @@ function _renderProjectsInto(el) {
     const p = byKey[k];
     if (p.error) return `<div class="project-section"><div class="project-head project-error" ${head(p)}>${_esc(p.name || p.key)} — ${_esc(p.error)} ${removeBtn(p)}</div></div>`;
     const isOpen = open.has(p.key);
-    const rows = (p.sessions || []).map(s => _sessionRow(p.key, s)).join('') || '<div class="session-empty">No sessions in this project yet.</div>';
+    const rows = _sessionRowsHtml(p.key, p.sessions || [], p.commit !== false) || '<div class="session-empty">No sessions in this project yet.</div>';
     return `<div class="project-section">
       <div class="project-head" ${head(p)} aria-expanded="${isOpen}">${isOpen ? '▾' : '▸'} <b>${_esc(p.name || p.key)}</b> ${badges(p)}
         <span class="session-meta">${(p.sessions || []).length} sessions</span>
@@ -1173,8 +1224,49 @@ function _renderProjectsInto(el) {
 
 // Rename / Remove on a session row (A): inline, never a modal dialog.
 let _sessionEdit = null;  // {key, agent, id, mode: 'rename' | 'remove', error, busy}
-function _sessionRow(key, s) {
-  const ed = _sessionEdit && _sessionEdit.key === key && _sessionEdit.agent === s.agent && _sessionEdit.id === s.id ? _sessionEdit : null;
+// Commit colour: green = something left to do (uncommitted changes, or commits not yet in main);
+// grey = nothing to commit and already merged into main.
+function _commitClass(c) {
+  return !c ? '' : c.state === 'clean' ? 'commit-clean' : 'commit-todo';
+}
+function _commitTitle(c) {
+  const base = 'Commit every change in this session\'s folder (local only, never pushed)';
+  if (!c) return base;
+  if (c.state === 'dirty') return `${c.files} uncommitted file${c.files === 1 ? '' : 's'} · ${base}; a worktree's branch is then merged into main`;
+  if (c.state === 'unmerged') return `${c.ahead} commit${c.ahead === 1 ? '' : 's'} not yet merged into main: click to merge`;
+  return 'Nothing to commit; already merged into main';
+}
+// A card can own several sessions: an agent switch starts a new one (AGE-113) and a reset can
+// too. The panel lists the card once — its current session — with earlier sessions folded under
+// it, so the same card never appears twice with two agents. Opening an editor expands its group.
+const _sessionEarlierOpen = new Set();  // `${project key}\u0000${card label}`
+function _sessionGroup(key, label) { return `${key}\u0000${label}`; }
+function _sessionRowsHtml(key, rows, commit) {
+  const blocks = [], byLabel = new Map();
+  for (const s of rows) {
+    if (!s.label) { blocks.push({ row: s }); continue; }
+    let g = byLabel.get(s.label);
+    if (!g) { g = { label: s.label, rows: [] }; byLabel.set(s.label, g); blocks.push(g); }
+    g.rows.push(s);
+  }
+  return blocks.map(b => {
+    if (b.row) return _sessionRow(key, b.row, commit);
+    if (b.rows.length === 1) return _sessionRow(key, b.rows[0], commit);
+    const at = b.rows.findIndex(s => s.card_current === true);
+    const current = b.rows[at < 0 ? 0 : at], earlier = b.rows.filter((_, i) => i !== (at < 0 ? 0 : at));
+    const editing = earlier.some(s => _sessionEdit && _sessionEdit.key === key
+      && _sessionEdit.agent === s.agent && _sessionEdit.id === s.id);
+    const open = editing || _sessionEarlierOpen.has(_sessionGroup(key, b.label));
+    const n = `${earlier.length} earlier session${earlier.length === 1 ? '' : 's'}`;
+    return _sessionRow(key, current, commit)
+      + `<div class="session-earlier-toggle"><button class="session-copy" data-searlier="${_esc(b.label)}" data-key="${_esc(key)}"
+           aria-expanded="${open}">${open ? '▾' : '▸'} ${n}</button></div>`
+      + (open ? `<div class="session-earlier">${earlier.map(s => _sessionRow(key, s, commit, true)).join('')}</div>` : '');
+  }).join('');
+}
+function _sessionRow(key, s, commit = true, earlier = false) {
+  let ed = _sessionEdit && _sessionEdit.key === key && _sessionEdit.agent === s.agent && _sessionEdit.id === s.id ? _sessionEdit : null;
+  if (ed && ed.mode === 'commit' && !commit) ed = null;  // Commit was turned off while its editor was open
   const ids = `data-key="${_esc(key)}" data-sagent="${_esc(s.agent)}" data-sid="${_esc(s.id)}"`;
   const err = ed && ed.error ? `<span class="session-meta" style="color:${ed.mode === 'note' ? 'var(--text-dim)' : 'var(--red)'}">${_esc(ed.error)}</span>` : '';
   // A board-launched session shows its card identifier first, e.g. "AGE-102 · title" (§9).
@@ -1182,37 +1274,99 @@ function _sessionRow(key, s) {
   // One Resume (§6): the session's card goes back to Todo and its reply opens.
   let actions = `<button class="session-copy" data-resume-agent="${_esc(s.agent)}" data-resume-id="${_esc(s.id)}" data-project="${_esc(key)}"
           title="Put this session's card in Todo and write the next reply (${_esc(s.resume)})">Resume</button>
+        ${commit ? `<button class="session-copy ${_commitClass(s.commit_state)}" data-saction="commit" ${ids} title="${_esc(_commitTitle(s.commit_state))}">Commit</button>` : ''}
         <button class="session-copy" data-saction="rename" ${ids}>Rename</button>
         <button class="session-copy" data-saction="remove" ${ids}>Remove</button>`;
+  if (ed && ed.mode === 'note' && ed.conflict) {
+    // A conflict needs a decision, not a merge: the session's own agent merges main into its branch,
+    // resolves it and runs the tests; its reply opens prefilled for the user to read and send.
+    actions = `<button class="session-copy commit-todo" data-resume-agent="${_esc(s.agent)}" data-resume-id="${_esc(s.id)}" data-project="${_esc(key)}"
+        data-prefill="conflict" data-branch="${_esc(ed.branch || '')}" data-into="${_esc(ed.into || 'main')}"
+        title="Send this session's card back to its agent to merge ${_esc(ed.into || 'main')} in and resolve the conflict">Resolve with agent</button>` + actions;
+  }
   if (ed && ed.mode === 'rename') {
     // the name the row shows: a card's session is renamed by renaming the card (D2, DP-16)
     title = `<input class="session-rename" ${ids} value="${_esc(s.card_title || s.title)}" maxlength="200" style="flex:1;font:inherit"
       ${s.label ? 'title="Renames the card too"' : ''}>`;
     actions = `<button class="session-copy" data-saction="save" ${ids}>Save</button><button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
+  } else if (ed && ed.mode === 'commit') {
+    // The whole checkout: git cannot tell which session made which edit (plan: session-commit-button).
+    const p = ed.preview;
+    if (!p) {
+      title = `<span class="session-title">${ed.error ? '' : 'Checking for changes…'}</span>`;
+      actions = `<button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
+    } else if (!p.files.length && !p.ahead) {
+      title = `<span class="session-title">Nothing to commit in ${_esc(p.repo)} (${_esc(p.branch)})${p.into ? `; already merged into ${_esc(p.into)}` : ''}.</span>`;
+      actions = `<button class="session-copy" data-saction="cancel" ${ids}>Close</button>`;
+    } else if (!p.files.length) {  // a clean worktree whose branch main lacks: merge only
+      title = `<span class="session-title">${_esc(p.branch)} has ${p.ahead} commit${p.ahead === 1 ? '' : 's'} not in the main checkout${p.into ? ` (${_esc(p.into)})` : ''}. Merge ${p.ahead === 1 ? 'it' : 'them'} now? Conflict-free merges only.</span>`;
+      actions = `<button class="session-copy commit-todo" data-saction="docommit" ${ids}>Merge</button><button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
+    } else {
+      const merge = p.into !== undefined && p.ahead ? `, then merge into ${_esc(p.into || 'the main checkout')}` : '';
+      title = `<input class="session-rename" data-commit="1" ${ids} value="${_esc(s.card_title || s.title)}" maxlength="500" style="flex:1;font:inherit"
+        title="Commit message" placeholder="Commit message">
+        <span class="session-meta" title="${_esc(p.files.join('\n'))}">all ${p.files.length} changed file${p.files.length === 1 ? '' : 's'} in ${_esc(p.repo.split('/').pop())} · ${_esc(p.branch)}${merge}</span>`;
+      actions = `<button class="session-copy commit-todo" data-saction="docommit" ${ids}>${merge ? 'Commit &amp; merge' : 'Commit'}</button><button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
+    }
   } else if (ed && ed.mode === 'remove') {
     const where = s.agent === 'codex' ? "it is archived the way Codex archives (its rollout moves to ~/.codex/archived_sessions); restore with Codex's unarchive"
+      : s.agent === 'dsh' ? 'its session folder moves to ~/.agentic-os/session-trash/dsh; restore by moving it back'
       : 'its transcript moves to ~/.agentic-os/session-trash; restore by moving it back';
-    title = `<span class="session-title" style="white-space:normal">Remove "${_esc(s.title)}"? It leaves this panel and ${s.agent === 'codex' ? 'codex resume' : 'claude --resume'} — ${where}.</span>`;
+    const resume = { codex: 'codex resume', claude: 'claude --resume', dsh: 'dsh --resume' }[s.agent] || 'the session picker';
+    title = `<span class="session-title" style="white-space:normal">Remove "${_esc(s.title)}"? It leaves this panel and ${resume} — ${where}.</span>`;
     actions = `<button class="session-copy" data-saction="confirm" ${ids} style="color:var(--red)">Remove</button><button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
   }
   return `
-      <div class="session-row">
-        <span class="session-agent ${s.agent}">${s.agent === 'codex' ? 'CX' : 'CC'}</span>
+      <div class="session-row${earlier ? ' is-earlier' : ''}">
+        <span class="session-agent ${_esc(s.agent)}" title="${_esc(_agentName(s.agent) || s.agent)}">${({codex: 'CX', claude: 'CC', dsh: 'DS'})[s.agent] || _esc(s.agent)}</span>
         ${title}
-        <span class="session-meta">${_esc(s.branch || '')} · ${_ago(s.updated)}</span>
+        <span class="session-meta">${earlier ? '<span class="session-earlier-tag">earlier</span> ' : ''}${_esc(s.branch || '')} · ${_ago(s.updated)}</span>
         ${err}${actions}
       </div>`;
+}
+async function _sessionCommitPreview(key, agent, sid) {
+  const ed = _sessionEdit = { key, agent, id: sid, mode: 'commit' };
+  _renderProjects();
+  const r = await _projectApi('POST', `/api/projects/${encodeURIComponent(key)}/sessions/${encodeURIComponent(agent)}/${encodeURIComponent(sid)}/commit`, { dry_run: true });
+  if (_sessionEdit !== ed) return;  // cancelled or another editor opened meanwhile (SC-014)
+  _sessionEdit = r.ok ? { ...ed, preview: r.data } : { ...ed, error: r.data.error || `HTTP ${r.status}` };
+  _renderProjects();
+  document.querySelector(`.session-rename[data-sid="${CSS.escape(sid)}"]`)?.focus();
 }
 async function _sessionSubmit(el, mode) {
   const { key, sagent, sid } = el.dataset;
   const base = `/api/projects/${encodeURIComponent(key)}/sessions/${encodeURIComponent(sagent)}/${encodeURIComponent(sid)}`;
   let body;
-  if (mode === 'rename') {
+  if (mode === 'rename' || mode === 'commit') {
     const input = document.querySelector(`.session-rename[data-sid="${CSS.escape(sid)}"]`);
-    body = { title: input ? input.value : '' };
+    body = mode === 'rename' ? { title: input ? input.value : '' } : { message: input ? input.value : '' };
+  }
+  const origin = _sessionEdit;  // the editor this request belongs to (SC-014)
+  if (mode === 'commit') {  // one commit request per editor: repeated clicks or Enter wait for it (SC-017)
+    if (!origin || origin.pending) return;
+    origin.pending = true;
+    const btn = document.querySelector(`[data-saction="docommit"][data-sid="${CSS.escape(sid)}"]`);
+    if (btn) { btn.disabled = true; btn.textContent = 'Committing…'; }
   }
   const r = await _projectApi('POST', `${base}/${mode}`, body);
-  if (!r.ok) { _sessionEdit = { key, agent: sagent, id: sid, mode, error: r.data.error || `HTTP ${r.status}` }; _renderProjects(); return; }
+  if (mode === 'commit' && _sessionEdit !== origin) { loadProjects(); return; }  // another editor is open now: leave it alone
+  if (!r.ok) {
+    const keep = mode === 'commit' && origin ? origin.preview : undefined;  // its own preview, never another row's
+    const typed = mode === 'commit' ? document.querySelector(`.session-rename[data-sid="${CSS.escape(sid)}"]`)?.value : null;
+    _sessionEdit = { key, agent: sagent, id: sid, mode, preview: keep, error: r.data.error || `HTTP ${r.status}` }; _renderProjects();
+    if (typed != null) { const again = document.querySelector(`.session-rename[data-sid="${CSS.escape(sid)}"]`); if (again) again.value = typed; }
+    return;
+  }
+  if (mode === 'commit') {
+    const parts = [];
+    if (r.data.committed) parts.push(`committed ${r.data.committed.slice(0, 7)} (${r.data.files.length} file${r.data.files.length === 1 ? '' : 's'})`);
+    if (r.data.merged_head) parts.push(`merged into ${r.data.into || 'the main checkout'} (${r.data.merged_head.slice(0, 7)})`);
+    if (r.data.merge_error) parts.push(`not merged: ${r.data.merge_error}`);
+    const note = parts.join(' · ') || 'nothing to commit';
+    const conflict = /conflicts with/.test(r.data.merge_error || '');  // only the agent can settle it: offer that (see _sessionRow)
+    _sessionEdit = { key, agent: sagent, id: sid, mode: 'note', error: note, conflict, branch: r.data.branch, into: r.data.into };
+    loadProjects(); return;
+  }
   // a busy card session: the card is renamed now, the session when it is idle (§3)
   _sessionEdit = r.data.pending ? { key, agent: sagent, id: sid, mode: 'note', error: 'card renamed; the session name follows when it is idle' } : null;
   loadProjects();
@@ -1287,7 +1441,19 @@ async function _filesOpenFile(key, path) {
   _renderProjects();
 }
 
-async function loadProjects() {
+// One /api/projects in flight per page; calls meanwhile share one follow-up load that starts
+// after it, so `await loadProjects()` still sees data fetched after the call (board latency).
+let _projectsInflight = null, _projectsQueued = null;
+function loadProjects() {
+  if (!_projectsInflight) {
+    _projectsInflight = _loadProjectsOnce().finally(() => { _projectsInflight = null; });
+    return _projectsInflight;
+  }
+  if (!_projectsQueued) _projectsQueued = _projectsInflight.then(() => { _projectsQueued = null; return loadProjects(); });
+  return _projectsQueued;
+}
+
+async function _loadProjectsOnce() {
   try {
     const res = await fetch('/api/projects');
     _projectData = res.ok ? await res.json() : { projects: [], error: `HTTP ${res.status}` };
@@ -1328,9 +1494,9 @@ async function _projectApi(method, url, body) {
 // The key is the folder name (same rules as projects.derive_key; the server re-checks).
 function _deriveKey(folder) {
   const base = (folder || '').replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[^A-Za-z0-9]+/, '') || 'project';
-  const taken = new Set((_projectData.projects || []).map(p => p.key));
+  const taken = new Set((_projectData.projects || []).map(p => p.key.toLowerCase()));  // case-insensitive, like derive_key
   let key = base, n = 1;
-  while (taken.has(key)) key = `${base}-${++n}`;
+  while (taken.has(key.toLowerCase())) key = `${base}-${++n}`;
   return key;
 }
 
@@ -1338,7 +1504,8 @@ function _projectKeyPreview() {
   const f = document.getElementById('project-form');
   const folder = f.path.value.trim().replace(/\/+$/, '').split('/').pop();
   document.getElementById('project-key-preview').textContent =
-    f.dataset.mode === 'edit' ? `Key: ${f.dataset.key}` : (folder ? `Key: ${_deriveKey(folder)}  (Linear label project:${_deriveKey(folder)})` : '');
+    f.dataset.mode === 'edit' ? `Key: ${f.dataset.key}` : !folder ? ''
+      : `Key: ${_deriveKey(folder)}  (${f.confidential.checked ? 'never sent to Linear' : `Linear label project:${_deriveKey(folder)}`})`;
 }
 
 // Bumped on every open, close, drop and typed path: a lookup result applies only while its
@@ -1356,6 +1523,7 @@ function _projectFormOpen(p) {
   document.getElementById('project-form-title').textContent = p ? `Edit ${p.key}` : 'Add project';
   f.path.value = e.path || ''; f.path.readOnly = !!p;
   f.confidential.checked = p ? !!e.confidential : true;
+  f.commit.checked = p ? e.commit !== false : true;
   for (const id of ['project-history-btn', 'project-drop']) document.getElementById(id).style.display = p ? 'none' : '';
   document.getElementById('project-history').style.display = 'none';
   document.getElementById('project-form-error').textContent = '';
@@ -1376,13 +1544,18 @@ document.getElementById('project-form')?.addEventListener('submit', async (event
   const hash = f.dataset.hash || '';
   save.disabled = true; errEl.textContent = 'Saving…';
   let r;
-  if (f.dataset.mode === 'edit') {  // only confidential changes; every other field stays (SAP-007)
-    r = await _projectApi('PATCH', `/api/projects/${encodeURIComponent(f.dataset.key)}`, { confidential: f.confidential.checked, registry_hash: hash });
+  if (f.dataset.mode === 'edit') {  // only confidential and commit change; every other field stays (SAP-007)
+    r = await _projectApi('PATCH', `/api/projects/${encodeURIComponent(f.dataset.key)}`, { confidential: f.confidential.checked, commit: f.commit.checked, registry_hash: hash });
   } else {
     const path = f.path.value.trim();
     const key = _deriveKey(path.replace(/\/+$/, '').split('/').pop());
-    r = await _projectApi('POST', '/api/projects', { key, registry_hash: hash,
-      entry: { path, confidential: f.confidential.checked, no_push: true } });
+    const body = { key, registry_hash: hash, entry: { path, confidential: f.confidential.checked, no_push: true, ...(f.commit.checked ? {} : { commit: false }) } };
+    r = await _projectApi('POST', '/api/projects', body);
+    // A folder with files but no commit yet: commit them from here, no terminal (AGE-127).
+    if (r.data?.needs_commit && confirm(`${r.data.error}.\n\nCommit them as the initial commit? `
+        + 'git init runs first if needed; files matched by .gitignore are skipped; files over 50 MB stop the save.')) {
+      r = await _projectApi('POST', '/api/projects', { ...body, commit_existing: true });
+    }
   }
   save.disabled = false;
   if (!r.ok) {
@@ -1476,6 +1649,12 @@ async function _projectBaseline(key) {
 }
 
 document.getElementById('project-panel-content')?.addEventListener('click', (event) => {
+  const searlier = event.target.closest('[data-searlier]');
+  if (searlier) {
+    const g = _sessionGroup(searlier.dataset.key, searlier.dataset.searlier);
+    _sessionEarlierOpen.has(g) ? _sessionEarlierOpen.delete(g) : _sessionEarlierOpen.add(g);
+    _renderProjects(); return;
+  }
   const act = event.target.closest('[data-proj-action]');
   if (act) {
     const key = act.dataset.key, p = (_projectData.projects || []).find(x => x.key === key);
@@ -1489,6 +1668,8 @@ document.getElementById('project-panel-content')?.addEventListener('click', (eve
   if (sact) {
     const { key, sagent, sid } = sact.dataset, a = sact.dataset.saction;
     if (a === 'rename' || a === 'remove') _sessionEdit = { key, agent: sagent, id: sid, mode: a };
+    else if (a === 'commit') { _sessionCommitPreview(key, sagent, sid); return; }
+    else if (a === 'docommit') { _sessionSubmit(sact, 'commit'); return; }
     else if (a === 'cancel') _sessionEdit = null;
     else if (a === 'save') { _sessionSubmit(sact, 'rename'); return; }
     else if (a === 'confirm') { _sessionSubmit(sact, 'remove'); return; }
@@ -1555,6 +1736,16 @@ async function _resumeToBoard(btn) {
   await refreshJobBoard(true);
   if (seq !== _detailModalLoadSeq) return;  // the user opened another card meanwhile: the Todo card waits on the board
   await _openResumeReply(r.data.run_id);
+  if (btn.dataset.prefill === 'conflict') {
+    const box = document.getElementById('detail-reply-input');
+    if (box && !box.value.trim()) {  // never over a draft the user already has
+      const into = btn.dataset.into || 'main', branch = btn.dataset.branch || 'this branch';
+      box.value = `Merge \`${into}\` into ${branch} and resolve the merge conflicts. Where both sides changed the same code, `
+        + `keep ${into}'s version and re-apply this ticket's intent on top of it. Run the project's tests, then commit the merge. `
+        + `Do not push. When you finish, ${branch} should merge into ${into} without conflicts.`;
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  }
 }
 
 // Project drag and drop (native HTML5) and keyboard reorder: Alt+↑/↓ on a focused head.
@@ -1613,7 +1804,7 @@ document.getElementById('project-panel-content')?.addEventListener('keydown', (e
   }
   const input = event.target.closest('.session-rename');
   if (!input) return;
-  if (event.key === 'Enter') { event.preventDefault(); _sessionSubmit(input, 'rename'); }
+  if (event.key === 'Enter') { event.preventDefault(); _sessionSubmit(input, input.dataset.commit ? 'commit' : 'rename'); }
   else if (event.key === 'Escape') { _sessionEdit = null; _renderProjects(); }
 });
 
@@ -2013,11 +2204,13 @@ let _boardItemsByRunId = {};
 let _trashOpen = false;
 let _cancelledItems = [];
 let _pendingBoardRefresh = false;
+let _boardRefreshSeq = 0;
 let _optimisticBoardHoldUntil = 0;
 let _heldBoardRefreshTimer = null;
 let _optimisticLinearIssuePatches = {};
 // Live interactive card sessions, term_id -> card key, refreshed with the board (AC4).
 let _liveCardTerms = new Map();
+let _liveCardTermsSeq = 0;
 // A card terminal that still holds its card: live, or its cleanup failed (still owns the card, ICS-29).
 function _holdsCard(i) { return i.kind === 'resume' && !!i.card_key && (i.alive !== false || !!i.cleanup_failed); }
 function _cardHasSession(key) { return !!key && [..._liveCardTerms.values()].includes(key); }
@@ -2028,9 +2221,17 @@ async function _termListBounded(ms = 1500) {
   return Promise.race([_cardTermList(), new Promise(r => setTimeout(() => r(null), ms))]);
 }
 async function _refreshLiveCardTerms() {  // never holds the board up: no answer = unchanged
+  const seq = ++_liveCardTermsSeq;
   const list = await _termListBounded();
-  if (list) _liveCardTerms = new Map(list.filter(i => _holdsCard(i))
-                                         .map(i => [i.term_id, i.card_key]));
+  if (!list || seq !== _liveCardTermsSeq) return;
+  const next = new Map(list.filter(i => _holdsCard(i)).map(i => [i.term_id, i.card_key]));
+  if (next.size === _liveCardTerms.size && [...next].every(([id, key]) => _liveCardTerms.get(id) === key)) return;
+  _liveCardTerms = next;
+  if (_shouldDeferBoardRefresh() || Date.now() < _optimisticBoardHoldUntil) {
+    _pendingBoardRefresh = true;
+    return;
+  }
+  _renderBoardItems(_boardItems);
 }
 let _detailLinearInitial = null;
 let _detailLinearUpdatedAt = '';
@@ -2654,7 +2855,8 @@ function _buildColCard(run) {
   const verifyHtml = warning ? `<span class="verify-badge bad" title="project ${_esc(run.project_key || '')}">${_esc(warning)}</span>` : '';
   const projectHtml = (run.issue_project || run.project_key)
     ? `<span class="verify-badge" title="Runs in a worktree of this project">${_esc(_projName(run.issue_project || run.project_key))}</span>` : '';
-  const syncHtml = run.unsynced ? '<span class="verify-badge" title="Not synced to Linear yet; it can be dispatched once it has its Linear id">syncing…</span>' : '';
+  const syncHtml = run.unsynced ? '<span class="verify-badge" title="Not synced to Linear yet; it can be dispatched once it has its Linear id">syncing…</span>'
+    : run.local_only ? '<span class="verify-badge" title="Confidential project: this task stays on this machine, never in Linear">local</span>' : '';
   const metaHtml = metaModelHtml || verifyHtml || projectHtml || syncHtml
     ? `<div class="job-card-meta">${metaModelHtml}${projectHtml}${syncHtml}${verifyHtml}</div>` : '';
   const footerControlsHtml = run._is_linear_issue && state === 'todo' ? todoAgentToggle : '';
@@ -2833,16 +3035,21 @@ async function refreshJobBoard(force = false) {
     _pendingBoardRefresh = true;
     return;
   }
+  const seq = ++_boardRefreshSeq;
   try {
     const teamParam = _currentTeamId ? `?team_id=${encodeURIComponent(_currentTeamId)}` : '';
     const fetches = [fetch('/api/runs?state=running'), fetch('/api/runs?limit=80'), fetch(`/api/linear/issues${teamParam}`),
                      fetch('/api/runs/latest-by-issue')];
     const results = await Promise.all(fetches);
-    await _refreshLiveCardTerms();
     const running = await results[0].json();
     const recent = await results[1].json();
     const linearIssues = results[2] ? await results[2].json() : [];
     const olderLatest = results[3] && results[3].ok ? await results[3].json() : {};  // beyond the 80-run window (REV23-01)
+    if (seq !== _boardRefreshSeq) return;
+    if (!force && _shouldDeferBoardRefresh()) {
+      _pendingBoardRefresh = true;
+      return;
+    }
 
     const latestRuns = _latestLinearRuns([
       ...running.map(r => ({ ...r, status: 'running' })),
@@ -2893,12 +3100,14 @@ async function refreshJobBoard(force = false) {
         waiting: latest?.waiting || '',
         resume_ok: !!latest?.resume_ok,  // precomputed by the server (§1)
         resume_agent: latest?.resume_agent || '',
-        unsynced: String(issue.id || '').startsWith('local-') && _trackerType === 'linear',
+        unsynced: String(issue.id || '').startsWith('local-') && _trackerType === 'linear' && !issue.local_only,
+        local_only: !!issue.local_only,
         _is_linear_issue: true,
       };
     });
 
     _renderBoardItems(all);
+    void _refreshLiveCardTerms().catch(() => {});
     _cardTermSyncLatest();  // the open card gained an attempt elsewhere? (QR-004)
   } catch (_) {}
 }
@@ -3053,7 +3262,7 @@ async function _refreshLocalTrash() {
     const r = await fetch('/api/linear/trash');
     if (!r.ok) return;
     _cancelledItems = (await r.json()).map(i => ({ run_id: `linear-${i.id}`, linear_issue_id: i.id,
-      identifier: i.identifier, title: i.title, when: '' }));
+      identifier: i.identifier, title: i.title, when: '', local_only: !!i.local_only }));
     const count = document.getElementById('trash-count');
     if (count) count.textContent = String(_cancelledItems.length);
     if (_trashOpen) renderTrash(_cancelledItems);
@@ -3064,8 +3273,13 @@ async function _refreshLocalTrash() {
 async function emptyTrash() {
   const n = _cancelledItems.length;
   if (!n) return;
-  const where = _trackerType === 'linear' ? "They stay recoverable from Linear's archive." : 'They are removed from the local tracker.';
-  if (!confirm(`Archive all ${n} canceled issue(s)? ${where} Run records and session transcripts are kept.`)) return;
+  // Local tasks (local tracker, or a confidential project's local-only task) are deleted for good;
+  // only Linear issues stay recoverable (AGE-127 I2-03).
+  const local = _cancelledItems.filter(i => i.local_only || _trackerType !== 'linear').length;
+  const parts = [];
+  if (n - local) parts.push(`${n - local} Linear issue(s) are archived and stay recoverable from Linear's archive.`);
+  if (local) parts.push(`${local} local task(s) are deleted from this machine for good.`);
+  if (!confirm(`Empty trash (${n} canceled)? ${parts.join(' ')} Run records and session transcripts are kept.`)) return;
   const r = await _projectApi('POST', '/api/linear/trash/empty');
   const failed = Object.entries((r.data && r.data.failed) || {});
   if (!r.ok || failed.length) alert('Empty trash: ' + (r.data.error || failed.map(([k, v]) => `${k}: ${v}`).join('\n')));
@@ -3382,12 +3596,24 @@ function _retryTitle(agent, current, sessionLocked) {
     : `Retry with ${name}`;
 }
 
+// Unsaved title/description in the detail modal, only when it shows this issue: starting a card
+// sends them, so text typed and never saved still reaches the agent and Linear (AGE-104).
+function _detailEditsFor(issueId) {
+  if (!_isModalOpen('detail-modal') || _detailLinearIssueId !== _sttIssueId(issueId)) return {};
+  return {
+    title: document.getElementById('linear-edit-title')?.value || '',
+    description: document.getElementById('linear-edit-desc')?.value || '',
+  };
+}
+
 async function dispatchFromDetail(agent) {
   if (!_detailLinearIssueId) return;
   const linearIssueId = _detailLinearIssueId, seq = _detailModalLoadSeq, sttCutoff = _sttNewSeq();
   // The dispatching PATCH alone, awaited: it reserves the card before any write and updates the local
   // tracker itself; refused or declined, the card, its dictation and the modal stay as they were (ICS-03).
-  const r = await _dispatchMove(linearIssueId, { state_name: 'In Progress', preferred_agent: agent });
+  // unsaved title/description go with it, so text typed and never saved reaches the agent (AGE-104)
+  const r = await _dispatchMove(linearIssueId, { state_name: 'In Progress', preferred_agent: agent,
+                                                 ..._detailEditsFor(linearIssueId) });
   const same = seq === _detailModalLoadSeq && _detailLinearIssueId === linearIssueId;
   if (!r.ok) {
     if (!r.declined && same) document.getElementById('detail-term-status').textContent = `could not start: ${(r.data || {}).error || 'HTTP ' + r.status}`;
@@ -3395,6 +3621,7 @@ async function dispatchFromDetail(agent) {
     return;
   }
   _sttCancelIssue(linearIssueId, sttCutoff);  // recordings started after the click survive (ICS-07)
+  _clearLinearDraft(linearIssueId);
   refreshJobBoard();
   if (same) closeDetailModal();
 }
@@ -3911,7 +4138,10 @@ function _linearStateToBoard(linearState) {
   return map[key] || 'todo';
 }
 
-// ── Voice input: Browser STT live preview + OpenAI two-pass refinement ─────
+// ── Voice input: OpenAI live transcription (text while speaking) + polish ─────
+// Preferred path works like ChatGPT dictation: the mic streams over WebRTC to an OpenAI Realtime
+// transcription session, whose deltas fill the field as the user speaks. If that cannot connect, the
+// older two-pass path runs: browser STT live preview, then the recording is re-transcribed and polished.
 // Plan: docs/exec-plans/active/2026-10-14-stt-two-pass.md. A recording is owned by its target
 // field's draft key (issue/task + field), whichever column the issue was opened from.
 const _STT_TARGETS = {
@@ -4019,7 +4249,7 @@ function _sttSetButton(kind, recording) {
 }
 
 function _sttUpdateTitles() {
-  const title = _sttBackends.includes('openai') ? 'Voice input (live + OpenAI refine)' : 'Voice input (browser only)';
+  const title = _sttBackends.includes('openai') ? 'Voice input (OpenAI live transcription)' : 'Voice input (browser only)';
   for (const t of Object.values(_STT_TARGETS)) {
     const btn = document.getElementById(t.btnId);
     if (btn) btn.title = title;
@@ -4050,13 +4280,17 @@ function _sttStart(kind) {
     sid: String(seq), seq, kind, owner, el, attached: true, base: el.value, expected: el.value,
     finalText: '', interim: '', capturing: true, draining: false, recActive: false, done: false,
     noRefine: !canRefine, SR, rec: null, recorder: null, stream: null, chunks: [], mime: '', ext: 'webm', abort: null,
+    live: false, pc: null, dc: null, items: new Map(), finishTimer: null,
   };
   _sttLatestSeq.set(owner, seq);
   if (!_sttSessions.has(owner)) _sttSessions.set(owner, new Set());
   _sttSessions.get(owner).add(s);
   _sttCapture = s;
   _sttSetButton(kind, true);
-  if (canRefine) {
+  if (canRefine && typeof RTCPeerConnection !== 'undefined') {
+    s.live = true;
+    _sttStartLive(s);
+  } else if (canRefine) {
     _sttSetStatus(kind, '● Starting mic…', 'var(--accent)');
     _sttStartRecorder(s);  // recognition starts only once recording runs, so the audio covers all live text
   } else {
@@ -4075,6 +4309,108 @@ function _sttWrite(s, value) {
   s.expected = value;  // set before dispatching so draft persistence sees our own write
   s.el.dispatchEvent(new Event('input', { bubbles: true }));
   return true;
+}
+
+async function _sttStartLive(s) {
+  _sttSetStatus(s.kind, '● Connecting…', 'var(--accent)');
+  try {
+    const tok = await fetch('/api/stt/live-token', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ language: _getSttLanguage() }),
+    }).then(r => r.json());
+    if (tok.error) throw new Error(tok.error);
+    if (!s.capturing || s.done) throw new Error('stopped');
+    s.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (!s.capturing || s.done) throw new Error('stopped');
+    const pc = s.pc = new RTCPeerConnection();
+    pc.addTrack(s.stream.getTracks()[0], s.stream);
+    const dc = s.dc = pc.createDataChannel('oai-events');
+    dc.onopen = () => { if (s.capturing && s.attached) _sttSetStatus(s.kind, '● Listening…', 'var(--red)'); };
+    dc.onmessage = (e) => { try { _sttLiveEvent(s, JSON.parse(e.data)); } catch (err) { console.warn('[stt] live event:', err); } };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState !== 'failed' || s.done) return;  // 'disconnected' can recover
+      _sttLiveEndCapture(s);
+      _sttLiveFinish(s, 'Live connection lost');
+    };
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    const res = await fetch('https://api.openai.com/v1/realtime/calls', {
+      method: 'POST', body: offer.sdp,
+      headers: { Authorization: `Bearer ${tok.value}`, 'Content-Type': 'application/sdp' },
+    });
+    if (!res.ok) throw new Error(`realtime HTTP ${res.status}`);
+    const sdp = await res.text();
+    if (!s.capturing || s.done) throw new Error('stopped');
+    await pc.setRemoteDescription({ type: 'answer', sdp });
+  } catch (err) {
+    _sttLiveClose(s);
+    if (s.done) return;
+    if (!s.capturing) { _sttEndSession(s, ''); return; }
+    console.warn('[stt] live transcription unavailable, using two-pass:', err.message);
+    s.live = false;
+    _sttSetStatus(s.kind, '● Starting mic…', 'var(--accent)');
+    _sttStartRecorder(s);
+  }
+}
+
+function _sttLiveEvent(s, ev) {
+  if (s.done) return;
+  if (ev.type === 'conversation.item.input_audio_transcription.delta') {
+    s.items.set(ev.item_id, (s.items.get(ev.item_id) || '') + (ev.delta || ''));
+  } else if (ev.type === 'conversation.item.input_audio_transcription.completed') {
+    s.items.set(ev.item_id, ev.transcript || '');
+  } else if (ev.type === 'error') {
+    console.warn('[stt] realtime error:', ev.error);
+    if (s.draining) _sttLiveFinish(s);  // e.g. the commit found an empty buffer
+    return;
+  } else {
+    return;
+  }
+  s.finalText = [...s.items.values()].join('');
+  if (!_sttWrite(s, s.base + s.finalText) && s.capturing) _sttStopCapture(s);  // field changed: result goes to a hint
+  if (ev.type.endsWith('.completed') && s.draining) _sttLiveFinish(s);
+}
+
+function _sttLiveEndCapture(s) {
+  s.capturing = false;
+  if (_sttCapture === s) _sttCapture = null;
+  _sttSetButton(s.kind, false);
+}
+
+// Stop: release the mic, commit the one open turn, wait for its final transcript.
+function _sttLiveStop(s) {
+  _sttReleaseStream(s);
+  if (s.dc?.readyState !== 'open') { _sttLiveClose(s); _sttEndSession(s, ''); return; }  // still connecting
+  s.draining = true;
+  if (s.attached) _sttSetStatus(s.kind, '⏳ Finishing…', 'var(--accent)');
+  // ponytail: fixed 300 ms for audio still in flight before the commit; raise it if last words go missing.
+  setTimeout(() => {
+    if (s.done || !s.draining) return;
+    try { s.dc.send(JSON.stringify({ type: 'input_audio_buffer.commit' })); } catch (_) { _sttLiveFinish(s); return; }
+    s.finishTimer = setTimeout(() => _sttLiveFinish(s), 10000);  // no final event: keep the deltas
+  }, 300);
+}
+
+function _sttLiveClose(s) {
+  clearTimeout(s.finishTimer);
+  if (s.dc) s.dc.onmessage = null;
+  if (s.pc) s.pc.onconnectionstatechange = null;
+  try { s.pc?.close(); } catch (_) {}
+  s.pc = s.dc = null;
+  _sttReleaseStream(s);
+}
+
+function _sttLiveFinish(s, emptyMessage = '') {
+  if (s.done || s.finished) return;
+  s.finished = true;
+  s.draining = false;
+  _sttLiveClose(s);
+  const text = s.finalText.trim();
+  if (!text) { _sttEndSession(s, emptyMessage, 'var(--red)'); return; }
+  if (s.attached) _sttSetStatus(s.kind, '⏳ Polishing…', 'var(--accent)');
+  const form = new FormData();
+  form.append('text', text);
+  _sttPost(s, form, () => _sttDeliver(s, { text, raw: text, polished: false }));  // field may be detached: keep the text
 }
 
 function _sttStartRecognition(s) {
@@ -4194,6 +4530,7 @@ function _sttStopCapture(s) {
   s.capturing = false;
   if (_sttCapture === s) _sttCapture = null;
   _sttSetButton(s.kind, false);
+  if (s.live) { _sttLiveStop(s); return; }
   if (s.rec && s.recActive) {
     s.draining = true;  // stop() may still deliver a final result; onend finishes draining
     try { s.rec.stop(); } catch (_) { s.draining = false; }
@@ -4219,6 +4556,10 @@ function _sttRefine(s, waited = 0) {
   const form = new FormData();
   form.append('audio', blob, `recording.${s.ext}`);
   form.append('browser_text', (s.finalText + s.interim).trim());
+  _sttPost(s, form, (why) => _sttEndSession(s, `Refine failed (${why}) — kept browser text`, 'var(--red)'));
+}
+
+function _sttPost(s, form, onFail) {
   form.append('language', _getSttLanguage());
   s.abort = new AbortController();
   const timer = setTimeout(() => s.abort.abort(), _STT_FETCH_TIMEOUT_MS);
@@ -4230,8 +4571,7 @@ function _sttRefine(s, waited = 0) {
     })
     .catch(err => {
       if (s.done) return;  // cancelled
-      const why = err.name === 'AbortError' ? 'timed out' : err.message;
-      _sttEndSession(s, `Refine failed (${why}) — kept browser text`, 'var(--red)');
+      onFail(err.name === 'AbortError' ? 'timed out' : err.message);
     })
     .finally(() => clearTimeout(timer));
 }
@@ -4289,7 +4629,7 @@ function _sttDispose(s) {
   if (s.rec) { s.rec.onend = s.rec.onresult = null; try { s.rec.abort(); } catch (_) {} }
   if (s.recorder) { s.recorder.onstop = null; try { s.recorder.stop(); } catch (_) {} }
   if (s.abort) s.abort.abort();
-  _sttReleaseStream(s);
+  _sttLiveClose(s);
   if (s.attached) { _sttSetButton(s.kind, false); _sttSetStatus(s.kind, ''); }
   const set = _sttSessions.get(_sttCanon(s.owner));
   if (set) { set.delete(s); if (!set.size) _sttSessions.delete(_sttCanon(s.owner)); }
@@ -4510,6 +4850,16 @@ setInterval(_sttTick, 1000);
 setInterval(refreshJobBoard, 15000);
 setInterval(_flushPendingBoardRefresh, 1000);
 setInterval(() => updateWindows(), 60000);
+// A CLI swap or another tab can change the account: keep the picker on the real login (AGE-125).
+setInterval(async () => {
+  const sel = document.querySelector('.claude-account-select');
+  if (!sel || sel.disabled) return;
+  const r = await fetch('/api/claude-accounts').catch(() => null);
+  const data = r && r.ok ? await r.json().catch(() => null) : null;
+  if (!data) return;
+  sel.value = data.active || '';
+  if (sel.value !== (data.active || '')) sel.selectedIndex = -1;
+}, 60000);
 setInterval(_updateRuntimeChip, 30000);
 setInterval(() => {
   document.querySelectorAll('.win-pace-marker').forEach(marker => {
@@ -5473,6 +5823,10 @@ socket.on('linear_issues_updated', (data) => {
   clearTimeout(_projectsReloadTimer);
   _projectsReloadTimer = setTimeout(loadProjects, 500);
 });
+socket.on('projects_commit_state', () => {  // a commit-colour pass landed: show it
+  clearTimeout(_projectsReloadTimer);
+  _projectsReloadTimer = setTimeout(loadProjects, 500);
+});
 
 socket.on('run_progress', (data) => {
   if (!data.run_id) return;
@@ -5808,6 +6162,23 @@ async function submitNewIssue() {
   } catch (err) {
     status.textContent = 'Error: ' + err;
     btn.disabled = false;
+  }
+}
+
+async function useClaudeAccount(sel) {
+  sel.disabled = true;
+  try {
+    const r = await fetch('/api/claude-accounts/use', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: sel.value }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    if ((data.warnings || []).length) alert(`Switched to ${data.label}.\n${data.warnings.join('\n')}`);
+    location.reload();
+  } catch (e) {
+    alert(`Could not switch Claude account: ${e.message}`);
+    location.reload();
   }
 }
 </script>

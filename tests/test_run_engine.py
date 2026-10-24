@@ -96,6 +96,59 @@ def test_renderer_turns_each_format_into_terminal_lines():
     assert pr.session_id_of("claude", json.dumps({"type": "system", "session_id": "s"})) == "s"
 
 
+def test_renderer_shows_what_an_interactive_session_shows():  # AGE-136
+    r = lambda fmt, ev: plain(pr.render_event(fmt, json.dumps(ev)))
+    asst = lambda *blocks, **kw: {"type": "assistant", "message": {"content": list(blocks)}, **kw}
+    assert r("claude", asst({"type": "thinking", "thinking": "plan A\nplan B"})) == ["✻ plan A", "✻ plan B"]
+    todos = [{"content": "read", "status": "completed"}, {"content": "fix", "status": "in_progress"},
+             {"content": "test", "status": "pending"}]
+    assert r("claude", asst({"type": "tool_use", "name": "TodoWrite", "input": {"todos": todos}})) \
+        == ["[todo]", "  ☒ read", "  ▶ fix", "  ☐ test"]
+    assert r("claude", asst({"type": "text", "text": "sub"}, parent_tool_use_id="t1")) == ["  │ sub"]
+    sys_ev = lambda **kw: r("claude", {"type": "system", **kw})
+    assert sys_ev(subtype="permission_denied", tool_name="Bash", decision_reason="no approval surface") \
+        == ["[denied] Bash: no approval surface"]
+    assert sys_ev(subtype="api_retry", attempt=2, max_retries=10, retry_delay_ms=1500, error_status=529) \
+        == ["[retry] API 529: attempt 2/10 in 1.5s"]
+    assert sys_ev(subtype="task_progress", description="Reading a.py", last_tool_name="Read") == ["[task] Reading a.py · Read"]
+    assert sys_ev(subtype="hook_started", hook_name="x") == [] and sys_ev(subtype="thinking_tokens") == []
+    assert r("claude", {"type": "tool_progress", "tool_name": "Bash", "elapsed_time_seconds": 30}) \
+        == ["  … Bash still running (30s)"]
+    assert r("claude", {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed_warning"}}) == []
+    assert r("claude", {"type": "result", "duration_ms": 397281, "num_turns": 8, "total_cost_usd": 2.749}) \
+        == ["[result] ok · 6m37s · 8 turns · $2.75"]
+    assert r("dsh", {"type": "thinking", "text": "hmm"}) == ["✻ hmm"] and r("dsh", {"type": "text", "text": "hi"}) == ["hi"]
+
+
+# ── a test run is announced before it starts (AGE-140) ───────────────────────
+
+def test_test_commands_are_recognised():
+    yes = ["pytest -q", "cd repo && .venv/bin/python3 -m pytest -q tests/", "npm test", "npm run test",
+           "pnpm run test:unit", "go test ./...", "cargo test", "make check", "bash tests/check.sh",
+           "sh -c 'pytest -q'", "npx jest --ci", "uv run pytest -q"]
+    no = ["ls -la", "cat tests/test_foo.py", "git grep pytest", "python3 runner/app.py", "make build"]
+    assert [c for c in yes if not pr.is_test_command(c)] == []
+    assert [c for c in no if pr.is_test_command(c)] == []
+
+
+def test_renderer_announces_a_test_run_before_the_call():
+    r = lambda fmt, ev: plain(pr.render_event(fmt, json.dumps(ev)))
+    asst = lambda cmd: {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Bash", "input": {"command": cmd}}]}}
+    out = r("claude", asst(".venv/bin/python3 -m pytest -q tests/"))
+    assert out[0].startswith("[runner] ▶ running tests: .venv/bin/python3 -m pytest") and "still alive" in out[0]
+    assert out[1] == '[tool] Bash {"command": ".venv/bin/python3 -m pytest -q tests/"}'
+    assert r("claude", asst("ls -la")) == ['[tool] Bash {"command": "ls -la"}']  # a plain command adds no note
+    codex = {"type": "item.started", "item": {"type": "command_execution", "command": "npm test"}}
+    assert r("codex", codex)[0].startswith("[runner] ▶ running tests: npm test")
+    jest = {"type": "item.started", "item": {"type": "command_execution", "command": "npx jest --ci"}}
+    assert r("codex", jest)[0].startswith("[runner] ▶ running tests: npx jest")
+    dsh = {"type": "tool_call", "tool": "bash", "input": {"command": "go test ./..."}}
+    assert r("dsh", dsh)[0].startswith("[runner] ▶ running tests: go test ./...")
+    # results and completed calls never repeat the note
+    assert r("dsh", {"type": "tool_result", "status": "ok", "result": "pytest passed"}) == ["  ↳ [ok] pytest passed"]
+
+
 # ── engine through the real launch paths ─────────────────────────────────────
 
 @pytest.fixture

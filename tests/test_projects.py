@@ -95,6 +95,19 @@ def test_worktree_created_on_agent_branch(repo):
     assert again["reused"]
 
 
+def test_codegraph_index_copied_without_seed(repo):
+    import sqlite3
+    (repo / ".codegraph").mkdir()
+    (repo / ".codegraph" / ".gitignore").write_text("*\n!.gitignore\n")  # what `codegraph init` writes
+    with sqlite3.connect(repo / ".codegraph" / "codegraph.db") as db:
+        db.execute("create table nodes (name text)")
+        db.execute("insert into nodes values ('demo')")
+    p, wt, _ = make(repo)
+    with sqlite3.connect(wt / ".codegraph" / "codegraph.db") as db:
+        assert db.execute("select name from nodes").fetchall() == [("demo",)]
+    assert pj.uncommitted(p, wt) == []  # the copy ignores itself: no rule needed in the project
+
+
 def test_seed_copy_has_no_symlinks(repo):
     _, wt, _ = make(repo, seed=["data", "linked.csv"])
     for f in (wt / "data" / "real.csv", wt / "data" / "nested_link.csv", wt / "linked.csv"):
@@ -307,6 +320,36 @@ def test_merge_into_checkout(repo):
     head = pj.merge_into_checkout(p, "T-1")
     assert (repo / "new.txt").read_text() == "agent work\n" and (repo / "sub" / "keep.txt").read_text() == "user edit\n"
     assert head == subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+
+def test_merge_into_checkout_merges_the_verified_commit_not_the_branch_tip(repo):
+    """A queued merge takes the sha read at verification; a later commit on the branch stays out (SC-007)."""
+    p, wt, info = make(repo)
+    (wt / "verified.txt").write_text("v\n")
+    pj.runner_commit(p, wt, "T-1: verified")
+    verified = pj.branch_head(p, "T-1")
+    (wt / "later.txt").write_text("l\n")
+    pj.runner_commit(p, wt, "T-1: later, unverified")
+    pj.merge_into_checkout(p, "T-1", verified)
+    assert (repo / "verified.txt").exists() and not (repo / "later.txt").exists()
+    with pytest.raises(pj.ProjectError, match="commit id"):
+        pj.merge_into_checkout(p, "T-1", "HEAD~1")
+
+
+def test_queued_merge_refused_after_cleanup_or_branch_replacement(repo):
+    """SC-009: a queued verified sha merges only while it is still that ticket's work."""
+    p, wt, info = make(repo)
+    (wt / "q.txt").write_text("q\n")
+    pj.runner_commit(p, wt, "T-1: queued")
+    sha = pj.branch_head(p, "T-1")
+    pj.check_queued_merge(p, "T-1", sha)  # still valid
+    subprocess.run(["git", "-C", str(wt), "reset", "-q", "--hard", info["base_sha"]], check=True)  # branch replaced
+    with pytest.raises(pj.ProjectError, match="no longer contains"):
+        pj.check_queued_merge(p, "T-1", sha)
+    with pj.ticket_lock(p.key, "T-1"):
+        pj.remove_worktree(p, "T-1")  # cleaned up
+    with pytest.raises(pj.ProjectError):
+        pj.check_queued_merge(p, "T-1", sha)
 
 
 @pytest.mark.parametrize("dirty", [False, True])
