@@ -7,6 +7,7 @@
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- AGE-126 scope split: confidentiality moved to its own draft plan `docs/exec-plans/active/2026-10-24-confidential-project-policy.md`; the fleet plan now only points at it. Docs only, no code — 2026-10-24
 - AGE-126 design talk follow-up: cost structure added to the fleet plan — `dsh` as elastic writer, `claude`/`codex` quota reserved for sampled cross-provider review, cost-per-merge metric; docs only — 2026-10-21
 - AGE-126 design talk: docs-only umbrella plan `docs/exec-plans/active/2026-10-21-scale-agent-fleet.md` (4 phases: verify gate → exception inbox → ticket decomposition → concurrency/cost ceiling); no code — 2026-10-21
 - AGE-120 Claude Code Projects research: docs-only note `docs/references/claude-code-projects.md` (overlap table + pilot checklist); no code, pilot waits for beta access — 2026-10-21
@@ -26,7 +27,8 @@
 
 ## Open Decisions
 <!-- Decisions made and their rationale — so a new session knows the "why" -->
-- Long-term direction (AGE-126): scale = less human attention per verified merge, not more agents. Order trust → attention → fan-out → ceiling; plan `2026-10-21-scale-agent-fleet`. Cost split: `dsh` is the elastic writer, subscription (`claude`/`codex`) quota is reserved for sampled cross-provider review. Confidential projects can use `dsh` too (AGE-139, main): the runner's Seatbelt runner closes shell network/DNS, the model API call stays outside it. Known gap: verify badge `no check` still auto-merges
+- Long-term direction (AGE-126): scale = less human attention per verified merge, not more agents. Order trust → attention → fan-out → ceiling; plan `2026-10-21-scale-agent-fleet`. Cost split: `dsh` is the elastic writer, subscription (`claude`/`codex`) quota is reserved for sampled cross-provider review. Known gap: verify badge `no check` still auto-merges
+- Confidentiality labels are split out of AGE-126 into `2026-10-24-confidential-project-policy` (draft, needs a ticket): owner says patient data is simulated and real data lives on a server, so the label may protect nothing. Facts: AGE-139 lets `dsh` run confidential on main; the flag is sticky (registry + worktree sidecar + durable binding + run history) and also gates Linear egress, tracker comments, run records and `ai_memory`. No decision yet
 - P15, P20, P23 parked in `docs/exec-plans/deferred/` (2026-10-13); P20 depended on `../symphony-ts`, which no longer exists
 - Server bound to 127.0.0.1 only — multi-host/remote scope is explicitly out of scope
 - Usage reset weekly limit is fixed at 3; unavailable Codex app-server data renders as no data
