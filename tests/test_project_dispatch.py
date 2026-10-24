@@ -143,30 +143,26 @@ def test_confidential_claude_exec_env_puts_sandboxed_codex_first(monkeypatch, tm
     assert app._project_exec_env("claude", SimpleNamespace(env={}, confidential=False), str(tmp_path))["PATH"] == "/usr/bin"
 
 
-def test_dsh_leaves_the_commit_and_git_writes_to_the_runner(proj):
-    """AGE-138: a linked worktree's git metadata is outside dsh's workspace-write root."""
+def test_dsh_commits_while_codex_leaves_it_to_the_runner(proj, monkeypatch):
+    """AGE-146: the workspace overlay lets dsh commit; Codex keeps the AGE-138 rule."""
+    monkeypatch.setattr(pr, "DSH_GIT_OVERLAY", True)
     repo, _ = proj
     binding = {"branch": "agent/T-1"}
     dsh = pr.project_prompt("task", project(repo), binding, "dsh")
-    assert "Leave your changes uncommitted" in dsh and "Commit your work" not in dsh
-    assert "`git commit`" in dsh and "runner commits" in dsh
+    assert "Commit your work on this branch" in dsh and "Leave your changes uncommitted" not in dsh
+    assert "`git commit`" not in dsh
     codex = pr.project_prompt("task", project(repo), binding, "codex")
     assert "Leave your changes uncommitted" in codex and "git commit" not in codex
     claude = pr.project_prompt("task", project(repo), binding, "claude")
     assert "Commit your work on this branch" in claude and "Leave your changes uncommitted" not in claude
 
 
-def test_dsh_leaves_the_commit_and_git_writes_to_the_runner(proj):
-    """AGE-138: a linked worktree's git metadata is outside dsh's workspace-write root."""
+def test_dsh_keeps_the_runner_commit_off_macos(proj, monkeypatch):
+    monkeypatch.setattr(pr, "DSH_GIT_OVERLAY", False)
     repo, _ = proj
-    binding = {"branch": "agent/T-1"}
-    dsh = pr.project_prompt("task", project(repo), binding, "dsh")
-    assert "Leave your changes uncommitted" in dsh and "Commit your work" not in dsh
-    assert "`git commit`" in dsh and "runner commits" in dsh
-    codex = pr.project_prompt("task", project(repo), binding, "codex")
-    assert "Leave your changes uncommitted" in codex and "git commit" not in codex
-    claude = pr.project_prompt("task", project(repo), binding, "claude")
-    assert "Commit your work on this branch" in claude and "Leave your changes uncommitted" not in claude
+    dsh = pr.project_prompt("task", project(repo), {"branch": "agent/T-1"}, "dsh")
+    assert "Leave your changes uncommitted" in dsh
+    assert "Commit your work" not in dsh
 
 
 def test_non_confidential_codex_uses_auto_review_without_sandbox_flag(proj):
@@ -176,11 +172,23 @@ def test_non_confidential_codex_uses_auto_review_without_sandbox_flag(proj):
     assert not any("approval_policy" in a for a in argv)
 
 
-def test_non_confidential_claude_and_dsh_unchanged(proj):
+def test_non_confidential_claude_and_dsh_without_a_workspace_prefix(proj):
     repo, _ = proj
     assert cli("claude", repo, False) == ["claude", "-p", "--verbose", "--permission-mode", "bypassPermissions",
                                           *pr.CLAUDE_SETTINGS]
-    assert cli("dsh", repo, False) == ["dsh", "--profile", "headless"]
+    assert cli("dsh", repo, False) == ["dsh", "--profile", "headless"]  # no workspace prefix passed
+
+
+def test_non_confidential_dsh_uses_the_workspace_overlay(proj, monkeypatch):
+    monkeypatch.setattr(pr, "DSH_GIT_OVERLAY", True)
+    monkeypatch.setattr(dsh_cli, "DSH_WORKSPACE_SUPPORTED", True)
+    monkeypatch.setattr(dsh_cli, "resolve_bin", lambda: "/bin/dsh")
+    monkeypatch.setattr(dsh_cli, "check_version", lambda dsh_bin: "0.2.1-rc.2")
+    repo, _ = proj
+    argv = pr.agent_cli("dsh", project(repo), "claude", lambda: ["dsh"],
+                        _confidential_dsh_prefix, dsh_cli.workspace_cli_prefix)
+    assert argv[0] == "/bin/dsh" and argv[1:3] == ["--profile", "headless"]
+    assert argv[3:5] == ["--patch", str(dsh_cli.DSH_WORKSPACE_PATCH)]
 
 
 def test_confidential_dsh_gets_the_sandbox_patch(proj):
@@ -368,7 +376,7 @@ def test_dispatch_records_binding_verify_and_badge(helper):
     assert subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True).stdout == ""
 
 
-@pytest.mark.parametrize("agent", ["codex", "dsh"])
+@pytest.mark.parametrize("agent", ["codex"])
 def test_agent_that_cannot_write_git_gets_a_runner_commit_without_the_seed(helper, agent):
     app_mod, run, records, state, *_ = helper
     state["mode"] = "uncommitted"
@@ -975,6 +983,7 @@ def test_cli_verify_keeps_sticky_confidentiality(helper, monkeypatch):
     run()
     write_registry(confidential=False)
     sandboxed = []
+    monkeypatch.setattr(pj, "already_confined", lambda: False)  # the runner is unsandboxed
     monkeypatch.setattr(pj, "sandbox_prefix", lambda roots: (sandboxed.append(roots), [])[1])
     assert pj.main(["verify", "demo", "--worktree", records()[-1]["worktree"]]) == 0
     assert sandboxed

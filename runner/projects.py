@@ -103,9 +103,12 @@ def _sb_str(path: str) -> str:
     return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def sandbox_profile(writable: list[Path], temp: bool = True, temp_root: str | None = None) -> str:
-    """macOS sandbox-exec profile: no network, writes only under `writable` and (temp) temp dirs.
+def sandbox_profile(writable: list[Path], temp: bool = True, temp_root: str | None = None,
+                    write_only: bool = False) -> str:
+    """macOS sandbox-exec profile: writes only under `writable` and (temp) temp dirs.
 
+    `write_only=True` keeps dsh's native write boundary: only `(deny file-write*)` plus the
+    roots, with no network/app-service denials (AGE-146's non-confidential workspace overlay).
     `temp_root` lets a caller name the shell temp area explicitly instead of the process
     `TMPDIR`; the dsh confinement wrapper uses `/tmp` while dsh's own spill directory lives
     outside every shell-writable root (AGE-139).
@@ -117,25 +120,28 @@ def sandbox_profile(writable: list[Path], temp: bool = True, temp_root: str | No
     # by which sandboxed code asks something outside the sandbox to act for it.
     # ponytail: deny-list, not deny-default; spike (g2) probes `open URL`, osascript and
     # launchctl submit. Move to deny-default if a new escape route shows up.
-    profile = ("(version 1)(allow default)(deny network*)(deny file-write*)"
-               "(deny lsopen)(deny appleevent-send)"
-               '(deny mach-lookup (global-name "com.apple.dnssd.service")'
-               ' (global-name "com.apple.trustd") (global-name "com.apple.trustd.agent")'
-               ' (global-name "com.apple.nsurlsessiond")'
-               ' (global-name "com.apple.coreservices.launchservicesd")'
-               ' (global-name "com.apple.coreservices.appleevents") (global-name-regex #"^com\\.apple\\.lsd\\."))'
+    deny = "" if write_only else (
+        "(deny network*)(deny lsopen)(deny appleevent-send)"
+        '(deny mach-lookup (global-name "com.apple.dnssd.service")'
+        ' (global-name "com.apple.trustd") (global-name "com.apple.trustd.agent")'
+        ' (global-name "com.apple.nsurlsessiond")'
+        ' (global-name "com.apple.coreservices.launchservicesd")'
+        ' (global-name "com.apple.coreservices.appleevents") (global-name-regex #"^com\\.apple\\.lsd\\."))')
+    profile = ("(version 1)(allow default)" + deny + "(deny file-write*)"
                f'(allow file-write* {allow} (literal "/dev/null") (literal "/dev/tty") (regex #"^/dev/fd/"))')
     return profile
 
 
-def sandbox_prefix(writable: list[Path], temp: bool = True, temp_root: str | None = None) -> list[str]:
-    return ["/usr/bin/sandbox-exec", "-p", sandbox_profile(writable, temp, temp_root)]
+def sandbox_prefix(writable: list[Path], temp: bool = True, temp_root: str | None = None,
+                   write_only: bool = False) -> list[str]:
+    return ["/usr/bin/sandbox-exec", "-p", sandbox_profile(writable, temp, temp_root, write_only)]
 
 
 def readonly_status(cwd: Path) -> list[str]:
     """`uncommitted` under a write-nothing sandbox: no writable roots, not even temp. A clean
     filter that status runs can neither touch the checkout nor its git dir (SC-011)."""
-    argv = [*sandbox_prefix([], temp=False), "git", *_GIT_HARDENING, "-C", str(cwd), "--no-optional-locks",
+    prefix = [] if already_confined() else sandbox_prefix([], temp=False)
+    argv = [*prefix, "git", *_GIT_HARDENING, "-C", str(cwd), "--no-optional-locks",
             "status", "--porcelain", "-z", "--untracked-files=all"]
     try:
         code, out, err = _run_bounded(argv, GIT_TIMEOUT_S)
@@ -243,7 +249,45 @@ def _git(cwd: Path, *args: str, check: bool = True, confine: list[Path] | None =
 
 def confine_for(project: "Project", *paths: Path) -> list[Path] | None:
     """Writable roots for confined commands on a confidential project; None otherwise (Decision 9)."""
-    if not project.confidential:
+    if not project.confidential or already_confined():
+        return None
+    common = _git(project.path, "rev-parse", "--git-common-dir").stdout.strip()
+    return [(project.path / common).resolve(), *paths]
+
+
+# The runner is single-host macOS today. The new AGE-146 confinement must not require
+# /usr/bin/sandbox-exec where it never existed; the old unsandboxed path stays there.
+GIT_SANDBOX = sys.platform == "darwin"
+# Set by dsh_confine.py in the command it execs. A nested sandbox-exec is refused by macOS, and
+# the parent Seatbelt profile already enforces the same write boundary, so a process that
+# carries this marker must not wrap git in a second one (AGE-146).
+DSH_SANDBOX_ENV = "AGENTICOS_DSH_SANDBOX"
+
+
+def already_confined() -> bool:
+    """True inside the runner's dsh Seatbelt: no second sandbox-exec (it would be denied)."""
+    return bool(os.environ.get(DSH_SANDBOX_ENV))
+
+
+def read_git_confine() -> list[Path] | None:
+    """No writable roots (temp only) for git readers that can run clean filters (AGE-146).
+
+    `git status` and working-tree `git diff` execute repository-configured clean filters even
+    with `--no-optional-locks`; an agent can plant one in the shared config. The empty root
+    list still wraps the command in a Seatbelt profile, so a filter cannot write the checkout
+    or the git dir. None off macOS, where the profile runner does not exist.
+    """
+    return None if not GIT_SANDBOX or already_confined() else []
+
+
+def write_git_confine(project: "Project", *paths: Path) -> list[Path] | None:
+    """Writable roots for a runner-owned mutating git command: the common dir plus `paths`.
+
+    Covers staging (`git add` clean filters), merge (merge-tree/merge drivers) and worktree
+    creation (`git worktree add` smudge filters). None off macOS, preserving AGE-138's
+    runner commit there.
+    """
+    if not GIT_SANDBOX or already_confined():
         return None
     common = _git(project.path, "rev-parse", "--git-common-dir").stdout.strip()
     return [(project.path / common).resolve(), *paths]
@@ -986,6 +1030,8 @@ def _ignored_by_committed_rule(wt: Path, rel: str, confine: list[Path] | None = 
 
     .git/info/exclude and core.excludesFile are uncommitted, so they do not count.
     """
+    if confine is None:
+        confine = read_git_confine()
     proc = _git(wt, "check-ignore", "-v", "-z", "--stdin", check=False, confine=confine,
                 stdin=rel.encode("utf-8", "surrogateescape") + b"\0")
     fields = proc.stdout.split("\0")
@@ -997,8 +1043,8 @@ def _ignored_by_committed_rule(wt: Path, rel: str, confine: list[Path] | None = 
     if Path(source).is_absolute() or not source.endswith(".gitignore"):
         return False
     tracked = _git(wt, "ls-files", "--error-unmatch", "--", source, check=False, confine=confine).returncode == 0
-    clean = _git(wt, "diff", "--quiet", "--no-ext-diff", "HEAD", "--", source, check=False,
-                 confine=confine).returncode == 0
+    clean = _git(wt, "--no-optional-locks", "diff", "--quiet", "--no-ext-diff", "HEAD", "--", source,
+                 check=False, confine=confine).returncode == 0
     return tracked and clean
 
 
@@ -1180,7 +1226,7 @@ def create_worktree(project: Project, ident: str) -> dict:
         raise ProjectError(f"branch {branch} already exists without its worktree; run cleanup first")
     base = _git(project.path, "rev-parse", "HEAD").stdout.strip()
     wt.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    _git(project.path, "worktree", "add", "-b", branch, str(wt), base, confine=confine_for(project, wt))
+    _git(project.path, "worktree", "add", "-b", branch, str(wt), base, confine=write_git_confine(project, wt))
     try:
         os.chmod(wt, 0o700)
         _copy_seeds(wt, project)
@@ -1223,7 +1269,7 @@ def runner_commit(project: Project, wt: Path, message: str) -> str | None:
     Returns the new commit sha, or None when there was nothing to commit.
     """
     load_binding(project, ticket_from_worktree(project, wt))  # still the bound branch (I5-10)
-    confine = confine_for(project, wt)
+    confine = write_git_confine(project, wt)
     # Staging can run repo-configured clean filters, so it is bounded like the commit.
     _git(wt, "add", "-A", confine=confine, timeout=COMMIT_TIMEOUT_S)
     if _git(wt, "diff", "--cached", "--quiet", "--no-ext-diff", check=False, confine=confine).returncode == 0:
@@ -1307,7 +1353,7 @@ def merge_into_checkout(project: Project, ident: str, rev: str | None = None) ->
         raise ProjectError(f"not a commit id: {rev!r}")
     target = rev or f"refs/heads/{branch}"  # rev: the verified commit; never a bare name a tag could shadow (CM-002)
     root = project.path
-    confine = confine_for(project, root)
+    confine = write_git_confine(project, root)
     with _MERGE_LOCK:
         if _git(root, "symbolic-ref", "-q", "HEAD", check=False, confine=confine).returncode:
             raise ProjectError(f"{root} is on a detached HEAD; merge {branch} by hand")
@@ -1356,7 +1402,7 @@ def commit_checkout(project: Project, cwd: str | Path, message: object = "", dry
     # Always sandboxed, whatever the policy says: staging can run repo-configured clean filters,
     # and a policy read before the ticket lock could be stale by the time git runs (SC-006).
     common = _git(project.path, "rev-parse", "--git-common-dir").stdout.strip()
-    confine = [(project.path / common).resolve(), repo]
+    confine = None if already_confined() else [(project.path / common).resolve(), repo]
     expect = None
     with contextlib.ExitStack() as stack:
         if ident:
@@ -1509,7 +1555,7 @@ def fingerprint_parts(project: Project, exclude: set[str] = frozenset()) -> dict
     prefixes = tuple(e for e in exclude if e.endswith("/"))
     skip = lambda rel: rel in exclude or (rel + "/") in exclude or rel.startswith(prefixes)
     root = project.path
-    confine = confine_for(project)
+    confine = read_git_confine()  # status/diff can run clean filters: no write roots
     g = lambda *a: _git_bytes(root, *a, confine=confine)
     digest = lambda b: hashlib.sha256(b).hexdigest()
     parts = {"head": g("rev-parse", "HEAD").decode().strip()}
@@ -1523,10 +1569,10 @@ def fingerprint_parts(project: Project, exclude: set[str] = frozenset()) -> dict
     listed = g("ls-files", "-v", "-z").split(b"\0")
     parts["tracked"] = digest(b"\0".join(e[2:] for e in listed))  # which paths: a merge or commit moves it
     parts["flags"] = digest(b"\0".join(e for e in listed if e and not e.startswith(b"H ")))  # skip-worktree etc.: never sanctioned
-    parts["staged"] = digest(g("diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"))
-    parts["unstaged"] = digest(g("diff", "--binary", "--no-ext-diff", "--no-textconv"))
+    parts["staged"] = digest(g("--no-optional-locks", "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv"))
+    parts["unstaged"] = digest(g("--no-optional-locks", "diff", "--binary", "--no-ext-diff", "--no-textconv"))
     files = {b"??": [], b"!!": []}  # untracked / ignored: a commit takes the first, never the second
-    for entry in g("status", "--porcelain", "-z", "-uall", "--ignored=matching").split(b"\0"):
+    for entry in g("--no-optional-locks", "status", "--porcelain", "-z", "-uall", "--ignored=matching").split(b"\0"):
         if len(entry) < 4 or entry[:2] not in (b"??", b"!!"):
             continue
         rel = entry[3:].decode("utf-8", "surrogateescape").rstrip("/")
@@ -1574,10 +1620,10 @@ def verify_writable_roots(wt: Path) -> list[Path]:
 
 def uncommitted(project: Project, wt: Path, confine: list[Path] | None = None) -> list[str]:
     """Tracked or non-ignored untracked changes left in the worktree (seeds are ignored).
-    Read-only: --no-optional-locks keeps status from refreshing the index (SC-004). `confine`
-    overrides the policy's confinement (status can run clean filters, SC-008)."""
+    Read-only: --no-optional-locks keeps status from refreshing the index (SC-004). Status can
+    run clean filters, so it gets the no-writes profile by default (AGE-146, SC-008)."""
     out = _git_bytes(wt, "--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=all",
-                     confine=confine if confine is not None else confine_for(project, wt))
+                     confine=confine if confine is not None else read_git_confine())
     return _porcelain_paths(out)
 
 
@@ -1615,7 +1661,7 @@ def run_verify(project: Project, worktree: Path, base: str | None = None, prefix
         if not base:
             raise ProjectError(f"{project.key}: verify uses {{base}} but no --base was given")
         cmd = cmd.replace("{base}", shlex.quote(base))
-    if prefix is None and project.confidential:
+    if prefix is None and project.confidential and not already_confined():
         prefix = sandbox_prefix(verify_writable_roots(wt))
     prefix = prefix or []
     argv = [*prefix, "/bin/sh", "-c", cmd]
@@ -2327,12 +2373,11 @@ def browse_worktrees(project: Project) -> list[str]:
 
 def _browse_root(project: Project, wt: str | None) -> tuple[Path, list[Path] | None]:
     if wt in (None, "", "main"):
-        return project.path.resolve(), ([] if project.confidential else None)
+        return project.path.resolve(), read_git_confine()
     root = worktree_path(project, wt)
     if root.is_symlink() or not _is_worktree_of(project, root):
         raise ProjectError(f"{wt} is not a worktree of {project.key}")
-    confidential = project.confidential or sidecar_confidential(project.key, wt) is not False
-    return root.resolve(), ([] if confidential else None)
+    return root.resolve(), read_git_confine()
 
 
 def _browse_path(root: Path, rel: str | None) -> tuple[str, Path]:

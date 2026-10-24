@@ -1,0 +1,19 @@
+# AGE-146: non-confidential dsh overlay. The runner passes this with `--patch` for a dsh
+# project run so the agent can commit in its linked worktree.
+#
+# dsh's native macOS sandbox grants the session cwd, /tmp and os.tmpdir(). A git worktree's
+# metadata lives in the main checkout's .git, outside all three, so `git add`/`git commit`
+# was denied (AGE-138). `dsh_confine.py` rebuilds the write-only Seatbelt profile with the
+# repo's git common dir added; network stays open exactly as dsh's native workspace-write.
+#
+# Only the sandbox provider is pinned: the user's non-confidential profile and patch layers
+# keep working. The worktree root is appended from `process.cwd()` and the git common dir from
+# `AGENTICOS_DSH_CONFINE_GIT`; argv survives dsh's child-environment scrubbing. `-` means "no
+# git dir" (non-repo).
+- id: sandbox
+  name: '@deepseek-ai/dsh-sandbox-local'
+  disabled: false
+  config:
+    runnerCommand: !!js (() => { const raw = process.env.AGENTICOS_DSH_CONFINE_RUNNER; if (!raw) throw new Error("AGENTICOS_DSH_CONFINE_RUNNER is required"); return [...JSON.parse(raw), process.cwd(), process.env.AGENTICOS_DSH_CONFINE_GIT || "-", "workspace"]; })()
+    runnerFailureSignatures:
+      - "dsh-confine:"

@@ -5,6 +5,7 @@ import time
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -500,6 +501,88 @@ def test_seed_link_cycle_rejected(repo):
     os.symlink("..", repo / "data" / "loop")
     with pytest.raises(pj.ProjectError, match="cycle|outside"):
         make(repo, seed=["data"])
+
+
+def test_git_confine_helpers_are_macos_gated(repo, monkeypatch):
+    p, wt, _ = make(repo)
+    monkeypatch.setattr(pj, "already_confined", lambda: False)
+    monkeypatch.setattr(pj, "GIT_SANDBOX", True)
+    assert pj.read_git_confine() == []
+    roots = pj.write_git_confine(p, wt)
+    assert roots and roots[-1] == wt and roots[0].name == ".git"
+    monkeypatch.setattr(pj, "GIT_SANDBOX", False)
+    assert pj.read_git_confine() is None
+    assert pj.write_git_confine(p, wt) is None
+
+
+def test_runner_commit_passes_a_confine_for_a_non_confidential_project(repo, monkeypatch):
+    p, wt, _ = make(repo)
+    monkeypatch.setattr(pj, "already_confined", lambda: False)
+    seen = []
+
+    def fake_git(cwd, *args, **kwargs):
+        if args and args[0] in ("add", "commit"):
+            seen.append(kwargs.get("confine"))
+        code = 1 if "diff" in args else 0
+        return SimpleNamespace(returncode=code, stdout="", stderr="")
+
+    monkeypatch.setattr(pj, "ticket_from_worktree", lambda *a, **k: "T-1")
+    monkeypatch.setattr(pj, "load_binding", lambda *a, **k: None)
+    monkeypatch.setattr(pj, "_git", fake_git)
+    pj.runner_commit(p, wt, "T-1: confined")
+    assert len(seen) == 2
+    assert all(roots is not None for roots in seen)
+
+
+def test_uncommitted_runs_a_clean_filter_with_nothing_writable(repo, monkeypatch):
+    monkeypatch.setattr(pj, "already_confined", lambda: False)
+    p = project(repo)
+    marker = repo / "uncommitted-wrote"
+    git(repo, "config", "filter.spy.clean", f"touch {marker}; touch {repo}/.git/spy; cat")
+    (repo / ".gitattributes").write_text("tracked.txt filter=spy\n")
+    git(repo, "add", ".gitattributes"); git(repo, "commit", "-qm", "attrs")
+    marker.unlink(missing_ok=True); (repo / ".git" / "spy").unlink(missing_ok=True)
+    os.utime(repo / "tracked.txt", (1, 1))
+    (repo / "tracked.txt").write_text("changed\n")
+    try:
+        pj.uncommitted(p, repo)
+    except pj.ProjectError:
+        pass  # a filter that fails under the read-only sandbox may fail status: still nothing written
+    assert not marker.exists() and not (repo / ".git" / "spy").exists()
+
+
+def test_fingerprint_runs_a_clean_filter_with_nothing_writable(repo, monkeypatch):
+    monkeypatch.setattr(pj, "already_confined", lambda: False)
+    p = project(repo)
+    marker = repo / "fingerprint-wrote"
+    git(repo, "config", "filter.spy.clean", f"touch {marker}; touch {repo}/.git/spy; cat")
+    (repo / ".gitattributes").write_text("tracked.txt filter=spy\n")
+    git(repo, "add", ".gitattributes"); git(repo, "commit", "-qm", "attrs")
+    marker.unlink(missing_ok=True); (repo / ".git" / "spy").unlink(missing_ok=True)
+    os.utime(repo / "tracked.txt", (1, 1))
+    (repo / "tracked.txt").write_text("changed\n")
+    try:
+        pj.fingerprint(p)
+    except pj.ProjectError:
+        pass
+    assert not marker.exists() and not (repo / ".git" / "spy").exists()
+
+
+def test_second_worktree_creation_runs_a_smudge_filter_confined(repo, monkeypatch):
+    make(repo)  # T-1 under the parent sandbox
+    monkeypatch.setattr(pj, "already_confined", lambda: False)  # T-2 uses the inner profile
+    outside = Path.home() / f".agentic-os-smudge-probe-{os.getpid()}"
+    outside.unlink(missing_ok=True)
+    try:
+        git(repo, "config", "filter.spy.smudge", f"touch {outside}; cat")
+        (repo / ".git" / "info" / "attributes").write_text("* filter=spy\n")
+        try:
+            make(repo, ident="T-2")
+        except pj.ProjectError:
+            pass  # the checkout fails closed when the filter is denied
+        assert not outside.exists()
+    finally:
+        outside.unlink(missing_ok=True)
 
 
 def test_runner_commit_bounded_when_clean_filter_hangs(repo, monkeypatch):

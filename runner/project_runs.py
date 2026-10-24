@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -97,16 +98,23 @@ def claude_confidential_settings(common: Path) -> str:
     })
 
 
+# AGE-146: macOS dsh gets the runner's write-only overlay that adds the git common dir, so it
+# can commit. Off macOS the overlay (and /usr/bin/sandbox-exec) does not exist: keep AGE-138.
+DSH_GIT_OVERLAY = sys.platform == "darwin"
+
+
 def leaves_commit_to_runner(agent: str, project: projects.Project) -> bool:
     """Agents whose sandbox cannot write the worktree's git metadata, so the runner commits for
-    them. A linked worktree keeps that metadata in the main checkout's .git, outside the
-    workspace the agent may write: Codex under workspace-write (spike) and dsh under its
-    workspace-write (AGE-138)."""
-    return agent in ("codex", "dsh")
+    them. A linked worktree keeps that metadata in the main checkout's .git, outside Codex's
+    workspace-write; dsh has the AGE-146 overlay on macOS, and keeps the AGE-138 rule off it."""
+    if agent == "codex":
+        return True
+    return agent == "dsh" and not DSH_GIT_OVERLAY
 
 
 def agent_cli(agent: str, project: projects.Project, claude_bin: str, dsh_prefix: Callable[[], list[str]],
-              dsh_confidential_prefix: Callable[[], list[str]] | None = None) -> list[str]:
+              dsh_confidential_prefix: Callable[[], list[str]] | None = None,
+              dsh_workspace_prefix: Callable[[], list[str] | None] | None = None) -> list[str]:
     """Headless CLI prefix for a project-bound run. Raises ProjectRunError for a backend the
     binding does not allow."""
     if agent not in PROJECT_AGENTS:
@@ -132,6 +140,8 @@ def agent_cli(agent: str, project: projects.Project, claude_bin: str, dsh_prefix
     if agent == "codex":
         return ["codex", "exec", "--json", "--approve-for-me", "--add-dir", common]
     if agent == "dsh":
+        if DSH_GIT_OVERLAY and dsh_workspace_prefix is not None:
+            return dsh_workspace_prefix() or dsh_prefix()
         return dsh_prefix()
     return [claude_bin, "-p", "--verbose", "--permission-mode", "bypassPermissions", *CLAUDE_SETTINGS]
 
@@ -140,10 +150,6 @@ def project_prompt(prompt: str, project: projects.Project, binding: dict, agent:
     rules = [f"You are working in a git worktree of project '{project.key}' on branch {binding['branch']}."]
     if leaves_commit_to_runner(agent, project):
         rules.append("Leave your changes uncommitted; the runner commits them on this branch after you finish.")
-        if agent == "dsh":
-            rules.append("Do not run `git commit` or `git add`: this worktree's git metadata lives in the "
-                         "main checkout's .git, outside the workspace your sandbox may write. "
-                         "`git status`, `git log` and `git diff` are read-only and fine.")
     else:
         rules.append("Commit your work on this branch. Do not switch branches.")
     if project.auto_merge:
