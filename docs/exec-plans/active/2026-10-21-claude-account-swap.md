@@ -221,7 +221,34 @@ Module `runner/claude_account.py`, stdlib only, CLI and importable.
 - [x] Run `claude_account.py save a`. — saved as `nyu`; `list` shows both (2026-10-22)
 - [x] Log in as account B.
 - [x] Run `claude_account.py save b`. — saved as `rancho`
-- [ ] Run `use a`.
-- [ ] Confirm `claude auth status` shows A.
-- [ ] Start a dashboard run; confirm it works on A.
+- [x] Run `use a`. — dashboard `POST /api/claude-accounts/use` 200 at 2026-10-22 16:55 (index mtime matches); active = `nyu`
+- [x] Confirm `claude auth status` shows A. — `yh576@nyu.edu`, matches the verified owner (2026-10-24)
+- [ ] Start a dashboard run; confirm it works on A. — BLOCKED: run b8afdef4 retry at 2026-10-22 18:18 failed "OAuth session expired and could not be refreshed" on the restored `nyu` login; two dashboard swaps at 18:19 returned 400. See Field failure
 - [ ] Switch to B from the dashboard select; confirm the quota cards change.
+
+## Field failure (2026-10-24 check)
+
+- [ ] Decide the fix direction for the shared-refresh-token failure below (user decision).
+
+Evidence: after the 16:55 switch to `nyu`, the restored login worked until its access token
+expired (~17:33). The next refresh failed: run b8afdef4 at 18:18, "OAuth session expired and
+could not be refreshed". The two swap attempts at 18:19 got 400. Later runs succeed again, and the
+index has not changed since 16:55, so the login was most likely repaired by a manual
+`claude auth login`. That login was never saved, so the `nyu` snapshot is probably dead. The
+`rancho` snapshot's state is unknown: the only way to test it would consume its refresh token.
+
+Likely cause (inferred, not proven): refresh tokens are single-use. A snapshot shares its
+refresh token with every Claude process that was running on that account at swap time. Two
+interactive `claude --resume` processes have been alive for 3 days 20 hours (since before this
+feature existed). When such a process's access token expires, it refreshes with that shared token,
+which kills the copy in the snapshot. The plan listed "concurrent Claude writers" as a residual
+risk, but that risk is not rare: any long-lived session triggers it within one ~8 h access-token
+lifetime.
+
+Candidate fixes (need a spike, both need the user's browser login):
+- Per-account `CLAUDE_CONFIG_DIR`: each account gets its own keychain item and its own refresh
+  lifecycle, managed by Claude Code itself. The runner sets the variable per spawn, and shared
+  `projects/`, skills and settings are symlinked into each account dir. Robust; more setup.
+- `claude setup-token` (1-year, non-rotating) per account, passed as `CLAUDE_CODE_OAUTH_TOKEN`
+  to runner spawns. Simple; the quota cards may lose the usage API (the token is inference-only)
+  and terminal sessions would not follow the switch.
