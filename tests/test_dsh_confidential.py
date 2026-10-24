@@ -381,7 +381,7 @@ def test_confidential_dsh_prompt_asks_for_a_commit():
     assert "Leave your changes uncommitted" not in confidential
     plain = pr.project_prompt("task", SimpleNamespace(**{**project.__dict__, "confidential": False}),
                               {"branch": "agent/T-1"}, "dsh")
-    assert "Commit your work on this branch" in plain
+    assert "Leave your changes uncommitted" in plain
 
 
 # ── installed dsh ───────────────────────────────────────────────────────────

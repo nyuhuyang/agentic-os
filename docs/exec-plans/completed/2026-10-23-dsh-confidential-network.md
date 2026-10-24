@@ -326,3 +326,16 @@ covered the pre-change snapshot, and the focused tests were rerun after this cha
 Trade-off: this grants the repo's git common dir (refs, config, hooks, objects) to the
 confined shell, matching confidential Claude/Codex `--add-dir common`; the prompt still says
 not to push.
+
+## Merge `main` (2026-10-23)
+
+- Base `1ab614d`, main `fe466a5`, branch `agent/AGE-139`.
+- Seven textual conflicts (AGENTS.md, context-maintenance, app.py, dsh_cli.py,
+  project_runs.py, projects.py, test_project_dispatch.py). Main's version was kept and the
+  AGE-139 changes were re-applied with `git merge-file`; `leaves_commit_to_runner` now leaves
+  only non-confidential dsh and Codex to the runner, because confidential dsh gets the git
+  common dir and commits its own work.
+- Full suite: 960 passed / 87 failed, the same DSH-sandbox/PTY environment class as main.
+  Focused dsh: 87 passed; `test_project_dispatch.py`: 88 passed / 11 nested-sandbox failures.
+- The resolved tree is uncommitted because the agent sandbox cannot write the shared `.git`;
+  the runner's `post_run` commits it. No push.

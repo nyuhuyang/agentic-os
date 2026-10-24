@@ -70,6 +70,13 @@ def cli(agent, repo, confidential):
                         lambda: ["dsh", "--profile", "headless"], _confidential_dsh_prefix)
 
 
+def test_prompt_asks_the_agent_to_announce_a_long_test_run(proj):
+    """AGE-140: a silent test run must not read as a hang; the agent says it is about to test."""
+    repo, _ = proj
+    prompt = pr.project_prompt("do the ticket", project(repo), {"branch": "agent/DEMO-1"}, "claude")
+    assert "Before running the test suite" in prompt and "look like a hang" in prompt
+
+
 def test_confidential_argv_has_no_bypass(proj):
     repo, _ = proj
     for agent in ("claude", "codex"):
@@ -127,6 +134,19 @@ def test_confidential_claude_exec_env_puts_sandboxed_codex_first(monkeypatch, tm
     assert app._project_exec_env("claude", project, str(tmp_path))["PATH"] == f"{pr.SANDBOXED_BIN}{os.pathsep}/usr/bin"
     assert app._project_exec_env("codex", project, str(tmp_path))["PATH"] == "/usr/bin"
     assert app._project_exec_env("claude", SimpleNamespace(env={}, confidential=False), str(tmp_path))["PATH"] == "/usr/bin"
+
+
+def test_dsh_leaves_the_commit_and_git_writes_to_the_runner(proj):
+    """AGE-138: a linked worktree's git metadata is outside dsh's workspace-write root."""
+    repo, _ = proj
+    binding = {"branch": "agent/T-1"}
+    dsh = pr.project_prompt("task", project(repo), binding, "dsh")
+    assert "Leave your changes uncommitted" in dsh and "Commit your work" not in dsh
+    assert "`git commit`" in dsh and "runner commits" in dsh
+    codex = pr.project_prompt("task", project(repo), binding, "codex")
+    assert "Leave your changes uncommitted" in codex and "git commit" not in codex
+    claude = pr.project_prompt("task", project(repo), binding, "claude")
+    assert "Commit your work on this branch" in claude and "Leave your changes uncommitted" not in claude
 
 
 def test_non_confidential_codex_uses_auto_review_without_sandbox_flag(proj):
@@ -328,10 +348,11 @@ def test_dispatch_records_binding_verify_and_badge(helper):
     assert subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True).stdout == ""
 
 
-def test_sandboxed_codex_gets_a_runner_commit_without_the_seed(helper):
+@pytest.mark.parametrize("agent", ["codex", "dsh"])
+def test_agent_that_cannot_write_git_gets_a_runner_commit_without_the_seed(helper, agent):
     app_mod, run, records, state, *_ = helper
     state["mode"] = "uncommitted"
-    run(agent="codex")
+    run(agent=agent)
     rec = records()[-1]
     assert rec["runner_commit"] and rec["verify"]["status"] == "pass" and rec["seed_committed"] == []
     names = subprocess.run(["git", "-C", rec["worktree"], "show", "--name-only", "--format=", rec["runner_commit"]],

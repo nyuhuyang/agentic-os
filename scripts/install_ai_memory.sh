@@ -1,16 +1,17 @@
 #!/bin/sh
 # AGE-137: install the ai-memory server used by runner/ai_memory.py, inside this checkout only.
 #   sh scripts/install_ai_memory.sh [--force]
-# Downloads the pinned-or-latest release for this OS/CPU into .tools/ai-memory/, verifies the
-# release's SHA-256, initialises state/ai-memory/ and leaves an `enabled` marker there. No
-# LaunchAgent, no harness hooks, no writes outside this checkout. `--force` re-downloads (the
-# upgrade path); without it an existing binary is kept. The wiki and its index are never touched.
+# Installs the pinned ai-memory release (3.2.2, the one reviewed for this integration) for this
+# OS/CPU into .tools/ai-memory/, verifies the release's SHA-256, initialises state/ai-memory/ and
+# leaves an `enabled` marker there. No LaunchAgent, no harness hooks, no writes outside this
+# checkout. `AI_MEMORY_VERSION=latest` (or another version) opts into a different release;
+# `--force` re-downloads. The wiki and its index are never touched.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DEST="$ROOT/.tools/ai-memory"
 DATA="$ROOT/state/ai-memory"
-VERSION=${AI_MEMORY_VERSION:-latest}
+VERSION=${AI_MEMORY_VERSION:-3.2.2}
 FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
 
@@ -25,7 +26,15 @@ case "$(uname -s):$(uname -m)" in
 esac
 TARGET=${AI_MEMORY_TARGET:-$TARGET}
 
-if [ -x "$DEST/ai-memory" ] && [ "$FORCE" -eq 0 ] && [ "$VERSION" = latest ]; then
+INSTALLED=$("$DEST/ai-memory" --version 2>/dev/null | awk '{ print $2 }') || INSTALLED=
+SKIP=0
+if [ -x "$DEST/ai-memory" ] && [ "$FORCE" -eq 0 ]; then
+  case "$VERSION" in
+    latest) SKIP=1 ;;
+    "$INSTALLED") SKIP=1 ;;
+  esac
+fi
+if [ "$SKIP" -eq 1 ]; then
   say "binary already present: $("$DEST/ai-memory" --version 2>/dev/null || echo unknown)"
 else
   TMP=$(mktemp -d "${TMPDIR:-/tmp}/ai-memory.XXXXXX")

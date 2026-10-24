@@ -13,6 +13,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import threading
 import time
@@ -96,9 +97,13 @@ def claude_confidential_settings(common: Path) -> str:
     })
 
 
-def is_sandboxed_codex(agent: str, project: projects.Project) -> bool:
-    """Codex under workspace-write cannot write .git (spike), so the runner commits for it."""
-    return agent == "codex"  # confidential: workspace-write; otherwise --approve-for-me
+def leaves_commit_to_runner(agent: str, project: projects.Project) -> bool:
+    """Agents whose sandbox cannot write the worktree's git metadata, so the runner commits for
+    them. A linked worktree keeps that metadata in the main checkout's .git, outside the
+    workspace the agent may write: Codex under workspace-write (spike) and dsh under its own
+    workspace-write (AGE-138). A confidential dsh run uses the runner's wrapper, which grants
+    the git common dir (AGE-139), so it commits its own work."""
+    return agent == "codex" or (agent == "dsh" and not project.confidential)
 
 
 def agent_cli(agent: str, project: projects.Project, claude_bin: str, dsh_prefix: Callable[[], list[str]],
@@ -134,8 +139,12 @@ def agent_cli(agent: str, project: projects.Project, claude_bin: str, dsh_prefix
 
 def project_prompt(prompt: str, project: projects.Project, binding: dict, agent: str) -> str:
     rules = [f"You are working in a git worktree of project '{project.key}' on branch {binding['branch']}."]
-    if is_sandboxed_codex(agent, project):
+    if leaves_commit_to_runner(agent, project):
         rules.append("Leave your changes uncommitted; the runner commits them on this branch after you finish.")
+        if agent == "dsh":
+            rules.append("Do not run `git commit` or `git add`: this worktree's git metadata lives in the "
+                         "main checkout's .git, outside the workspace your sandbox may write. "
+                         "`git status`, `git log` and `git diff` are read-only and fine.")
     else:
         rules.append("Commit your work on this branch. Do not switch branches.")
     if project.auto_merge:
@@ -144,6 +153,9 @@ def project_prompt(prompt: str, project: projects.Project, binding: dict, agent:
     if project.no_push:
         rules.append("Do not push, deploy or publish anything.")
     rules.append("Never edit files outside this worktree.")
+    rules.append("Before running the test suite or any check that may take a while, say in one line what "
+                 "you are about to run and that it can take a few minutes, so a quiet stretch does not "
+                 "look like a hang.")
     if not project.verify:
         rules.append("No check command is configured for this project: find and run its own tests "
                      "before you finish, and report the result.")
@@ -569,12 +581,145 @@ def note_agent_error(run_id: str, fmt: str, line: str) -> None:
         AGENT_FAILED.add(run_id)
 
 
+def closing_summary(agent: str, lines: list[str]) -> str:
+    """The last assistant message of a Codex run. `_parse_agent_output` joins every message, so
+    storing its first bytes would keep the opening commentary and drop the closing outcome."""
+    if agent != "codex":
+        return ""  # Claude's result event / dsh's final event already is the closing text
+    last = ""
+    for line in lines or []:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        item = ev.get("item") or {}
+        if ev.get("type") == "item.completed" and isinstance(item, dict) and item.get("type") == "agent_message":
+            last = item.get("text") or last
+    return last
+
+
 def _subagent(ev: dict, lines: list[str]) -> list[str]:
     """A subagent's turns are indented under the Agent call that started them."""
     return [f"{_DIM}  │{_RESET} {ln}" for ln in lines] if ev.get("parent_tool_use_id") else lines
 
 
+# ── test-run announcements (AGE-140) ────────────────────────────────────────
+# A test suite can run for minutes without printing anything, which reads exactly like a
+# hang. Every shell call that starts tests gets a runner note before the call, and the
+# card's status line repeats it, so a quiet stretch shows as work in progress.
+
+TEST_NOTE_MARK = "▶ running tests:"
+
+# Programs that are test runners themselves (`pytest -q`, `./.venv/bin/jest`).
+_TEST_PROGRAMS = {"pytest", "py.test", "tox", "nox", "phpunit", "rspec", "jest", "vitest", "mocha",
+                  "ctest", "playwright", "cypress", "nextest", "unittest"}
+# Subcommands that mean "run the suite" for language/build tools.
+_TEST_TASKS = {"test", "tests", "check", "spec", "it"}
+_TEST_PATH_RE = re.compile(r"(?:^|[/_.-])(?:tests?|spec|check)(?:[/_.-]|$)", re.IGNORECASE)
+
+
+def _test_path(path: str) -> bool:
+    return bool(_TEST_PATH_RE.search(path or ""))
+
+
+def is_test_command(command: str) -> bool:
+    """Whether a shell command line starts a test suite (best effort, no shell expansion)."""
+    for segment in re.split(r"&&|\|\||[;|\n]", command or ""):
+        try:
+            tokens = shlex.split(segment)
+        except ValueError:  # unbalanced quotes: the raw split still finds the program
+            tokens = segment.split()
+        while tokens and (tokens[0] in ("sudo", "command", "time", "env") or re.fullmatch(r"[A-Za-z_]\w*=.*", tokens[0])):
+            tokens.pop(0)
+        if not tokens:
+            continue
+        base = os.path.basename(tokens[0]).lower()
+        args = [os.path.basename(t).lower() for t in tokens[1:]]
+        if base in _TEST_PROGRAMS:
+            return True
+        if base.startswith("python") and "-m" in args:
+            i = args.index("-m")
+            if i + 1 < len(args) and args[i + 1] in {"pytest", "unittest", "tox", "nox"}:
+                return True
+        if base in ("npm", "pnpm", "yarn", "bun") \
+                and any(a == "test" or a.startswith("test:") for a in args[:2]):
+            return True
+        if base in ("npx", "bunx") and args and args[0] in _TEST_PROGRAMS:
+            return True
+        if base in ("uv", "poetry", "pipenv", "hatch", "pdm") \
+                and any(a in _TEST_PROGRAMS or a in _TEST_TASKS for a in args):
+            return True
+        if base in ("go", "cargo", "swift", "mix", "deno", "dotnet", "mvn", "gradle", "gradlew") \
+                and args and args[0] in _TEST_TASKS:
+            return True
+        if base == "node" and "--test" in args:
+            return True
+        if base in ("make", "just") and any(a in _TEST_TASKS for a in args):
+            return True
+        if base in ("bash", "sh", "zsh", "dash"):
+            if "-c" in args and len(tokens) >= 3:  # sh -c "<command>"
+                return is_test_command(tokens[-1])
+            script = tokens[-1]
+            if _test_path(script) or _test_path(os.path.basename(script)):
+                return True
+        if _test_path(base):
+            return True
+    return False
+
+
+def test_command_of(fmt: str, line: str) -> str | None:
+    """The test command a structured agent event is about to run, if any.
+
+    Only start events count (Claude tool_use, Codex item.started, dsh tool_call): the note has
+    to come before the long run, not after it."""
+    hints = ("test", "spec", "check", "jest", "mocha", "tox", "nox", "phpunit", "playwright", "cypress")
+    if fmt not in ("claude", "codex", "dsh") or not any(k in line.lower() for k in hints):
+        return None
+    try:
+        ev = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(ev, dict):
+        return None
+    commands: list[str] = []
+    if fmt == "claude" and ev.get("type") == "assistant":
+        for block in (ev.get("message") or {}).get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_use" \
+                    and str(block.get("name", "")).lower() in ("bash", "shell"):
+                command = (block.get("input") or {}).get("command")
+                if isinstance(command, str):
+                    commands.append(command)
+    elif fmt == "codex" and ev.get("type") == "item.started":
+        item = ev.get("item") or {}
+        if item.get("type") == "command_execution" and isinstance(item.get("command"), str):
+            commands.append(item["command"])
+    elif fmt == "dsh" and ev.get("type") == "tool_call":
+        payload = ev.get("input")
+        command = payload.get("command") if isinstance(payload, dict) else payload if isinstance(payload, str) else None
+        if isinstance(command, str):
+            commands.append(command)
+    return next((command for command in commands if is_test_command(command)), None)
+
+
+def test_note_text(command: str) -> str:
+    return f"{TEST_NOTE_MARK} {_first_line(command, 100)} — this can take a while; the run is still alive."
+
+
+def _test_note(fmt: str, line: str) -> str | None:
+    command = test_command_of(fmt, line)
+    return f"{_DIM}[runner] {test_note_text(command)}{_RESET}" if command else None
+
+
 def render_event(fmt: str, line: str) -> list[str]:
+    """The run view's lines, with a heads-up note before a test suite starts (AGE-140)."""
+    shown = _render_event(fmt, line)
+    note = _test_note(fmt, line)
+    return [note] + shown if note else shown
+
+
+def _render_event(fmt: str, line: str) -> list[str]:
     """One raw stdout line -> terminal lines for the live/replay run view (shared by both).
     fmt: claude (stream-json), codex (exec --json), dsh (--json) or text (plain output).
     Tool calls cyan, tool results dim and truncated, errors red. A runner note shows in every format."""

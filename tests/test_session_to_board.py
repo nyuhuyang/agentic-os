@@ -60,6 +60,7 @@ def stb(env, tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod, "_linear_dispatched", {})
     monkeypatch.setattr(app_mod, "_FINALIZING", set())  # other tests' stubbed workers never write records
     monkeypatch.setattr(app_mod, "_process_table", lambda: {})  # never the host's processes
+    monkeypatch.setattr(app_mod, "_DSH_SESSIONS", tmp_path / "dsh" / "sessions")
     app_mod._RECORDS_CACHE.clear()
     claude_session(tmp_path, SID, proj)
     launches = []
@@ -137,11 +138,128 @@ def test_to_board_refuses_a_running_or_claimed_session_and_changes_nothing(stb):
     assert (log.read_text(), tasks(tmp)) == before
 
 
-def test_to_board_refuses_sessions_outside_the_project_and_dsh(stb):
+def test_to_board_refuses_sessions_outside_the_project_and_missing_dsh(stb):
     app_mod, mod, client, log, tmp, proj, conf, launches = stb
     claude_session(tmp, "far", tmp / "elsewhere")
     assert to_board(client, sid="far").status_code == 404
-    assert to_board(client, agent="dsh").status_code == 400
+    assert to_board(client, agent="dsh").status_code == 404
+
+
+def dsh_session(app_mod, sid, cwd, *, compressed=False, parent=None):
+    project_dir = "--" + str(cwd).replace("/", "-").lstrip("-")[:251] + "--"
+    directory = app_mod._DSH_SESSIONS / project_dir / sid
+    directory.mkdir(parents=True)
+    header = {"type": "session", "version": 4, "id": sid, "cwd": str(cwd),
+              "createdAt": 1, "isSeeded": False, "delegationDepth": 0,
+              **({"parentSession": parent} if parent else {})}
+    events = [header, {"type": "user/message", "seq": 0, "time": 1,
+                       "surfaceOp": "append", "data": {"role": "user", "id": "message-1",
+                       "source": {"kind": "user"}, "content": [{"type": "text", "text": "first prompt"}]}},
+              {"type": "session/title", "seq": 1, "time": 2,
+               "data": {"title": "DeepSeek 原生标题", "messageSeqs": [], "source": {"kind": "user"}}}]
+    lines = [(json.dumps(e, ensure_ascii=False) + "\n").encode() for e in events]
+    # Real separately compressed frames: decoding just the first frame loses title/events.
+    content = b"".join(app_mod._dsh_zstd(line) if compressed else line for line in lines)
+    path = directory / ("session.v4.jsonl.zstd" if compressed else "session.v4.jsonl")
+    path.write_bytes(content)
+    os.utime(path, (time.time() - 600, time.time() - 600))
+    return path
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+def test_dsh_project_session_list_rename_resume_and_remove(stb, monkeypatch, compressed):
+    app_mod, mod, client, log, tmp, proj, conf, launches = stb
+    import projects as pj
+    monkeypatch.setattr(app_mod, "_request_commit_pass", lambda jobs: None)
+    monkeypatch.setattr(pj, "SESSION_TRASH", tmp / "trash")
+    sid = "session-dsh-project"
+    path = dsh_session(app_mod, sid, proj, compressed=compressed)
+    dsh_session(app_mod, "session-outside", tmp / "proj-other")
+    dsh_session(app_mod, "session-child", proj, parent=sid)
+    base = f"/api/projects/demo/sessions/dsh/{sid}"
+    listed = client.get("/api/projects").get_json()["projects"][0]["sessions"]
+    row, = [s for s in listed if s["agent"] == "dsh"]
+    assert row["id"] == sid and row["title"] == "DeepSeek 原生标题"
+    assert sid in row["resume"] and "dsh" in row["resume"]
+    before, mtime = path.read_bytes(), path.stat().st_mtime_ns
+    assert client.post(base + "/rename", json={"title": "新名字"}).status_code == 200
+    assert path.read_bytes().startswith(before) and path.stat().st_mtime_ns == mtime
+    assert app_mod._find_session("dsh", sid)["native_title"] == "新名字"
+    r = to_board(client, agent="dsh", sid=sid)
+    assert r.status_code == 200, r.get_json()
+    rid = r.get_json()["run_id"]
+    intent = app_mod._valid_intent(app_mod._latest_record(rid))
+    assert intent["agent"] == "dsh" and intent["id"] == sid
+    reply = client.post(f"/api/runs/{rid}/retry", json={"reply": "continue exactly here"})
+    assert reply.status_code == 200, reply.get_json()
+    launch, = launches
+    assert launch["cwd"] == str(proj) and launch["stream"] == "dsh"
+    assert launch["cmd"][-4:] == ["--session-id", sid, "--", "continue exactly here"]
+    assert app_mod._card_session(r.get_json()["issue_id"], "dsh")[0] == sid
+    assert client.post(base + "/rename", json={"title": "card and native title"}).status_code == 200
+    assert app_mod._find_session("dsh", sid)["native_title"] == "card and native title"
+    assert client.post(base + "/remove").status_code == 200
+    assert not path.exists() and app_mod._find_session("dsh", sid) is None
+    assert list((tmp / "trash" / "dsh").rglob(path.name))
+    assert client.post(base + "/to-board").status_code == 404
+
+
+def test_dsh_session_rows_show_the_branch_of_their_checkout(stb, monkeypatch):
+    """AGE-144: a DeepSeek row's worktree label comes from the folder it ran in, both the main
+    checkout and a linked worktree, without running git on the request path."""
+    app_mod, mod, client, log, tmp, proj, conf, launches = stb
+    monkeypatch.setattr(app_mod, "_request_commit_pass", lambda jobs: None)
+    base = subprocess.run(["git", "-C", str(proj), "symbolic-ref", "--short", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "-C", str(proj), "-c", "user.email=t@example.com", "-c", "user.name=t",
+                    "commit", "-q", "--allow-empty", "-m", "base"], check=True)
+    wt = tmp / "wt" / "demo" / "T-1"
+    subprocess.run(["git", "-C", str(proj), "worktree", "add", "-q", "-b", "agent/T-1", str(wt)], check=True)
+    (wt / "src").mkdir()
+    dsh_session(app_mod, "session-in-main", proj)
+    dsh_session(app_mod, "session-in-worktree", wt / "src")
+    listed = client.get("/api/projects").get_json()["projects"][0]["sessions"]
+    rows = {s["id"]: s for s in listed if s["agent"] == "dsh"}
+    assert rows["session-in-main"]["branch"] == base
+    assert rows["session-in-worktree"]["branch"] == "agent/T-1"
+
+
+def test_dsh_session_writes_refuse_live_external_owner_and_store_escape(stb):
+    import fcntl
+    app_mod, mod, client, log, tmp, proj, conf, launches = stb
+    sid = "session-native-lock"
+    path = dsh_session(app_mod, sid, proj)
+    base = f"/api/projects/demo/sessions/dsh/{sid}"
+    before = path.read_bytes()
+    with (path.parent / "session.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert client.post(base + "/rename", json={"title": "blocked"}).status_code == 409
+        assert client.post(base + "/remove").status_code == 409
+    assert path.read_bytes() == before
+    app_mod._claim_session("dsh", sid, "claimed")
+    assert client.post(base + "/rename", json={"title": "blocked"}).status_code == 409
+    app_mod._release_session("claimed")
+    assert to_board(client, key="secret", agent="dsh", sid=sid).status_code == 404
+    escaped = path.parent.parent / "session-symlink"
+    escaped.symlink_to(path.parent, target_is_directory=True)
+    assert app_mod._find_session("dsh", "session-symlink") is None
+
+
+def test_dsh_rename_short_write_rolls_back_and_preserves_torn_log(stb, monkeypatch):
+    app_mod, mod, client, log, tmp, proj, conf, launches = stb
+    sid = "session-rollback"
+    path = dsh_session(app_mod, sid, proj)
+    base = f"/api/projects/demo/sessions/dsh/{sid}"
+    before, mtime = path.read_bytes(), path.stat().st_mtime_ns
+    real_write = os.write
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "write", lambda fd, data: real_write(fd, data[:5]))
+        assert client.post(base + "/rename", json={"title": "must roll back"}).status_code == 500
+    assert path.read_bytes() == before and path.stat().st_mtime_ns == mtime
+    path.write_bytes(before + b'{"type":')
+    os.utime(path, (time.time() - 600, time.time() - 600))
+    assert client.post(base + "/rename", json={"title": "torn log"}).status_code == 400
+    assert path.read_bytes() == before + b'{"type":'
 
 
 def test_failed_move_restores_the_generation_and_appends_nothing(stb, monkeypatch):

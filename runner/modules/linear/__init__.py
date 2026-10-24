@@ -957,7 +957,7 @@ class LinearModule(AgenticModule):
                 latest = _latest_card_session_record(issue_id) or {}
                 other = canonical_agent(latest.get("agent"))
                 if other and other != backend:
-                    prompt = _handoff_prompt(latest, "", [], other, task=prompt)
+                    prompt = _handoff_prompt(latest, "", [], other, task=prompt, agent=backend)
             self.dispatched[issue_id] = run_id
             try:
                 self.push_state(issue_id, "running", gen=launch_gen)

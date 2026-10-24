@@ -274,3 +274,14 @@ this dsh host and the claudex-loop workflow explicitly.
 - `projects.sandbox_profile` no longer has the `protected`/`.git` deny feature.
 - Focused tests updated: 38 `test_dsh_confidential.py` + 49 `test_dsh_backend.py` pass; 9
   sandbox-independent dispatch tests pass. No new inspection after this user-requested change.
+
+### Merge main into agent/AGE-139 (2026-10-23)
+
+- Merged `main` at `fe466a5` over base `1ab614d` with a temporary index; kept main's version
+  for all seven textual conflicts and re-applied AGE-139 with `git merge-file`.
+- Adjusted main's AGE-138 `leaves_commit_to_runner`: Codex and non-confidential dsh still
+  leave the commit to the runner; confidential dsh gets the git common dir and commits.
+- Full suite 960 pass / 87 fail (same DSH sandbox/PTY class as main); focused dsh 87 pass;
+  dispatch 88 pass / 11 nested-sandbox failures.
+- The merge tree is left in the worktree for the runner's `post_run` commit because the agent
+  sandbox cannot write the main checkout's `.git`.

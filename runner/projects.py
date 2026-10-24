@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -1701,6 +1702,62 @@ def _under_resolved(cwd: str, roots: list[str]) -> bool:
 
 def _session_roots(project: Project) -> list[str]:
     return [str(project.path), str(WORKTREE_ROOT / project.key)]
+
+
+_GIT_HEAD_LIMIT = 4096  # a HEAD is one short line; anything bigger is not one
+
+
+@functools.lru_cache(maxsize=512)
+def _head_file(cwd: str) -> str | None:
+    """The HEAD file of the checkout enclosing cwd: a path walk, never a git process, because
+    the session list runs on every /api/projects request. A linked worktree's `.git` file
+    points at its own git dir, whose HEAD is that worktree's branch."""
+    path = Path(cwd)
+    while True:
+        marker = path / ".git"
+        try:
+            if marker.is_dir():
+                return str(marker / "HEAD")
+            if marker.is_file():
+                line = marker.read_text(encoding="utf-8", errors="replace").split("\n", 1)[0]
+                raw = line[len("gitdir:"):].strip() if line.startswith("gitdir:") else ""
+                if not raw:
+                    return None
+                target = Path(raw)
+                return str((target if target.is_absolute() else path / target) / "HEAD")
+        except (OSError, ValueError):
+            return None
+        if path.parent == path:
+            return None
+        path = path.parent
+
+
+@functools.lru_cache(maxsize=512)
+def _branch_at(head: str, mtime_ns: int, size: int) -> str | None:
+    """The branch named by a HEAD file, cached by its (mtime, size); None when detached."""
+    try:
+        if size > _GIT_HEAD_LIMIT:
+            return None
+        ref = Path(head).read_text(encoding="utf-8", errors="replace").strip()
+    except (OSError, ValueError):
+        return None
+    prefix = "ref: refs/heads/"
+    return ref[len(prefix):] if ref.startswith(prefix) else None
+
+
+def session_branch(cwd: object) -> str | None:
+    """The branch checked out where a session ran, shown as its row's worktree label. A missing
+    folder, a plain folder or a detached HEAD gives None (the row then shows only the time)."""
+    if not isinstance(cwd, str) or not os.path.isabs(cwd):
+        return None
+    head = _head_file(cwd)
+    if head is None:
+        return None
+    try:
+        st = os.stat(head)
+    except (OSError, ValueError):
+        return None
+    return _branch_at(head, st.st_mtime_ns, st.st_size)
 
 
 def _user_text(msg: object) -> str:
