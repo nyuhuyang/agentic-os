@@ -64,7 +64,8 @@ Flow for one project-bound run:
    shortstat, runner commit and the closing summary (secrets redacted, ≤ 1.2 KB). The page keeps the
    newest 40 sections and 12 KB.
 4. Pages are written with ai-memory's conditional write (`expected_page_id`), retried once on a
-   concurrent append; a repeated run id is a no-op.
+   concurrent append. A repeated run id is a no-op while it is one of the last 100 ids in the page
+   header (the section list itself keeps the newest 40).
 
 Confidential projects are skipped in both directions. Unknown confidentiality is skipped in the
 record path too.
@@ -81,13 +82,15 @@ sh scripts/install_ai_memory.sh --force    # re-download (upgrade); wiki/index u
 
 - Data: `state/ai-memory/` (gitignored; wiki markdown under `wiki/`, ~90 MB with the local
   embedding model, downloaded on first start). Server log: `state/ai-memory/logs/runner-server.log`.
-- Server: loopback `127.0.0.1:49375`, bearer token from `state/ai-memory/auth-tokens/default`, started
-  lazily by the runner (or the first `brief`) and reused by later runner processes. Stopping the
+- Server: loopback on a per-checkout port (base 49375, plus a small hash of the data directory), so two
+  checkouts never reuse each other's service. Bearer token from `state/ai-memory/auth-tokens/default`;
+  started lazily by the runner (or the first `brief`) and reused by later runner processes. Stopping the
   runner leaves it running; it is restarted on demand.
 - Disable: `rm state/ai-memory/enabled` (or `AGENTIC_OS_AI_MEMORY=0`). Re-enable: touch the marker,
   or `AGENTIC_OS_AI_MEMORY=1`.
 - External server: set `AI_MEMORY_SERVER_URL` and `AI_MEMORY_AUTH_TOKEN`; no local binary needed.
-- Port: `AGENTIC_OS_AI_MEMORY_PORT` (default 49375), so a stock ai-memory on 49374 is left alone.
+- Port: `AGENTIC_OS_AI_MEMORY_PORT` overrides the per-checkout default; a stock ai-memory on 49374 is
+  left alone.
 - The install is per checkout. After the branch merges, run the installer once in the main checkout;
   the merged runner finds it there.
 
