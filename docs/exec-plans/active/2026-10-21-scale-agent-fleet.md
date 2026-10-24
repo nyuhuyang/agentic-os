@@ -24,8 +24,10 @@ order of magnitude cheaper per unit of work than list-price Claude/Codex API. So
 - `dsh` carries bulk implementation. Its marginal cost is low enough that retries and best-of-N
   are affordable, which buys reliability more cheaply than a stronger model would.
 - `claude` / `codex` are a prepaid monthly allowance of *judgment*. Spend it on cross-provider
-  review, ambiguous design calls, and work `dsh` must not touch (confidential projects are already
-  refused for `dsh` in `runner/project_runs.py`). Never let implementation drain it.
+  review and ambiguous design calls. Never let implementation drain it. Confidential projects are
+  no longer an exception: AGE-139 (on main) lets `dsh` run there through the runner's Seatbelt
+  runner (`runner/dsh_confine.py`), which closes shell network and DNS while the model's own API
+  call stays outside that sandbox.
 - Reviewer capacity is therefore the scarce resource. Deterministic `verify` runs first and should
   absorb everything it can; cross-provider review is sampled and risk-weighted, not applied to
   every diff. Every check `verify` cannot do spends reviewer quota.
@@ -82,6 +84,9 @@ A project with no `verify` command auto-merges on the agent's own word.
 - Server stays on 127.0.0.1
 - Agent count is not a goal. Measure verified merged work per unit of human attention and per dollar.
 - Subscription quota is reserved for review; bulk implementation defaults to the metered agent.
+- `confidential` currently means "an external model may read the code, but its tools get no network
+  and no writes outside the worktree". If a project means "the code must never reach a third-party
+  model at all", none of the three backends qualifies and that needs its own decision, not a sandbox tweak.
 
 ## Verification
 - [ ] Each phase's own plan lists its proof commands; this umbrella is done when all four phase plans are in `completed/`

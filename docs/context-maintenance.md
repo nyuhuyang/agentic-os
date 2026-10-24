@@ -26,7 +26,7 @@
 
 ## Open Decisions
 <!-- Decisions made and their rationale — so a new session knows the "why" -->
-- Long-term direction (AGE-126): scale = less human attention per verified merge, not more agents. Order trust → attention → fan-out → ceiling; plan `2026-10-21-scale-agent-fleet`. Cost split: `dsh` is the elastic writer, subscription (`claude`/`codex`) quota is reserved for sampled cross-provider review. Known gap: verify badge `no check` still auto-merges
+- Long-term direction (AGE-126): scale = less human attention per verified merge, not more agents. Order trust → attention → fan-out → ceiling; plan `2026-10-21-scale-agent-fleet`. Cost split: `dsh` is the elastic writer, subscription (`claude`/`codex`) quota is reserved for sampled cross-provider review. Confidential projects can use `dsh` too (AGE-139, main): the runner's Seatbelt runner closes shell network/DNS, the model API call stays outside it. Known gap: verify badge `no check` still auto-merges
 - P15, P20, P23 parked in `docs/exec-plans/deferred/` (2026-10-13); P20 depended on `../symphony-ts`, which no longer exists
 - Server bound to 127.0.0.1 only — multi-host/remote scope is explicitly out of scope
 - Usage reset weekly limit is fixed at 3; unavailable Codex app-server data renders as no data
