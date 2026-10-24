@@ -260,6 +260,17 @@ def test_the_configured_token_is_scrubbed_from_pages_and_run_text():
         fake.close()
 
 
+def test_the_run_log_boundary_scrubs_the_token(monkeypatch):
+    import app  # the shared _sanitize_record every run-log writer and record copy goes through
+
+    secret = "boundary-token-123456"
+    monkeypatch.setenv("AI_MEMORY_AUTH_TOKEN", secret)
+    monkeypatch.setattr(ai_memory, "_DEFAULT", None)
+    record = app._sanitize_record({"prompt": f"x {secret}", "output": f"y {secret}",
+                                   "error": f"z {secret}", "extra": {"note": secret}})
+    assert secret not in json.dumps(record)
+
+
 def test_scrub_record_walks_nested_run_record_fields():
     secret = "bare-token-abcdefghijkl"
     record = {"error": f"bad {secret}", "extra": {"note": secret, "n": 1},
