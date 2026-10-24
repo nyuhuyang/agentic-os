@@ -30,6 +30,11 @@ from flask import jsonify, request
 
 from runner.core.module_registry import AgenticModule, registry
 
+try:  # runner/ is on sys.path when the dashboard imports it as `app`
+    import claude_account
+except ImportError:  # imported as a package (tests, tooling)
+    from runner import claude_account
+
 logger = logging.getLogger(__name__)
 
 _HERE = Path(__file__).resolve().parent
@@ -451,6 +456,7 @@ def _shell_env(project=None) -> dict:
     env["COLORTERM"] = "truecolor"
     for k, v in (project.env.items() if project else []):
         env[k] = f"{v}{os.pathsep}{env.get('PATH', '')}" if k == "PATH" else v
+    claude_account.activate_env(env)  # AGE-125: after project.env, a tab uses the active account
     return env
 
 

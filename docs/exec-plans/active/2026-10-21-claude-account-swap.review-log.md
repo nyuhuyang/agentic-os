@@ -549,3 +549,187 @@ Result: `/tmp/age125-art/i6/claudex-p_hj5fds/result.json`
 Note: inspection round 3 was first launched in the foreground and killed by the tool timeout (exit 137, no result); rerun in the background with the same inputs.
 
 Outcome: APPROVED at round 6, assurance=cross_provider. Rejected: AGE125-R2 (one 60 s poll of transient staleness). Accepted residual risks: concurrent Claude writers (sub-ms window), expired saved tokens, post-swap snapshots from older sessions.
+
+---
+
+## Design revision: per-account CLAUDE_CONFIG_DIR (2026-10-24)
+
+The user chose option A (one configuration directory per account) after the snapshot design failed
+in the field. The plan was rewritten in place; the rounds below review that revision. Paths:
+`runner/claude_account.py` (rewritten), `runner/app.py`, `runner/modules/pty/__init__.py`,
+`runner/run_skill.py`, `tests/test_claude_account.py`, `tests/conftest.py`,
+`docs/context-maintenance.md`.
+
+Roles for this revision: host/planner/builder DeepSeek (this session), reviewer Codex, inspector
+Codex (fresh sessions). Claude review was attempted and is unavailable (see "Reviewer
+availability"). Fallback: none for a DeepSeek host.
+
+## Plan review round 5 (Codex, fresh session)
+
+Result: `/tmp/age125-art/r5/claudex-1648ks5a/result.json` — verdict **BLOCKED**, assurance
+`cross_provider`, codex-cli 0.163.0, session `01a16e57-913f-75f3-a7c4-94a01b22e49f`.
+
+Findings and dispositions (all accepted):
+
+- **R1** (medium): a tab's `CLAUDE_CONFIG_DIR` is fixed at spawn, so a bare `claude` typed in an
+  older tab stays on the old account; the plan claimed otherwise. → Plan now documents tab
+  pinning, makes `claude_account.py claude` the per-invocation resolver, and adds acceptance and
+  a test for the wrapper.
+- **R2** (medium): a logged-out `claude -p` exits 0 but the plan promised a failed run. → Host
+  probed `--output-format stream-json` in a logged-out directory: the final result event carries
+  `is_error: true` and the text `Not logged in · Please run /login`. Plan now requires
+  `_stream_claude_run` to return `ok = returncode == 0 and not is_error` and
+  `_parse_project_output` to surface the result text as the error; both are tested.
+- **R3** (low): requirements were buried in prose. → Acceptance/Verification/Progress were
+  restructured into per-item checkboxes.
+
+The reviewer could not read repository files: its read-only mode needs a nested
+`/usr/bin/sandbox-exec`, which this session's outer sandbox refuses (`sandbox_apply: Operation not
+permitted`). Findings were therefore plan-text findings; the host verified each cited repository
+claim and supplied verbatim excerpts in later rounds.
+
+Host-side failure of the first launch: Codex could not start at all in the default `~/.codex`
+(writable state under `~/.codex/.tmp` is outside this sandbox). Reruns use
+`CODEX_HOME=/tmp/age125-codex-home` with `auth.json`/`config.toml` symlinked read-only from
+`~/.codex`; this is recorded because it changes what the reviewer could do, not the review
+protocol.
+
+## Plan review round 6 (Codex, resumed)
+
+Result: `/tmp/age125-art/r6/claudex-ixv0f3w4/result.json` — **BLOCKED** (R1/R2 confirmed
+addressed; repository inspection still blocked).
+
+- **R4** (low, accepted): locking and the pure-index `accounts()` requirement had no checkboxes.
+  → Added locked identity recording, locked `use`, `accounts()` as a pure index read, a
+  second-writer lock test, and a no-keychain/no-subprocess test.
+- **R5** (medium, accepted): `prepare` only linked names already in `~/.claude`; on a machine
+  without `~/.claude/projects`, Claude would create a real `projects` directory inside the first
+  account and cross-account resume would break, with no repair path. → `prepare` now creates the
+  canonical `~/.claude/projects` before linking, adopts an existing account-local `projects`
+  directory with an atomic same-filesystem rename when the canonical name is absent, and
+  `local_only()`/`status` report a left-over. Two tests cover bootstrap and adoption.
+
+## Plan review round 7 (Codex, resumed, host-supplied evidence)
+
+Result: `/tmp/age125-art/r7/claudex-a93kaypk/result.json` — **BLOCKED**, R1–R5 confirmed
+addressed, no new finding. The only stated blocker is the reviewer's inability to read files
+(limitation text: "Both direct inspection commands failed before execution with
+`sandbox-exec: sandbox_apply: Operation not permitted`"). No actionable plan defect remains in the
+supplied revision.
+
+## Reviewer availability
+
+- Codex as a *repository-aware* reviewer is unavailable here: its read-only sandbox cannot start
+  inside this session's sandbox. `--sandbox_permissions danger-full-access` was attempted for the
+  review command and refused ("no approval channel is available"). Codex still reviews the plan
+  text and, in inspect mode, the complete tracked diff supplied in the prompt; it cannot read
+  unchanged files.
+- Claude review was attempted (`/tmp/age125-art/c1/claudex-2pguyy1o`) and failed before reviewing:
+  `oauth_not_allowed_for_organization` (403), "Your organization has disabled Claude subscription
+  access for Claude Code". The current default login (`yh576@nyu.edu`) cannot run Claude Code at
+  all in this session, so Claude is not an available reviewer.
+- No approval-gated plan review is therefore recorded for this revision. The host verified every
+  repository claim in the plan directly and ran the proof commands; that is host evidence, not
+  independent approval. This limitation is reported in the final summary.
+
+## Build (DeepSeek host, no commit)
+
+- Pre-build commit: `f2c2eb6` (`agent/AGE-125`), worktree clean before build.
+- Changed: `runner/claude_account.py` (rewritten for per-account config dirs; snapshots, profile
+  API and `~/.claude.json` writes removed), `runner/app.py` (env injection for Claude spawns, quota
+  token from the active account, `is_error` stream results fail the run, result text as the error,
+  startup override warning), `runner/modules/pty/__init__.py` (tab env after `project.env`),
+  `runner/run_skill.py` (inherit the selector unless explicit), `tests/test_claude_account.py`
+  (69 tests), `tests/conftest.py` (`WORKTREE_ROOT` isolation for the unrelated
+  `test_local_tracker` failure), plan and `docs/context-maintenance.md`.
+- Proof: `py_compile runner/*.py` passes. Account tests 69 passed (71 after inspection fixes).
+  Targeted regression set (account, run engine, dsh, session-to-board, write safety, usage cache,
+  local tracker) 278 passed. Full suite in this sandbox: 867 passed / 62 failed; the same suite on
+  a clean `HEAD` export in this sandbox is 828 passed / 72 failed. Every remaining failure is a
+  confinement or PTY test whose `/usr/bin/sandbox-exec` or `pty.openpty()` is refused by this
+  session's sandbox (verified standalone), so none is caused by this diff; the unsandboxed venv run
+  remains the authority.
+
+## Inspection round 7 (fresh Codex session)
+
+Result: `/tmp/age125-art/i7/claudex-ys7g5exp/result.json` — response reached but the run is
+**invalid for approval** ("Code changed during inspection"): the host edited a tracked doc
+(`docs/context-maintenance.md`) while the inspection ran. Findings still reviewed and accepted:
+
+- **AGE125-R1** (high): `activate_env` returned an unchanged env when the selected account's
+  directory was missing, so runs could use the default or an inherited login — contradicting "no
+  silent fallback". Accepted: `activate_env` now always passes the selected directory; Claude
+  fails loudly. Test updated to require the selected path.
+- **AGE125-R2** (medium): `_credential_raw` let a keychain *failure* prevent the
+  `<dir>/.credentials.json` fallback, so quota could stay empty exactly when Claude itself falls
+  back to that file. Accepted: the file is tried after a keychain error; the error surfaces only
+  when neither source exists. Two tests (file fallback, both fail).
+- **AGE125-R3** (medium): `pty._shell_env` applied the account before `project.env`, so a project
+  `CLAUDE_CONFIG_DIR` could override it in tabs while `_project_exec_env` did not. Accepted: the
+  account is applied after `project.env`; test added.
+
+A fresh inspection of the fixed tree follows this entry.
+
+## Inspection round 8 (fresh Codex session)
+
+Result: `/tmp/age125-art/i8/claudex-g7bzm8u0/result.json` — response valid (snapshot unchanged
+during the run), verdict BLOCKED on repository access, two findings:
+
+- **AGE125-I8-01** (medium, accepted): `_security` could raise `TimeoutExpired`/`OSError`, which
+  `_credential_raw` did not catch, so the plaintext-credential fallback was skipped and the error
+  escaped `use`/`status`. Fixed: `_kc_read` converts security launch failures/timeouts into
+  `AccountError`; the file is still tried and the error surfaces only when neither source exists.
+  `use` also guards the `pgrep` count. Tests: file-after-timeout, warning-not-failure, status
+  "unreadable".
+- **AGE125-I8-02** (medium, accepted): adoption ran only when `~/.claude` already existed, so an
+  account holding a real `projects` directory on a machine without `~/.claude` could not be
+  adopted. Fixed: `link_shared` creates `~/.claude` first, adopts, then creates the canonical
+  stores. Test: adoption with `~/.claude` absent.
+
+## Inspection round 9 (fresh Codex session)
+
+Result: `/tmp/age125-art/i9/claudex-6hn7w_wo/result.json` — no findings; BLOCKED only because the
+reviewer could not read repository files ("approval withheld pending inspection of related callers
+and shared-state writers").
+
+## Inspection round 10 (fresh Codex session)
+
+Result: `/tmp/age125-art/i10/claudex-7xuh6kje/result.json` — **AGE125-SHARED-01** (medium,
+accepted): only `projects` was bootstrapped, so on a clean machine `skills`, `plugins`, `commands`,
+`agents`, `hooks`, `output-styles`, `todos` or `settings.json` created inside one account would stay
+local and `local_only` would not report them. Fixed: `SHARED_DIRS`/`SHARED_NAMES` cover those
+stores, `link_shared` adopts any known account-local copy (directory or file) before creating the
+canonical one, and `local_only` reports known names even with no canonical counterpart. Tests:
+clean-machine creation for every store, cross-account visibility, adoption of a local `skills`
+directory and a local `settings.json`.
+
+## Inspection round 11 (fresh Codex session)
+
+Result: `/tmp/age125-art/i11/claudex-a5sjl0fd/result.json` — **AGE125-I10-01** (medium, accepted):
+`settings.json`/`CLAUDE.md` were listed as shared but not created when absent, so no link was made
+on a clean machine. Fixed: `_ensure_canonical` seeds an empty `settings.json` (`{}`) and `CLAUDE.md`
+without overwriting existing content; the clean-machine test now checks both files and cross-account
+visibility.
+
+## Inspection round 12 (fresh Codex session, final tree)
+
+Result: `/tmp/age125-art/i12/claudex-x4x3uk_k/result.json` — **zero findings**; verdict BLOCKED
+with the only limitation being that repository reads fail
+("`sandbox-exec: sandbox_apply: Operation not permitted`"), so the reviewer could not inspect
+unchanged callers or shared-state writers. It states explicitly that an empty findings list is not
+proof of absence of defects. No independent approval is claimed.
+
+## Final state (2026-10-24)
+
+- Code hashes inspected in round 12 (unchanged since, except this log entry):
+  `runner/claude_account.py` `4a53a621…`, `runner/app.py` `256d8666…`,
+  `runner/modules/pty/__init__.py` `f5733a61…`, `runner/run_skill.py` `eef3101f…`,
+  `tests/test_claude_account.py` `a8943fc0…`, `tests/conftest.py` `6b725dd4…`.
+- `py_compile runner/*.py` passes; `tests/test_claude_account.py` 80 passed; targeted regression set
+  213 passed; full suite 878 passed / 62 failed in this sandbox, versus 828 / 72 for a clean `HEAD`
+  export under the same sandbox. All 62 failures are `sandbox-exec`/PTY-dependent tests
+  (`pty.openpty()` fails standalone here); none is attributable to this diff.
+- Rounds used: 3 plan reviews, 6 code inspections. Assurance: none for approval (reviewer
+  filesystem-blocked); all findings were resolved and re-tested. The only post-inspection edit is
+  this log entry.
+- Remaining: the user's browser logins and the real switch/resume acceptance, then archive the plan.
