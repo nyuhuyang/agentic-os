@@ -10,10 +10,12 @@ from runner.modules.linear.local_tracker import LocalTracker
 
 
 @pytest.fixture
-def tracker():
-    """Create a LocalTracker in a temp directory."""
+def tracker(monkeypatch):
+    """Create a LocalTracker in a temp directory, blind to the real worktree root's LOC-n dirs."""
+    import projects
     with tempfile.TemporaryDirectory() as tmpdir:
         state_dir = Path(tmpdir)
+        monkeypatch.setattr(projects, "WORKTREE_ROOT", state_dir / "wt")
         yield LocalTracker(state_dir)
 
 
