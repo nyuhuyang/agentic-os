@@ -68,6 +68,7 @@
 
   /* Window cards — all agents stacked */
   .windows-row { display: flex; align-items: flex-start; gap: 6px; margin-bottom: 12px; }
+  .claude-account-select { display: block; margin: 4px 0 0 auto; max-width: 68px; font-size: calc(10px * var(--fs)); background: var(--bg); color: var(--accent); border: 1px solid var(--border); border-radius: 4px; }
   .win-agent-label { flex: 0 0 72px; font-size: calc(10px * var(--fs)); color: var(--accent); letter-spacing: .3px; padding: 14px 4px 0 0; text-align: right; opacity: .8; }
   .windows-row-cards { flex: 1; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
   .win-card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
@@ -105,7 +106,7 @@
   /* Chart */
   .chart-box { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 16px 20px; margin-bottom: 20px; }
   .chart-title { font-size: calc(12px * var(--fs)); color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 12px; }
-  .chart-wrap { height: 100px; }
+  .chart-wrap { height: 170px; }
 
   /* Job board — kanban columns */
   .job-board { margin-bottom: 24px; }
@@ -377,7 +378,8 @@
   .session-list { padding: 0 4px 8px 20px; }
   .session-row { display: flex; gap: 10px; align-items: center; padding: 3px 0; font-size: calc(12px * var(--fs)); }
   .session-agent { font-size: calc(10px * var(--fs)); padding: 1px 4px; border-radius: 3px; border: 1px solid var(--border); }
-  .session-agent.codex { color: var(--green); } .session-agent.claude { color: var(--accent); }
+  .session-agent.claude { color: #e8a87c; } .session-agent.codex { color: #6fb5d4; }
+  .session-agent.dsh { color: #7ec8a0; }
   .session-copy.commit-todo { color: var(--green); border-color: var(--green); }
   .session-copy.commit-clean { color: var(--text-dim); border-color: var(--border); opacity: .6; }
   .session-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -385,6 +387,10 @@
   .session-copy { background: none; border: 1px solid var(--border); color: var(--text-dim); border-radius: 3px; cursor: pointer; font-family: inherit; font-size: calc(10px * var(--fs)); }
   .session-copy:hover { color: var(--accent); border-color: var(--accent); }
   .session-empty { color: var(--text-dim); font-size: calc(12px * var(--fs)); padding: 4px 0; }
+  .session-earlier-toggle { padding: 1px 0 1px 26px; }
+  .session-earlier { margin-left: 12px; padding-left: 14px; border-left: 1px solid var(--border); }
+  .session-row.is-earlier { opacity: .7; }
+  .session-earlier-tag { border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; font-size: calc(10px * var(--fs)); }
   .proj-tabs { display: flex; gap: 6px; padding: 0 4px 6px 20px; }
   .proj-tabs button.active { color: var(--accent); border-color: var(--accent); }
   .files-view { padding: 0 4px 8px 20px; font-size: calc(12px * var(--fs)); }
@@ -600,7 +606,16 @@
     <!-- Budget window cards — all agents visible -->
     {% macro win_row(agent_name, agent_label, w) %}
     <div class="windows-row" id="windows-row-{{ agent_name }}">
-      <div class="win-agent-label">{{ agent_label }}</div>
+      <div class="win-agent-label">{{ agent_label }}
+        {% if agent_name == "claude" and claude_accounts and claude_accounts.accounts|length > 1 %}
+        <select class="claude-account-select" title="Switch Claude account (AGE-125)" onchange="useClaudeAccount(this)">
+          {% if not claude_accounts.active %}<option value="" selected disabled>?</option>{% endif %}
+          {% for acc in claude_accounts.accounts %}
+          <option value="{{ acc.label }}" title="{{ acc.email }}" {% if acc.label == claude_accounts.active %}selected{% endif %}>{{ acc.label }}</option>
+          {% endfor %}
+        </select>
+        {% endif %}
+      </div>
       {% set w5 = w.window_5h %}
       {% set w7 = w.window_7d %}
       {% set wa = w.aux %}
@@ -758,7 +773,9 @@
 
     <!-- Activity chart -->
     <div class="chart-box">
-      <div class="chart-title">Activity — last 30 days · {{ stats.total_runs }} total runs</div>
+      {% set _w, _a, _o = chart_data["work"] | sum, chart_data["agentic"] | sum, chart_data["other"] | sum %}
+      {% set _total = _w + _a + _o %}
+      <div class="chart-title">Activity — last 30 days · {{ _total }} conversations · {{ _w }} work{% if _total %} ({{ (_w / _total * 100) | round | int }}%){% endif %} · {{ _a }} AgenticOS · {{ _o }} other</div>
       <div class="chart-wrap">
         <canvas id="activityChart"></canvas>
       </div>
@@ -792,7 +809,7 @@
     <section class="skill-panel" id="skill-panel">
       <div class="skill-panel-header">
         <div class="skill-panel-title">Projects</div>
-        <div class="skill-panel-subtitle">Registered projects and their Claude / Codex sessions, newest first</div>
+        <div class="skill-panel-subtitle">Registered projects and their Claude / Codex / DeepSeek sessions, newest first; a card's earlier sessions fold under its current one</div>
       </div>
 
 
@@ -809,6 +826,7 @@
           <select id="project-history" style="display:none"></select>
           <div class="key-preview" id="project-key-preview"></div>
           <label class="check"><input type="checkbox" name="confidential" checked> Confidential (sandboxed; only template comments reach Linear)</label>
+          <label class="check"><input type="checkbox" name="commit" checked> Commit button on session rows (untick for notes or a wiki that is not code)</label>
           <div class="error" id="project-form-error"></div>
           <div class="actions">
             <button type="button" class="session-copy" id="project-form-cancel">Cancel</button>
@@ -986,29 +1004,60 @@
 <script>
 // Activity chart
 const pageDataEl = document.getElementById('page-data');
-const chartData = JSON.parse(pageDataEl?.dataset.chartData || '{"labels":[],"values":[]}');
+const chartData = JSON.parse(pageDataEl?.dataset.chartData || '{"labels":[]}');
 const errorRuns = JSON.parse(pageDataEl?.dataset.errorRuns || '[]');
+// Hover or click a day: a crosshair plus that day's counts, like a stock chart
+const crosshair = {
+  id: 'crosshair',
+  afterDatasetsDraw(chart) {
+    const active = chart.tooltip?.getActiveElements?.() || [];
+    if (!active.length) return;
+    const x = active[0].element.x, { top, bottom } = chart.chartArea, ctx = chart.ctx;
+    ctx.save();
+    ctx.strokeStyle = '#555';
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+    ctx.restore();
+  }
+};
 new Chart(document.getElementById('activityChart'), {
   type: 'line',
   data: {
     labels: chartData.labels,
-    datasets: [{
-      data: chartData.values,
-      borderColor: '#e8723a',
-      backgroundColor: 'rgba(232,114,58,0.08)',
-      borderWidth: 2,
-      pointRadius: 0,
-      fill: true,
-      tension: 0.3,
-    }]
+    // Stacked fill, bottom to top: AgenticOS, Work, Other. A band's thickness is that
+    // kind's conversations; the top line's height is the day's total. Boundaries are a
+    // translucent light hairline: it separates the bands without a hard black outline
+    // that fights the dark theme (AGE-128).
+    datasets: [
+      ['AgenticOS', chartData.agentic, '#e8723a'],
+      ['Work', chartData.work, '#4caf50'],
+      ['Other', chartData.other, '#4fa3e0'],
+    ].map(([label, data, color]) => ({
+      label, data: data || [], borderColor: 'rgba(255,255,255,0.3)', backgroundColor: color,
+      borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, pointBackgroundColor: color,
+      fill: true, tension: 0.25, cubicInterpolationMode: 'monotone',
+    }))
   },
+  plugins: [crosshair],
   options: {
     responsive: true,
     maintainAspectRatio: false,
-    plugins: { legend: { display: false } },
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: true, labels: { color: '#888', boxWidth: 10, font: { size: 11 } } },
+      tooltip: {
+        callbacks: {
+          footer: items => {  // from the day's data, so a line hidden in the legend still counts
+            const i = items[0]?.dataIndex, work = chartData.work?.[i] || 0;
+            const total = work + (chartData.agentic?.[i] || 0) + (chartData.other?.[i] || 0);
+            return total ? `Total: ${total} · Work: ${Math.round(work / total * 100)}%` : '';
+          }
+        }
+      }
+    },
     scales: {
       x: { grid: { color: '#1e1e1e' }, ticks: { color: '#555', font: { size: 11 }, maxTicksLimit: 6 } },
-      y: { grid: { color: '#1e1e1e' }, ticks: { color: '#555', font: { size: 11 }, stepSize: 1 }, beginAtZero: true }
+      y: { stacked: true, grid: { color: '#1e1e1e' }, ticks: { color: '#555', font: { size: 11 }, stepSize: 1 }, beginAtZero: true }
     }
   }
 });
@@ -1160,7 +1209,7 @@ function _renderProjectsInto(el) {
     const p = byKey[k];
     if (p.error) return `<div class="project-section"><div class="project-head project-error" ${head(p)}>${_esc(p.name || p.key)} — ${_esc(p.error)} ${removeBtn(p)}</div></div>`;
     const isOpen = open.has(p.key);
-    const rows = (p.sessions || []).map(s => _sessionRow(p.key, s)).join('') || '<div class="session-empty">No sessions in this project yet.</div>';
+    const rows = _sessionRowsHtml(p.key, p.sessions || [], p.commit !== false) || '<div class="session-empty">No sessions in this project yet.</div>';
     return `<div class="project-section">
       <div class="project-head" ${head(p)} aria-expanded="${isOpen}">${isOpen ? '▾' : '▸'} <b>${_esc(p.name || p.key)}</b> ${badges(p)}
         <span class="session-meta">${(p.sessions || []).length} sessions</span>
@@ -1187,8 +1236,37 @@ function _commitTitle(c) {
   if (c.state === 'unmerged') return `${c.ahead} commit${c.ahead === 1 ? '' : 's'} not yet merged into main: click to merge`;
   return 'Nothing to commit; already merged into main';
 }
-function _sessionRow(key, s) {
-  const ed = _sessionEdit && _sessionEdit.key === key && _sessionEdit.agent === s.agent && _sessionEdit.id === s.id ? _sessionEdit : null;
+// A card can own several sessions: an agent switch starts a new one (AGE-113) and a reset can
+// too. The panel lists the card once — its current session — with earlier sessions folded under
+// it, so the same card never appears twice with two agents. Opening an editor expands its group.
+const _sessionEarlierOpen = new Set();  // `${project key}\u0000${card label}`
+function _sessionGroup(key, label) { return `${key}\u0000${label}`; }
+function _sessionRowsHtml(key, rows, commit) {
+  const blocks = [], byLabel = new Map();
+  for (const s of rows) {
+    if (!s.label) { blocks.push({ row: s }); continue; }
+    let g = byLabel.get(s.label);
+    if (!g) { g = { label: s.label, rows: [] }; byLabel.set(s.label, g); blocks.push(g); }
+    g.rows.push(s);
+  }
+  return blocks.map(b => {
+    if (b.row) return _sessionRow(key, b.row, commit);
+    if (b.rows.length === 1) return _sessionRow(key, b.rows[0], commit);
+    const at = b.rows.findIndex(s => s.card_current === true);
+    const current = b.rows[at < 0 ? 0 : at], earlier = b.rows.filter((_, i) => i !== (at < 0 ? 0 : at));
+    const editing = earlier.some(s => _sessionEdit && _sessionEdit.key === key
+      && _sessionEdit.agent === s.agent && _sessionEdit.id === s.id);
+    const open = editing || _sessionEarlierOpen.has(_sessionGroup(key, b.label));
+    const n = `${earlier.length} earlier session${earlier.length === 1 ? '' : 's'}`;
+    return _sessionRow(key, current, commit)
+      + `<div class="session-earlier-toggle"><button class="session-copy" data-searlier="${_esc(b.label)}" data-key="${_esc(key)}"
+           aria-expanded="${open}">${open ? '▾' : '▸'} ${n}</button></div>`
+      + (open ? `<div class="session-earlier">${earlier.map(s => _sessionRow(key, s, commit, true)).join('')}</div>` : '');
+  }).join('');
+}
+function _sessionRow(key, s, commit = true, earlier = false) {
+  let ed = _sessionEdit && _sessionEdit.key === key && _sessionEdit.agent === s.agent && _sessionEdit.id === s.id ? _sessionEdit : null;
+  if (ed && ed.mode === 'commit' && !commit) ed = null;  // Commit was turned off while its editor was open
   const ids = `data-key="${_esc(key)}" data-sagent="${_esc(s.agent)}" data-sid="${_esc(s.id)}"`;
   const err = ed && ed.error ? `<span class="session-meta" style="color:${ed.mode === 'note' ? 'var(--text-dim)' : 'var(--red)'}">${_esc(ed.error)}</span>` : '';
   // A board-launched session shows its card identifier first, e.g. "AGE-102 · title" (§9).
@@ -1196,7 +1274,7 @@ function _sessionRow(key, s) {
   // One Resume (§6): the session's card goes back to Todo and its reply opens.
   let actions = `<button class="session-copy" data-resume-agent="${_esc(s.agent)}" data-resume-id="${_esc(s.id)}" data-project="${_esc(key)}"
           title="Put this session's card in Todo and write the next reply (${_esc(s.resume)})">Resume</button>
-        <button class="session-copy ${_commitClass(s.commit_state)}" data-saction="commit" ${ids} title="${_esc(_commitTitle(s.commit_state))}">Commit</button>
+        ${commit ? `<button class="session-copy ${_commitClass(s.commit_state)}" data-saction="commit" ${ids} title="${_esc(_commitTitle(s.commit_state))}">Commit</button>` : ''}
         <button class="session-copy" data-saction="rename" ${ids}>Rename</button>
         <button class="session-copy" data-saction="remove" ${ids}>Remove</button>`;
   if (ed && ed.mode === 'note' && ed.conflict) {
@@ -1232,15 +1310,17 @@ function _sessionRow(key, s) {
     }
   } else if (ed && ed.mode === 'remove') {
     const where = s.agent === 'codex' ? "it is archived the way Codex archives (its rollout moves to ~/.codex/archived_sessions); restore with Codex's unarchive"
+      : s.agent === 'dsh' ? 'its session folder moves to ~/.agentic-os/session-trash/dsh; restore by moving it back'
       : 'its transcript moves to ~/.agentic-os/session-trash; restore by moving it back';
-    title = `<span class="session-title" style="white-space:normal">Remove "${_esc(s.title)}"? It leaves this panel and ${s.agent === 'codex' ? 'codex resume' : 'claude --resume'} — ${where}.</span>`;
+    const resume = { codex: 'codex resume', claude: 'claude --resume', dsh: 'dsh --resume' }[s.agent] || 'the session picker';
+    title = `<span class="session-title" style="white-space:normal">Remove "${_esc(s.title)}"? It leaves this panel and ${resume} — ${where}.</span>`;
     actions = `<button class="session-copy" data-saction="confirm" ${ids} style="color:var(--red)">Remove</button><button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
   }
   return `
-      <div class="session-row">
-        <span class="session-agent ${s.agent}">${s.agent === 'codex' ? 'CX' : 'CC'}</span>
+      <div class="session-row${earlier ? ' is-earlier' : ''}">
+        <span class="session-agent ${_esc(s.agent)}" title="${_esc(_agentName(s.agent) || s.agent)}">${({codex: 'CX', claude: 'CC', dsh: 'DS'})[s.agent] || _esc(s.agent)}</span>
         ${title}
-        <span class="session-meta">${_esc(s.branch || '')} · ${_ago(s.updated)}</span>
+        <span class="session-meta">${earlier ? '<span class="session-earlier-tag">earlier</span> ' : ''}${_esc(s.branch || '')} · ${_ago(s.updated)}</span>
         ${err}${actions}
       </div>`;
 }
@@ -1361,7 +1441,19 @@ async function _filesOpenFile(key, path) {
   _renderProjects();
 }
 
-async function loadProjects() {
+// One /api/projects in flight per page; calls meanwhile share one follow-up load that starts
+// after it, so `await loadProjects()` still sees data fetched after the call (board latency).
+let _projectsInflight = null, _projectsQueued = null;
+function loadProjects() {
+  if (!_projectsInflight) {
+    _projectsInflight = _loadProjectsOnce().finally(() => { _projectsInflight = null; });
+    return _projectsInflight;
+  }
+  if (!_projectsQueued) _projectsQueued = _projectsInflight.then(() => { _projectsQueued = null; return loadProjects(); });
+  return _projectsQueued;
+}
+
+async function _loadProjectsOnce() {
   try {
     const res = await fetch('/api/projects');
     _projectData = res.ok ? await res.json() : { projects: [], error: `HTTP ${res.status}` };
@@ -1402,9 +1494,9 @@ async function _projectApi(method, url, body) {
 // The key is the folder name (same rules as projects.derive_key; the server re-checks).
 function _deriveKey(folder) {
   const base = (folder || '').replace(/[^A-Za-z0-9._-]/g, '-').replace(/^[^A-Za-z0-9]+/, '') || 'project';
-  const taken = new Set((_projectData.projects || []).map(p => p.key));
+  const taken = new Set((_projectData.projects || []).map(p => p.key.toLowerCase()));  // case-insensitive, like derive_key
   let key = base, n = 1;
-  while (taken.has(key)) key = `${base}-${++n}`;
+  while (taken.has(key.toLowerCase())) key = `${base}-${++n}`;
   return key;
 }
 
@@ -1412,7 +1504,8 @@ function _projectKeyPreview() {
   const f = document.getElementById('project-form');
   const folder = f.path.value.trim().replace(/\/+$/, '').split('/').pop();
   document.getElementById('project-key-preview').textContent =
-    f.dataset.mode === 'edit' ? `Key: ${f.dataset.key}` : (folder ? `Key: ${_deriveKey(folder)}  (Linear label project:${_deriveKey(folder)})` : '');
+    f.dataset.mode === 'edit' ? `Key: ${f.dataset.key}` : !folder ? ''
+      : `Key: ${_deriveKey(folder)}  (${f.confidential.checked ? 'never sent to Linear' : `Linear label project:${_deriveKey(folder)}`})`;
 }
 
 // Bumped on every open, close, drop and typed path: a lookup result applies only while its
@@ -1430,6 +1523,7 @@ function _projectFormOpen(p) {
   document.getElementById('project-form-title').textContent = p ? `Edit ${p.key}` : 'Add project';
   f.path.value = e.path || ''; f.path.readOnly = !!p;
   f.confidential.checked = p ? !!e.confidential : true;
+  f.commit.checked = p ? e.commit !== false : true;
   for (const id of ['project-history-btn', 'project-drop']) document.getElementById(id).style.display = p ? 'none' : '';
   document.getElementById('project-history').style.display = 'none';
   document.getElementById('project-form-error').textContent = '';
@@ -1450,13 +1544,18 @@ document.getElementById('project-form')?.addEventListener('submit', async (event
   const hash = f.dataset.hash || '';
   save.disabled = true; errEl.textContent = 'Saving…';
   let r;
-  if (f.dataset.mode === 'edit') {  // only confidential changes; every other field stays (SAP-007)
-    r = await _projectApi('PATCH', `/api/projects/${encodeURIComponent(f.dataset.key)}`, { confidential: f.confidential.checked, registry_hash: hash });
+  if (f.dataset.mode === 'edit') {  // only confidential and commit change; every other field stays (SAP-007)
+    r = await _projectApi('PATCH', `/api/projects/${encodeURIComponent(f.dataset.key)}`, { confidential: f.confidential.checked, commit: f.commit.checked, registry_hash: hash });
   } else {
     const path = f.path.value.trim();
     const key = _deriveKey(path.replace(/\/+$/, '').split('/').pop());
-    r = await _projectApi('POST', '/api/projects', { key, registry_hash: hash,
-      entry: { path, confidential: f.confidential.checked, no_push: true } });
+    const body = { key, registry_hash: hash, entry: { path, confidential: f.confidential.checked, no_push: true, ...(f.commit.checked ? {} : { commit: false }) } };
+    r = await _projectApi('POST', '/api/projects', body);
+    // A folder with files but no commit yet: commit them from here, no terminal (AGE-127).
+    if (r.data?.needs_commit && confirm(`${r.data.error}.\n\nCommit them as the initial commit? `
+        + 'git init runs first if needed; files matched by .gitignore are skipped; files over 50 MB stop the save.')) {
+      r = await _projectApi('POST', '/api/projects', { ...body, commit_existing: true });
+    }
   }
   save.disabled = false;
   if (!r.ok) {
@@ -1550,6 +1649,12 @@ async function _projectBaseline(key) {
 }
 
 document.getElementById('project-panel-content')?.addEventListener('click', (event) => {
+  const searlier = event.target.closest('[data-searlier]');
+  if (searlier) {
+    const g = _sessionGroup(searlier.dataset.key, searlier.dataset.searlier);
+    _sessionEarlierOpen.has(g) ? _sessionEarlierOpen.delete(g) : _sessionEarlierOpen.add(g);
+    _renderProjects(); return;
+  }
   const act = event.target.closest('[data-proj-action]');
   if (act) {
     const key = act.dataset.key, p = (_projectData.projects || []).find(x => x.key === key);
@@ -2099,11 +2204,13 @@ let _boardItemsByRunId = {};
 let _trashOpen = false;
 let _cancelledItems = [];
 let _pendingBoardRefresh = false;
+let _boardRefreshSeq = 0;
 let _optimisticBoardHoldUntil = 0;
 let _heldBoardRefreshTimer = null;
 let _optimisticLinearIssuePatches = {};
 // Live interactive card sessions, term_id -> card key, refreshed with the board (AC4).
 let _liveCardTerms = new Map();
+let _liveCardTermsSeq = 0;
 // A card terminal that still holds its card: live, or its cleanup failed (still owns the card, ICS-29).
 function _holdsCard(i) { return i.kind === 'resume' && !!i.card_key && (i.alive !== false || !!i.cleanup_failed); }
 function _cardHasSession(key) { return !!key && [..._liveCardTerms.values()].includes(key); }
@@ -2114,9 +2221,17 @@ async function _termListBounded(ms = 1500) {
   return Promise.race([_cardTermList(), new Promise(r => setTimeout(() => r(null), ms))]);
 }
 async function _refreshLiveCardTerms() {  // never holds the board up: no answer = unchanged
+  const seq = ++_liveCardTermsSeq;
   const list = await _termListBounded();
-  if (list) _liveCardTerms = new Map(list.filter(i => _holdsCard(i))
-                                         .map(i => [i.term_id, i.card_key]));
+  if (!list || seq !== _liveCardTermsSeq) return;
+  const next = new Map(list.filter(i => _holdsCard(i)).map(i => [i.term_id, i.card_key]));
+  if (next.size === _liveCardTerms.size && [...next].every(([id, key]) => _liveCardTerms.get(id) === key)) return;
+  _liveCardTerms = next;
+  if (_shouldDeferBoardRefresh() || Date.now() < _optimisticBoardHoldUntil) {
+    _pendingBoardRefresh = true;
+    return;
+  }
+  _renderBoardItems(_boardItems);
 }
 let _detailLinearInitial = null;
 let _detailLinearUpdatedAt = '';
@@ -2740,7 +2855,8 @@ function _buildColCard(run) {
   const verifyHtml = warning ? `<span class="verify-badge bad" title="project ${_esc(run.project_key || '')}">${_esc(warning)}</span>` : '';
   const projectHtml = (run.issue_project || run.project_key)
     ? `<span class="verify-badge" title="Runs in a worktree of this project">${_esc(_projName(run.issue_project || run.project_key))}</span>` : '';
-  const syncHtml = run.unsynced ? '<span class="verify-badge" title="Not synced to Linear yet; it can be dispatched once it has its Linear id">syncing…</span>' : '';
+  const syncHtml = run.unsynced ? '<span class="verify-badge" title="Not synced to Linear yet; it can be dispatched once it has its Linear id">syncing…</span>'
+    : run.local_only ? '<span class="verify-badge" title="Confidential project: this task stays on this machine, never in Linear">local</span>' : '';
   const metaHtml = metaModelHtml || verifyHtml || projectHtml || syncHtml
     ? `<div class="job-card-meta">${metaModelHtml}${projectHtml}${syncHtml}${verifyHtml}</div>` : '';
   const footerControlsHtml = run._is_linear_issue && state === 'todo' ? todoAgentToggle : '';
@@ -2919,16 +3035,21 @@ async function refreshJobBoard(force = false) {
     _pendingBoardRefresh = true;
     return;
   }
+  const seq = ++_boardRefreshSeq;
   try {
     const teamParam = _currentTeamId ? `?team_id=${encodeURIComponent(_currentTeamId)}` : '';
     const fetches = [fetch('/api/runs?state=running'), fetch('/api/runs?limit=80'), fetch(`/api/linear/issues${teamParam}`),
                      fetch('/api/runs/latest-by-issue')];
     const results = await Promise.all(fetches);
-    await _refreshLiveCardTerms();
     const running = await results[0].json();
     const recent = await results[1].json();
     const linearIssues = results[2] ? await results[2].json() : [];
     const olderLatest = results[3] && results[3].ok ? await results[3].json() : {};  // beyond the 80-run window (REV23-01)
+    if (seq !== _boardRefreshSeq) return;
+    if (!force && _shouldDeferBoardRefresh()) {
+      _pendingBoardRefresh = true;
+      return;
+    }
 
     const latestRuns = _latestLinearRuns([
       ...running.map(r => ({ ...r, status: 'running' })),
@@ -2979,12 +3100,14 @@ async function refreshJobBoard(force = false) {
         waiting: latest?.waiting || '',
         resume_ok: !!latest?.resume_ok,  // precomputed by the server (§1)
         resume_agent: latest?.resume_agent || '',
-        unsynced: String(issue.id || '').startsWith('local-') && _trackerType === 'linear',
+        unsynced: String(issue.id || '').startsWith('local-') && _trackerType === 'linear' && !issue.local_only,
+        local_only: !!issue.local_only,
         _is_linear_issue: true,
       };
     });
 
     _renderBoardItems(all);
+    void _refreshLiveCardTerms().catch(() => {});
     _cardTermSyncLatest();  // the open card gained an attempt elsewhere? (QR-004)
   } catch (_) {}
 }
@@ -3139,7 +3262,7 @@ async function _refreshLocalTrash() {
     const r = await fetch('/api/linear/trash');
     if (!r.ok) return;
     _cancelledItems = (await r.json()).map(i => ({ run_id: `linear-${i.id}`, linear_issue_id: i.id,
-      identifier: i.identifier, title: i.title, when: '' }));
+      identifier: i.identifier, title: i.title, when: '', local_only: !!i.local_only }));
     const count = document.getElementById('trash-count');
     if (count) count.textContent = String(_cancelledItems.length);
     if (_trashOpen) renderTrash(_cancelledItems);
@@ -3150,8 +3273,13 @@ async function _refreshLocalTrash() {
 async function emptyTrash() {
   const n = _cancelledItems.length;
   if (!n) return;
-  const where = _trackerType === 'linear' ? "They stay recoverable from Linear's archive." : 'They are removed from the local tracker.';
-  if (!confirm(`Archive all ${n} canceled issue(s)? ${where} Run records and session transcripts are kept.`)) return;
+  // Local tasks (local tracker, or a confidential project's local-only task) are deleted for good;
+  // only Linear issues stay recoverable (AGE-127 I2-03).
+  const local = _cancelledItems.filter(i => i.local_only || _trackerType !== 'linear').length;
+  const parts = [];
+  if (n - local) parts.push(`${n - local} Linear issue(s) are archived and stay recoverable from Linear's archive.`);
+  if (local) parts.push(`${local} local task(s) are deleted from this machine for good.`);
+  if (!confirm(`Empty trash (${n} canceled)? ${parts.join(' ')} Run records and session transcripts are kept.`)) return;
   const r = await _projectApi('POST', '/api/linear/trash/empty');
   const failed = Object.entries((r.data && r.data.failed) || {});
   if (!r.ok || failed.length) alert('Empty trash: ' + (r.data.error || failed.map(([k, v]) => `${k}: ${v}`).join('\n')));
@@ -4722,6 +4850,16 @@ setInterval(_sttTick, 1000);
 setInterval(refreshJobBoard, 15000);
 setInterval(_flushPendingBoardRefresh, 1000);
 setInterval(() => updateWindows(), 60000);
+// A CLI swap or another tab can change the account: keep the picker on the real login (AGE-125).
+setInterval(async () => {
+  const sel = document.querySelector('.claude-account-select');
+  if (!sel || sel.disabled) return;
+  const r = await fetch('/api/claude-accounts').catch(() => null);
+  const data = r && r.ok ? await r.json().catch(() => null) : null;
+  if (!data) return;
+  sel.value = data.active || '';
+  if (sel.value !== (data.active || '')) sel.selectedIndex = -1;
+}, 60000);
 setInterval(_updateRuntimeChip, 30000);
 setInterval(() => {
   document.querySelectorAll('.win-pace-marker').forEach(marker => {
@@ -5138,7 +5276,8 @@ function _resolveReply(runId, data) {
 }
 function _showUnsent(text, reason) {
   const box = document.getElementById('detail-term-reply');
-  if (!box.value.trim()) box.value = text;
+  text = text.replace(/\s*\n\s*/g, ' ');  // a one-line box
+  if (!box.value.includes(text)) box.value = box.value.trim() ? `${box.value.trim()} ${text}` : text;  // added, never dropped (AGE-117)
   document.getElementById('detail-term-status').textContent = `reply not completed: ${reason}`;
 }
 // One outcome check per pending reply at a time; it keeps polling (every 3 s) until the outcome is known,
@@ -5182,20 +5321,90 @@ function _cardTermReplyState() {
   if (!_cardTerm.runId) why = 'No run on this card yet';
   else if (_cardTerm.historyUnknown) why = 'Loading…';  // the latest attempt is not known (QR-R3-003)
   else if (viewed !== latest) why = 'Viewing an earlier attempt — switch to the latest to reply';
-  else if (d && d.finished === false) why = 'The agent is working — reply when it stops';
+  else if (_cardTermWorking()) why = '';  // typed now, sent when it stops (AGE-117)
   else if (!d || d.unknown || d.finished !== true) why = 'Loading…';  // stopped must be known (QR-R2-003)
-  else if (d && d.finished && !d.status && _cardTerm.mode !== 'interactive') why = 'Starting…';  // launched, no record yet
   else if (_cardTerm.sendingReply) why = 'Sending…';
   input.disabled = btn.disabled = !!why;
-  input.placeholder = why || (_cardTerm.mode === 'interactive'
-    ? 'Quick reply: ends the open interactive session and continues it here'
-    : 'Quick reply: continues this same session');
+  input.placeholder = why || (_cardTermWorking()
+    ? 'The agent is working: your reply is queued and sent when it stops'
+    : _cardTerm.mode === 'interactive'
+      ? 'Quick reply: ends the open interactive session and continues it here'
+      : 'Quick reply: continues this same session');
+  const queued = _queuedReplies()[_cardKey()];
+  if (queued) document.getElementById('detail-term-status').textContent = `queued, sent when the agent stops: ${queued.text}`;
 }
+// The latest attempt is still running, or launched with no record yet.
+function _cardTermWorking() {
+  const d = _cardTerm.data;
+  return !!d && (d.finished === false || (d.finished === true && !d.status && _cardTerm.mode !== 'interactive'));
+}
+// Quick replies typed while the agent works (AGE-117): kept per card in localStorage (a reload keeps
+// them), joined into one reply, and sent once the attempt they were typed on stops, card open or not.
+// A cancelled attempt sends nothing: the text goes back to its card unsent.
+// ponytail: lives in this browser; with the dashboard closed the reply waits until it is opened again.
+const _QUEUED_REPLIES = 'agenticos.queuedReplies';
+function _queuedReplies() {
+  try { return JSON.parse(_storageGet(_QUEUED_REPLIES, '{}')) || {}; } catch (_) { return {}; }
+}
+function _setQueuedReplies(q) { _storageSet(_QUEUED_REPLIES, JSON.stringify(q)); }
+function _queueReply(key, runId, text) {
+  const q = _queuedReplies();
+  q[key] = { runId, text: q[key] ? `${q[key].text}\n${text}` : text };
+  _setQueuedReplies(q);
+  _watchQueued(key);
+}
+const _queuedWatching = new Set();  // one polling chain per card
+async function _watchQueued(key, chained = false) {
+  if (_queuedWatching.has(key) && !chained) return;
+  const item = _queuedReplies()[key];
+  if (!item) { _queuedWatching.delete(key); return; }
+  _queuedWatching.add(key);
+  let d = null;
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(item.runId)}/events`);
+    if (res.ok) d = await res.json();
+  } catch (_) {}
+  if (d && d.finished === true && !d.unknown && d.status) { _queuedWatching.delete(key); await _flushQueued(key, d.status); }
+  else setTimeout(() => _watchQueued(key, true), 5000);
+}
+async function _flushQueued(key, status) {
+  const q = _queuedReplies(), item = q[key];
+  if (!item) return;
+  delete q[key];
+  _setQueuedReplies(q);
+  const open = () => _isModalOpen('detail-modal') && _cardKey() === key;
+  const unsent = reason => {
+    if (open()) { _showUnsent(item.text, reason); return; }
+    const prev = _unsentReplies.get(key);  // the cancelled reply's own text may be waiting there too
+    _unsentReplies.set(key, { text: prev ? `${prev.text}\n${item.text}` : item.text, reason });
+  };
+  if (status === 'cancelled') { unsent('the run was cancelled'); return; }
+  let data = null;
+  try { data = await _postRetry(item.runId, { reply: item.text, strict: true }); }  // the same session (QR2)
+  catch (err) { data = { ok: false, error: `connection failed: ${err}` }; }
+  if (!data || !data.ok || !data.run_id) { unsent((data && data.error) || 'not sent'); return; }
+  _pendingReplies.set(data.run_id, { text: item.text, key });
+  _checkReply(data.run_id);
+  refreshJobBoard(true);
+  if (!open()) return;
+  const gen = _cardTerm.gen;  // on screen: its run streams here, like a reply sent from the box
+  document.getElementById('detail-term-status').textContent = 'continuing the same session…';
+  _cardTerm.runId = _cardTerm.latestRunId = data.run_id;
+  await _cardTermAttempts(gen);
+  if (_cardTermCurrent(gen)) _cardTermLoad(data.run_id);
+}
+Object.keys(_queuedReplies()).forEach(key => _watchQueued(key));  // queued before a reload
 async function _cardTermQuickReply() {
   const gen = _cardTerm.gen, input = document.getElementById('detail-term-reply'), status = document.getElementById('detail-term-status');
   const reply = input.value.trim(), runId = _cardTerm.runId, key = _cardKey();
   const latestId = _cardTerm.latestRunId || runId;
   if (!reply || !runId || input.disabled || (_cardTerm.viewRunId || runId) !== latestId) return;  // latest attempt only
+  if (_cardTermWorking()) {  // queued, sent when this attempt stops (AGE-117)
+    _queueReply(key, latestId, reply);
+    if (input.value.trim() === reply) input.value = '';
+    _cardTermReplyState();
+    return;
+  }
   const token = {};  // this send's own: a newer card's controls are never changed by it (QR-003)
   _cardTerm.sendingReply = token; _cardTermReplyState();
   status.textContent = 'sending…';
@@ -5614,6 +5823,10 @@ socket.on('linear_issues_updated', (data) => {
   clearTimeout(_projectsReloadTimer);
   _projectsReloadTimer = setTimeout(loadProjects, 500);
 });
+socket.on('projects_commit_state', () => {  // a commit-colour pass landed: show it
+  clearTimeout(_projectsReloadTimer);
+  _projectsReloadTimer = setTimeout(loadProjects, 500);
+});
 
 socket.on('run_progress', (data) => {
   if (!data.run_id) return;
@@ -5949,6 +6162,23 @@ async function submitNewIssue() {
   } catch (err) {
     status.textContent = 'Error: ' + err;
     btn.disabled = false;
+  }
+}
+
+async function useClaudeAccount(sel) {
+  sel.disabled = true;
+  try {
+    const r = await fetch('/api/claude-accounts/use', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label: sel.value }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    if ((data.warnings || []).length) alert(`Switched to ${data.label}.\n${data.warnings.join('\n')}`);
+    location.reload();
+  } catch (e) {
+    alert(`Could not switch Claude account: ${e.message}`);
+    location.reload();
   }
 }
 </script>

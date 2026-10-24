@@ -161,13 +161,16 @@ query AgenticOSProjects {
 }
 """
 
+# viewer.teams = teams you belong to; root `teams` also lists public teams you left (AGE-122)
 _QUERY_TEAMS = """
 query AgenticOSTeams {
-  teams(first: 50) {
-    nodes {
-      id
-      key
-      name
+  viewer {
+    teams(first: 50) {
+      nodes {
+        id
+        key
+        name
+      }
     }
   }
 }
@@ -475,7 +478,7 @@ class LinearClient:
 
     def fetch_teams(self) -> list[dict]:
         data = self._graphql(_QUERY_TEAMS)
-        nodes = (data.get("teams") or {}).get("nodes", [])
+        nodes = ((data.get("viewer") or {}).get("teams") or {}).get("nodes", [])
         return [{"id": n["id"], "key": n["key"], "name": n["name"]} for n in nodes]
 
     def resolve_state_id_by_team(self, team_id: str, state_name: str) -> str | None:

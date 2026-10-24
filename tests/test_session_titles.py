@@ -560,7 +560,8 @@ def test_board_label_uses_the_live_local_title_after_a_restart(cs):
     import state_io
     state_io.write_json_atomic(tmp / "tasks.json", {ISSUE: {"id": ISSUE, "state": "In Review", "title": "B"}})
     mod.issues_cache.clear()  # a restart in local mode: nothing cached yet
-    assert app_mod._board_sessions()[1][("claude", SID)] == {"label": "T-1", "title": "B"}  # R3-02
+    label = app_mod._board_sessions()[1][("claude", SID)]
+    assert {k: label[k] for k in ("label", "title")} == {"label": "T-1", "title": "B"}  # R3-02
 
 
 def test_a_card_never_continues_another_cards_session(cs, monkeypatch):
@@ -764,7 +765,8 @@ def test_card_row_rename_with_an_empty_cache_keeps_the_card_metadata(cs, demo):
     assert client.post(f"/api/projects/demo/sessions/claude/{SID}/rename", json={"title": "New"}).status_code == 200
     cached = mod.issues_cache[ISSUE]
     assert cached["identifier"] == "LOC-7" and cached["state"] == "In Review" and cached["labels"] == ["x"]  # R9-02
-    assert app_mod._board_sessions()[1][("claude", SID)] == {"label": "LOC-7", "title": "New"}
+    label = app_mod._board_sessions()[1][("claude", SID)]
+    assert {k: label[k] for k in ("label", "title")} == {"label": "LOC-7", "title": "New"}
 
 
 def test_retry_transient_intent_keeps_the_generation_the_request_read(cs, demo, monkeypatch):
@@ -1093,3 +1095,56 @@ def test_card_continuation_outlives_the_run_cap_and_stops_at_the_session_ceiling
         assert rec["error"] == f"Timed out after {session_cap}s"
     else:
         assert rec["duration_s"] > 1  # ran past the (scaled) run cap
+
+
+# ── AGE-143: a card's sessions after an agent switch ───────────────────────
+
+def test_a_switched_card_marks_only_the_session_it_continues(cs, demo):
+    """Both sessions stay real and listed, but the card names one as current: the project panel
+    folds the other one under it instead of showing the same card twice (AGE-143)."""
+    app_mod, mod, client, log, events, tmp = cs
+    transcript(demo, sid="old", title="One card")
+    codex_store(demo, "new", title="One card")
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": "old", "issue_identifier": "T-1",
+                    "started_at": "2026-10-23T10:00:00+00:00"})
+    write_log(log, {"run_id": "b", "agent": "codex", "status": "review", "agent_session_id": "new", "issue_identifier": "T-1",
+                    "started_at": "2026-10-23T10:05:00+00:00"})
+    board_ids, labels = app_mod._board_sessions()
+    assert labels[("claude", "old")]["label"] == labels[("codex", "new")]["label"] == "T-1"
+    assert labels[("claude", "old")]["current"] is False
+    assert labels[("codex", "new")]["current"] is True
+    rows = {r["id"]: r for r in app_mod._project_sessions(pj.get_project("demo"), board_ids, labels)}
+    assert rows["old"]["card_current"] is False and rows["new"]["card_current"] is True
+
+
+def test_the_session_the_card_continues_is_current_not_the_newest_file(cs, demo):
+    """A newer transcript from an external resume does not move the card: its own newest record
+    still names the session a reply continues."""
+    app_mod, mod, client, log, events, tmp = cs
+    transcript(demo, sid="current", title="One card", age=600)
+    transcript(demo, sid="touched-later", title="One card", age=0)
+    write_log(log, {"run_id": "b", "agent": "claude", "status": "review", "agent_session_id": "touched-later", "issue_identifier": "T-1",
+                    "started_at": "2026-10-23T10:00:00+00:00"})
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": "current", "issue_identifier": "T-1",
+                    "started_at": "2026-10-23T10:05:00+00:00"})
+    rows = {r["id"]: r for r in app_mod._project_sessions(pj.get_project("demo"), *app_mod._board_sessions())}
+    assert rows["touched-later"]["card_current"] is False  # newest mtime, older card record
+    assert rows["current"]["card_current"] is True
+
+
+def test_a_running_launch_is_current_but_an_older_one_left_behind_is_not(cs, demo, monkeypatch):
+    app_mod, mod, client, log, events, tmp = cs
+    transcript(demo, sid="done", title="One card")
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": "done", "issue_identifier": "T-1",
+                    "started_at": "2026-10-23T10:05:00+00:00"})
+    monkeypatch.setattr(app_mod, "_running_jobs", {
+        "old": {"run_id": "old", "agent": "codex", "agent_session_id": "stale", "linear_issue_id": ISSUE,
+                "record_extra": {"issue_identifier": "T-1"},
+                "started_at": "2026-10-23T10:00:00+00:00"},
+        "new": {"run_id": "new", "agent": "codex", "agent_session_id": "live", "linear_issue_id": ISSUE,
+                "record_extra": {"issue_identifier": "T-1"},
+                "started_at": "2026-10-23T10:10:00+00:00"},
+    })
+    _, labels = app_mod._board_sessions()
+    assert labels[("codex", "stale")]["current"] is False  # older job, superseded by the record
+    assert labels[("codex", "live")]["current"] is True     # started after it: the card continues this

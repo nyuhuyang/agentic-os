@@ -369,7 +369,7 @@ def test_init_repo(reg, tmp_path):
     root = pj.init_repo(str(tmp_path / "fresh"))
     log = subprocess.run(["git", "-C", str(root), "log", "--oneline"], capture_output=True, text=True).stdout
     assert len(log.splitlines()) == 1
-    with pytest.raises(pj.ProjectError, match="not an empty folder"):
+    with pytest.raises(pj.ProjectError, match="already a git repository with commits"):
         pj.init_repo(str(root))
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -447,32 +447,64 @@ def test_create_auto_inits_missing_and_empty_folders_only(reg, tmp_path):
     full.mkdir(); (full / "data.csv").write_text("x")
     (a / "src").mkdir(); (a / "src" / "f.py").write_text("x")
     before = path.read_bytes()
-    for folder in (full, a / "src"):
-        with pytest.raises(pj.ProjectError, match="not empty; run git init"):
-            pj.save_project("n", {"path": str(folder)}, h(path), create=True)
+    with pytest.raises(pj.NeedsCommit, match="1 file"):
+        pj.save_project("n", {"path": str(full)}, h(path), create=True)
+    with pytest.raises(pj.ProjectError, match="inside the git repository"):
+        pj.save_project("n", {"path": str(a / "src")}, h(path), create=True)
     assert path.read_bytes() == before and not (full / ".git").exists()
 
 
-def test_set_confidential_changes_only_that_field(reg):
+def test_create_commits_existing_files_on_request(reg, tmp_path, monkeypatch):
+    path, a, b = reg
+    plain, bare = tmp_path / "plain", tmp_path / "bare"  # no repo yet / repo with no commit (AGE-127)
+    for folder in (plain, bare):
+        folder.mkdir(); (folder / "a.py").write_text("x"); (folder / ".gitignore").write_text("big/\n")
+        (folder / "big").mkdir(); (folder / "big" / "blob").write_text("y")
+    git(bare, "init", "-q")
+    with pytest.raises(pj.NeedsCommit):
+        pj.save_project("bare", {"path": str(bare)}, h(path), create=True)
+    assert (bare / ".git").is_dir()  # a pre-existing .git is never removed
+    for key, folder in (("plain", plain), ("bare", bare)):
+        pj.save_project(key, {"path": str(folder)}, h(path), create=True, commit_existing=True)
+        tracked = subprocess.run(["git", "-C", str(folder), "ls-files"], capture_output=True, text=True).stdout.split()
+        assert sorted(tracked) == [".gitignore", "a.py"], key
+    huge = tmp_path / "huge"
+    huge.mkdir()
+    with open(huge / "h.bin", "wb") as f:
+        f.truncate(pj.MAX_INIT_FILE_BYTES + 1)
+    with pytest.raises(pj.ProjectError, match="over 50 MB.*h.bin"):
+        pj.save_project("huge", {"path": str(huge)}, h(path), create=True, commit_existing=True)
+    assert not (huge / ".git").exists() and "huge" not in pj.raw_entries(path.read_bytes())
+
+
+def test_set_flags_changes_only_that_field(reg):
     path, a, b = reg
     doc = yaml.safe_load(path.read_text())
     doc["projects"]["beta"].update({"note": "", "env": {}, "seed": [], "kind": None})
     path.write_text(yaml.safe_dump(doc, sort_keys=False))
     before = dict(pj.raw_entries(path.read_bytes())["beta"])
-    pj.set_confidential("beta", True, h(path))
+    pj.set_flags("beta", {"confidential": True}, h(path))
     after = pj.raw_entries(path.read_bytes())["beta"]
     assert after.pop("confidential") is True and before.pop("confidential") is False and after == before
     with pj.project_lock("beta"):
         with pytest.raises(pj.ProjectBusy):
-            pj.set_confidential("beta", False, h(path))
+            pj.set_flags("beta", {"confidential": False}, h(path))
     with pytest.raises(pj.RegistryConflict):
-        pj.set_confidential("beta", False, "stale")
+        pj.set_flags("beta", {"confidential": False}, "stale")
 
 
 @pytest.mark.parametrize("name, want", [("my-repo", "my-repo"), ("My Repo!", "My-Repo-"), ("研究", "project"),
-                                        ("---", "project"), ("_x", "x"), ("alpha", "alpha-2")])
+                                        ("---", "project"), ("_x", "x"), ("alpha", "alpha-2"),
+                                        ("Alpha", "Alpha-2")])
 def test_derive_key(name, want):
     assert pj.derive_key(name, {"alpha": {}}) == want
+
+
+def test_create_refuses_a_key_differing_only_in_case(reg, tmp_path):
+    path, a, b = reg  # worktree folders are named by key; macOS folders ignore case (AGE-127)
+    with pytest.raises(pj.ProjectError, match="'alpha' already exists"):
+        pj.save_project("ALPHA", {"path": str(tmp_path / "new")}, h(path), create=True)
+    assert not (tmp_path / "new").exists()
 
 
 @pytest.fixture
@@ -513,10 +545,23 @@ def test_locate_folder(home):
             pj.locate_folder(bad, [])
 
 
+def test_commit_flag_defaults_on_and_set_flags_turns_it_off(reg):
+    path, a, b = reg
+    assert pj.load_registry(path)["beta"].commit is True
+    before = dict(pj.raw_entries(path.read_bytes())["beta"])
+    assert pj.set_flags("beta", {"commit": False}, h(path))["commit"] is False
+    after = pj.raw_entries(path.read_bytes())["beta"]
+    assert after.pop("commit") is False and after == before
+    assert pj.load_registry(path)["beta"].commit is False
+    for bad in ({"commit": "no"}, {"path": "/x"}, {}):
+        with pytest.raises(pj.ProjectError):
+            pj.set_flags("beta", bad, h(path))
+
+
 def test_set_confidential_does_not_leak_through_a_yaml_alias(reg):
     path, a, b = reg
     path.write_text(f"projects:\n  alpha: &shared\n    path: {a}\n    confidential: true\n  beta: *shared\n")
-    pj.set_confidential("alpha", False, h(path))
+    pj.set_flags("alpha", {"confidential": False}, h(path))
     raw = pj.raw_entries(path.read_bytes())
     assert raw["alpha"]["confidential"] is False and raw["beta"]["confidential"] is True
 

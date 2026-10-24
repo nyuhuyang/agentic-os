@@ -186,3 +186,32 @@ def test_non_string_titles_and_blob_ids_degrade(env):
     assert set(rows) == {"dict-title", "ok"} and rows["ok"]["title"] == "first"
     import json as _j
     _j.dumps(list(rows.values()))  # serializable
+
+
+def test_codex_rows_queried_once_until_the_db_changes(env, monkeypatch):
+    root, project = env
+    codex_db(root, [("t1", PROJ, None, "one", None, 1, 0, None, "cli", 0)])
+    other = pj.Project(key="other", path=Path("/b/other"), verify="true")
+    connects = []
+    real = sqlite3.connect
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: connects.append(a) or real(*a, **k))
+    for p in (project, other, project):
+        pj.codex_sessions(p)
+    assert len(connects) == 1  # board latency: one query for every project while the DB is unchanged
+    db = real(root / "state_5.sqlite")
+    db.execute("INSERT INTO threads VALUES ('t2', ?, NULL, 'two', NULL, 2, 0, NULL, 'cli', 0)", (PROJ,))
+    db.commit()
+    db.close()
+    assert {r["id"] for r in pj.codex_sessions(project)} == {"t1", "t2"} and len(connects) == 2
+
+
+def test_codex_rows_memo_expires(env, monkeypatch):
+    root, project = env
+    codex_db(root, [("t1", PROJ, None, "one", None, 1, 0, None, "cli", 0)])
+    connects = []
+    real = sqlite3.connect
+    monkeypatch.setattr(sqlite3, "connect", lambda *a, **k: connects.append(a) or real(*a, **k))
+    monkeypatch.setattr(pj, "_CODEX_ROWS_MAX_AGE_S", 0)  # a WAL commit published after the files settled (BL-004)
+    pj.codex_sessions(project)
+    pj.codex_sessions(project)
+    assert len(connects) == 2

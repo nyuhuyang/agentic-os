@@ -230,6 +230,21 @@ def test_streaming_is_progress_and_cancel_keeps_the_session(harness, monkeypatch
     assert records(log)[-1]["status"] == "cancelled" and records(log)[-1]["agent_session_id"] == "s-9"  # UI2-04
 
 
+def test_a_test_run_is_announced_in_the_stream_and_on_the_card(harness):
+    """AGE-140: before a test suite starts, the run view and the card both say so."""
+    app_mod, mod, client, log, events, tmp = harness
+    app_mod._publish_run_line("r", "claude", json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Bash", "input": {"command": "pytest -q tests/"}}]}}))
+    stream = [e[1]["line"] for e in events if e[0] == "run_event"]
+    assert any("▶ running tests: pytest -q tests/" in line for line in stream)
+    cards = [e[1]["snippet"] for e in events if e[0] == "run_progress"]
+    assert cards and cards[-1].startswith("▶ running tests: pytest -q")
+    app_mod._publish_run_line("r", "claude", json.dumps({"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "name": "Read", "input": {"file_path": "a.py"}}]}}))
+    cards = [e[1]["snippet"] for e in events if e[0] == "run_progress"]
+    assert cards[-1].startswith("[tool] Read")  # the next call replaces it instead of going stale
+
+
 def test_card_terminals_stay_out_of_the_panel(harness, monkeypatch, tmp_path):
     app_mod, mod, client, log, events, tmp = harness
     import runner.modules.pty as pty_mod
