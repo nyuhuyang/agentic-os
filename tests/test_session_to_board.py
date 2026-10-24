@@ -204,6 +204,26 @@ def test_dsh_project_session_list_rename_resume_and_remove(stb, monkeypatch, com
     assert client.post(base + "/to-board").status_code == 404
 
 
+def test_dsh_session_rows_show_the_branch_of_their_checkout(stb, monkeypatch):
+    """AGE-144: a DeepSeek row's worktree label comes from the folder it ran in, both the main
+    checkout and a linked worktree, without running git on the request path."""
+    app_mod, mod, client, log, tmp, proj, conf, launches = stb
+    monkeypatch.setattr(app_mod, "_request_commit_pass", lambda jobs: None)
+    base = subprocess.run(["git", "-C", str(proj), "symbolic-ref", "--short", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "-C", str(proj), "-c", "user.email=t@example.com", "-c", "user.name=t",
+                    "commit", "-q", "--allow-empty", "-m", "base"], check=True)
+    wt = tmp / "wt" / "demo" / "T-1"
+    subprocess.run(["git", "-C", str(proj), "worktree", "add", "-q", "-b", "agent/T-1", str(wt)], check=True)
+    (wt / "src").mkdir()
+    dsh_session(app_mod, "session-in-main", proj)
+    dsh_session(app_mod, "session-in-worktree", wt / "src")
+    listed = client.get("/api/projects").get_json()["projects"][0]["sessions"]
+    rows = {s["id"]: s for s in listed if s["agent"] == "dsh"}
+    assert rows["session-in-main"]["branch"] == base
+    assert rows["session-in-worktree"]["branch"] == "agent/T-1"
+
+
 def test_dsh_session_writes_refuse_live_external_owner_and_store_escape(stb):
     import fcntl
     app_mod, mod, client, log, tmp, proj, conf, launches = stb

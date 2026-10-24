@@ -4129,9 +4129,14 @@ def _project_sessions(project, board_ids=None, labels=None) -> list[dict]:
         target = _dsh_read(path)
         if target and _projects._under_resolved(target["cwd"], _projects._session_roots(project)):
             row = {k: target[k] for k in ("agent", "id", "cwd", "title", "updated")}
-            row.update(branch=None, tokens=None,
+            row.update(branch=_projects.session_branch(target["cwd"]), tokens=None,
                        resume=f"cd {shlex.quote(target['cwd'])} && dsh --profile tui --resume {shlex.quote(target['id'])}")
             rows.append(_projects._with_label(row, labels))
+    if labels:  # which row is the card's current session; earlier ones fold under it (AGE-143)
+        for row in rows:
+            info = labels.get((row.get("agent"), row.get("id")))
+            if isinstance(info, dict) and "current" in info:
+                row["card_current"] = bool(info["current"])
     rows.sort(key=lambda row: row["updated"], reverse=True)
     return rows[:_projects.MAX_SESSIONS]
 
@@ -4228,10 +4233,39 @@ def _all_records() -> list[dict]:
     return _RECORDS_CACHE["records"]
 
 
+def _current_card_sessions() -> dict[str, tuple[str, str]]:
+    """issue id -> (agent, session id) the card continues now.
+
+    A switch starts a new session for the same card (AGE-113), so a card can own several real
+    sessions. The newest record naming one is current; a launch still running (no record yet)
+    takes over only when it started after that record, so an old run left behind by a switch
+    never hides the session the card actually continues."""
+    best: dict[str, tuple[str, str, str]] = {}
+    for r in _all_records():
+        agent, sid, iid = canonical_agent(r.get("agent")) or r.get("agent"), r.get("agent_session_id"), r.get("linear_issue_id")
+        if not iid or not sid or agent not in _SESSION_AGENTS:
+            continue
+        if r.get("interactive_ended") or r.get("status") == "archived":
+            continue
+        started = r.get("started_at") if isinstance(r.get("started_at"), str) else ""
+        best[iid] = (agent, sid, started)
+    for run_id, job in list(_running_jobs.items()):
+        agent = canonical_agent(job.get("agent")) or job.get("agent")
+        sid = job.get("agent_session_id") or (_SESSION_CLAIMS.get(run_id) or (None, None))[1]
+        iid = job.get("linear_issue_id")
+        if not iid or not sid or agent not in _SESSION_AGENTS:
+            continue
+        started = job.get("started_at") if isinstance(job.get("started_at"), str) else ""
+        if iid not in best or started >= best[iid][2]:
+            best[iid] = (agent, sid, started)
+    return {iid: (agent, sid) for iid, (agent, sid, _) in best.items()}
+
+
 def _board_sessions() -> tuple[set, dict]:
     """(board_ids, labels) for projects.py (§9): the (agent, session) pairs the runner launched,
     from its run records, running jobs and session claims; and (agent, session) -> the card's
-    identifier, from the record or the tracker cache."""
+    identifier, from the record or the tracker cache. A label also says whether its session is
+    the card's current one (`current`), so the project panel can fold earlier sessions away."""
     ids: set = set()
     labels: dict = {}
     cache = _linear_cache()
@@ -4252,7 +4286,8 @@ def _board_sessions() -> tuple[set, dict]:
         issue = _issue(r["linear_issue_id"]) if r.get("linear_issue_id") else {}
         ident = r.get("issue_identifier") or issue.get("identifier")
         if ident:
-            labels[(agent, sid)] = {"label": ident, "title": issue.get("title") or r.get("issue_title")}
+            labels[(agent, sid)] = {"label": ident, "title": issue.get("title") or r.get("issue_title"),
+                                    "issue_id": r.get("linear_issue_id")}
     # A running card's session is labelled while it runs, not only once its record lands (§2).
     for job in list(_running_jobs.values()):
         agent, sid = canonical_agent(job.get("agent")) or job.get("agent"), job.get("agent_session_id")
@@ -4263,11 +4298,16 @@ def _board_sessions() -> tuple[set, dict]:
         extra = job.get("record_extra") or {}
         ident = extra.get("issue_identifier") or issue.get("identifier") or (labels.get((agent, sid)) or {}).get("label")
         if ident:
-            labels[(agent, sid)] = {"label": ident, "title": issue.get("title") or extra.get("issue_title") or job.get("issue_title")}
+            labels[(agent, sid)] = {"label": ident, "title": issue.get("title") or extra.get("issue_title") or job.get("issue_title"),
+                                    "issue_id": iid}
     ids |= {(canonical_agent(a) or a, s) for a, s in _live_session_ids() if a and s}
     # A card label only while the session's newest owning card is live: a card emptied from the
     # trash leaves the session its own name (R10-01). Visibility (ids) is unaffected.
     labels = {k: v for k, v in labels.items() if k in owners}
+    current = _current_card_sessions()  # one pass for every project's rows, not one per project
+    for (agent, sid), info in labels.items():
+        if isinstance(info, dict):
+            info["current"] = current.get(info.get("issue_id")) == (agent, sid)
     return ids, labels
 
 
