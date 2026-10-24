@@ -28,9 +28,11 @@ import re
 import select
 import selectors
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 import uuid
@@ -881,9 +883,17 @@ def _persist_and_publish(run_id: str, fmt: str, sf, line: str) -> None:
 def _publish_run_line(run_id: str, fmt: str, line: str) -> None:
     """Every streamed stdout line of every run feeds the live terminal view (ring + socket)
     and, once announced, the job's agent session id (C, A/R02)."""
-    for shown in project_runs.render_event(fmt, line):
+    shown_lines = project_runs.render_event(fmt, line)
+    for shown in shown_lines:
         seq = project_runs.ring_for(run_id).append(shown)
         socketio.emit("run_event", {"run_id": run_id, "line": shown, "seq": seq})
+    # AGE-140: the card says what is running, with the test-run heads-up first (a quiet suite
+    # must not look like a hang). Every later tool call replaces it, so it does not go stale.
+    snippet = next((x for x in shown_lines if project_runs.TEST_NOTE_MARK in x), None) \
+        or next((x for x in shown_lines if "[tool]" in x), None)
+    if snippet:
+        snippet = re.sub(r"\x1b\[[0-9;]*m", "", snippet).replace("[runner] ", "").strip()
+        socketio.emit("run_progress", {"run_id": run_id, "event": "tool_use", "snippet": snippet})
     project_runs.note_agent_error(run_id, fmt, line)  # the agent's own failure text, for the record (D6)
     job = _running_jobs.get(run_id)
     if job is not None:
@@ -2538,7 +2548,9 @@ def _stream_dsh_run(
                 progress = {"state": "running", "stream_log": str(stream_path), "last_event_type": ev_type}
                 if ev_type == "tool_call":
                     tool_name = str(ev.get("tool") or "tool")
-                    snippet = f"[tool] {tool_name}: {str(ev.get('input', {}))[:80]}"
+                    test_cmd = project_runs.test_command_of("dsh", line)  # AGE-140: keep the test note on the card
+                    snippet = project_runs.test_note_text(test_cmd) if test_cmd \
+                        else f"[tool] {tool_name}: {str(ev.get('input', {}))[:80]}"
                     socketio.emit("run_progress", {"run_id": run_id, "snippet": snippet, "event": "tool_use"})
                     progress["tool_name"] = tool_name
                 elif ev_type == "tool_result":
@@ -2709,7 +2721,14 @@ def _claude_bin() -> str:
 
 
 def _project_cmd(agent: str, project, prompt: str, resume_session: str | None) -> list[str]:
-    cli = project_runs.agent_cli(agent, project, _claude_bin(), dsh_cli.cli_prefix)
+    if agent == "dsh" and project.confidential and resume_session:
+        # AGE-139: a stored dsh session can carry its own sandbox/approval events; the patch
+        # cannot prove the effective mode. A fresh session is the only confidential form.
+        raise project_runs.ProjectRunError(
+            "confidential dsh does not resume a stored session (it can carry a wider sandbox mode); "
+            "start a new session")
+    cli = project_runs.agent_cli(agent, project, _claude_bin(), dsh_cli.cli_prefix,
+                                 dsh_cli.confidential_cli_prefix)
     if agent == "claude":
         resume = ["--resume", resume_session] if resume_session else []
         return cli + resume + [prompt, "--output-format", "stream-json"]
@@ -2750,12 +2769,161 @@ def _parse_project_output(agent: str, lines: list[str], stderr: str, returncode:
     return events.final or "", it, ot, None, events.session_id, bool(ok and events.final is not None), err
 
 
-def _project_exec_env(agent: str, project) -> dict:
+_CONFINE_TEMP_PREFIXES = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
+# AGE-139: these names make a child load code or configuration before dsh's sandbox exists.
+# They are removed after project env, not trusted as project configuration.
+_CONFINE_BOOTSTRAP_ENV = frozenset({
+    "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED",
+    "PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME",
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "DYLD_INSERT_LIBRARIES",
+    "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS",
+    "PERL5OPT", "PERL5LIB", "RUBYOPT", "RUBYLIB",
+    "JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS",
+    "GIT_SSH", "GIT_SSH_COMMAND", "GIT_EXTERNAL_DIFF", "GIT_PAGER", "GIT_EDITOR",
+    "GIT_ASKPASS", "SSH_ASKPASS", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT",
+    "EDITOR", "VISUAL", "PAGER", "BROWSER", "DEEPSEEK_BASE_URL", "DEEPSEEK_SEARCH_BASE_URL",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+})
+
+
+def _under(path: str, *roots: str) -> bool:
+    return any(path == root or path.startswith(root + os.sep) for root in roots)
+
+
+def _expand_home(raw: str, home: Path) -> Path:
+    if raw == "~":
+        return home
+    if raw.startswith("~/"):
+        return home / raw[2:]
+    return Path(raw)
+
+
+def _confine_home(env: dict[str, str], name: str, default: Path, root: str, tmp: str,
+                  effective_home: Path) -> Path:
+    """Resolve and validate one dsh user-data root from the final launch environment."""
+    raw = env.get(name)
+    if raw is not None and raw.strip():
+        if raw.startswith("~") and raw != "~" and not raw.startswith("~/"):
+            raise project_runs.ProjectRunError(
+                f"confidential dsh: {name} must be an absolute path or ~/...")
+        if not os.path.isabs(os.path.expanduser(raw)) and raw != "~" and not raw.startswith("~/"):
+            raise project_runs.ProjectRunError(
+                f"confidential dsh: {name} must be absolute")
+        home = Path(os.path.realpath(_expand_home(raw, effective_home)))
+    else:
+        home = Path(os.path.realpath(default))
+    if _under(str(home), root, tmp, os.path.realpath(str(_projects.WORKTREE_ROOT)),
+              *_CONFINE_TEMP_PREFIXES):
+        raise project_runs.ProjectRunError(
+            f"confidential dsh: {name} must not be inside the ticket worktree or a temp area")
+    return home
+
+
+def _trusted_temp_root() -> str:
+    """The runner's temp area, only when it is a real macOS temp root (AGE-139).
+
+    dsh loads unset `TMPDIR`/`TMP`/`TEMP` from a repository `.env`, and
+    `projects.sandbox_profile` trusts `tempfile.gettempdir()`. A wider temp root would make
+    an agent-writable directory (or the home directory) writable inside the sandbox.
+    """
+    tmp = os.path.realpath(tempfile.gettempdir())
+    if not _under(tmp, *_CONFINE_TEMP_PREFIXES):
+        raise project_runs.ProjectRunError(
+            "confidential dsh: the runner's temp root is not a trusted temporary area")
+    return tmp
+
+
+def _cleanup_dsh_spill(env: dict) -> None:
+    """Remove only a per-run child of the runner's own spill root."""
+    raw = env.get("AGENTICOS_DSH_SPILL_DIR")
+    if not raw:
+        return
+    root = Path(os.path.realpath(OUTPUTS_DIR / "dsh-spill"))
+    path = Path(os.path.realpath(raw))
+    if path.parent == root and path.name not in ("", ".", ".."):
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _project_exec_env(agent: str, project, worktree: str | None = None,
+                      run_id: str | None = None) -> dict:
     env = _registry_exec_env(agent, _load_registry(agent))
     for k, v in project.env.items():
         env[k] = f"{v}{os.pathsep}{env.get('PATH', '')}" if k == "PATH" else v
+    env.pop("AGENTICOS_DSH_SPILL_DIR", None)  # never inherited from a project or the runner
     if agent == "claude" and project.confidential:  # AGE-129: Codex inside Claude's sandbox
         env["PATH"] = f"{project_runs.SANDBOXED_BIN}{os.pathsep}{env.get('PATH', '')}"
+    if agent == "dsh" and project.confidential:
+        if not worktree:
+            raise project_runs.ProjectRunError("confidential dsh: the ticket worktree is unknown")
+        root = os.path.realpath(worktree)
+        tmp = _trusted_temp_root()
+        project_keys = set(project.env)
+        # The launch composition must be the one the preflight checked: drop every ambient
+        # DSH_* switch (DSH_SNAPSHOT, DSH_TOOLS_MODE, telemetry, ...) except the two homes
+        # that are validated and pinned below.
+        for name in [k for k in env if k.upper().startswith("DSH_")
+                     and k not in ("DSH_HOME", "DSH_AGENTS_HOME")]:
+            env.pop(name, None)
+        for name in project_keys:
+            if name in _CONFINE_BOOTSTRAP_ENV or name.upper().startswith("DYLD_"):
+                env.pop(name, None)
+        home_raw = env.get("HOME")
+        if home_raw and not os.path.isabs(home_raw):
+            raise project_runs.ProjectRunError("confidential dsh: HOME must be absolute")
+        effective_home = Path(os.path.realpath(home_raw)) if home_raw else Path.home()
+        protected = (root, tmp, os.path.realpath(str(_projects.WORKTREE_ROOT)), *_CONFINE_TEMP_PREFIXES)
+        if _under(str(effective_home), *protected):
+            raise project_runs.ProjectRunError(
+                "confidential dsh: HOME must not be inside the ticket worktree or a temp area")
+        env["HOME"] = str(effective_home)
+        dsh_home = _confine_home(env, "DSH_HOME", effective_home / ".dsh", root, tmp, effective_home)
+        agents_home = _confine_home(env, "DSH_AGENTS_HOME", effective_home / ".agents", root, tmp,
+                                    effective_home)
+        # A repository .env is loaded for unset variables, so pin these after project env.
+        env["DSH_HOME"] = str(dsh_home)
+        env["DSH_AGENTS_HOME"] = str(agents_home)
+        # dsh's unsandboxed spill writers cache a directory under tmpdir(); keep that directory
+        # outside every shell-writable root so a confined shell cannot redirect it with a symlink.
+        problem = _records_unsafe()
+        if problem:
+            raise project_runs.ProjectRunError(f"confidential dsh: {problem}")
+        git_dir = os.path.realpath(project_runs.common_dir(project))
+        if not os.path.isdir(git_dir):
+            raise project_runs.ProjectRunError(
+                "confidential dsh: the repository git directory is missing")
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", run_id) if run_id else f"adhoc-{os.getpid()}-{time.time_ns()}"
+        spill_root = Path(os.path.realpath(OUTPUTS_DIR / "dsh-spill"))
+        if _under(str(spill_root), root, *_CONFINE_TEMP_PREFIXES):
+            raise project_runs.ProjectRunError(
+                "confidential dsh: the spill directory must be outside the worktree and temp")
+        # Best-effort sweep of crash residue; a live run's directory is recent.
+        if spill_root.is_dir():
+            cutoff = time.time() - 24 * 3600
+            for child in spill_root.iterdir():
+                try:
+                    stale = child.is_dir() and child.stat().st_mtime < cutoff
+                except OSError:
+                    continue
+                if stale:
+                    shutil.rmtree(child, ignore_errors=True)
+        spill = spill_root / name
+        spill.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            env["TMPDIR"] = env["TMP"] = env["TEMP"] = str(spill)
+            env["AGENTICOS_DSH_SPILL_DIR"] = str(spill)
+            env["DSH_PERMISSION_MODE"] = dsh_cli.DSH_PERMISSION_MODE
+            env["DSH_TELEMETRY_DISABLED"] = "1"
+            env["AGENTICOS_DSH_CONFINE_GIT"] = git_dir
+            env[dsh_cli.DSH_CONFINE_RUNNER_ENV] = json.dumps(
+                [sys.executable, "-I", str(dsh_cli.DSH_CONFINE_RUNNER)])
+            dsh_cli.verify_confidential_launch(env, root)
+        except RuntimeError as exc:
+            _cleanup_dsh_spill(env)
+            raise project_runs.ProjectRunError(str(exc)) from exc
+        except Exception:
+            _cleanup_dsh_spill(env)
+            raise
     return env
 
 
@@ -3260,6 +3428,12 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
 
     def _emit(event, payload):
         job["last_progress_at"] = time.monotonic()  # streaming agent = progress (I5-07)
+        line = re.sub(r"\x1b\[[0-9;]*m", "", str((payload or {}).get("line") or "")) \
+            if isinstance(payload, dict) else ""
+        if event == "run_event" and (project_runs.TEST_NOTE_MARK in line or "[tool]" in line):
+            # AGE-140: the test heads-up and later tool calls both keep the card's status line current.
+            snippet = line.replace("[runner] ", "").strip()
+            socketio.emit("run_progress", {"run_id": run_id, "snippet": snippet, "event": "tool_use"})
         socketio.emit(event, payload)
 
     try:
@@ -3324,9 +3498,11 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
             # AGE-137: a fresh run gets the ticket's earlier-run notes. A resumed session already
             # has its own context, and a confidential prompt never reaches the wiki.
             memory_brief = "" if (resume_session or project.confidential) else ai_memory.brief(project.key, ident)
+            prompt_text = project_runs.project_prompt(prompt, project, binding, agent)
+            if agent == "dsh" and project.confidential:
+                prompt_text = dsh_cli.confidential_prompt(prompt_text)
             cmd = _project_cmd(agent, project,
-                               project_runs.with_memory_brief(
-                                   project_runs.project_prompt(prompt, project, binding, agent), memory_brief),
+                               project_runs.with_memory_brief(prompt_text, memory_brief),
                                resume_session)
             if resume_session:
                 job["agent_session_id"] = resume_session  # in the live set before launch (A, R02)
@@ -3336,14 +3512,16 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
             log_path.parent.mkdir(parents=True, exist_ok=True)
             write_json_atomic(_stream_meta_path(run_id), {"format": agent})
             sink = _StderrSink(run_id)  # written only where this run's log may be (checked above)
+            exec_env = _project_exec_env(agent, project, binding["worktree"], run_id)
             try:
                 lines, stderr_s, code, timed_out = project_runs.run_agent(
-                    cmd, binding["worktree"], _project_exec_env(agent, project), run_id, agent,
+                    cmd, binding["worktree"], exec_env, run_id, agent,
                     timeout, _emit, on_start=_track,
                     on_session=lambda sid: job.update(agent_session_id=sid), log_path=log_path,
                     on_stderr=sink.feed, note=note)  # stderr live as it arrives (IR9-02)
             finally:
                 sink.close()
+                _cleanup_dsh_spill(exec_env)
             _running_procs.pop(run_id, None)
             output, it, ot, model, sid, ok, error = _parse_project_output(agent, lines, stderr_s, code)
             agent_error, turn_failed = project_runs.pop_agent_failure(run_id)
@@ -3993,6 +4171,214 @@ def _latest_record(run_id: str) -> dict:
 # `resume_session {agent, id, project_key, gen}`; replies to that card continue exactly that
 # session in its own folder, under the project's policy, until a reset to Todo (§1–§4).
 
+_DSH_SESSIONS = Path(os.environ.get("DSH_HOME", "~/.dsh")).expanduser() / "sessions"
+
+
+def _dsh_zstd(data: bytes, *, decompress: bool = False) -> bytes:
+    """Use dsh's Node runtime, without booting a profile (which writes its config).
+    Each persisted batch is a separate frame; Node decodes only one frame per call."""
+    node = shutil.which("node") or "/opt/homebrew/bin/node"
+    script = """const fs = require('node:fs'), z = require('node:zlib');
+let input = fs.readFileSync(0), chunks = [], size = 0;
+if (process.argv[1] === 'decode') {
+  while (input.length) {
+    const r = z.zstdDecompressSync(input, {info:true, maxOutputLength:64*1024*1024});
+    if (!r.engine.bytesWritten) throw Error('invalid zstd frame');
+    size += r.buffer.length;
+    if (size > 64*1024*1024) throw Error('session log exceeds read limit');
+    chunks.push(r.buffer); input = input.subarray(r.engine.bytesWritten);
+  }
+} else chunks.push(z.zstdCompressSync(input));
+process.stdout.write(Buffer.concat(chunks));
+"""
+    try:
+        return subprocess.run([node, "-e", script, "decode" if decompress else "encode"],
+                              input=data, capture_output=True, check=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise _projects.ProjectError("could not read/write DeepSeek session compression") from exc
+
+
+def _dsh_paths(sid: str | None = None) -> list[Path]:
+    """Newest supported generation per session directory; never follow store escapes."""
+    store = _DSH_SESSIONS.resolve()
+    out = []
+    for directory in _DSH_SESSIONS.glob(f"*/{sid or '*'}"):
+        if not directory.is_dir() or directory.is_symlink() or directory.parent.is_symlink() \
+                or not directory.resolve().is_relative_to(store):
+            continue
+        generations = []
+        for path in directory.glob("session*.jsonl*"):
+            match = re.fullmatch(r"session(?:\.v([1-9][0-9]*))?\.jsonl(?:\.zstd)?", path.name)
+            if match and path.is_file() and not path.is_symlink():
+                generations.append((int(match[1] or 0), path))
+        if generations:
+            version, path = max(generations)
+            if version <= 4:  # never edit or misinterpret a future physical format
+                out.append(path)
+    return out
+
+
+@functools.lru_cache(maxsize=128)
+def _dsh_summary(path: Path, mtime_ns: int, size: int) -> dict | None:
+    if size > 64 * 1024 * 1024:
+        return None
+    raw = path.read_bytes()
+    if path.suffix == ".zstd":
+        raw = _dsh_zstd(raw, decompress=True)
+    lines = raw.decode("utf-8").splitlines()
+    header = json.loads(lines[0]) if lines else None
+    if not isinstance(header, dict) or header.get("type") != "session" \
+            or header.get("id") != path.parent.name or header.get("parentSession") \
+            or header.get("delegationDepth", 0) != 0:
+        return None  # subagents do not have independent project rows
+    sid, cwd = header.get("id"), header.get("cwd")
+    if not isinstance(sid, str) or not _projects._SESSION_ID.fullmatch(sid) \
+            or not isinstance(cwd, str) or not os.path.isabs(cwd):
+        return None
+    title, first, seq = None, None, -1
+    appendable = raw.endswith(b"\n")
+    for line in lines[1:]:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            appendable = False
+            continue  # a live writer may not have completed the last line
+        if not isinstance(event, dict):
+            continue
+        if isinstance(event.get("seq"), int):
+            seq = max(seq, event["seq"])
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        if event.get("type") == "session/title" and isinstance(data.get("title"), str):
+            title = data["title"]
+        elif event.get("type") == "user/message" and first is None:
+            content = data.get("content")
+            if isinstance(content, list):
+                content = " ".join(b.get("text", "") for b in content
+                                   if isinstance(b, dict) and isinstance(b.get("text"), str))
+            if isinstance(content, str) and content.strip():
+                first = content.strip()[:200]
+    return {"agent": "dsh", "id": sid, "cwd": cwd, "path": path,
+            "title": title or first or "untitled", "native_title": title,
+            "updated": mtime_ns / 1e9, "seq": seq, "version": header.get("version"),
+            "appendable": appendable}
+
+
+def _dsh_read(path: Path) -> dict | None:
+    try:
+        st = path.stat()
+        row = _dsh_summary(path, st.st_mtime_ns, st.st_size)
+        return dict(row) if row else None
+    except (OSError, ValueError, _projects.ProjectError):
+        return None  # one corrupt or actively written log never hides the project
+
+
+def _find_session(agent: str, sid: str) -> dict | None:
+    if agent != "dsh":
+        return _projects.find_session(agent, sid)
+    if not isinstance(sid, str) or not _projects._SESSION_ID.fullmatch(sid):
+        return None
+    return max((row for path in _dsh_paths(sid) if (row := _dsh_read(path))),
+               key=lambda row: row["updated"], default=None)
+
+
+def _session_target(project, agent: str, sid: str, board_ids=None) -> dict:
+    if agent != "dsh":
+        return _projects.session_target(project, agent, sid, board_ids=board_ids)
+    target = _find_session(agent, sid)
+    if not target or not _projects._under_resolved(target["cwd"], _projects._session_roots(project)):
+        raise _projects.SessionNotFound("no such DeepSeek session in this project")
+    return target
+
+
+def _project_sessions(project, board_ids=None, labels=None) -> list[dict]:
+    rows = _projects.project_sessions(project, board_ids, labels)
+    for path in _dsh_paths():
+        target = _dsh_read(path)
+        if target and _projects._under_resolved(target["cwd"], _projects._session_roots(project)):
+            row = {k: target[k] for k in ("agent", "id", "cwd", "title", "updated")}
+            row.update(branch=_projects.session_branch(target["cwd"]), tokens=None,
+                       resume=f"cd {shlex.quote(target['cwd'])} && dsh --profile tui --resume {shlex.quote(target['id'])}")
+            rows.append(_projects._with_label(row, labels))
+    if labels:  # which row is the card's current session; earlier ones fold under it (AGE-143)
+        for row in rows:
+            info = labels.get((row.get("agent"), row.get("id")))
+            if isinstance(info, dict) and "current" in info:
+                row["card_current"] = bool(info["current"])
+    rows.sort(key=lambda row: row["updated"], reverse=True)
+    return rows[:_projects.MAX_SESSIONS]
+
+
+@contextlib.contextmanager
+def _dsh_write_lease(target: dict):
+    """Share the native dsh kernel lock, including against idle external TUI sessions."""
+    path = target["path"]
+    if path not in _dsh_paths(target["id"]):
+        raise _projects.SessionNotFound("DeepSeek session was moved or removed")
+    fd = os.open(path.parent / "session.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise _projects.SessionBusy("DeepSeek session is open in another process") from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def _rename_session(target: dict, title: object) -> str:
+    if target["agent"] != "dsh":
+        return _projects.rename_session(target, title)
+    title = _projects._clean_title(title)
+    with _dsh_write_lease(target):
+        current = _dsh_read(target["path"])
+        if not current or current["version"] != 4 or not current["appendable"]:
+            raise _projects.ProjectError("DeepSeek session format does not support rename")
+        if current["native_title"] == title:
+            return title
+        line = (json.dumps({"type": "session/title", "seq": current["seq"] + 1,
+                            "time": int(time.time() * 1000),
+                            "data": {"title": title, "messageSeqs": [], "source": {"kind": "user"}}},
+                           ensure_ascii=False) + "\n").encode()
+        path = target["path"]
+        if path.suffix == ".zstd":
+            line = _dsh_zstd(line)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW)
+        try:
+            st = os.fstat(fd)
+            try:
+                if os.write(fd, line) != len(line):
+                    raise OSError("short DeepSeek title write")
+                os.fsync(fd)
+            except BaseException:
+                os.ftruncate(fd, st.st_size)
+                raise
+            finally:
+                os.utime(fd, ns=(st.st_atime_ns, st.st_mtime_ns))
+        finally:
+            os.close(fd)
+    return title
+
+
+def _remove_session(target: dict) -> dict:
+    if target["agent"] != "dsh":
+        return _projects.remove_session(target)
+    with _dsh_write_lease(target):
+        directory = target["path"].parent
+        trash = _projects.SESSION_TRASH / "dsh" / directory.parent.name
+        if trash.parent.is_symlink() or trash.is_symlink():
+            raise _projects.ProjectError("DeepSeek session trash must not be a symlink")
+        trash.mkdir(parents=True, exist_ok=True)
+        if not trash.resolve().is_relative_to(_projects.SESSION_TRASH.resolve()):
+            raise _projects.ProjectError("DeepSeek session trash escapes its store")
+        destination = trash / directory.name
+        if destination.exists() or destination.is_symlink():
+            raise _projects.ProjectError("DeepSeek session already exists in trash")
+        os.rename(directory, destination)  # same-filesystem move, never delete conversation data
+    return {"removed": target["id"], "trash": str(destination)}
+
+
 _RECORDS_CACHE: dict = {}
 
 
@@ -4016,10 +4402,39 @@ def _all_records() -> list[dict]:
     return _RECORDS_CACHE["records"]
 
 
+def _current_card_sessions() -> dict[str, tuple[str, str]]:
+    """issue id -> (agent, session id) the card continues now.
+
+    A switch starts a new session for the same card (AGE-113), so a card can own several real
+    sessions. The newest record naming one is current; a launch still running (no record yet)
+    takes over only when it started after that record, so an old run left behind by a switch
+    never hides the session the card actually continues."""
+    best: dict[str, tuple[str, str, str]] = {}
+    for r in _all_records():
+        agent, sid, iid = canonical_agent(r.get("agent")) or r.get("agent"), r.get("agent_session_id"), r.get("linear_issue_id")
+        if not iid or not sid or agent not in _SESSION_AGENTS:
+            continue
+        if r.get("interactive_ended") or r.get("status") == "archived":
+            continue
+        started = r.get("started_at") if isinstance(r.get("started_at"), str) else ""
+        best[iid] = (agent, sid, started)
+    for run_id, job in list(_running_jobs.items()):
+        agent = canonical_agent(job.get("agent")) or job.get("agent")
+        sid = job.get("agent_session_id") or (_SESSION_CLAIMS.get(run_id) or (None, None))[1]
+        iid = job.get("linear_issue_id")
+        if not iid or not sid or agent not in _SESSION_AGENTS:
+            continue
+        started = job.get("started_at") if isinstance(job.get("started_at"), str) else ""
+        if iid not in best or started >= best[iid][2]:
+            best[iid] = (agent, sid, started)
+    return {iid: (agent, sid) for iid, (agent, sid, _) in best.items()}
+
+
 def _board_sessions() -> tuple[set, dict]:
     """(board_ids, labels) for projects.py (§9): the (agent, session) pairs the runner launched,
     from its run records, running jobs and session claims; and (agent, session) -> the card's
-    identifier, from the record or the tracker cache."""
+    identifier, from the record or the tracker cache. A label also says whether its session is
+    the card's current one (`current`), so the project panel can fold earlier sessions away."""
     ids: set = set()
     labels: dict = {}
     cache = _linear_cache()
@@ -4040,7 +4455,8 @@ def _board_sessions() -> tuple[set, dict]:
         issue = _issue(r["linear_issue_id"]) if r.get("linear_issue_id") else {}
         ident = r.get("issue_identifier") or issue.get("identifier")
         if ident:
-            labels[(agent, sid)] = {"label": ident, "title": issue.get("title") or r.get("issue_title")}
+            labels[(agent, sid)] = {"label": ident, "title": issue.get("title") or r.get("issue_title"),
+                                    "issue_id": r.get("linear_issue_id")}
     # A running card's session is labelled while it runs, not only once its record lands (§2).
     for job in list(_running_jobs.values()):
         agent, sid = canonical_agent(job.get("agent")) or job.get("agent"), job.get("agent_session_id")
@@ -4051,11 +4467,16 @@ def _board_sessions() -> tuple[set, dict]:
         extra = job.get("record_extra") or {}
         ident = extra.get("issue_identifier") or issue.get("identifier") or (labels.get((agent, sid)) or {}).get("label")
         if ident:
-            labels[(agent, sid)] = {"label": ident, "title": issue.get("title") or extra.get("issue_title") or job.get("issue_title")}
+            labels[(agent, sid)] = {"label": ident, "title": issue.get("title") or extra.get("issue_title") or job.get("issue_title"),
+                                    "issue_id": iid}
     ids |= {(canonical_agent(a) or a, s) for a, s in _live_session_ids() if a and s}
     # A card label only while the session's newest owning card is live: a card emptied from the
     # trash leaves the session its own name (R10-01). Visibility (ids) is unaffected.
     labels = {k: v for k, v in labels.items() if k in owners}
+    current = _current_card_sessions()  # one pass for every project's rows, not one per project
+    for (agent, sid), info in labels.items():
+        if isinstance(info, dict):
+            info["current"] = current.get(info.get("issue_id")) == (agent, sid)
     return ids, labels
 
 
@@ -4073,7 +4494,7 @@ def _valid_intent(rec: dict | None) -> dict | None:
     current (§1); None otherwise. Any reset to Todo bumps the generation and voids it."""
     rec = rec or {}
     intent, issue_id = rec.get("resume_session"), rec.get("linear_issue_id")
-    if not isinstance(intent, dict) or not issue_id or intent.get("agent") not in ("claude", "codex") \
+    if not isinstance(intent, dict) or not issue_id or intent.get("agent") not in _SESSION_AGENTS \
             or not intent.get("id") or not intent.get("project_key"):
         return None
     latest = _intent_latest(issue_id)
@@ -4227,7 +4648,7 @@ def api_session_to_board(key: str, agent: str, sid: str):
             project = _projects.get_project(key, _projects.load_registry(errors={}))
             board_ids, _labels = _board_sessions()
             with _projects.session_lock(agent, sid):  # everything below runs inside (STB-027)
-                target = _projects.session_target(project, agent, sid, board_ids=board_ids)
+                target = _session_target(project, agent, sid, board_ids=board_ids)
                 if (agent, sid) in _live_session_ids() or any(
                         j.get("agent_session_id") == sid for j in list(_running_jobs.values())):
                     return _card_refusal({"error": "still running"}, 409, agent=agent, session_id=sid)
@@ -4252,9 +4673,9 @@ def _session_card(agent: str, sid: str) -> str | None:
 
 # ── One task, one session, named by the card title (2026-10-16 plan §2–§4) ───────────────
 # A card-bound session is named by its card's title, natively too, and every launch of a card
-# continues the card's own session. Only claude and codex sessions; dsh is out of scope.
+# continues the card's own session, including DeepSeek sessions (AGE-142).
 
-_SESSION_AGENTS = ("claude", "codex")
+_SESSION_AGENTS = ("claude", "codex", "dsh")
 _CLOSING_SESSIONS: dict[tuple[str, str], int] = {}  # (agent, sid) -> pgid of a run still exiting (R6)
 _CLOSING_LOCK = threading.Lock()  # every marker read-check-remove and replacement (R7-02)
 
@@ -4360,7 +4781,7 @@ def _card_sessions(live_only: bool = True) -> dict[tuple[str, str], str]:
 def _card_session(issue_id: str | None, agent: str | None) -> tuple[str, dict] | None:
     """The card's own session for this agent: the newest record of the issue with that agent and
     a session id, across every reset generation (D3), skipping audits and archived records. None
-    when the card is gone (DP-43) or the agent is not claude/codex (DP-22)."""
+    when the card is gone (DP-43) or the agent is unsupported."""
     agent = canonical_agent(agent) or agent
     if not issue_id or agent not in _SESSION_AGENTS or _tracker_issue(issue_id) is None:
         return None
@@ -4451,7 +4872,7 @@ def _sync_card_session_names(issue_id: str | None, *, title: str | None = None, 
             for (agent, sid), iid in _card_sessions(live_only=False).items():
                 if iid != issue_id:
                     continue
-                target = _projects.find_session(agent, sid)
+                target = _find_session(agent, sid)
                 if not target or target.get("native_title") == name:
                     continue
                 try:
@@ -4459,7 +4880,7 @@ def _sync_card_session_names(issue_id: str | None, *, title: str | None = None, 
                         if not _rename_idle(target, issue_id, ended):
                             busy.add((agent, sid))
                             continue
-                        _projects.rename_session(target, name)
+                        _rename_session(target, name)
                 except _projects.SessionBusy:
                     busy.add((agent, sid))
                 except Exception as exc:
@@ -4547,7 +4968,7 @@ def _resumable_card_session(issue_id: str | None, agent: str | None, folder: str
     (None, reason) for the run view's `new session: <reason>` note (§4)."""
     agent = canonical_agent(agent) or agent
     if agent not in _SESSION_AGENTS:
-        return None, "only claude and codex sessions continue"
+        return None, "this agent does not support session continuation"
     found = _card_session(issue_id, agent)
     if not found:
         other = any(_card_session(issue_id, a) for a in _SESSION_AGENTS if a != agent)
@@ -4557,7 +4978,7 @@ def _resumable_card_session(issue_id: str | None, agent: str | None, folder: str
     other = latest and (canonical_agent(latest.get("agent")) or latest.get("agent"))
     if other and other != agent:  # switched away since: that session lacks the later turns (AGE-114 D4)
         return None, f"the card's latest session belongs to {other}"
-    target = _projects.find_session(agent, sid)
+    target = _find_session(agent, sid)
     if not target:
         return None, "the card's session was removed or archived"
     if folder is not None and os.path.realpath(target["cwd"]) != os.path.realpath(str(folder)):
@@ -4569,7 +4990,7 @@ def _resume_admission(issue_id: str | None, agent: str, sid: str, run_id: str) -
     """Why a dispatch may not continue this session now, or None: live in the dashboard, open
     outside it (DP-25), or held by a rename/sync (SessionBusy at claim, DP-13). On None the
     session is claimed for `run_id`."""
-    target = _projects.find_session(agent, sid)
+    target = _find_session(agent, sid)
     if not target:
         return "the card's session was removed or archived"
     if (agent, sid) in {(canonical_agent(a) or a, s) for a, s in _live_session_ids()}:
@@ -4675,7 +5096,7 @@ def _retry_session_card(run_id: str, original: dict, intent: dict, data: dict, c
     attachments = data.get("attachments") or []
     prompt = (reply + _format_prompt_attachments(attachments)).strip()  # the reply only (§3.5)
     if switch_to:
-        prompt = _handoff_prompt(original, reply, attachments, agent)
+        prompt = _handoff_prompt(original, reply, attachments, agent, agent=switch_to)
     elif not prompt and card_sourced:  # a plain Retry of a card continuing its session: the task again (PVST-02)
         prompt = (original.get("prompt") or "").strip()
     if not prompt:
@@ -4705,7 +5126,7 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
     run_agent, run_sid = (switch_to, None) if switch_to else (agent, sid)  # who runs, resuming what
     try:
         project = _projects.get_project(intent["project_key"], _projects.load_registry(errors={}))
-        target = _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])
+        target = _session_target(project, agent, sid, board_ids=_board_sessions()[0])
     except _projects.ProjectError as exc:  # gone, moved outside the project, or unregistered
         return jsonify({"ok": False, "error": f"session not available: {exc}"}), 409
     # a dashboard terminal on this card or session: the page offers to end it, not "send anyway"
@@ -4854,9 +5275,14 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
                     return
                 try:
                     cmd = _project_cmd(run_agent, eff, prompt, run_sid)  # the sandboxed CLI for a confidential project
-                    output, it, ot, model, _new_sid, stderr_s, ok = run_agent_process(
-                        new_run_id, cmd, stream=run_agent, cwd=target["cwd"], env=_project_exec_env(run_agent, eff),
-                        on_proc=procs.append, timeout=AI_SESSION_TIMEOUT_S)
+                    exec_env = _project_exec_env(run_agent, eff, target["cwd"], new_run_id)
+                    try:
+                        output, it, ot, model, _new_sid, stderr_s, ok = run_agent_process(
+                            new_run_id, cmd, stream=run_agent, cwd=target["cwd"],
+                            env=exec_env,
+                            on_proc=procs.append, timeout=AI_SESSION_TIMEOUT_S)
+                    finally:
+                        _cleanup_dsh_spill(exec_env)
                     agent_error, turn_failed = project_runs.pop_agent_failure(new_run_id)
                     # a reported failure, or no reply at all, fails the continuation (R4-03, R14-01)
                     ok = ok and not turn_failed and project_runs.pop_replied(new_run_id)
@@ -4948,7 +5374,7 @@ def api_projects():
     board_ids, labels = _board_sessions()  # board-launched headless sessions, with their card ids (§9)
     for key, p in reg.items():
         try:  # one project's reader failure never hides the others
-            sessions = _projects.project_sessions(p, board_ids, labels)
+            sessions = _project_sessions(p, board_ids, labels)
             if p.commit:
                 commit_jobs.append((p, [{"cwd": s.get("cwd")} for s in sessions]))
                 sessions = _cached_commit_states(p, sessions)
@@ -5127,7 +5553,7 @@ _SESSION_CLAIMS: dict[str, tuple[str, str]] = {}  # run_id -> (agent, session_id
 
 
 def _claim_session(agent: str, sid: str | None, run_id: str) -> None:
-    if sid and agent in ("claude", "codex"):
+    if sid and agent in _SESSION_AGENTS:
         with _projects.session_lock(agent, sid):
             if _closing_live(agent, sid):  # unconditional: no confirmation overrides live processes (R6-01)
                 raise _projects.SessionBusy(f"session {sid} still has processes from its last run; try again shortly")
@@ -5157,7 +5583,7 @@ def _session_action(key: str, agent: str, sid: str, act):
         project = _projects.get_project(key, _projects.load_registry(errors={}))
         board_ids = _board_sessions()[0]
         with _projects.session_lock(agent, sid):
-            target = _projects.session_target(project, agent, sid, board_ids=board_ids)
+            target = _session_target(project, agent, sid, board_ids=board_ids)
             _projects.check_session_idle(target, _live_session_ids())
             result = act(target)
     except _projects.SessionNotFound as exc:
@@ -5177,7 +5603,7 @@ def api_session_rename(key: str, agent: str, sid: str):
     issue_id = _card_sessions().get((canonical_agent(agent) or agent, sid))
     if issue_id:  # a card's session is named by the card: rename the card (D2, §3)
         return _rename_card_session(key, agent, sid, issue_id, title)
-    return _session_action(key, agent, sid, lambda t: {"title": _projects.rename_session(t, title)})
+    return _session_action(key, agent, sid, lambda t: {"title": _rename_session(t, title)})
 
 
 def _rename_card_session(key: str, agent: str, sid: str, issue_id: str, title: object):
@@ -5185,7 +5611,7 @@ def _rename_card_session(key: str, agent: str, sid: str, issue_id: str, title: o
     validate, change the card title through the tracker (strict), then rename the sessions."""
     try:
         project = _projects.get_project(key, _projects.load_registry(errors={}))
-        _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])  # this project's row
+        _session_target(project, agent, sid, board_ids=_board_sessions()[0])  # this project's row
         clean = _projects._clean_title(title)  # before any write (DP-17)
     except _projects.SessionNotFound as exc:
         return jsonify({"error": str(exc)}), 404
@@ -5343,7 +5769,7 @@ def _session_commit(key: str, agent: str, sid: str, body: dict):
             project = _projects.get_project(key, _projects.load_registry(errors={}))
             if not project.commit:
                 raise _projects.ProjectError("Commit is off for this project (Edit to turn it on)")
-            target = _projects.session_target(project, agent, sid, board_ids=_board_sessions()[0])
+            target = _session_target(project, agent, sid, board_ids=_board_sessions()[0])
             # commit_checkout always runs git sandboxed, so no policy snapshot can go stale (SC-001/006)
             result = _projects.commit_checkout(project, target["cwd"], body.get("message"),
                                                dry_run=bool(body.get("dry_run")),
@@ -5360,7 +5786,7 @@ def _session_commit(key: str, agent: str, sid: str, body: dict):
 
 @app.route("/api/projects/<key>/sessions/<agent>/<sid>/remove", methods=["POST"])
 def api_session_remove(key: str, agent: str, sid: str):
-    return _session_action(key, agent, sid, _projects.remove_session)
+    return _session_action(key, agent, sid, _remove_session)
 
 
 @app.route("/api/projects/<key>/tree")
@@ -5503,8 +5929,8 @@ def api_run_detail(run_id: str):
                     r["resume_agent"] = intent["agent"]
                     with contextlib.suppress(Exception):
                         project = _projects.get_project(intent["project_key"], _projects.load_registry(errors={}))
-                        target = _projects.session_target(project, intent["agent"], intent["id"],
-                                                          board_ids=_board_sessions()[0])
+                        target = _session_target(project, intent["agent"], intent["id"],
+                                                 board_ids=_board_sessions()[0])
                         r["session_cwd"] = target["cwd"]
                         r["in_use_elsewhere"] = session_in_use(target, None, _own_activity_end(r["linear_issue_id"]))
                 return jsonify(r)
@@ -5740,11 +6166,12 @@ def _cut(text: str, n: int) -> str:
 
 
 def _handoff_prompt(original: dict, reply: str, attachments: list, switched_from: str | None = None,
-                    task: str | None = None) -> str:
+                    task: str | None = None, agent: str | None = None) -> str:
     """A new session's prompt on a card that already ran: the task, every earlier turn of the run
     chain whichever agent ran it, the reply, and where the earlier sessions' transcripts are
     (AGE-114 D2). On a switch of agent (AGE-113), who had the task. A resumed session gets the
-    reply only: it has all this already (D1)."""
+    reply only: it has all this already (D1). `agent`: who runs next, for sandbox-aware git advice
+    (a dsh worktree cannot write the git metadata outside it — AGE-138)."""
     attach_note = _format_prompt_attachments(attachments)
     chain = _record_chain(original)
     task = (task if task is not None else chain[0].get("prompt") or "").strip()  # `task`: the issue's text now
@@ -5759,9 +6186,9 @@ def _handoff_prompt(original: dict, reply: str, attachments: list, switched_from
     if not turns and not reply and not attach_note:
         return task
     blocks = []
-    for n, (agent, human, out) in enumerate(turns, 1):
+    for n, (turn_agent, human, out) in enumerate(turns, 1):
         cut = _HANDOFF_CUT if n <= len(turns) - _HANDOFF_FULL_TURNS else None
-        blocks.append(f"--- Turn {n} ({agent})"
+        blocks.append(f"--- Turn {n} ({turn_agent})"
                       + (f"\nHuman: {_cut(human, cut) if cut else human}" if human else "")
                       + (f"\nAgent: {_cut(out, cut) if cut else out}" if out else ""))
     dropped = 0
@@ -5785,7 +6212,12 @@ def _handoff_prompt(original: dict, reply: str, attachments: list, switched_from
         parts.append("Earlier sessions' full conversations (JSONL), read them if you need more context:\n"
                      + "\n".join(transcripts))
     if len(chain) > 1 or switched_from:
-        parts.append("Changes from earlier turns are already in this folder: check `git status` and `git log` first.")
+        if agent == "dsh":
+            # Read-only orientation: project-bound worktree runs are told separately that the runner
+            # commits for them (project_runs.project_prompt); a main-checkout session may still commit.
+            parts.append("Changes from earlier turns are already in this folder: check `git log` and `git diff` first.")
+        else:
+            parts.append("Changes from earlier turns are already in this folder: check `git status` and `git log` first.")
     return "\n\n".join(parts)
 
 
@@ -5836,7 +6268,7 @@ def api_run_retry(run_id: str):
         if _newest and _newest != run_id:
             return jsonify({"ok": False, "error": "a newer attempt exists on this card; reply from the latest attempt"}), 409
     intent = _valid_intent(original)
-    if intent and _projects.find_session(intent["agent"], intent["id"]) is None:
+    if intent and _find_session(intent["agent"], intent["id"]) is None:
         # removed or archived (or a Codex thread without its rollout): the card starts fresh, with
         # the reason, through the ordinary admission below (R12-01)
         intent = None
@@ -5846,7 +6278,6 @@ def api_run_retry(run_id: str):
         return _retry_session_card(run_id, original, intent, req_data)
     reply = (req_data.get("reply") or "").strip()
     attachments = req_data.get("attachments") or []
-    prompt = _handoff_prompt(original, reply, attachments)
 
     # Guard: reject if already running
     if run_id in _running_procs or any(j.get("skill") == skill for j in _running_jobs.values()):
@@ -5875,6 +6306,7 @@ def api_run_retry(run_id: str):
         else:
             agent = locked_agent
     sess_agent = switch_from or agent  # whose session routes this retry to its folder
+    prompt = _handoff_prompt(original, reply, attachments, agent=agent)  # after the lock resolves who runs
     if strict and _same_session and _newest_attempt(linear_issue_id, task_id) == run_id:
         # the answered attempt is the card's newest by history order: its own session is the card's
         # current one, whatever an appended status copy of an older attempt left last (QR-R6-001)
@@ -5902,7 +6334,7 @@ def api_run_retry(run_id: str):
         if _lock_session_id and _card_sessions(live_only=False).get((sess_agent, _lock_session_id)) not in (None, linear_issue_id):
             _lock_session_id = None  # the lock's session now belongs to another card (R3-03)
         sid = _lock_session_id or (_card_session(linear_issue_id, sess_agent) or (None, None))[0]
-        target = _projects.find_session(sess_agent, sid) if sid else None
+        target = _find_session(sess_agent, sid) if sid else None
         project_key = (bound or {}).get("project_key") or original.get("session_project")
         if not sid:
             card_note = "new session: " + (_resumable_card_session(linear_issue_id, sess_agent, None)[1] or "no session yet")
@@ -5936,7 +6368,7 @@ def api_run_retry(run_id: str):
                         return jsonify({"ok": False, "in_use_elsewhere": why}), 409
                 _lock_session_id, card_session = sid, True
     if switch_from:  # a new session of the chosen agent, in the folder chosen above, told what came before
-        prompt = _handoff_prompt(original, reply, attachments, switch_from)
+        prompt = _handoff_prompt(original, reply, attachments, switch_from, agent=agent)
         card_note, _lock_session_id, card_session = f"new session: switched from {switch_from}", None, False
     fresh_prompt = prompt  # a new session's, e.g. the fallback after a failed resume
     if _lock_session_id:  # the resumed session has the history already: the reply only (AGE-114 D1, as §3.5)

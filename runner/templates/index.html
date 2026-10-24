@@ -106,7 +106,7 @@
   /* Chart */
   .chart-box { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 16px 20px; margin-bottom: 20px; }
   .chart-title { font-size: calc(12px * var(--fs)); color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 12px; }
-  .chart-wrap { height: 140px; }
+  .chart-wrap { height: 170px; }
 
   /* Job board — kanban columns */
   .job-board { margin-bottom: 24px; }
@@ -378,7 +378,8 @@
   .session-list { padding: 0 4px 8px 20px; }
   .session-row { display: flex; gap: 10px; align-items: center; padding: 3px 0; font-size: calc(12px * var(--fs)); }
   .session-agent { font-size: calc(10px * var(--fs)); padding: 1px 4px; border-radius: 3px; border: 1px solid var(--border); }
-  .session-agent.codex { color: var(--green); } .session-agent.claude { color: var(--accent); }
+  .session-agent.claude { color: #e8a87c; } .session-agent.codex { color: #6fb5d4; }
+  .session-agent.dsh { color: #7ec8a0; }
   .session-copy.commit-todo { color: var(--green); border-color: var(--green); }
   .session-copy.commit-clean { color: var(--text-dim); border-color: var(--border); opacity: .6; }
   .session-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -386,6 +387,10 @@
   .session-copy { background: none; border: 1px solid var(--border); color: var(--text-dim); border-radius: 3px; cursor: pointer; font-family: inherit; font-size: calc(10px * var(--fs)); }
   .session-copy:hover { color: var(--accent); border-color: var(--accent); }
   .session-empty { color: var(--text-dim); font-size: calc(12px * var(--fs)); padding: 4px 0; }
+  .session-earlier-toggle { padding: 1px 0 1px 26px; }
+  .session-earlier { margin-left: 12px; padding-left: 14px; border-left: 1px solid var(--border); }
+  .session-row.is-earlier { opacity: .7; }
+  .session-earlier-tag { border: 1px solid var(--border); border-radius: 3px; padding: 0 3px; font-size: calc(10px * var(--fs)); }
   .proj-tabs { display: flex; gap: 6px; padding: 0 4px 6px 20px; }
   .proj-tabs button.active { color: var(--accent); border-color: var(--accent); }
   .files-view { padding: 0 4px 8px 20px; font-size: calc(12px * var(--fs)); }
@@ -769,7 +774,8 @@
     <!-- Activity chart -->
     <div class="chart-box">
       {% set _w, _a, _o = chart_data["work"] | sum, chart_data["agentic"] | sum, chart_data["other"] | sum %}
-      <div class="chart-title">Activity — last 30 days · {{ _w + _a + _o }} conversations · {{ _w }} work · {{ _a }} AgenticOS · {{ _o }} other</div>
+      {% set _total = _w + _a + _o %}
+      <div class="chart-title">Activity — last 30 days · {{ _total }} conversations · {{ _w }} work{% if _total %} ({{ (_w / _total * 100) | round | int }}%){% endif %} · {{ _a }} AgenticOS · {{ _o }} other</div>
       <div class="chart-wrap">
         <canvas id="activityChart"></canvas>
       </div>
@@ -803,7 +809,7 @@
     <section class="skill-panel" id="skill-panel">
       <div class="skill-panel-header">
         <div class="skill-panel-title">Projects</div>
-        <div class="skill-panel-subtitle">Registered projects and their Claude / Codex sessions, newest first</div>
+        <div class="skill-panel-subtitle">Registered projects and their Claude / Codex / DeepSeek sessions, newest first; a card's earlier sessions fold under its current one</div>
       </div>
 
 
@@ -1018,13 +1024,18 @@ new Chart(document.getElementById('activityChart'), {
   type: 'line',
   data: {
     labels: chartData.labels,
+    // Stacked fill, bottom to top: AgenticOS, Work, Other. A band's thickness is that
+    // kind's conversations; the top line's height is the day's total. Boundaries are a
+    // translucent light hairline: it separates the bands without a hard black outline
+    // that fights the dark theme (AGE-128).
     datasets: [
-      ['Work', chartData.work, '#4caf50'],
       ['AgenticOS', chartData.agentic, '#e8723a'],
+      ['Work', chartData.work, '#4caf50'],
       ['Other', chartData.other, '#4fa3e0'],
     ].map(([label, data, color]) => ({
-      label, data: data || [], borderColor: color, backgroundColor: color,
-      borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, fill: false, tension: 0.3,
+      label, data: data || [], borderColor: 'rgba(255,255,255,0.3)', backgroundColor: color,
+      borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, pointBackgroundColor: color,
+      fill: true, tension: 0.25, cubicInterpolationMode: 'monotone',
     }))
   },
   plugins: [crosshair],
@@ -1046,7 +1057,7 @@ new Chart(document.getElementById('activityChart'), {
     },
     scales: {
       x: { grid: { color: '#1e1e1e' }, ticks: { color: '#555', font: { size: 11 }, maxTicksLimit: 6 } },
-      y: { grid: { color: '#1e1e1e' }, ticks: { color: '#555', font: { size: 11 }, stepSize: 1 }, beginAtZero: true }
+      y: { stacked: true, grid: { color: '#1e1e1e' }, ticks: { color: '#555', font: { size: 11 }, stepSize: 1 }, beginAtZero: true }
     }
   }
 });
@@ -1198,7 +1209,7 @@ function _renderProjectsInto(el) {
     const p = byKey[k];
     if (p.error) return `<div class="project-section"><div class="project-head project-error" ${head(p)}>${_esc(p.name || p.key)} — ${_esc(p.error)} ${removeBtn(p)}</div></div>`;
     const isOpen = open.has(p.key);
-    const rows = (p.sessions || []).map(s => _sessionRow(p.key, s, p.commit !== false)).join('') || '<div class="session-empty">No sessions in this project yet.</div>';
+    const rows = _sessionRowsHtml(p.key, p.sessions || [], p.commit !== false) || '<div class="session-empty">No sessions in this project yet.</div>';
     return `<div class="project-section">
       <div class="project-head" ${head(p)} aria-expanded="${isOpen}">${isOpen ? '▾' : '▸'} <b>${_esc(p.name || p.key)}</b> ${badges(p)}
         <span class="session-meta">${(p.sessions || []).length} sessions</span>
@@ -1225,7 +1236,35 @@ function _commitTitle(c) {
   if (c.state === 'unmerged') return `${c.ahead} commit${c.ahead === 1 ? '' : 's'} not yet merged into main: click to merge`;
   return 'Nothing to commit; already merged into main';
 }
-function _sessionRow(key, s, commit = true) {
+// A card can own several sessions: an agent switch starts a new one (AGE-113) and a reset can
+// too. The panel lists the card once — its current session — with earlier sessions folded under
+// it, so the same card never appears twice with two agents. Opening an editor expands its group.
+const _sessionEarlierOpen = new Set();  // `${project key}\u0000${card label}`
+function _sessionGroup(key, label) { return `${key}\u0000${label}`; }
+function _sessionRowsHtml(key, rows, commit) {
+  const blocks = [], byLabel = new Map();
+  for (const s of rows) {
+    if (!s.label) { blocks.push({ row: s }); continue; }
+    let g = byLabel.get(s.label);
+    if (!g) { g = { label: s.label, rows: [] }; byLabel.set(s.label, g); blocks.push(g); }
+    g.rows.push(s);
+  }
+  return blocks.map(b => {
+    if (b.row) return _sessionRow(key, b.row, commit);
+    if (b.rows.length === 1) return _sessionRow(key, b.rows[0], commit);
+    const at = b.rows.findIndex(s => s.card_current === true);
+    const current = b.rows[at < 0 ? 0 : at], earlier = b.rows.filter((_, i) => i !== (at < 0 ? 0 : at));
+    const editing = earlier.some(s => _sessionEdit && _sessionEdit.key === key
+      && _sessionEdit.agent === s.agent && _sessionEdit.id === s.id);
+    const open = editing || _sessionEarlierOpen.has(_sessionGroup(key, b.label));
+    const n = `${earlier.length} earlier session${earlier.length === 1 ? '' : 's'}`;
+    return _sessionRow(key, current, commit)
+      + `<div class="session-earlier-toggle"><button class="session-copy" data-searlier="${_esc(b.label)}" data-key="${_esc(key)}"
+           aria-expanded="${open}">${open ? '▾' : '▸'} ${n}</button></div>`
+      + (open ? `<div class="session-earlier">${earlier.map(s => _sessionRow(key, s, commit, true)).join('')}</div>` : '');
+  }).join('');
+}
+function _sessionRow(key, s, commit = true, earlier = false) {
   let ed = _sessionEdit && _sessionEdit.key === key && _sessionEdit.agent === s.agent && _sessionEdit.id === s.id ? _sessionEdit : null;
   if (ed && ed.mode === 'commit' && !commit) ed = null;  // Commit was turned off while its editor was open
   const ids = `data-key="${_esc(key)}" data-sagent="${_esc(s.agent)}" data-sid="${_esc(s.id)}"`;
@@ -1271,15 +1310,17 @@ function _sessionRow(key, s, commit = true) {
     }
   } else if (ed && ed.mode === 'remove') {
     const where = s.agent === 'codex' ? "it is archived the way Codex archives (its rollout moves to ~/.codex/archived_sessions); restore with Codex's unarchive"
+      : s.agent === 'dsh' ? 'its session folder moves to ~/.agentic-os/session-trash/dsh; restore by moving it back'
       : 'its transcript moves to ~/.agentic-os/session-trash; restore by moving it back';
-    title = `<span class="session-title" style="white-space:normal">Remove "${_esc(s.title)}"? It leaves this panel and ${s.agent === 'codex' ? 'codex resume' : 'claude --resume'} — ${where}.</span>`;
+    const resume = { codex: 'codex resume', claude: 'claude --resume', dsh: 'dsh --resume' }[s.agent] || 'the session picker';
+    title = `<span class="session-title" style="white-space:normal">Remove "${_esc(s.title)}"? It leaves this panel and ${resume} — ${where}.</span>`;
     actions = `<button class="session-copy" data-saction="confirm" ${ids} style="color:var(--red)">Remove</button><button class="session-copy" data-saction="cancel" ${ids}>Cancel</button>`;
   }
   return `
-      <div class="session-row">
-        <span class="session-agent ${s.agent}">${s.agent === 'codex' ? 'CX' : 'CC'}</span>
+      <div class="session-row${earlier ? ' is-earlier' : ''}">
+        <span class="session-agent ${_esc(s.agent)}" title="${_esc(_agentName(s.agent) || s.agent)}">${({codex: 'CX', claude: 'CC', dsh: 'DS'})[s.agent] || _esc(s.agent)}</span>
         ${title}
-        <span class="session-meta">${_esc(s.branch || '')} · ${_ago(s.updated)}</span>
+        <span class="session-meta">${earlier ? '<span class="session-earlier-tag">earlier</span> ' : ''}${_esc(s.branch || '')} · ${_ago(s.updated)}</span>
         ${err}${actions}
       </div>`;
 }
@@ -1608,6 +1649,12 @@ async function _projectBaseline(key) {
 }
 
 document.getElementById('project-panel-content')?.addEventListener('click', (event) => {
+  const searlier = event.target.closest('[data-searlier]');
+  if (searlier) {
+    const g = _sessionGroup(searlier.dataset.key, searlier.dataset.searlier);
+    _sessionEarlierOpen.has(g) ? _sessionEarlierOpen.delete(g) : _sessionEarlierOpen.add(g);
+    _renderProjects(); return;
+  }
   const act = event.target.closest('[data-proj-action]');
   if (act) {
     const key = act.dataset.key, p = (_projectData.projects || []).find(x => x.key === key);
@@ -2157,11 +2204,13 @@ let _boardItemsByRunId = {};
 let _trashOpen = false;
 let _cancelledItems = [];
 let _pendingBoardRefresh = false;
+let _boardRefreshSeq = 0;
 let _optimisticBoardHoldUntil = 0;
 let _heldBoardRefreshTimer = null;
 let _optimisticLinearIssuePatches = {};
 // Live interactive card sessions, term_id -> card key, refreshed with the board (AC4).
 let _liveCardTerms = new Map();
+let _liveCardTermsSeq = 0;
 // A card terminal that still holds its card: live, or its cleanup failed (still owns the card, ICS-29).
 function _holdsCard(i) { return i.kind === 'resume' && !!i.card_key && (i.alive !== false || !!i.cleanup_failed); }
 function _cardHasSession(key) { return !!key && [..._liveCardTerms.values()].includes(key); }
@@ -2172,9 +2221,17 @@ async function _termListBounded(ms = 1500) {
   return Promise.race([_cardTermList(), new Promise(r => setTimeout(() => r(null), ms))]);
 }
 async function _refreshLiveCardTerms() {  // never holds the board up: no answer = unchanged
+  const seq = ++_liveCardTermsSeq;
   const list = await _termListBounded();
-  if (list) _liveCardTerms = new Map(list.filter(i => _holdsCard(i))
-                                         .map(i => [i.term_id, i.card_key]));
+  if (!list || seq !== _liveCardTermsSeq) return;
+  const next = new Map(list.filter(i => _holdsCard(i)).map(i => [i.term_id, i.card_key]));
+  if (next.size === _liveCardTerms.size && [...next].every(([id, key]) => _liveCardTerms.get(id) === key)) return;
+  _liveCardTerms = next;
+  if (_shouldDeferBoardRefresh() || Date.now() < _optimisticBoardHoldUntil) {
+    _pendingBoardRefresh = true;
+    return;
+  }
+  _renderBoardItems(_boardItems);
 }
 let _detailLinearInitial = null;
 let _detailLinearUpdatedAt = '';
@@ -2978,16 +3035,21 @@ async function refreshJobBoard(force = false) {
     _pendingBoardRefresh = true;
     return;
   }
+  const seq = ++_boardRefreshSeq;
   try {
     const teamParam = _currentTeamId ? `?team_id=${encodeURIComponent(_currentTeamId)}` : '';
     const fetches = [fetch('/api/runs?state=running'), fetch('/api/runs?limit=80'), fetch(`/api/linear/issues${teamParam}`),
                      fetch('/api/runs/latest-by-issue')];
     const results = await Promise.all(fetches);
-    await _refreshLiveCardTerms();
     const running = await results[0].json();
     const recent = await results[1].json();
     const linearIssues = results[2] ? await results[2].json() : [];
     const olderLatest = results[3] && results[3].ok ? await results[3].json() : {};  // beyond the 80-run window (REV23-01)
+    if (seq !== _boardRefreshSeq) return;
+    if (!force && _shouldDeferBoardRefresh()) {
+      _pendingBoardRefresh = true;
+      return;
+    }
 
     const latestRuns = _latestLinearRuns([
       ...running.map(r => ({ ...r, status: 'running' })),
@@ -3045,6 +3107,7 @@ async function refreshJobBoard(force = false) {
     });
 
     _renderBoardItems(all);
+    void _refreshLiveCardTerms().catch(() => {});
     _cardTermSyncLatest();  // the open card gained an attempt elsewhere? (QR-004)
   } catch (_) {}
 }

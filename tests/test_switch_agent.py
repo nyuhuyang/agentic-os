@@ -8,6 +8,7 @@ import sqlite3
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 RUNNER = Path(__file__).resolve().parents[1] / "runner"
 sys.path.insert(0, str(RUNNER))
@@ -30,6 +31,22 @@ def test_plain_card_switches_to_codex_with_the_previous_context(env, monkeypatch
     assert cmds[0][0] == "codex" and not resumed(cmds[0]) and SID not in cmds[0]
     assert "claude's last answer" in cmd and "keep going" in cmd and "[Agent switch]" in cmd
     assert f"{SID}.jsonl" in cmd  # where the Claude conversation is
+
+
+def test_switch_to_dsh_hands_over_read_only_git_orientation(env, monkeypatch):
+    """AGE-138: a switch to dsh must not send it to `git status` in an unwritable worktree."""
+    app_mod, mod, client, log, events, _ = env
+    monkeypatch.setattr(app_mod, "_process_table", lambda: {})
+    on_disk(app_mod, "claude", SID)
+    write_log(log, {"run_id": "a", "agent": "claude", "status": "review", "agent_session_id": SID,
+                    "output": "claude's last answer"})
+    cmds = capture_launches(app_mod, monkeypatch)
+    with patch.object(app_mod.dsh_cli, "cli_prefix", return_value=["dsh", "--profile", "headless"]):
+        r = client.post("/api/runs/a/retry", json={"agent": "dsh", "reply": "keep going"})
+    assert r.status_code == 200 and r.get_json()["agent"] == "dsh", r.get_json()
+    prompt = " ".join(cmds[0])
+    assert cmds[0][0] == "dsh" and "[Agent switch]" in prompt and "claude's last answer" in prompt
+    assert "check `git log` and `git diff` first" in prompt and "check `git status`" not in prompt
 
 
 def test_quick_reply_never_switches(env, monkeypatch):
