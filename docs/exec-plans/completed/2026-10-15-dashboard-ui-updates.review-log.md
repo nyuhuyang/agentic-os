@@ -2186,3 +2186,8 @@ Lesson from runner-write-safety (10 inspections): later rounds drift into inject
 - Result: `/private/tmp/claude-501/-Users-yanghu-Documents-AI-Workspace-agentic-os/43734fe6-827b-4456-8612-0540ddad69af/scratchpad/claudex/i37/claudex-wuobz0i5/result.json`, status completed, 215 s, on HEAD `8095cc2`. Verdict APPROVED, no findings.
 - Proof: full suite 588 passed. Plan item 268 ticked.
 - Still open (manual or external, not code): 23/24/25/74 (native `claude --resume` / `codex resume` pickers) and 125 (live Linear label). The plan stays active until those are checked.
+
+## Closing checks (2026-10-24)
+- Native pickers (23/24/25/74): throwaway Claude and Codex sessions in a temp `CLAUDE_CONFIG_DIR` / `CODEX_HOME`, changed by `projects.rename_session` / `remove_session`; real `claude --resume` 2.1.309 and `codex resume` 0.163.0 driven in a pty. Renamed titles listed; removed (trash) / archived sessions gone; moving back / un-archiving lists them again. The real `~/.claude` / `~/.codex` were not touched.
+- Linear label (125): 43 live Linear issues carry `project:<key>` labels across 9 projects, and their runs used `~/.agentic-os/worktrees/<key>/<id>` on `agent/<id>`.
+- All boxes ticked; plan moved to completed/.

@@ -7,6 +7,7 @@
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- Plan `2026-10-15-dashboard-ui-updates` closed: the native `claude --resume` / `codex resume` pickers confirm rename/remove/restore on throwaway sessions in temp config dirs, and 43 live Linear issues carry `project:<key>` labels with matching worktrees; plan + review log moved to completed/ — 2026-10-24
 - AGE-117 card detail: Log tab removed (Terminal replay shows the same, copyable), with its `/api/runs/<id>/progress` and `/api/linear/issues/<id>/progress` routes and their Codex-session helpers; Error tab adds verify fail, merge_error and stderr tail. 782 pytest pass, `node --check` passes; isolated runner on 8599: tabs Output/Error/Terminal, stderr tail in run detail, progress route 404 — 2026-10-21
 - AGE-117 card detail opens on Output in every column; only a pending next-state choice opens on Terminal. Headless Chrome on isolated runner 8599: in_review/in_progress/done → output, choice pending → terminal; 65 card-terminal pytest pass — 2026-10-21
 - AGE-117 board card shows the issue's newest run, not its highest attempt (a reset to Todo restarts attempts at 0, so AGE-110 kept showing attempt 15 over the newer run). Live data (read-only): old pick 824cd97c, new pick cf5ca04b; isolated runner 8599: reset, running-first and tie cases pass — 2026-10-21
