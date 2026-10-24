@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: completed
 created: 2026-10-15
 ---
 
@@ -20,9 +20,9 @@ Each part has its own goal, criteria and checklist; one Codex plan review and on
 Each session row in the Projects panel gets "Rename" and "Remove". Rename changes the title everywhere the native tools show it; Remove takes the session out of the panel and out of the native resume pickers, recoverably. Today the list is read-only.
 
 ### Acceptance criteria
-- [ ] Renaming a Claude session shows the new title in the panel and in `claude --resume`; renaming a Codex session shows it in the panel and in `codex resume` — PARTIAL: panel title verified (tests + isolated browser check); the native `claude --resume` / `codex resume` pickers were not opened (see item 74)
-- [ ] Removing a Codex session archives it (`threads.archived = 1`, `archived_at` set): gone from the panel and from `codex resume`, restorable by un-archiving — PARTIAL: archived row and panel verified; native `codex resume` picker not opened (item 74)
-- [ ] Removing a Claude session moves its transcript (and its same-named sidecar folder, if any) to `~/.agentic-os/session-trash/<slug>/`: gone from the panel and from `claude --resume`; restoring is moving it back — PARTIAL: trash move, sidecar and panel verified; native `claude --resume` picker not opened (item 74)
+- [x] Renaming a Claude session shows the new title in the panel and in `claude --resume`; renaming a Codex session shows it in the panel and in `codex resume` — panel title verified (tests + isolated browser check); native pickers confirmed 2026-10-24 (item 74)
+- [x] Removing a Codex session archives it (`threads.archived = 1`, `archived_at` set): gone from the panel and from `codex resume`, restorable by un-archiving — archived row and panel verified; native pickers confirmed 2026-10-24 (item 74), un-archive brings it back
+- [x] Removing a Claude session moves its transcript (and its same-named sidecar folder, if any) to `~/.agentic-os/session-trash/<slug>/`: gone from the panel and from `claude --resume`; restoring is moving it back — trash move, sidecar and panel verified; native pickers confirmed 2026-10-24 (item 74), moving it back brings it back
 - [x] Remove asks for confirmation naming the session title; both actions are refused for a session that is live (running in a dashboard tab, a running job, or a transcript written in the last 2 minutes)
 - [x] Only sessions of a registered project are touched: the session's cwd must be under that project's path, and the file/row must resolve inside `~/.claude/projects` / `~/.codex`
 - [x] A failed write leaves the session exactly as it was (no half-written transcript, no partial DB update)
@@ -71,7 +71,7 @@ Each session row in the Projects panel gets "Rename" and "Remove". Rename change
 - [x] Test: routes are gated by maintenance (409) and need the request token
 - [x] Implement backend helpers and routes
 - [x] Implement UI buttons
-- [ ] Manual browser check on a throwaway session; native pickers confirm — BLOCKED: dashboard flow verified in an isolated runner against fixture stores (rename, 2-min refusal, remove + sidecar, Codex archive); confirming in the real native pickers needs a throwaway real session in ~/.claude / ~/.codex, left for the user
+- [x] Manual browser check on a throwaway session; native pickers confirm — dashboard flow verified in an isolated runner against fixture stores (rename, 2-min refusal, remove + sidecar, Codex archive). Native pickers, 2026-10-24: throwaway sessions in a temp `CLAUDE_CONFIG_DIR` / `CODEX_HOME` (the real `~/.claude` / `~/.codex` untouched), changed by `projects.rename_session` / `remove_session` (what the routes call), then the real `claude --resume` (2.1.309) and `codex resume` (0.163.0) opened in a pty: the renamed title is listed, the removed/archived session is gone, and moving it back / un-archiving lists it again
 
 ## B. Pick a project when creating a task
 
@@ -122,7 +122,7 @@ The new-task form (job board "+" / Todo) gets a Project selector listing the reg
 - [x] Test: with Linear active, dispatch/retry of a `local-*` task (create pending, failed, or returned nothing) → 409, nothing launched, state unchanged; with the local tracker only, the same task dispatches into the chosen project's worktree
 - [x] Test: `ensure_label` reuses an existing label and creates a missing one; `create_issue` sends `labelIds`
 - [x] Implement tracker labels, route, Linear client, UI selector and card badge
-- [ ] Manual check of the three creation cases, including the Linear label — BLOCKED: all three creation cases verified in the isolated runner (local tracker); the Linear label path is covered by fake-client tests only (no Linear test workspace)
+- [x] Manual check of the three creation cases, including the Linear label — all three creation cases verified in the isolated runner (local tracker). Linear label path confirmed in production, 2026-10-24: 43 live Linear issues carry `project:<key>` labels across 9 projects (agentic-os, knowledge-base, Trading, study_research, …) and their runs used `~/.agentic-os/worktrees/<key>/<id>` on `agent/<id>` (e.g. AGE-117 → agentic-os, AGE-123 → knowledge-base, AGE-135 → Trading)
 
 ## C. Live terminal view from any board card
 
