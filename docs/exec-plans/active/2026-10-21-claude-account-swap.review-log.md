@@ -733,3 +733,59 @@ proof of absence of defects. No independent approval is claimed.
   filesystem-blocked); all findings were resolved and re-tested. The only post-inspection edit is
   this log entry.
 - Remaining: the user's browser logins and the real switch/resume acceptance, then archive the plan.
+
+## Merge with main (2026-10-24)
+
+`main` is at `fd89f14`, ~60 commits ahead of this branch (`e8da827`).
+
+Constraint: `git merge main` cannot run in this worktree. Its git metadata lives in the main
+checkout's `.git/worktrees/AGE-125`; every ref/index write is refused by this session's file sandbox
+(`fatal: unable to lock ORIG_HEAD … Operation not permitted`), and the `danger-full-access` retry is
+reporting "no approval channel is available". Nothing was committed here. The merge was resolved in
+a throwaway clone under /tmp and the resolved tree was applied to the worktree as uncommitted
+changes, which the runner commits on this branch.
+
+Read-only merge-tree preview: 5 files changed on both sides; `runner/modules/pty/__init__.py`,
+`runner/run_skill.py` and `tests/conftest.py` auto-merged; conflicts in `runner/app.py` and
+`docs/context-maintenance.md`.
+
+Resolution:
+
+- `runner/app.py` — main rewrote `_project_exec_env` (new `worktree`/`run_id` parameters, AGE-129
+  sandbox PATH, confidential-dsh environment). Main's version is kept unchanged. The ticket's
+  guarantee (a `CLAUDE_CONFIG_DIR` in `project.env` must not defeat switching) is re-applied where
+  Claude is actually spawned: `run_agent_process` for `stream == "claude"`, and
+  `project_runs.run_agent` for the project-ticket path. `_registry_exec_env` still sets the
+  directory for skill/routing/resume calls. Quota token, `is_error` results, result-text error and
+  the startup warning auto-merged unchanged.
+- `docs/context-maintenance.md` — main's version is kept verbatim. Main's AGE-125 lines describe
+  the retired snapshot design; replacing them recreates the conflict, and appending a section at
+  the file's end also conflicts (main added lines at EOF). Keeping main's file is the only
+  conflict-free choice; the revision is recorded here and in the plan, and the plan's DoD item is
+  marked N/A with that reason.
+- The ticket's `runner/claude_account.py`, `tests/test_claude_account.py`, plan and log are
+  unchanged by main, so the branch versions are kept. `tests/test_claude_account.py` gained two
+  tests for the relocated spawn-time guarantee (`80 → 81`).
+
+Proof of the resolution (throwaway clone, not committed in the repo): the resolved tree replayed as
+a normal commit on `e8da827` merges into `main` with "Automatic merge went well" and no conflicts.
+In the worktree, `py_compile` passes and `tests/test_claude_account.py` is 81 passed; the full-suite
+result is recorded below after the run.
+
+Final merge proof and suite:
+
+- Exact final tree (patch + the 81-test account file + this plan/log) replayed as a commit on
+  `e8da827` in a throwaway clone: `git merge <final> main` → "Automatic merge went well", no
+  conflicts.
+- `py_compile runner/*.py` passes. `tests/test_claude_account.py` 81 passed.
+- Full suite on the merged worktree: **1010 passed / 79 failed** (`env -u GIT_OPTIONAL_LOCKS` to
+  drop this session's ambient value; one dsh env test asserts that variable is absent).
+  The same seven confinement/PTY modules on a clean `main` clone give **78 failures, identical by
+  name**; they need `/usr/bin/sandbox-exec` or a PTY, both refused in this sandbox. The 79th,
+  `tests/test_terminals.py::test_resume_argv_policy`, fails only because the uncommitted
+  `.gitignore` is not "clean vs HEAD" (`_ignored_by_committed_rule`); the same tree committed in a
+  clone passes it (verified). No failure is introduced by the merge.
+- The merge commit itself could not be created: every write to the worktree's git metadata
+  (main checkout `.git/worktrees/AGE-125`) is denied, and the escalation has no approval channel.
+  The resolved tree is therefore uncommitted for the runner to commit, as the session contract
+  requires.

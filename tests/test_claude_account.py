@@ -629,11 +629,36 @@ def test_registry_exec_env_sets_the_account_for_claude_only(app_mod, env):
     assert "CLAUDE_CONFIG_DIR" not in app_mod._registry_exec_env("dsh", {})
 
 
-def test_project_exec_env_applies_the_account_after_project_env(app_mod, monkeypatch, env):
+def test_run_agent_process_applies_the_account_after_project_env(app_mod, env, tmp_path, monkeypatch):
     login(env, "nyu")
-    monkeypatch.setattr(app_mod, "_load_registry", lambda agent: {})
-    project = SimpleNamespace(env={"CLAUDE_CONFIG_DIR": "/from-projects-yaml"})
-    assert app_mod._project_exec_env("claude", project)["CLAUDE_CONFIG_DIR"] == \
+    monkeypatch.setattr(app_mod, "RUN_PROGRESS_DIR", tmp_path / "progress")
+    script = tmp_path / "dump.py"
+    script.write_text(
+        "import json, os\n"
+        "print(json.dumps({'type': 'result', 'session_id': 's1', "
+        "'result': os.environ.get('CLAUDE_CONFIG_DIR', '')}), flush=True)\n")
+    app_mod._running_jobs["acct"] = {"run_id": "acct"}
+    try:
+        output, *_rest = app_mod.run_agent_process(
+            "acct", [sys.executable, str(script)], stream="claude", timeout=20,
+            env={"CLAUDE_CONFIG_DIR": "/from-projects-yaml"})
+    finally:
+        app_mod._running_jobs.pop("acct", None)
+    assert output == ca.normalize_dir(ca.account_dir("nyu"))
+
+
+def test_project_run_agent_applies_the_account_after_project_env(env, tmp_path):
+    import project_runs
+    login(env, "nyu")
+    script = tmp_path / "dump.py"
+    script.write_text(
+        "import os, pathlib\n"
+        "pathlib.Path('seen.txt').write_text(os.environ.get('CLAUDE_CONFIG_DIR', ''))\n")
+    _lines, _err, code, _timed = project_runs.run_agent(
+        [sys.executable, str(script)], str(tmp_path),
+        {"CLAUDE_CONFIG_DIR": "/from-projects-yaml"}, "acctrun", "claude", 30,
+        lambda *args, **kwargs: None)
+    assert code == 0 and (tmp_path / "seen.txt").read_text() == \
         ca.normalize_dir(ca.account_dir("nyu"))
 
 

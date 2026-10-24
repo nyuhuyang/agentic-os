@@ -633,7 +633,11 @@ def open_terminal(data: dict, socketio) -> dict:
             # A card's session ends with its agent, so the card's lock goes with it (no shell is
             # left holding it); an unbound resume keeps a shell in its folder afterwards.
             tail = "" if rec is not None else f"; exec {shlex.quote(argv[0])} -l"
-            argv = [argv[0], "-l", "-c", shlex.join(resume) + tail]
+            # AGE-129: after the login profile has set PATH, so the sandboxed `codex` stays first
+            import project_runs
+            path = (f"PATH={shlex.quote(str(project_runs.SANDBOXED_BIN))}:\"$PATH\" "
+                    if t.agent == "claude" and project and project.confidential else "")
+            argv = [argv[0], "-l", "-c", path + shlex.join(resume) + tail]
         short = (t.ticket or Path(t.cwd).name)[:16]
         t.label = f"{key or 'runner'} · {kind} · {short}"
         # An agent tab starts and registers under its checkout's merge gate: never between a manual
@@ -699,7 +703,8 @@ def _record_pending_handoff(t: Terminal, line: str, socketio) -> None:
     run_id = pending.get("run_id") or str(uuid.uuid4())
     _write_run_log(pending["skill"], "sent", datetime.now(timezone.utc).isoformat(), 0.0,
                    prompt=command, output="dispatched to terminal", run_id=run_id,
-                   extra={"project_key": t.project_key, "term_id": t.term_id} if t.project_key else None)
+                   extra={"project_key": t.project_key, "term_id": t.term_id,
+                          "confidential": bool(confidential)} if t.project_key else None)
     socketio.emit("run_logged", {"skill": pending["skill"], "run_id": run_id}, to=_room(t.term_id))
 
 

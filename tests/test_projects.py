@@ -95,6 +95,19 @@ def test_worktree_created_on_agent_branch(repo):
     assert again["reused"]
 
 
+def test_codegraph_index_copied_without_seed(repo):
+    import sqlite3
+    (repo / ".codegraph").mkdir()
+    (repo / ".codegraph" / ".gitignore").write_text("*\n!.gitignore\n")  # what `codegraph init` writes
+    with sqlite3.connect(repo / ".codegraph" / "codegraph.db") as db:
+        db.execute("create table nodes (name text)")
+        db.execute("insert into nodes values ('demo')")
+    p, wt, _ = make(repo)
+    with sqlite3.connect(wt / ".codegraph" / "codegraph.db") as db:
+        assert db.execute("select name from nodes").fetchall() == [("demo",)]
+    assert pj.uncommitted(p, wt) == []  # the copy ignores itself: no rule needed in the project
+
+
 def test_seed_copy_has_no_symlinks(repo):
     _, wt, _ = make(repo, seed=["data", "linked.csv"])
     for f in (wt / "data" / "real.csv", wt / "data" / "nested_link.csv", wt / "linked.csv"):

@@ -180,12 +180,16 @@ class LocalTracker:
         team_key: str = "",
         team_name: str = "",
         labels: list[str] | None = None,
+        local_only: bool = False,
     ) -> dict:
-        """Create a new task, return normalized issue dict."""
+        """Create a new task, return normalized issue dict. `local_only`: a confidential
+        project's task that never goes to Linear, even while Linear is the tracker (AGE-127)."""
         with _tasks_txn(self._state_dir) as tasks:
             issue = self._new_issue(tasks, title, description, state_name, preferred_agent,
                                     team_id, team_key, team_name)
             issue["labels"] = list(labels or [])
+            if local_only:
+                issue["local_only"] = True
         logger.info("Local task created: %s — %s", issue["identifier"], title)
         return dict(issue)
 
