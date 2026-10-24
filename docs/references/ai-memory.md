@@ -86,6 +86,10 @@ sh scripts/install_ai_memory.sh --force    # re-download (upgrade); wiki/index u
   checkouts never reuse each other's service. Bearer token from `state/ai-memory/auth-tokens/default`;
   started lazily by the runner (or the first `brief`) and reused by later runner processes. Stopping the
   runner leaves it running; it is restarted on demand.
+- Lifecycle: resident by design. There is no idle timeout, so after the first use it keeps its model
+  and index in memory until the machine reboots or you stop it. To stop it by hand, use the port from
+  `python3 runner/ai_memory.py` (for example `kill "$(lsof -ti tcp:49434)"`); the next project run or
+  `brief` starts it again. Runner restarts do not stop it.
 - Disable: `rm state/ai-memory/enabled` (or `AGENTIC_OS_AI_MEMORY=0`). Re-enable: touch the marker,
   or `AGENTIC_OS_AI_MEMORY=1`.
 - External server: set `AI_MEMORY_SERVER_URL` and `AI_MEMORY_AUTH_TOKEN`; no local binary needed.

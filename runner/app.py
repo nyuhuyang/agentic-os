@@ -361,6 +361,7 @@ def _sanitize_record(record: dict) -> dict:
     """Every run-log writer, record copies included (status change, restore, archive): a
     confidential or unknown-policy project run keeps no issue_title where records may leak
     (DP-24, R13-01). The policy is the current sticky one, not the copied flag alone."""
+    record = ai_memory.scrub_record(record)  # defense in depth for copies that skip _write_run_log
     if "issue_title" not in record or not (record.get("project_key") or "confidential" in record):
         return record
     conf = record.get("confidential")
@@ -2012,6 +2013,13 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
                    agent_session_id: str | None = None,
                    reset_generation: int | None = None,
                    extra: dict | None = None, audit: bool = False) -> str:
+    # Every run-log writer (project runs, session cards, generic dispatch) comes through here, and
+    # task state below reuses these strings: scrub the memory bearer token before either write.
+    prompt = ai_memory.scrub_token(prompt)
+    output = ai_memory.scrub_token(output)
+    error = ai_memory.scrub_token(error)
+    if extra:
+        extra = ai_memory.scrub_record(extra)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if run_id is None:
