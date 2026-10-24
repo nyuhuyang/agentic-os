@@ -18,6 +18,7 @@ sys.path.insert(0, str(RUNNER))
 sys.path.insert(0, str(RUNNER.parent))
 
 import projects as pj  # noqa: E402
+import dsh_cli
 import project_runs as pr  # noqa: E402
 
 SENTINEL = "SENTINEL-CONFIDENTIAL-4242"
@@ -59,8 +60,28 @@ def project(repo, confidential=False):
 
 # ── argv policy (Decision 9) ─────────────────────────────────────────────────
 
+def _confidential_dsh_prefix():
+    return ["/opt/homebrew/bin/node", "/opt/homebrew/lib/dsh/bin.js", "--profile", "headless",
+            "--patch", str(dsh_cli.DSH_CONFIDENTIAL_PATCH)]
+
+
 def cli(agent, repo, confidential):
-    return pr.agent_cli(agent, project(repo, confidential), "claude", lambda: ["dsh", "--profile", "headless"])
+    return pr.agent_cli(agent, project(repo, confidential), "claude",
+                        lambda: ["dsh", "--profile", "headless"], _confidential_dsh_prefix)
+
+
+def test_prompt_asks_the_agent_to_announce_a_long_test_run(proj):
+    """AGE-140: a silent test run must not read as a hang; the agent says it is about to test."""
+    repo, _ = proj
+    prompt = pr.project_prompt("do the ticket", project(repo), {"branch": "agent/DEMO-1"}, "claude")
+    assert "Before running the test suite" in prompt and "look like a hang" in prompt
+
+
+def test_prompt_asks_the_agent_to_announce_a_long_test_run(proj):
+    """AGE-140: a silent test run must not read as a hang; the agent says it is about to test."""
+    repo, _ = proj
+    prompt = pr.project_prompt("do the ticket", project(repo), {"branch": "agent/DEMO-1"}, "claude")
+    assert "Before running the test suite" in prompt and "look like a hang" in prompt
 
 
 def test_confidential_argv_has_no_bypass(proj):
@@ -84,7 +105,68 @@ def test_confidential_claude_settings_and_sources(proj):
     argv = cli("claude", repo, True)
     settings = json.loads(argv[argv.index("--settings") + 1])["sandbox"]
     assert settings["failIfUnavailable"] is True and settings["allowUnsandboxedCommands"] is False
-    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert argv[argv.index("--setting-sources") + 1] == "user" and "--strict-mcp-config" in argv
+    codex_home = Path.home() / ".codex"
+    assert settings["network"]["allowedDomains"] == pr.CODEX_DOMAINS and settings["network"]["strictAllowlist"]
+    assert str(codex_home) in settings["filesystem"]["allowWrite"]
+    assert str(codex_home / "config.toml") in settings["filesystem"]["denyWrite"]
+
+
+def test_sandboxed_codex_shim(tmp_path):
+    """Passes through outside a sandbox; inside one (nested sandbox-exec refused) it drops Codex's
+    own sandbox for the outer one and points Codex at the bundled CA file."""
+    if sys.platform != "darwin":
+        pytest.skip("macOS seatbelt only")
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "codex").write_text('#!/bin/sh\necho "$CODEX_CA_CERTIFICATE|$*"\n')
+    (fake / "codex").chmod(0o755)
+    env = {**os.environ, "PATH": f"{pr.SANDBOXED_BIN}:{fake}:/usr/bin:/bin"}
+    env.pop("CODEX_CA_CERTIFICATE", None)
+    run = lambda *argv: subprocess.run(argv, env=env, capture_output=True, text=True).stdout.strip()
+    assert run("codex", "exec", "-s", "read-only", "-") == "|exec -s read-only -"
+    jail = ["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny mach-lookup)"]  # refuses nesting
+    assert run(*jail, "codex", "exec", "-s", "read-only", "-") == (
+        "/etc/ssl/cert.pem|exec --dangerously-bypass-approvals-and-sandbox -s read-only -")
+    assert run(*jail, "codex", "exec", "resume", "sid", "-") == (
+        "/etc/ssl/cert.pem|exec resume --dangerously-bypass-approvals-and-sandbox sid -")
+    assert run(*jail, "codex", "--version") == "/etc/ssl/cert.pem|--version"
+
+
+def test_confidential_claude_exec_env_puts_sandboxed_codex_first(monkeypatch, tmp_path):
+    import app
+    monkeypatch.setattr(app, "_registry_exec_env", lambda agent, reg: {"PATH": "/usr/bin"})
+    monkeypatch.setattr(app, "_load_registry", lambda agent: {})
+    project = SimpleNamespace(env={}, confidential=True)
+    assert app._project_exec_env("claude", project, str(tmp_path))["PATH"] == f"{pr.SANDBOXED_BIN}{os.pathsep}/usr/bin"
+    assert app._project_exec_env("codex", project, str(tmp_path))["PATH"] == "/usr/bin"
+    assert app._project_exec_env("claude", SimpleNamespace(env={}, confidential=False), str(tmp_path))["PATH"] == "/usr/bin"
+
+
+def test_dsh_leaves_the_commit_and_git_writes_to_the_runner(proj):
+    """AGE-138: a linked worktree's git metadata is outside dsh's workspace-write root."""
+    repo, _ = proj
+    binding = {"branch": "agent/T-1"}
+    dsh = pr.project_prompt("task", project(repo), binding, "dsh")
+    assert "Leave your changes uncommitted" in dsh and "Commit your work" not in dsh
+    assert "`git commit`" in dsh and "runner commits" in dsh
+    codex = pr.project_prompt("task", project(repo), binding, "codex")
+    assert "Leave your changes uncommitted" in codex and "git commit" not in codex
+    claude = pr.project_prompt("task", project(repo), binding, "claude")
+    assert "Commit your work on this branch" in claude and "Leave your changes uncommitted" not in claude
+
+
+def test_dsh_leaves_the_commit_and_git_writes_to_the_runner(proj):
+    """AGE-138: a linked worktree's git metadata is outside dsh's workspace-write root."""
+    repo, _ = proj
+    binding = {"branch": "agent/T-1"}
+    dsh = pr.project_prompt("task", project(repo), binding, "dsh")
+    assert "Leave your changes uncommitted" in dsh and "Commit your work" not in dsh
+    assert "`git commit`" in dsh and "runner commits" in dsh
+    codex = pr.project_prompt("task", project(repo), binding, "codex")
+    assert "Leave your changes uncommitted" in codex and "git commit" not in codex
+    claude = pr.project_prompt("task", project(repo), binding, "claude")
+    assert "Commit your work on this branch" in claude and "Leave your changes uncommitted" not in claude
 
 
 def test_non_confidential_codex_uses_auto_review_without_sandbox_flag(proj):
@@ -101,10 +183,18 @@ def test_non_confidential_claude_and_dsh_unchanged(proj):
     assert cli("dsh", repo, False) == ["dsh", "--profile", "headless"]
 
 
+def test_confidential_dsh_gets_the_sandbox_patch(proj):
+    """AGE-139: dsh is allowed for a confidential project through the runner's Seatbelt patch."""
+    repo, _ = proj
+    argv = cli("dsh", repo, True)
+    assert argv[:2] == ["/opt/homebrew/bin/node", "/opt/homebrew/lib/dsh/bin.js"]
+    assert argv[2:4] == ["--profile", "headless"]
+    assert argv[4:6] == ["--patch", str(dsh_cli.DSH_CONFIDENTIAL_PATCH)]
+    assert dsh_cli.DSH_CONFIDENTIAL_PATCH.is_file()
+
+
 def test_rejected_backends(proj, monkeypatch):
     repo, _ = proj
-    with pytest.raises(pr.ProjectRunError, match="dsh is not allowed"):
-        cli("dsh", repo, True)
     with pytest.raises(pr.ProjectRunError, match="cannot run project tickets"):
         cli("deepseek-direct", repo, False)
     monkeypatch.setattr(pr, "CONFIDENTIAL_SANDBOX_VERIFIED", False)
@@ -278,10 +368,11 @@ def test_dispatch_records_binding_verify_and_badge(helper):
     assert subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True).stdout == ""
 
 
-def test_sandboxed_codex_gets_a_runner_commit_without_the_seed(helper):
+@pytest.mark.parametrize("agent", ["codex", "dsh"])
+def test_agent_that_cannot_write_git_gets_a_runner_commit_without_the_seed(helper, agent):
     app_mod, run, records, state, *_ = helper
     state["mode"] = "uncommitted"
-    run(agent="codex")
+    run(agent=agent)
     rec = records()[-1]
     assert rec["runner_commit"] and rec["verify"]["status"] == "pass" and rec["seed_committed"] == []
     names = subprocess.run(["git", "-C", rec["worktree"], "show", "--name-only", "--format=", rec["runner_commit"]],
@@ -925,13 +1016,8 @@ def test_relocated_worktree_root_is_refused(helper, monkeypatch, tmp_path):
 def test_failed_closing_snapshot_is_recorded(helper, monkeypatch):
     """I7-07: a closing fingerprint that fails is recorded and badges the run, on success and cancel."""
     app_mod, run, records, state, *_ = helper
-    real, calls = pj.fingerprint, []
-
-    def flaky(project, exclude=frozenset()):
-        calls.append(1)
-        if len(calls) % 2 == 0:
-            raise pj.ProjectError("index is corrupt")
-        return real(project, exclude=exclude)
+    def flaky(project, exclude=frozenset()):  # the opening uses fingerprint_parts: only the closing fails (AGE-124)
+        raise pj.ProjectError("index is corrupt")
     monkeypatch.setattr(pj, "fingerprint", flaky)
     run()
     rec = records()[-1]

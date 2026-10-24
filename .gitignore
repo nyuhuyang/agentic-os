@@ -21,9 +21,11 @@
 
 # Generated / runtime
 graphify-out/
+.codegraph/
 .playwright-mcp/
 outputs/
 state/
+.tools/
 .pnpm-store/
 
 # Project registry (names private/client projects; repo is public)

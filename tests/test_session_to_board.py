@@ -60,6 +60,7 @@ def stb(env, tmp_path, monkeypatch):
     monkeypatch.setattr(app_mod, "_linear_dispatched", {})
     monkeypatch.setattr(app_mod, "_FINALIZING", set())  # other tests' stubbed workers never write records
     monkeypatch.setattr(app_mod, "_process_table", lambda: {})  # never the host's processes
+    monkeypatch.setattr(app_mod, "_DSH_SESSIONS", tmp_path / "dsh" / "sessions")
     app_mod._RECORDS_CACHE.clear()
     claude_session(tmp_path, SID, proj)
     launches = []
@@ -137,11 +138,128 @@ def test_to_board_refuses_a_running_or_claimed_session_and_changes_nothing(stb):
     assert (log.read_text(), tasks(tmp)) == before
 
 
-def test_to_board_refuses_sessions_outside_the_project_and_dsh(stb):
+def test_to_board_refuses_sessions_outside_the_project_and_missing_dsh(stb):
     app_mod, mod, client, log, tmp, proj, conf, launches = stb
     claude_session(tmp, "far", tmp / "elsewhere")
     assert to_board(client, sid="far").status_code == 404
-    assert to_board(client, agent="dsh").status_code == 400
+    assert to_board(client, agent="dsh").status_code == 404
+
+
+def dsh_session(app_mod, sid, cwd, *, compressed=False, parent=None):
+    project_dir = "--" + str(cwd).replace("/", "-").lstrip("-")[:251] + "--"
+    directory = app_mod._DSH_SESSIONS / project_dir / sid
+    directory.mkdir(parents=True)
+    header = {"type": "session", "version": 4, "id": sid, "cwd": str(cwd),
+              "createdAt": 1, "isSeeded": False, "delegationDepth": 0,
+              **({"parentSession": parent} if parent else {})}
+    events = [header, {"type": "user/message", "seq": 0, "time": 1,
+                       "surfaceOp": "append", "data": {"role": "user", "id": "message-1",
+                       "source": {"kind": "user"}, "content": [{"type": "text", "text": "first prompt"}]}},
+              {"type": "session/title", "seq": 1, "time": 2,
+               "data": {"title": "DeepSeek 原生标题", "messageSeqs": [], "source": {"kind": "user"}}}]
+    lines = [(json.dumps(e, ensure_ascii=False) + "\n").encode() for e in events]
+    # Real separately compressed frames: decoding just the first frame loses title/events.
+    content = b"".join(app_mod._dsh_zstd(line) if compressed else line for line in lines)
+    path = directory / ("session.v4.jsonl.zstd" if compressed else "session.v4.jsonl")
+    path.write_bytes(content)
+    os.utime(path, (time.time() - 600, time.time() - 600))
+    return path
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+def test_dsh_project_session_list_rename_resume_and_remove(stb, monkeypatch, compressed):
+    app_mod, mod, client, log, tmp, proj, conf, launches = stb
+    import projects as pj
+    monkeypatch.setattr(app_mod, "_request_commit_pass", lambda jobs: None)
+    monkeypatch.setattr(pj, "SESSION_TRASH", tmp / "trash")
+    sid = "session-dsh-project"
+    path = dsh_session(app_mod, sid, proj, compressed=compressed)
+    dsh_session(app_mod, "session-outside", tmp / "proj-other")
+    dsh_session(app_mod, "session-child", proj, parent=sid)
+    base = f"/api/projects/demo/sessions/dsh/{sid}"
+    listed = client.get("/api/projects").get_json()["projects"][0]["sessions"]
+    row, = [s for s in listed if s["agent"] == "dsh"]
+    assert row["id"] == sid and row["title"] == "DeepSeek 原生标题"
+    assert sid in row["resume"] and "dsh" in row["resume"]
+    before, mtime = path.read_bytes(), path.stat().st_mtime_ns
+    assert client.post(base + "/rename", json={"title": "新名字"}).status_code == 200
+    assert path.read_bytes().startswith(before) and path.stat().st_mtime_ns == mtime
+    assert app_mod._find_session("dsh", sid)["native_title"] == "新名字"
+    r = to_board(client, agent="dsh", sid=sid)
+    assert r.status_code == 200, r.get_json()
+    rid = r.get_json()["run_id"]
+    intent = app_mod._valid_intent(app_mod._latest_record(rid))
+    assert intent["agent"] == "dsh" and intent["id"] == sid
+    reply = client.post(f"/api/runs/{rid}/retry", json={"reply": "continue exactly here"})
+    assert reply.status_code == 200, reply.get_json()
+    launch, = launches
+    assert launch["cwd"] == str(proj) and launch["stream"] == "dsh"
+    assert launch["cmd"][-4:] == ["--session-id", sid, "--", "continue exactly here"]
+    assert app_mod._card_session(r.get_json()["issue_id"], "dsh")[0] == sid
+    assert client.post(base + "/rename", json={"title": "card and native title"}).status_code == 200
+    assert app_mod._find_session("dsh", sid)["native_title"] == "card and native title"
+    assert client.post(base + "/remove").status_code == 200
+    assert not path.exists() and app_mod._find_session("dsh", sid) is None
+    assert list((tmp / "trash" / "dsh").rglob(path.name))
+    assert client.post(base + "/to-board").status_code == 404
+
+
+def test_dsh_session_rows_show_the_branch_of_their_checkout(stb, monkeypatch):
+    """AGE-144: a DeepSeek row's worktree label comes from the folder it ran in, both the main
+    checkout and a linked worktree, without running git on the request path."""
+    app_mod, mod, client, log, tmp, proj, conf, launches = stb
+    monkeypatch.setattr(app_mod, "_request_commit_pass", lambda jobs: None)
+    base = subprocess.run(["git", "-C", str(proj), "symbolic-ref", "--short", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+    subprocess.run(["git", "-C", str(proj), "-c", "user.email=t@example.com", "-c", "user.name=t",
+                    "commit", "-q", "--allow-empty", "-m", "base"], check=True)
+    wt = tmp / "wt" / "demo" / "T-1"
+    subprocess.run(["git", "-C", str(proj), "worktree", "add", "-q", "-b", "agent/T-1", str(wt)], check=True)
+    (wt / "src").mkdir()
+    dsh_session(app_mod, "session-in-main", proj)
+    dsh_session(app_mod, "session-in-worktree", wt / "src")
+    listed = client.get("/api/projects").get_json()["projects"][0]["sessions"]
+    rows = {s["id"]: s for s in listed if s["agent"] == "dsh"}
+    assert rows["session-in-main"]["branch"] == base
+    assert rows["session-in-worktree"]["branch"] == "agent/T-1"
+
+
+def test_dsh_session_writes_refuse_live_external_owner_and_store_escape(stb):
+    import fcntl
+    app_mod, mod, client, log, tmp, proj, conf, launches = stb
+    sid = "session-native-lock"
+    path = dsh_session(app_mod, sid, proj)
+    base = f"/api/projects/demo/sessions/dsh/{sid}"
+    before = path.read_bytes()
+    with (path.parent / "session.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert client.post(base + "/rename", json={"title": "blocked"}).status_code == 409
+        assert client.post(base + "/remove").status_code == 409
+    assert path.read_bytes() == before
+    app_mod._claim_session("dsh", sid, "claimed")
+    assert client.post(base + "/rename", json={"title": "blocked"}).status_code == 409
+    app_mod._release_session("claimed")
+    assert to_board(client, key="secret", agent="dsh", sid=sid).status_code == 404
+    escaped = path.parent.parent / "session-symlink"
+    escaped.symlink_to(path.parent, target_is_directory=True)
+    assert app_mod._find_session("dsh", "session-symlink") is None
+
+
+def test_dsh_rename_short_write_rolls_back_and_preserves_torn_log(stb, monkeypatch):
+    app_mod, mod, client, log, tmp, proj, conf, launches = stb
+    sid = "session-rollback"
+    path = dsh_session(app_mod, sid, proj)
+    base = f"/api/projects/demo/sessions/dsh/{sid}"
+    before, mtime = path.read_bytes(), path.stat().st_mtime_ns
+    real_write = os.write
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "write", lambda fd, data: real_write(fd, data[:5]))
+        assert client.post(base + "/rename", json={"title": "must roll back"}).status_code == 500
+    assert path.read_bytes() == before and path.stat().st_mtime_ns == mtime
+    path.write_bytes(before + b'{"type":')
+    os.utime(path, (time.time() - 600, time.time() - 600))
+    assert client.post(base + "/rename", json={"title": "torn log"}).status_code == 400
+    assert path.read_bytes() == before + b'{"type":'
 
 
 def test_failed_move_restores_the_generation_and_appends_nothing(stb, monkeypatch):
@@ -348,9 +466,7 @@ def test_session_card_terminal_opens_in_the_session_folder(stb):
 
 @pytest.mark.parametrize("commits, dirty, verify, changed, expected", [
     ("", [], None, False, None),                    # question-only, no check: no badge
-    ("", [], "pass", False, None),                  # question-only, pass: hidden too
-    ("", [], "fail", False, "fail"),                # a real failure still shows
-    ("", [], "timeout", False, "timeout"),
+    ("", [], "fail", False, None),                  # question-only: verify does not run (AGE-117)
     ("", [], None, True, "main checkout changed"),
     ("abc", [], None, False, "no check"),           # changed files, no check: neutral
 ])
@@ -363,11 +479,29 @@ def test_badge_for_a_run_that_changed_nothing(monkeypatch, tmp_path, commits, di
     monkeypatch.setattr(pr.projects, "confine_for", lambda p, wt: None)
     monkeypatch.setattr(pr.projects, "load_binding", lambda p, i: {})
     monkeypatch.setattr(pr.projects, "committed_seeds", lambda p, wt, base: [])
-    monkeypatch.setattr(pr.projects, "run_verify", lambda *a, **k: {"status": verify, "exit": 1, "duration_s": 0, "tail": ""})
+    ran = []
+    monkeypatch.setattr(pr.projects, "run_verify", lambda *a, **k: ran.append(1) or {"status": verify, "exit": 1, "duration_s": 0, "tail": ""})
     monkeypatch.setattr(pr, "closing_check", lambda p, e, b: {"main_checkout_changed": changed})
     binding = {"worktree": str(tmp_path), "issue_identifier": "LOC-1", "base_sha": "base"}
     result = pr.post_run(project, binding, "claude", "t", "fp", set(), start_sha="start")
     assert result.get("verify_badge") == expected
+    assert bool(ran) == bool((commits or dirty) and verify) and ("verify" in result) == bool(ran)  # only a run that changed something
+
+
+def test_verify_runs_when_the_run_committed(monkeypatch, tmp_path):
+    import project_runs as pr
+    import projects as pj
+    project = pj.Project(key="demo", path=tmp_path, verify="make test")
+    monkeypatch.setattr(pr.projects, "uncommitted", lambda p, wt: [])
+    monkeypatch.setattr(pr.projects, "_git", lambda wt, *a, **k: subprocess.CompletedProcess(a, 0, "abc", ""))
+    monkeypatch.setattr(pr.projects, "confine_for", lambda p, wt: None)
+    monkeypatch.setattr(pr.projects, "load_binding", lambda p, i: {})
+    monkeypatch.setattr(pr.projects, "committed_seeds", lambda p, wt, base: [])
+    monkeypatch.setattr(pr.projects, "run_verify", lambda *a, **k: {"status": "fail", "exit": 1, "duration_s": 0, "tail": ""})
+    monkeypatch.setattr(pr, "closing_check", lambda p, e, b: {"main_checkout_changed": False})
+    binding = {"worktree": str(tmp_path), "issue_identifier": "LOC-1", "base_sha": "base"}
+    result = pr.post_run(project, binding, "claude", "t", "fp", set(), start_sha="start")
+    assert result["verify"]["status"] == "fail" and result["verify_badge"] == "fail"
 
 
 # ── §8 model and cost ────────────────────────────────────────────────────────
@@ -611,6 +745,23 @@ def test_linear_session_issue_is_synchronous_with_label_marker_and_project(stb, 
     monkeypatch.setattr(mod, "_linear_client", lambda: (fake_bad, {}))
     claude_session(tmp, "c2", proj)
     assert to_board(client, sid="c2").status_code == 409 and not [c for c in fake_bad.calls if c[0] == "create_issue"]
+
+
+def test_linear_session_issue_with_all_teams_uses_the_viewers_only_team(stb, monkeypatch):
+    app_mod, mod, client, log, tmp, proj, conf, launches = stb
+    import runner.modules.linear as lin
+    fake = FakeLinearCreate()
+    fake.fetch_teams = lambda: [{"id": "age", "key": "AGE", "name": "Agenticos"}]
+    teams = []
+    fake.ensure_label = lambda team_id, name: teams.append(team_id) or "lab-1"
+    create = fake.create_issue
+    fake.create_issue = lambda team_id, *a, **k: teams.append(team_id) or create(team_id, *a, **k)
+    monkeypatch.setattr(lin, "_load_workflow_config", lambda: {"tracker": {"kind": "linear", "team_id": ""}})
+    monkeypatch.setattr(mod, "_linear_client", lambda: (fake, {"team_id": "", "project_slug": "slug"}))
+    mod._capability = {"available": True, "type": "linear"}
+    r = to_board(client)
+    assert r.status_code == 200 and teams == ["age", "age"]  # label + create; "All Teams" no longer blocks (AGE-122)
+    assert [c for c in fake.calls if c[0] == "create_issue"]
 
 
 def test_dispatch_moves_a_project_ticket_without_a_linear_project(stb, monkeypatch):
@@ -891,3 +1042,56 @@ def test_to_board_of_an_older_session_names_the_terminal_holding_its_card(stb, m
     app_mod._running_jobs["j"] = {"linear_issue_id": ISSUE, "state": "running", "agent": "claude"}
     assert to_board(client).get_json() == {"error": "still running"}  # headless: unchanged
     assert (log.read_text(), tasks(tmp)) == before
+
+
+# ── AGE-127: confidential sessions get local-only tasks while Linear is the tracker ──
+
+@pytest.fixture
+def stb_linear(stb, monkeypatch):
+    app_mod, mod, client, log, tmp, proj, conf, launches = stb
+    import linear_client
+    import runner.modules.linear as lin
+    calls = []
+
+    class NoLinear:
+        def __call__(self, *a, **k):
+            return self
+
+        def __getattr__(self, name):
+            return lambda *a, **k: calls.append((name, a, k))
+
+    monkeypatch.setattr(linear_client, "LinearClient", NoLinear())
+    monkeypatch.setattr(lin, "_post_linear_comment_raw", lambda *a: calls.append(("comment_raw", a)) or True)
+    monkeypatch.setenv("LINEAR_API_KEY", "dummy")
+    monkeypatch.setattr(lin, "_load_workflow_config", lambda: {"tracker": {
+        "kind": "linear", "api_key": "$LINEAR_API_KEY", "project_slug": "slug", "team_id": "team-a"}})
+    monkeypatch.setattr(mod, "_capability", {"available": True, "type": "linear"})
+    return stb, calls
+
+
+def test_sidecar_confidential_session_gets_a_local_only_task_in_linear_mode(stb_linear):
+    (app_mod, mod, client, log, tmp, proj, conf, launches), calls = stb_linear
+    import projects as pj
+    wt = pj.WORKTREE_ROOT / "demo" / "LOC-8"
+    wt.mkdir(parents=True)
+    (pj.WORKTREE_ROOT / "demo" / ".meta").mkdir(parents=True, exist_ok=True)
+    (pj.WORKTREE_ROOT / "demo" / ".meta" / "LOC-8.json").write_text(json.dumps({"confidential": True}))
+    claude_session(tmp, "wt-secret-2", wt, title="sidecar secret")
+    r = to_board(client, sid="wt-secret-2")
+    assert r.status_code == 200, r.get_json()
+    assert tasks(tmp)[r.get_json()["issue_id"]]["local_only"] is True and calls == []
+
+
+def test_history_confidential_session_gets_a_local_only_task_in_linear_mode(stb_linear):
+    (app_mod, mod, client, log, tmp, proj, conf, launches), calls = stb_linear
+    write_log(log, {"run_id": "old", "agent": "claude", "status": "review", "agent_session_id": SID,
+                    "linear_issue_id": "archived-card", "confidential": True})
+    r = to_board(client)
+    assert r.status_code == 200, r.get_json()
+    assert tasks(tmp)[r.get_json()["issue_id"]]["local_only"] is True and calls == []
+
+
+def test_public_session_still_goes_to_linear(stb_linear):
+    (app_mod, mod, client, log, tmp, proj, conf, launches), calls = stb_linear
+    to_board(client)
+    assert any(c[0] == "ensure_label" for c in calls)  # the public path is unchanged
