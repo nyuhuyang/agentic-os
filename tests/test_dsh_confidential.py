@@ -144,7 +144,7 @@ def test_wrapper_builds_the_seatbelt_profile(tmp_path, monkeypatch):
 def test_wrapper_turns_a_profile_error_into_a_confine_error(tmp_path, monkeypatch):
     monkeypatch.setattr(dsh_confine, "_temp_root", lambda: "/private/tmp")
     monkeypatch.setattr(dsh_confine.projects, "sandbox_prefix",
-                        lambda roots, temp=None, temp_root=None, protected=None: (_ for _ in ()).throw(RuntimeError("bad path")))
+                        lambda roots, temp=None, temp_root=None, protected=None, **kw: (_ for _ in ()).throw(RuntimeError("bad path")))
     with pytest.raises(dsh_confine.ConfineError, match="sandbox profile"):
         dsh_confine.build_argv([_worktree(tmp_path), "--", "true"])
 
@@ -186,7 +186,7 @@ def test_wrapper_rejects_an_untrusted_temp_root(tmp_path, monkeypatch):
 def test_wrapper_main_fails_closed_when_sandbox_exec_is_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(dsh_confine, "_temp_root", lambda: "/tmp")
     monkeypatch.setattr(dsh_confine.projects, "sandbox_prefix",
-                        lambda roots, temp=None, temp_root=None, protected=None: ["/definitely/missing/sandbox-exec"])
+                        lambda roots, temp=None, temp_root=None, protected=None, **kw: ["/definitely/missing/sandbox-exec"])
     assert dsh_confine.main([_worktree(tmp_path), "--", "true"]) == 126
 
 
@@ -199,13 +199,59 @@ def test_wrapper_gives_the_shell_its_own_temp_root(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dsh_confine, "_temp_root", lambda: "/tmp")
     monkeypatch.setattr(dsh_confine.projects, "sandbox_prefix",
-                        lambda roots, temp=None, temp_root=None, protected=None: ["/usr/bin/sandbox-exec", "-p", "x"])
+                        lambda roots, temp=None, temp_root=None, protected=None, **kw: ["/usr/bin/sandbox-exec", "-p", "x"])
     monkeypatch.setattr(dsh_confine.os, "execve", fake_execve)
     root = _worktree(tmp_path)
     with pytest.raises(SystemExit):
         dsh_confine.main([root, "-", "--bind", root, root, "--", "true"])
     assert captured["env"]["TMPDIR"] == captured["env"]["TMP"] == captured["env"]["TEMP"] == "/tmp"
     assert captured["argv"][-1] == "true"
+
+
+def test_wrapper_workspace_profile_adds_git_and_keeps_network(tmp_path, monkeypatch):
+    monkeypatch.setattr(dsh_confine, "_temp_root", lambda: "/private/tmp")
+    root = _worktree(tmp_path)
+    git = tmp_path / "git-common"
+    argv = dsh_confine.build_argv(
+        [root, str(git), "workspace", "--ro-bind", "/", "/", "--tmpfs", "/tmp",
+         "--bind", root, root, "--", "git", "commit"])
+    profile = argv[2]
+    assert "(deny network*)" not in profile
+    assert 'global-name "com.apple.dnssd.service"' not in profile
+    assert f'(subpath "{os.path.realpath(root)}")' in profile
+    assert f'(subpath "{os.path.realpath(git)}")' in profile
+    assert '(subpath "/private/tmp")' in profile
+    assert argv[-2:] == ["git", "commit"]
+
+
+def test_wrapper_workspace_read_only_grants_no_roots(tmp_path, monkeypatch):
+    monkeypatch.setattr(dsh_confine, "_temp_root", lambda: "/private/tmp")
+    root = _worktree(tmp_path)
+    git = tmp_path / "git-common"
+    argv = dsh_confine.build_argv(
+        [root, str(git), "workspace", "--ro-bind", "/", "/", "--", "git", "status"])
+    profile = argv[2]
+    assert f'(subpath "{os.path.realpath(root)}")' not in profile
+    assert f'(subpath "{os.path.realpath(git)}")' not in profile
+    assert '(subpath "/private/tmp")' not in profile
+
+
+def test_wrapper_workspace_keeps_the_ambient_tmpdir(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_execve(path, argv, env):
+        captured.update(env=env)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(dsh_confine, "_temp_root", lambda: "/tmp")
+    monkeypatch.setattr(dsh_confine.projects, "sandbox_prefix",
+                        lambda roots, temp=None, temp_root=None, **kw: ["/usr/bin/sandbox-exec", "-p", "x"])
+    monkeypatch.setattr(dsh_confine.os, "execve", fake_execve)
+    monkeypatch.setenv("TMPDIR", "/var/folders/age146-test")
+    root = _worktree(tmp_path)
+    with pytest.raises(SystemExit):
+        dsh_confine.main([root, "-", "workspace", "--bind", root, root, "--", "true"])
+    assert captured["env"]["TMPDIR"] == "/var/folders/age146-test"
 
 
 # ── env / argv ──────────────────────────────────────────────────────────────
@@ -265,6 +311,50 @@ def test_confidential_dsh_refuses_dsh_home_inside_the_worktree(monkeypatch, tmp_
         app._project_exec_env("dsh", project, str(tmp_path))
 
 
+def test_non_confidential_dsh_project_gets_the_git_env(monkeypatch, tmp_path):
+    import app
+    monkeypatch.setattr(app, "_registry_exec_env", lambda agent, reg: {"PATH": "/usr/bin"})
+    monkeypatch.setattr(app, "_load_registry", lambda agent: {})
+    monkeypatch.setattr(pr, "DSH_GIT_OVERLAY", True)
+    monkeypatch.setattr(dsh_cli, "verify_workspace_launch", lambda env, root: None)
+    project = SimpleNamespace(env={}, confidential=False)
+    env = app._project_exec_env("dsh", project, str(tmp_path), "run-1")
+    assert env["AGENTICOS_DSH_CONFINE_GIT"] == os.path.realpath(str(tmp_path / "git-common"))
+    runner = json.loads(env[dsh_cli.DSH_CONFINE_RUNNER_ENV])
+    assert runner[0] == sys.executable and runner[1] == "-I" and runner[2].endswith("dsh_confine.py")
+    assert "AGENTICOS_DSH_SPILL_DIR" not in env
+    off = app._project_exec_env("dsh", project, str(tmp_path), "run-1", ticket_dispatch=False)
+    assert "AGENTICOS_DSH_CONFINE_GIT" not in off
+
+
+def test_non_confidential_dsh_env_exports_a_fallback_identity(monkeypatch, tmp_path):
+    import app
+    monkeypatch.setattr(app, "_registry_exec_env", lambda agent, reg: {"PATH": "/usr/bin"})
+    monkeypatch.setattr(app, "_load_registry", lambda agent: {})
+    monkeypatch.setattr(pr, "DSH_GIT_OVERLAY", True)
+    monkeypatch.setattr(dsh_cli, "verify_workspace_launch", lambda env, root: None)
+    monkeypatch.setattr(app._projects, "commit_identity_env", lambda cwd: {
+        "GIT_AUTHOR_NAME": "AgenticOS", "GIT_AUTHOR_EMAIL": "agentic-os@localhost",
+        "GIT_COMMITTER_NAME": "AgenticOS", "GIT_COMMITTER_EMAIL": "agentic-os@localhost"})
+    env = app._project_exec_env("dsh", SimpleNamespace(env={}, confidential=False), str(tmp_path), "run-1")
+    assert env["GIT_AUTHOR_NAME"] == "AgenticOS"
+    assert env["GIT_COMMITTER_EMAIL"] == "agentic-os@localhost"
+
+
+def test_session_continuation_does_not_get_the_workspace_overlay(monkeypatch):
+    import app
+    seen = {}
+
+    def fake_agent_cli(agent, project, claude_bin, dsh_prefix, confidential_prefix=None,
+                       workspace_prefix=None):
+        seen["workspace"] = workspace_prefix
+        return ["dsh"]
+
+    monkeypatch.setattr(pr, "agent_cli", fake_agent_cli)
+    app._project_cmd("dsh", SimpleNamespace(confidential=False), "x", None, ticket_dispatch=False)
+    assert seen["workspace"] is None
+
+
 def test_session_ticket_reads_the_worktree_root(monkeypatch, tmp_path):
     import app
     monkeypatch.setattr(app._projects, "WORKTREE_ROOT", tmp_path)
@@ -277,6 +367,52 @@ def test_non_confidential_dsh_prefix_is_unchanged(monkeypatch):
     monkeypatch.setattr(dsh_cli, "resolve_bin", lambda: "/bin/dsh")
     monkeypatch.setattr(dsh_cli, "check_version", lambda dsh_bin: "0.2.1-rc.2")
     assert dsh_cli.cli_prefix() == ["/bin/dsh", "--profile", "headless"]
+
+
+def test_workspace_prefix_adds_the_git_patch(monkeypatch):
+    monkeypatch.setattr(dsh_cli, "DSH_WORKSPACE_SUPPORTED", True)
+    monkeypatch.setattr(dsh_cli, "resolve_bin", lambda: "/bin/dsh")
+    monkeypatch.setattr(dsh_cli, "check_version", lambda dsh_bin: "0.2.1-rc.2")
+    argv = dsh_cli.workspace_cli_prefix()
+    assert argv[:2] == ["/bin/dsh", "--profile"]
+    assert argv[2:4] == ["headless", "--patch"]
+    assert argv[4] == str(dsh_cli.DSH_WORKSPACE_PATCH)
+    assert dsh_cli.DSH_WORKSPACE_PATCH.is_file()
+
+
+def test_workspace_prefix_is_none_off_macos(monkeypatch):
+    monkeypatch.setattr(dsh_cli, "DSH_WORKSPACE_SUPPORTED", False)
+    assert dsh_cli.workspace_cli_prefix() is None
+
+
+def test_workspace_problem_requires_the_runner_and_mode():
+    patch = dsh_cli.DSH_WORKSPACE_PATCH
+    good = (f"# == @deepseek-ai/dsh-base, patched by {patch}\n"
+            "- id: sandbox\n  name: '@deepseek-ai/dsh-sandbox-local'\n  config:\n"
+            "    runnerCommand: !!js [x, dsh-confine:, \"workspace\"]\n")
+    assert dsh_cli.workspace_problem(good, patch) is None
+    assert "did not apply" in dsh_cli.workspace_problem("- id: sandbox\n", patch)
+    replaced = good.replace("dsh-confine:", "something-else")
+    assert "not using" in dsh_cli.workspace_problem(replaced, patch)
+    wrong_mode = good.replace('\"workspace\"', '\"read-only\"')
+    assert "workspace mode" in dsh_cli.workspace_problem(wrong_mode, patch)
+
+
+def test_verify_workspace_launch_refuses_an_unapplied_patch(monkeypatch, tmp_path):
+    monkeypatch.setattr(dsh_cli, "DSH_WORKSPACE_SUPPORTED", True)
+    monkeypatch.setattr(dsh_cli, "resolve_bin", lambda: "/bin/dsh")
+    monkeypatch.setattr(dsh_cli, "check_version", lambda dsh_bin: "0.2.1-rc.2")
+    env = {dsh_cli.DSH_CONFINE_RUNNER_ENV: json.dumps(
+        [sys.executable, "-I", str(dsh_cli.DSH_CONFINE_RUNNER)])}
+
+    class Dump:
+        returncode = 0
+        stdout = "- id: sandbox\n  config:\n    runnerCommand: dsh-confine:\n"
+        stderr = ""
+
+    monkeypatch.setattr(dsh_cli, "_dump", lambda *a, **k: Dump())
+    with pytest.raises(RuntimeError, match="did not apply"):
+        dsh_cli.verify_workspace_launch(env, str(tmp_path))
 
 
 def test_confidential_dsh_refuses_a_tilde_user_home(monkeypatch, tmp_path):
@@ -374,17 +510,15 @@ def test_agent_cli_uses_the_confidential_prefix(monkeypatch):
     assert called
 
 
-def test_confidential_dsh_prompt_asks_for_a_commit():
-    project = SimpleNamespace(key="demo", auto_merge=False, no_push=True, verify="true", confidential=True)
-    shared = pr.project_prompt("task", project, {"branch": "agent/T-1"}, "dsh")
-    assert "Leave your changes uncommitted" in shared  # main's shared helper
-    confidential = dsh_cli.confidential_prompt(shared)
-    assert "Commit your work on this branch" in confidential
-    assert "Leave your changes uncommitted" not in confidential
-    assert "Do not run `git commit`" not in confidential
-    plain = pr.project_prompt("task", SimpleNamespace(**{**project.__dict__, "confidential": False}),
-                              {"branch": "agent/T-1"}, "dsh")
-    assert "Leave your changes uncommitted" in plain
+def test_dsh_prompt_asks_for_a_commit_in_both_modes(monkeypatch):
+    monkeypatch.setattr(pr, "DSH_GIT_OVERLAY", True)
+    for confidential in (True, False):
+        project = SimpleNamespace(key="demo", auto_merge=False, no_push=True, verify="true",
+                                  confidential=confidential)
+        prompt = pr.project_prompt("task", project, {"branch": "agent/T-1"}, "dsh")
+        assert "Commit your work on this branch" in prompt
+        assert "Leave your changes uncommitted" not in prompt
+        assert "Do not run `git commit`" not in prompt
 
 
 # ── installed dsh ───────────────────────────────────────────────────────────
