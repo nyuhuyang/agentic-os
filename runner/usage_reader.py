@@ -16,6 +16,7 @@ import argparse
 import contextlib
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -90,6 +91,44 @@ DEFAULT_LIMITS: dict[str, dict] = {
     "codex":  {"window_5h": 30_000_000, "window_7d": 150_000_000,   "daily_runs_max": 5},
     "deepseek":  {"window_5h": 10_000_000, "window_7d":  50_000_000,   "daily_runs_max": 20},
 }
+
+# DeepSeek spend is account-level and may be charged in USD or CNY. The dashboard uses one
+# USD-normalized monthly budget so both currencies count against the same cap.
+DEEPSEEK_MONTHLY_CAP_USD = 20.0
+DEEPSEEK_CNY_PER_USD = 7.2
+
+
+def _money(value: Any, default: float = 0.0) -> float:
+    """Finite float or the default, for usage values that may be missing or malformed."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def deepseek_balance_totals(data: dict[str, Any]) -> tuple[float, float]:
+    """USD and CNY totals for a DeepSeek usage record, including legacy caches.
+
+    New caches carry the totals. Old caches are reconstructed from `raw_balances` or the
+    normalized balance fields; a legacy USD-only cache's synthesized `balance_cny` is excluded.
+    Negative balances are clamped so the displayed components and the total agree.
+    """
+    balance = data.get("balance")
+    if not isinstance(balance, dict):
+        balance = {}
+    if data.get("balance_total_usd") is not None and data.get("balance_total_cny") is not None:
+        return round(_money(data.get("balance_total_usd")), 2), round(_money(data.get("balance_total_cny")), 2)
+    raw = balance.get("raw_balances")
+    if isinstance(raw, dict) and raw:
+        usd = max(0.0, _money(raw.get("USD")))
+        cny = max(0.0, _money(raw.get("CNY")))
+    else:
+        usd = max(0.0, _money(balance.get("balance_usd")))
+        cny = max(0.0, _money(balance.get("balance_cny")))
+        if balance.get("currency") == "USD":
+            cny = 0.0  # legacy USD-only cache: balance_cny was synthesized from balance_usd
+    return round(usd + cny / DEEPSEEK_CNY_PER_USD, 2), round(cny + usd * DEEPSEEK_CNY_PER_USD, 2)
 
 _AGY_CACHE_TTL_S = 55.0
 _AGY_MAX_AGE_S = 15 * 60
@@ -422,8 +461,10 @@ def load_deepseek_usage() -> dict[str, Any]:
         }
         # Pass through new fields if present
         for key in ("balance", "total_cost_usd", "total_cost_cny",
+                     "balance_total_usd", "balance_total_cny",
+                     "month_cost", "month_cost_cny", "month_resets_at",
                      "by_model_detail", "current_session", "session_count",
-                     "last_updated",
+                     "last_updated", "_schema",
                      "window_5h_cost", "window_5h_cost_cny",
                      "window_7d_cost", "window_7d_cost_cny",
                      "window_30d_cost", "window_30d_cost_cny",
@@ -964,8 +1005,10 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
     def _pct(val: int, lim: int) -> int:
         return min(100, round(val / lim * 100)) if lim else 0
 
-    # Compute today stats per agent
-    if agent == "codex":
+    # Compute today stats per agent. DeepSeek spend is account-level, so no local scan runs.
+    if agent == "deepseek":
+        today_stats = {"tokens": None, "sessions": None, "cost": 0.0}
+    elif agent == "codex":
         _codex_usage = load_codex_usage()
         _today_codex = _codex_usage.get("today", {})
         today_stats = {
@@ -994,151 +1037,146 @@ def compute_windows(agent: str = "claude", run_log_path: Path | None = None) -> 
         return max(0, 100 - _pct(val, lim))
 
     if agent == "deepseek":
-        # Cost-based budget windows (CNY)
-        CAP_5H = 5.0
-        CAP_WEEKLY = 50.0
-        CAP_MONTHLY = 200.0
-
         _ds_usage = load_deepseek_usage()
-        _bal_cny = 0.0
-        _cost_5h = 0.0
-        _cost_weekly = 0.0
-        _cost_monthly = 0.0
+        _cap = DEEPSEEK_MONTHLY_CAP_USD
+        _rate = DEEPSEEK_CNY_PER_USD
+        _has_usage = bool(_ds_usage)
 
-        if _ds_usage:
-            _bal = _ds_usage.get("balance", {})
-            _bal_cny = max(0.0, float(_bal.get("balance_cny", 0) or 0))
-            _cost_5h = float(_ds_usage.get("window_5h_cost_cny", 0) or 0)
-            _cost_weekly = float(_ds_usage.get("window_7d_cost_cny", 0) or 0)
-            _cost_monthly = float(_ds_usage.get("window_30d_cost_cny", 0) or 0)
+        def _num(value: Any, default: float | None = 0.0) -> float | None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
 
-        def _cost_pct(cost: float, cap: float) -> int:
-            return min(100, round(cost / cap * 100)) if cap else 0
+        _bal = _ds_usage.get("balance", {})
+        if not isinstance(_bal, dict):
+            _bal = {}
+        _bal_usd = max(0.0, _num(_bal.get("balance_usd")) or 0.0)
+        _bal_cny = max(0.0, _num(_bal.get("balance_cny")) or 0.0)
+        _has_balance = "balance_cny" in _bal or "balance_usd" in _bal
+        _bal_total_usd, _bal_total_cny = deepseek_balance_totals(_ds_usage)
+        _raw = _bal.get("raw_balances")
+        if isinstance(_raw, dict) and _raw:
+            _view_usd = max(0.0, _money(_raw.get("USD")))
+            _view_cny = max(0.0, _money(_raw.get("CNY")))
+        else:
+            _view_usd, _view_cny = _bal_usd, _bal_cny
+        _show_usd = _view_usd > 0
+        _show_cny = _view_cny > 0 and _bal.get("currency") != "USD"
+        _parts = []
+        if _show_usd:
+            _parts.append(f"${_view_usd:.2f} USD")
+        if _show_cny:
+            _parts.append(f"¥{_view_cny:.2f} CNY")
+        _bal_parts = " + ".join(_parts) if _parts else "no positive balance"
 
-        def _cost_card(cost: float, cap: float, title: str,
-                       reset_label: str, balance: float | None = None) -> dict:
-            pct = _cost_pct(cost, cap)
-            cost_fmt = f"¥{cost:.2f}"
-            cap_fmt = f"¥{cap:.2f}"
-            card: dict[str, Any] = {
-                "title": title,
-                "cost_cny": round(cost, 2),
-                "cap_cny": cap,
-                "pct": pct,
-                "tokens_fmt": cost_fmt,
-                "display_line": f"{cost_fmt} / {cap_fmt} · {reset_label}",
-                "value_line": f"{cost_fmt} / {cap_fmt}",
-                "sub_line": reset_label,
-                "reset": reset_label,
-                "tokens": int(cost * 100),
-                "limit": int(cap * 100),
-                "remaining_pct": _rem(int(cost * 100), int(cap * 100)) if cap else 100,
-                "resets_at_unix": None,
-            }
-            if balance is not None and cap > 0:
-                marker = min(100, _cost_pct(cost + balance, cap))
-                card["balance_marker_pct"] = marker
-            return card
+        def _spend(name: str) -> tuple[float, float]:
+            usd = _num(_ds_usage.get(f"window_{name}_cost"), None)
+            cny = _num(_ds_usage.get(f"window_{name}_cost_cny"), None)
+            if usd is None and cny is not None:
+                usd = cny / _rate
+            if cny is None and usd is not None:
+                cny = usd * _rate
+            return max(0.0, usd or 0.0), max(0.0, cny or 0.0)
 
-        _total_cost = float(_ds_usage.get("total_cost_cny", 0) or 0)
-        _total_value = _bal_cny + _total_cost
-        _total_pct = min(100, round(_total_cost / _total_value * 100)) if _total_value > 0 else 0
-        _total_rem = max(0, 100 - _total_pct)
-        # Tokens are unknown at account level (per-run tokens are in run records).
-        _ds_tok = 0
-        _ds_tok_fmt = "n/a"
+        _cost_5h, _ = _spend("5h")
+        _cost_7d, _ = _spend("7d")
+        _cost_30d, _cost_30d_cny = _spend("30d")
+
+        _month_usd = _num(_ds_usage.get("month_cost"), None)
+        _month_cny = _num(_ds_usage.get("month_cost_cny"), None)
+        if _month_usd is None and _month_cny is not None:
+            _month_usd = _month_cny / _rate
+        elif _month_cny is None and _month_usd is not None:
+            _month_cny = _month_usd * _rate
+        elif _month_usd is None:  # old cache: no calendar-month field yet
+            _month_usd, _month_cny = _cost_30d, _cost_30d_cny
+        _month_usd = max(0.0, _month_usd or 0.0)
+        _month_cny = max(0.0, _month_cny or 0.0)
+
+        _month_pct = min(100, round(_month_usd / _cap * 100)) if _cap > 0 else 0
+        _remaining = max(0, 100 - _month_pct)
+        _month_reset = _num(_ds_usage.get("month_resets_at"), None)
+        _month_reset_label = _reset_label_from_epoch(_month_reset, now) if _month_reset else "30d"
         _stale = bool(_ds_usage.get("stale"))
+        _scope = "account-level · all uses of this key"
+        _stale_note = " · stale" if _stale else ""
+
+        if _has_usage:
+            _month_line = f"${_month_usd:.2f} / ${_cap:.2f} · ¥{_month_cny:.2f}"
+            _recent_line = (f"${_cost_5h:.2f} (5h) · ${_cost_7d:.2f} (7d) · "
+                            f"${_cost_30d:.2f} (30d) · ¥{_cost_30d_cny:.2f} · account-level")
+        else:
+            _month_line = f"no usage data · ${_cap:.2f} cap"
+            _recent_line = "no spend data"
+        _bal_line = (
+            f"${_bal_total_usd:.2f} total · {_bal_parts}"
+            if _has_balance else "no balance data"
+        )
+
+        _month_card = {
+            "title": "Monthly Budget",
+            "reset": _month_reset_label,
+            "pct": _month_pct,
+            "remaining_pct": _remaining,
+            "tokens": int(round(_month_usd * 100)),
+            "limit": int(round(_cap * 100)),
+            "sessions": 0,
+            "value_line": f"${_month_usd:.2f} / ${_cap:.2f}",
+            "sub_line": f"¥{_month_cny:.2f}" + _stale_note,
+            "display_line": _month_line + _stale_note,
+            "resets_at_unix": int(_month_reset) if _month_reset else None,
+            "window_minutes": 0,
+        }
+        _balance_card = {
+            "title": "Balance",
+            "reset": "Account",
+            "pct": 0,
+            "remaining_pct": None,
+            "value": f"${_bal_total_usd:.2f}" if _has_balance else None,
+            "value_suffix": " total",
+            "tokens": 0,
+            "limit": 0,
+            "sessions": 0,
+            "value_line": f"${_bal_total_usd:.2f}",
+            "sub_line": _bal_parts,
+            "display_line": _bal_line,
+            "resets_at_unix": None,
+            "window_minutes": 0,
+        }
+        _recent_card = {
+            "title": "Recent Spend",
+            "reset": "30d",
+            "pct": min(100, round(_cost_30d / _cap * 100)) if _cap > 0 else 0,
+            "remaining_pct": None,
+            "value": f"${_cost_30d:.2f}" if _has_usage else None,
+            "value_suffix": " 30d",
+            "tokens": int(round(_cost_30d * 100)),
+            "limit": int(round(_cap * 100)),
+            "sessions": 0,
+            "value_line": f"${_cost_30d:.2f}",
+            "sub_line": _scope + _stale_note,
+            "display_line": _recent_line + _stale_note,
+            "resets_at_unix": None,
+            "window_minutes": 0,
+        }
         return {
-            "agent": agent, "limits_estimated": True,
+            "agent": "deepseek",
+            "limits_estimated": True,
             "quota_source": "usage.json",
             "balance_cny": round(_bal_cny, 2),
+            "balance_usd": round(_bal_usd, 2),
+            "balance_total_usd": _bal_total_usd,
+            "balance_total_cny": _bal_total_cny,
+            "month_cap_usd": _cap,
+            "month_cost": round(_month_usd, 2),
+            "month_cost_cny": round(_month_cny, 2),
             "stale": _stale,
             "last_error": _ds_usage.get("last_error"),
-            "window_5h": {
-                "title": "Total Spend", "reset": "Tracked",
-                "pct": _total_pct, "remaining_pct": _total_rem,
-                "tokens": _ds_tok, "limit": _ds_tok,
-                "value_line": f"¥{_total_cost:.2f} / ¥{_total_value:.2f}",
-                "sub_line": f"¥{_bal_cny:.2f} remaining · {_ds_tok_fmt} tokens" + (" · stale" if _stale else ""),
-                "display_line": f"¥{_total_cost:.2f} spent · ¥{_bal_cny:.2f} left · {_ds_tok_fmt} tokens"
-                                + " · account-level (all uses of this key, incl. ask_deepseek.py)"
-                                + (" · stale" if _stale else ""),
-                "resets_at_unix": None, "window_minutes": 0,
-            },
-            "window_7d": {
-                "title": "Balance", "reset": "—",
-                "pct": 0, "remaining_pct": None,
-                "tokens": int(_bal_cny * 100), "limit": int(_total_cost * 100),
-                "value_line": f"¥{_bal_cny:.2f}",
-                "sub_line": f"¥{_total_cost:.2f} spent to date",
-                "display_line": f"¥{_bal_cny:.2f} balance · ¥{_total_cost:.2f} spent",
-                "resets_at_unix": None, "window_minutes": 0,
-            },
-            "aux": {
-                "title": "Recent Spend", "reset": midnight_label,
-                "pct": _cost_pct(_cost_5h, CAP_5H) if CAP_5H else 0,
-                "value_line": f"¥{_cost_5h:.2f} (5h) · ¥{_cost_weekly:.2f} (7d)",
-                "sub_line": f"¥{_cost_monthly:.2f} (30d) · account-level, all uses of this key",
-                "tokens": int(_cost_5h * 100),
-                "display_line": f"¥{_cost_5h:.2f} last 5h · ¥{_cost_weekly:.2f} last 7d",
-                "resets_at_unix": None, "window_minutes": 0,
-            },
+            "window_5h": _month_card,
+            "window_7d": _balance_card,
+            "aux": _recent_card,
         }
-        # Fallback: run_log-based estimate
-        sum_5h, sum_7d, runs_5h, runs_7d = 0, 0, 0, 0
-        cutoff_5h = now - timedelta(hours=5)
-        cutoff_7d = now - timedelta(days=7)
-        if run_log_path and run_log_path.exists():
-            for raw in run_log_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-                if not raw.strip():
-                    continue
-                try:
-                    r = json.loads(raw)
-                    if r.get("agent") != "deepseek":
-                        continue
-                    ts = _parse_iso_utc(r.get("started_at") or "")
-                    if ts is None:
-                        continue
-                    tok = (r.get("input_tokens") or 0) + (r.get("output_tokens") or 0)
-                    if ts >= cutoff_7d:
-                        sum_7d += tok
-                        runs_7d += 1
-                    if ts >= cutoff_5h:
-                        sum_5h += tok
-                        runs_5h += 1
-                except Exception:
-                    continue
-        return {
-            "agent": "deepseek", "limits_estimated": True,
-            "quota_source": "run_log",
-            "window_5h": {
-                "title": "5-Hour (run_log)",
-                "tokens": sum_5h, "limit": lim_5h,
-                "pct": _pct(sum_5h, lim_5h),
-                "remaining_pct": _rem(sum_5h, lim_5h),
-                "sessions": runs_5h, "reset": midnight_label,
-                "resets_at_unix": None, "window_minutes": 300,
-                "display_line": f"{_fmt_tok(sum_5h)} / {_fmt_tok(lim_5h)} · {runs_5h} runs",
-            },
-            "window_7d": {
-                "title": "Weekly (run_log)",
-                "tokens": sum_7d, "limit": lim_7d,
-                "pct": _pct(sum_7d, lim_7d),
-                "remaining_pct": _rem(sum_7d, lim_7d),
-                "sessions": runs_7d, "reset": weekly_reset_label,
-                "resets_at_unix": None, "window_minutes": 10080,
-                "display_line": f"{_fmt_tok(sum_7d)} / {_fmt_tok(lim_7d)} · {runs_7d} runs",
-            },
-            "aux": {
-                "title": "DeepSeek Usage",
-                "value_line": f"{_fmt_tok(sum_7d)} tokens this week",
-                "sub_line": f"{runs_7d} runs",
-                "reset": weekly_reset_label,
-                "pct": _pct(sum_7d, lim_7d),
-            },
-        }
-
-    # today_stats was computed above per agent
 
     if agent == "codex":
         codex_live = load_latest_codex_rate_limits()

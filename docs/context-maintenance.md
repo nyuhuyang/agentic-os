@@ -2,6 +2,13 @@
 
 ## Current WIP (WIP = 1)
 <!-- One active task at a time. What is it? -->
+- AGE-147 DeepSeek usage: the account reports USD and CNY; the dashboard row now shows a
+  `$20.00` USD-normalized monthly budget, both balances, and 5h/7d/30d spend in both currencies
+  (`deepseek_monitor.py` raw per-currency snapshots + `_schema: 2`, `usage_reader.py` three
+  cards, `index.html` three-card row). CNY is converted at 7.2; legacy USD-only history is
+  migrated once. Plan archived at `docs/exec-plans/completed/2026-10-24-deepseek-dual-currency-budget.md`.
+  Next action: restart the managed runner so the 2-minute poll rewrites `~/.deepseek/usage.json`
+  with the month/schema fields, then confirm the live DeepSeek row shows the budget card.
 - AGE-137 ai-memory: **closed 2026-10-24**, plan archived at `docs/exec-plans/completed/2026-10-23-ai-memory.md`. Installed and live on 49434; `tickets/AGE-137.md` has three DSH runs; follow-up = one non-confidential ticket with Claude + Codex
 - STT two-pass: done, plan archived in completed/ (2026-10-14); optional follow-ups = one cross-provider Codex inspection, low-severity Open Issues in its review log
 - Multi-Project Dispatch — `docs/exec-plans/active/2026-10-13-multi-project-dispatch.md`: Phases 0–3 built on `feat/multi-project-dispatch` (2026-10-14). Open: the cross-provider Codex inspection of the build (Codex quota), spike (d2) for Codex, dogfood tickets, one user decision (`/run` free prompts), one project's committed .gitignore
@@ -26,7 +33,16 @@
   PTY classes, which run on a normal host. `py_compile` and `git diff --check` pass. Merged main
   (`4eef431`, AGE-125): only `runner/app.py` conflicted; kept main's
   `claude_account.activate_env` and re-applied the dsh env strip; merge suite 1017 passed /
-  106 skipped / 0 failed — 2026-10-25
+  106 skipped / 0 failed. Then merged the next main (`a22e018`, AGE-147 DeepSeek usage): the
+  only conflict was this file; kept both AGE-150 and AGE-147 entries; final merge suite 1033
+  passed / 106 skipped / 0 failed — 2026-10-25
+- AGE-147 DeepSeek usage: `py_compile` passes; `tests/test_deepseek_usage.py` 16 passed;
+  `tests/test_dsh_backend.py` 49 passed with ambient `GIT_OPTIONAL_LOCKS` unset;
+  `tests/test_claude_account.py tests/test_activity_chart.py` 45 passed. Temp-cache live check:
+  schema 2, month `$6.10 / $20.00`, balance `$19.76 total`, recent `$0.19 (5h) / $3.57 (7d) /
+  $6.10 (30d)`. Codex plan review APPROVED round 4 (`b6178600…`); fresh Codex code inspection
+  APPROVED round 2 (`98be4fc3…`), cross_provider. The final code snapshot matches that
+  inspection; only plan/log/context docs changed afterward — 2026-10-24
 - 2026-10-25 live check: the first post-restart dsh project run ran `git add`/`git commit`
   from its own worktree with the AGE-146 workspace overlay (no runner fallback); main
   already contains `a1f0cce Merge branch 'agent/AGE-146'`.
