@@ -16,6 +16,9 @@
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- 2026-10-25 live check: the first post-restart dsh project run ran `git add`/`git commit`
+  from its own worktree with the AGE-146 workspace overlay (no runner fallback); main
+  already contains `a1f0cce Merge branch 'agent/AGE-146'`.
 - AGE-146 merge `main` (8604180) into the branch content: the only conflict was this file;
   kept main's closed AGE-137 line and moved the AGE-146 WIP entry below Multi-Project, so the
   runner's stale-base merge is conflict-free. A simulated runner normal commit +
