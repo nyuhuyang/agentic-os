@@ -23,14 +23,20 @@
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- AGE-148 no_push: `agentic-os` is now registered with `no_push: false` (dashboard
+  `PUT /api/projects/agentic-os`, registry hash `69ae5935…`), so `project_prompt` no longer
+  adds "Do not push, deploy or publish anything."; every other registry entry is unchanged,
+  with a backup at `/tmp/projects.yaml.bak-age148-1792938924`. Verified with `load_registry`
+  (`no_push False`), `project_prompt` (rule absent, commit rule present), and an
+  `/api/projects` read-back. No code changed — 2026-10-25
 - AGE-148 GitHub push readiness: the branch is a fast-forward of `origin/main` (291 commits,
   4.2 MB pack), the worktree is clean, no configured API key or confidential project name
   appears in any unpushed blob, no tracked file is over 5 MB, and `gh auth` plus a dry-run
   ref update succeed. Fixed the five links that 404 on github.com: `docs/PLANS.md` now points
   P9/P10 at `completed/` and P15 at `deferred/`; `docs/next-steps.md` points at
   `deferred/p20-dashboard.md` and `deferred/p15-deepseek-tui-exec-tools.md`. Docs-only, so no
-  pytest; `py_compile` and `git diff --check` pass. The push itself stays outside this session
-  (the runner forbids pushing) — 2026-10-25
+  pytest; `py_compile` and `git diff --check` pass. The push itself stayed outside that session
+  (`no_push` was still true when it started) — 2026-10-25
 - AGE-150 fixed the 14 post-AGE-146 regressions: `_git_operation` no longer treats an empty
   `rev-parse --git-path` answer (or a mocked non-SHA "success") as an unfinished rebase/merge;
   removing a project also drops the runner-owned `.meta/project.json` pin; `_registry_exec_env`
@@ -124,9 +130,9 @@
 
 ## Next Action
 <!-- Concrete first step for the next session -->
-- AGE-148: after this branch merges, `git push origin main` is a clean fast-forward from
-  `aa9cf13`; the remote is still the 2026-10-14 snapshot. Re-run the link check first if any
-  more plan files move.
+- AGE-148: `agentic-os` now allows pushes; after this branch merges, a run can
+  `git push origin main` (clean fast-forward from `aa9cf13`, 291 commits; remote is still the
+  2026-10-14 snapshot). Re-run the link check first if any more plan files move.
 - AGE-138: switch a card from Claude to DeepSeek after the merge and let it finish: it should leave changes uncommitted and the runner should commit/merge them.
 - AGE-144: restart the live runner after merge, then open the project page and confirm DeepSeek rows show `agent/<id>` (worktree) or the main checkout's branch, as Claude/Codex rows do
 - AGE-143: restart the live runner after merge and switch one live card from Claude to Codex mid-review: the project panel should show the card once with the new session on top and an "N earlier sessions" toggle, and Resume on the old row should move the card back to it
