@@ -5,6 +5,7 @@ import time
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -106,6 +107,53 @@ def test_codegraph_index_copied_without_seed(repo):
     with sqlite3.connect(wt / ".codegraph" / "codegraph.db") as db:
         assert db.execute("select name from nodes").fetchall() == [("demo",)]
     assert pj.uncommitted(p, wt) == []  # the copy ignores itself: no rule needed in the project
+
+
+def test_codegraph_copy_is_anchored_to_the_opened_directory(repo, tmp_path, monkeypatch):
+    import sqlite3
+    p = project(repo)
+    (repo / ".codegraph").mkdir()
+    with sqlite3.connect(repo / ".codegraph" / "codegraph.db") as db:
+        db.execute("create table nodes (name text)")
+    wt = tmp_path / "next-wt"
+    (wt / ".codegraph").mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    real_rename = os.rename
+    swapped = {}
+
+    def swap(src, dst, *a, **k):
+        if dst == "codegraph.db" and not swapped:
+            swapped["old"] = wt / ".codegraph-old"
+            os.rename(wt / ".codegraph", swapped["old"])
+            os.symlink(outside, wt / ".codegraph")
+        return real_rename(src, dst, *a, **k)
+
+    monkeypatch.setattr(pj.os, "rename", swap)
+    pj._copy_codegraph(wt, p)
+    assert not (outside / "codegraph.db").exists()
+    assert (swapped["old"] / "codegraph.db").is_file()
+
+
+def test_codegraph_copy_does_not_follow_a_planted_db_symlink(repo, tmp_path):
+    import sqlite3
+    p = project(repo)
+    (repo / ".codegraph").mkdir()
+    with sqlite3.connect(repo / ".codegraph" / "codegraph.db") as db:
+        db.execute("create table nodes (name text)")
+    wt = tmp_path / "next-wt"
+    (wt / ".codegraph").mkdir(parents=True)
+    outside_db = tmp_path / "outside.db"
+    outside_db.write_text("keep\n")
+    (wt / ".codegraph" / "codegraph.db").symlink_to(outside_db)
+    outside_ignore = tmp_path / "outside-ignore"
+    outside_ignore.write_text("keep\n")
+    (wt / ".codegraph" / ".gitignore").symlink_to(outside_ignore)
+    pj._copy_codegraph(wt, p)
+    assert outside_db.read_text() == "keep\n"
+    assert outside_ignore.read_text() == "keep\n"
+    assert not (wt / ".codegraph" / "codegraph.db").is_symlink()
+    assert (wt / ".codegraph" / "codegraph.db").is_file()
 
 
 def test_seed_copy_has_no_symlinks(repo):
@@ -500,6 +548,296 @@ def test_seed_link_cycle_rejected(repo):
     os.symlink("..", repo / "data" / "loop")
     with pytest.raises(pj.ProjectError, match="cycle|outside"):
         make(repo, seed=["data"])
+
+
+def test_git_confine_helpers_are_macos_gated(repo, monkeypatch):
+    p, wt, _ = make(repo)
+    monkeypatch.setattr(pj, "already_confined", lambda: False)
+    monkeypatch.setattr(pj, "GIT_SANDBOX", True)
+    assert pj.read_git_confine() == []
+    roots = pj.write_git_confine(p, wt)
+    assert roots and roots[-1] == wt and roots[0].name == ".git"
+    monkeypatch.setattr(pj, "GIT_SANDBOX", False)
+    assert pj.read_git_confine() is None
+    assert pj.write_git_confine(p, wt) is None
+    pc = project(repo, confidential=True)
+    assert pj.read_git_confine(True) == []  # confidential attempts Seatbelt and fails closed
+    assert pj.write_git_confine(pc, wt) is not None
+
+
+def test_non_confidential_git_confine_keeps_network(repo, monkeypatch):
+    monkeypatch.setattr(pj, "GIT_SANDBOX", True)
+    monkeypatch.setattr(pj, "already_confined", lambda: False)
+    p = project(repo)
+    argv = pj._git_argv(repo, ("status",), pj.write_git_confine(p, repo))
+    assert "(deny network*)" not in argv[2]
+    pc = project(repo, confidential=True)
+    argv_c = pj._git_argv(repo, ("status",), pj.write_git_confine(pc, repo))
+    assert "(deny network*)" in argv_c[2]
+
+
+def test_runner_git_disables_lazy_fetch(repo, monkeypatch):
+    seen = {}
+
+    def fake_run(argv, timeout, cwd=None, env=None, stdin=None, merge_stderr=False):
+        seen["env"] = env
+        return 0, b"", b""
+
+    monkeypatch.setattr(pj, "_run_bounded", fake_run)
+    pj._git(repo, "rev-parse", "HEAD")
+    assert seen["env"]["GIT_NO_LAZY_FETCH"] == "1"
+
+
+def test_runner_commit_passes_a_confine_for_a_non_confidential_project(repo, monkeypatch):
+    p, wt, _ = make(repo)
+    monkeypatch.setattr(pj, "already_confined", lambda: False)
+    seen = []
+
+    def fake_git(cwd, *args, **kwargs):
+        if args and args[0] in ("add", "commit"):
+            seen.append(kwargs.get("confine"))
+        code = 1 if "diff" in args else 0
+        return SimpleNamespace(returncode=code, stdout="", stderr="")
+
+    monkeypatch.setattr(pj, "ticket_from_worktree", lambda *a, **k: "T-1")
+    monkeypatch.setattr(pj, "load_binding", lambda *a, **k: None)
+    monkeypatch.setattr(pj, "_git_operation", lambda *a, **k: None)
+    monkeypatch.setattr(pj, "git_common_dir", lambda project: (project.path / ".git").resolve())
+    monkeypatch.setattr(pj, "_git", fake_git)
+    pj.runner_commit(p, wt, "T-1: confined")
+    assert len(seen) == 2
+    assert all(roots is not None for roots in seen)
+
+
+def test_uncommitted_runs_a_clean_filter_with_nothing_writable(repo, monkeypatch):
+    monkeypatch.setattr(pj, "already_confined", lambda: False)
+    p = project(repo)
+    outside = Path.home() / f".agentic-os-uncommitted-probe-{os.getpid()}"
+    sentinel = repo / "uncommitted-filter-ran"
+    git(repo, "config", "filter.spy.clean", f"touch {sentinel}; touch {outside}; cat")
+    (repo / ".gitattributes").write_text("tracked.txt filter=spy\n")
+    git(repo, "add", ".gitattributes"); git(repo, "commit", "-qm", "attrs")
+    outside.unlink(missing_ok=True); sentinel.unlink(missing_ok=True)
+    os.utime(repo / "tracked.txt", (1, 1))
+    (repo / "tracked.txt").write_text("changed\n")
+    try:
+        pj.uncommitted(p, repo)
+    except pj.ProjectError as exc:
+        if "sandbox" in str(exc).lower():
+            pytest.skip("nested sandbox-exec is unavailable")
+        raise
+    assert sentinel.exists()
+    assert not outside.exists()
+
+
+def test_fingerprint_runs_a_clean_filter_with_nothing_writable(repo, monkeypatch):
+    monkeypatch.setattr(pj, "already_confined", lambda: False)
+    p = project(repo)
+    outside = Path.home() / f".agentic-os-fingerprint-probe-{os.getpid()}"
+    sentinel = repo / "fingerprint-filter-ran"
+    git(repo, "config", "filter.spy.clean", f"touch {sentinel}; touch {outside}; cat")
+    (repo / ".gitattributes").write_text("tracked.txt filter=spy\n")
+    git(repo, "add", ".gitattributes"); git(repo, "commit", "-qm", "attrs")
+    outside.unlink(missing_ok=True); sentinel.unlink(missing_ok=True)
+    os.utime(repo / "tracked.txt", (1, 1))
+    (repo / "tracked.txt").write_text("changed\n")
+    try:
+        pj.fingerprint(p)
+    except pj.ProjectError as exc:
+        if "sandbox" in str(exc).lower():
+            pytest.skip("nested sandbox-exec is unavailable")
+        raise
+    assert sentinel.exists()
+    assert not outside.exists()
+
+
+def test_second_worktree_creation_runs_a_smudge_filter_confined(repo, monkeypatch):
+    p, _, _ = make(repo)  # T-1 under the parent sandbox
+    monkeypatch.setattr(pj, "already_confined", lambda: False)  # T-2 uses the inner profile
+    outside = Path.home() / f".agentic-os-smudge-probe-{os.getpid()}"
+    t2 = pj.worktree_path(p, "T-2")
+    sentinel = t2 / "smudge-filter-ran"
+    outside.unlink(missing_ok=True)
+    try:
+        git(repo, "config", "filter.spy.smudge", f"touch {sentinel}; touch {outside}; cat")
+        (repo / ".git" / "info" / "attributes").write_text("* filter=spy\n")
+        try:
+            make(repo, ident="T-2")
+        except pj.ProjectError as exc:
+            if "sandbox" in str(exc).lower():
+                pytest.skip("nested sandbox-exec is unavailable")
+            raise
+        assert sentinel.exists()  # the smudge filter really ran
+        assert not outside.exists()
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_already_confined_needs_marker_and_a_refused_probe(monkeypatch):
+    monkeypatch.setattr(pj, "GIT_SANDBOX", True)
+    monkeypatch.delenv(pj.DSH_SANDBOX_ENV, raising=False)
+    assert not pj.already_confined()
+    monkeypatch.setenv(pj.DSH_SANDBOX_ENV, "workspace")
+    monkeypatch.setattr(pj, "_nested_sandbox_unavailable", lambda: False)
+    assert not pj.already_confined()
+    monkeypatch.setattr(pj, "_nested_sandbox_unavailable", lambda: True)
+    assert pj.already_confined()
+    monkeypatch.setenv(pj.DSH_SANDBOX_ENV, "confidential")
+    assert not pj.already_confined()  # only the write-only workspace parent is trusted
+    monkeypatch.setenv(pj.DSH_SANDBOX_ENV, "spoofed")
+    assert not pj.already_confined()
+
+
+def test_confidential_never_uses_the_workspace_parent_shortcut(repo, monkeypatch):
+    p = project(repo, confidential=True)
+    monkeypatch.setenv(pj.DSH_SANDBOX_ENV, "workspace")
+    monkeypatch.setattr(pj, "_nested_sandbox_unavailable", lambda: True)
+    assert pj.confine_for(p, repo) is not None  # a workspace parent does not close the network
+    assert pj.write_git_confine(p, repo) is not None  # nor may it skip a confidential git write
+    monkeypatch.setenv(pj.DSH_SANDBOX_ENV, "confidential")
+    assert pj.confine_for(p, repo) is not None  # confidential always attempts the inner profile
+
+
+def test_clear_inherited_sandbox_marker(monkeypatch):
+    monkeypatch.setenv(pj.DSH_SANDBOX_ENV, "workspace")
+    pj.clear_inherited_sandbox_marker()
+    assert pj.DSH_SANDBOX_ENV not in os.environ
+
+
+def _conflicting_merge(repo):
+    git(repo, "checkout", "-q", "-b", "side")
+    (repo / "tracked.txt").write_text("side\n")
+    git(repo, "add", "tracked.txt")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "side")
+    git(repo, "checkout", "-q", "main")
+    (repo / "tracked.txt").write_text("main\n")
+    git(repo, "add", "tracked.txt")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "main")
+    proc = subprocess.run(["git", "-C", str(repo), "merge", "side"], capture_output=True, text=True)
+    assert proc.returncode != 0 and (repo / ".git" / "MERGE_HEAD").exists()
+
+
+def _bind_as_ticket(monkeypatch):
+    monkeypatch.setattr(pj, "ticket_from_worktree", lambda *a, **k: "T-1")
+    monkeypatch.setattr(pj, "load_binding", lambda *a, **k: None)
+
+
+def test_git_common_dir_refuses_a_redirected_main_commondir(repo, tmp_path):
+    p = project(repo)
+    pj.git_common_dir(p)  # the first grant pins the original common dir
+    other = tmp_path / "other"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(other)], check=True)
+    (repo / ".git" / "commondir").write_text(f"{other}/.git\n")
+    with pytest.raises(pj.ProjectError, match="git common dir moved"):
+        pj.git_common_dir(p)
+
+
+def test_commit_checkout_refuses_a_redirected_main_commondir(repo, tmp_path):
+    p = project(repo)
+    pj.git_common_dir(p)  # pin the original
+    other = tmp_path / "other"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(other)], check=True)
+    (repo / ".git" / "commondir").write_text(f"{other}/.git\n")
+    before = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                            capture_output=True, text=True).stdout.strip()
+    with pytest.raises(pj.ProjectError, match="git common dir moved"):
+        pj.commit_checkout(p, repo, "T-1: manual")
+    after = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                           capture_output=True, text=True).stdout.strip()
+    assert after == before
+
+
+def test_git_common_dir_pin_is_thread_safe(repo):
+    import threading
+    p = project(repo)
+    values = []
+
+    def run():
+        values.append(pj.git_common_dir(p))
+
+    threads = [threading.Thread(target=run) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(values) == 8 and len(set(values)) == 1
+
+
+def test_load_binding_rejects_a_redirected_worktree_gitdir(repo, tmp_path):
+    p, wt, _ = make(repo)
+    other = tmp_path / "other"
+    subprocess.run(["git", "init", "-q", "-b", "main", str(other)], check=True)
+    (wt / ".git").write_text(f"gitdir: {other}/.git\n")
+    with pytest.raises(pj.ProjectError, match="moved outside"):
+        pj.load_binding(p, "T-1")
+
+
+def test_git_operation_prefers_rebase_over_merge(repo):
+    (repo / ".git" / "rebase-merge").mkdir()
+    (repo / ".git" / "MERGE_HEAD").write_text("0" * 40 + "\n")
+    assert pj._git_operation(repo, None) == "a rebase"
+
+
+def test_runner_commit_refuses_a_rebase_with_merge_head(repo, monkeypatch):
+    p = project(repo)
+    _bind_as_ticket(monkeypatch)
+    (repo / ".git" / "rebase-merge").mkdir()
+    (repo / ".git" / "MERGE_HEAD").write_text("0" * 40 + "\n")
+    before = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                            capture_output=True, text=True).stdout.strip()
+    with pytest.raises(pj.ProjectError, match="a rebase"):
+        pj.runner_commit(p, repo, "T-1: rebase")
+    after = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                           capture_output=True, text=True).stdout.strip()
+    assert after == before
+
+
+def test_git_operation_sees_a_pending_sequencer(repo):
+    p = project(repo)
+    seq = repo / ".git" / "sequencer"
+    seq.mkdir()
+    (seq / "todo").write_text("pick abc\n")
+    assert pj._git_operation(repo, None) == "a cherry-pick/revert sequence"
+
+
+def test_runner_commit_refuses_an_unresolved_merge(repo, monkeypatch):
+    _conflicting_merge(repo)
+    p = project(repo)
+    _bind_as_ticket(monkeypatch)
+    before = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    with pytest.raises(pj.ProjectError, match="unresolved merge conflicts"):
+        pj.runner_commit(p, repo, "T-1: merge")
+    after = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    assert after == before
+    assert subprocess.run(["git", "-C", str(repo), "ls-files", "-u"], capture_output=True, text=True).stdout.strip()
+    assert "<<<<<<<" in (repo / "tracked.txt").read_text()
+
+
+def test_runner_commit_finishes_a_resolved_merge_with_both_parents(repo, monkeypatch):
+    _conflicting_merge(repo)
+    (repo / "tracked.txt").write_text("resolved\n")
+    git(repo, "add", "tracked.txt")
+    p = project(repo)
+    _bind_as_ticket(monkeypatch)
+    sha = pj.runner_commit(p, repo, "T-1: merge")
+    parents = subprocess.run(["git", "-C", str(repo), "rev-list", "--parents", "-n1", sha],
+                             capture_output=True, text=True).stdout.split()
+    assert len(parents) == 3  # commit + both parents
+    assert not (repo / ".git" / "MERGE_HEAD").exists()
+
+
+def test_runner_commit_refuses_an_empty_pending_merge(repo, monkeypatch):
+    git(repo, "checkout", "-q", "-b", "empty")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "--allow-empty", "-qm", "empty")
+    git(repo, "checkout", "-q", "main")
+    proc = subprocess.run(["git", "-C", str(repo), "merge", "--no-commit", "--no-ff", "empty"],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0 and (repo / ".git" / "MERGE_HEAD").exists()
+    p = project(repo)
+    _bind_as_ticket(monkeypatch)
+    with pytest.raises(pj.ProjectError, match="empty merge"):
+        pj.runner_commit(p, repo, "T-1: empty")
+    assert (repo / ".git" / "MERGE_HEAD").exists()
 
 
 def test_runner_commit_bounded_when_clean_filter_hangs(repo, monkeypatch):

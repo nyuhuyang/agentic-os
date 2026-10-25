@@ -143,30 +143,28 @@ def test_confidential_claude_exec_env_puts_sandboxed_codex_first(monkeypatch, tm
     assert app._project_exec_env("claude", SimpleNamespace(env={}, confidential=False), str(tmp_path))["PATH"] == "/usr/bin"
 
 
-def test_dsh_leaves_the_commit_and_git_writes_to_the_runner(proj):
-    """AGE-138: a linked worktree's git metadata is outside dsh's workspace-write root."""
+def test_dsh_commits_while_codex_leaves_it_to_the_runner(proj, monkeypatch):
+    """AGE-146: the workspace overlay lets dsh commit; Codex keeps the AGE-138 rule."""
+    monkeypatch.setattr(pr, "DSH_GIT_OVERLAY", True)
     repo, _ = proj
     binding = {"branch": "agent/T-1"}
     dsh = pr.project_prompt("task", project(repo), binding, "dsh")
-    assert "Leave your changes uncommitted" in dsh and "Commit your work" not in dsh
-    assert "`git commit`" in dsh and "runner commits" in dsh
+    assert "Commit your work on this branch" in dsh and "Leave your changes uncommitted" not in dsh
+    assert "`git commit`" not in dsh
+    assert "real `git merge" in dsh and "GIT_INDEX_FILE" in dsh
+    assert "git metadata is writable" in dsh
     codex = pr.project_prompt("task", project(repo), binding, "codex")
     assert "Leave your changes uncommitted" in codex and "git commit" not in codex
     claude = pr.project_prompt("task", project(repo), binding, "claude")
     assert "Commit your work on this branch" in claude and "Leave your changes uncommitted" not in claude
 
 
-def test_dsh_leaves_the_commit_and_git_writes_to_the_runner(proj):
-    """AGE-138: a linked worktree's git metadata is outside dsh's workspace-write root."""
+def test_dsh_keeps_the_runner_commit_off_macos(proj, monkeypatch):
+    monkeypatch.setattr(pr, "DSH_GIT_OVERLAY", False)
     repo, _ = proj
-    binding = {"branch": "agent/T-1"}
-    dsh = pr.project_prompt("task", project(repo), binding, "dsh")
-    assert "Leave your changes uncommitted" in dsh and "Commit your work" not in dsh
-    assert "`git commit`" in dsh and "runner commits" in dsh
-    codex = pr.project_prompt("task", project(repo), binding, "codex")
-    assert "Leave your changes uncommitted" in codex and "git commit" not in codex
-    claude = pr.project_prompt("task", project(repo), binding, "claude")
-    assert "Commit your work on this branch" in claude and "Leave your changes uncommitted" not in claude
+    dsh = pr.project_prompt("task", project(repo), {"branch": "agent/T-1"}, "dsh")
+    assert "Leave your changes uncommitted" in dsh
+    assert "Commit your work" not in dsh
 
 
 def test_non_confidential_codex_uses_auto_review_without_sandbox_flag(proj):
@@ -176,11 +174,23 @@ def test_non_confidential_codex_uses_auto_review_without_sandbox_flag(proj):
     assert not any("approval_policy" in a for a in argv)
 
 
-def test_non_confidential_claude_and_dsh_unchanged(proj):
+def test_non_confidential_claude_and_dsh_without_a_workspace_prefix(proj):
     repo, _ = proj
     assert cli("claude", repo, False) == ["claude", "-p", "--verbose", "--permission-mode", "bypassPermissions",
                                           *pr.CLAUDE_SETTINGS]
-    assert cli("dsh", repo, False) == ["dsh", "--profile", "headless"]
+    assert cli("dsh", repo, False) == ["dsh", "--profile", "headless"]  # no workspace prefix passed
+
+
+def test_non_confidential_dsh_uses_the_workspace_overlay(proj, monkeypatch):
+    monkeypatch.setattr(pr, "DSH_GIT_OVERLAY", True)
+    monkeypatch.setattr(dsh_cli, "DSH_WORKSPACE_SUPPORTED", True)
+    monkeypatch.setattr(dsh_cli, "resolve_bin", lambda: "/bin/dsh")
+    monkeypatch.setattr(dsh_cli, "check_version", lambda dsh_bin: "0.2.1-rc.2")
+    repo, _ = proj
+    argv = pr.agent_cli("dsh", project(repo), "claude", lambda: ["dsh"],
+                        _confidential_dsh_prefix, dsh_cli.workspace_cli_prefix)
+    assert argv[0] == "/bin/dsh" and argv[1:3] == ["--profile", "headless"]
+    assert argv[3:5] == ["--patch", str(dsh_cli.DSH_WORKSPACE_PATCH)]
 
 
 def test_confidential_dsh_gets_the_sandbox_patch(proj):
@@ -368,7 +378,7 @@ def test_dispatch_records_binding_verify_and_badge(helper):
     assert subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True).stdout == ""
 
 
-@pytest.mark.parametrize("agent", ["codex", "dsh"])
+@pytest.mark.parametrize("agent", ["codex"])
 def test_agent_that_cannot_write_git_gets_a_runner_commit_without_the_seed(helper, agent):
     app_mod, run, records, state, *_ = helper
     state["mode"] = "uncommitted"
@@ -378,6 +388,34 @@ def test_agent_that_cannot_write_git_gets_a_runner_commit_without_the_seed(helpe
     names = subprocess.run(["git", "-C", rec["worktree"], "show", "--name-only", "--format=", rec["runner_commit"]],
                            capture_output=True, text=True).stdout.split()
     assert names == ["feature.txt"]
+
+
+def test_post_run_refuses_a_clean_pending_merge_left_by_verify(proj, monkeypatch):
+    repo, _ = proj
+    base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    (repo / "feature.txt").write_text("x\n")
+    git(repo, "add", "feature.txt")
+    git(repo, "commit", "-qm", "work")
+    p = project(repo)
+    monkeypatch.setattr(pj, "load_binding", lambda *a, **k: None)
+    monkeypatch.setattr(pj, "committed_seeds", lambda *a, **k: [])
+
+    def fake_verify(project, wt, base=None, on_start=None):
+        git(wt, "checkout", "-q", "-b", "empty-side")
+        git(wt, "commit", "--allow-empty", "-qm", "empty")
+        git(wt, "checkout", "-q", "main")
+        subprocess.run(["git", "-C", str(wt), "merge", "--no-commit", "--no-ff", "empty-side"],
+                       check=True, capture_output=True)
+        assert (Path(wt) / ".git" / "MERGE_HEAD").exists()
+        return {"status": "pass", "exit": 0, "duration_s": 0.0, "tail": ""}
+
+    monkeypatch.setattr(pj, "run_verify", fake_verify)
+    out = pr.post_run(p, {"worktree": str(repo), "issue_identifier": "T-1", "base_sha": base},
+                      "claude", "title", None, set(), start_sha=base,
+                      closing=lambda: {"main_checkout_changed": False})
+    assert "merge" in out.get("post_run_error", "").lower()
+    assert out.get("verify_badge") == "error"
 
 
 def test_successful_run_is_merged_into_the_main_checkout(helper):
@@ -975,6 +1013,7 @@ def test_cli_verify_keeps_sticky_confidentiality(helper, monkeypatch):
     run()
     write_registry(confidential=False)
     sandboxed = []
+    monkeypatch.setattr(pj, "already_confined", lambda: False)  # the runner is unsandboxed
     monkeypatch.setattr(pj, "sandbox_prefix", lambda roots: (sandboxed.append(roots), [])[1])
     assert pj.main(["verify", "demo", "--worktree", records()[-1]["worktree"]]) == 0
     assert sandboxed

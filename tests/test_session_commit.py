@@ -227,21 +227,29 @@ def test_route_holds_the_lifecycle_lock(repo, tmp_path, monkeypatch):
 
 
 def test_preview_runs_a_clean_filter_with_nothing_writable(repo):
-    """A clean filter run by the preview's status cannot write the checkout or git dir (SC-011)."""
-    project, root = repo
-    marker = root / "preview-wrote"
-    git(root, "config", "filter.spy.clean", f"touch {marker}; touch {root}/.git/spy; cat")
-    (root / ".gitattributes").write_text("a.txt filter=spy\n")
-    git(root, "add", ".gitattributes"); git(root, "commit", "-qm", "attrs")
-    marker.unlink(missing_ok=True); (root / ".git" / "spy").unlink(missing_ok=True)  # setup ran the filter
+    """A clean filter run by the preview's status cannot write outside the granted roots."""
     import os
+    if pj._nested_sandbox_unavailable():
+        pytest.skip("nested sandbox-exec is unavailable")
+    project, root = repo
+    outside = Path.home() / f".agentic-os-preview-probe-{os.getpid()}"
+    git(root, "config", "filter.spy.clean", f"touch {outside}; exit 7")
+    (root / ".gitattributes").write_text("a.txt filter=spy\n")
+    (root / "a.txt").write_text("a\n")
+    git(root, "add", ".gitattributes", "a.txt"); git(root, "commit", "-qm", "attrs")
+    git(root, "config", "filter.spy.required", "true")  # a failing filter must fail status
+    outside.unlink(missing_ok=True)  # setup ran the filter
     os.utime(root / "a.txt", (1, 1))  # stat-dirty: status re-reads it through the filter
     (root / "a.txt").write_text("changed\n")
     try:
         pj.commit_checkout(project, root, dry_run=True)
-    except pj.ProjectError:
-        pass  # a filter that fails under the read-only sandbox may fail the preview: still nothing written
-    assert not marker.exists() and not (root / ".git" / "spy").exists()
+    except pj.ProjectError as exc:
+        if "sandbox" in str(exc).lower():
+            pytest.skip("nested sandbox-exec is unavailable")
+        assert "filter" in str(exc).lower()  # the failing filter proves it really ran
+    else:
+        pytest.fail("the clean filter did not run")
+    assert not outside.exists()
 
 
 def test_checkout_path_with_quotes_and_backslash_works_sandboxed(tmp_path, monkeypatch):

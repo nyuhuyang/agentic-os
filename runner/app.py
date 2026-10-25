@@ -363,6 +363,7 @@ def _sanitize_record(record: dict) -> dict:
     """Every run-log writer, record copies included (status change, restore, archive): a
     confidential or unknown-policy project run keeps no issue_title where records may leak
     (DP-24, R13-01). The policy is the current sticky one, not the copied flag alone."""
+    record = ai_memory.scrub_record(record)  # defense in depth for copies that skip _write_run_log
     if "issue_title" not in record or not (record.get("project_key") or "confidential" in record):
         return record
     conf = record.get("confidential")
@@ -2022,6 +2023,13 @@ def _write_run_log(skill: str, status: str, started_at: str, duration_s: float,
                    agent_session_id: str | None = None,
                    reset_generation: int | None = None,
                    extra: dict | None = None, audit: bool = False) -> str:
+    # Every run-log writer (project runs, session cards, generic dispatch) comes through here, and
+    # task state below reuses these strings: scrub the memory bearer token before either write.
+    prompt = ai_memory.scrub_token(prompt)
+    output = ai_memory.scrub_token(output)
+    error = ai_memory.scrub_token(error)
+    if extra:
+        extra = ai_memory.scrub_record(extra)
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     if run_id is None:
@@ -2712,7 +2720,8 @@ def _claude_bin() -> str:
     return str(claude_bin) if claude_bin.exists() else "claude"
 
 
-def _project_cmd(agent: str, project, prompt: str, resume_session: str | None) -> list[str]:
+def _project_cmd(agent: str, project, prompt: str, resume_session: str | None,
+                 *, ticket_dispatch: bool = True) -> list[str]:
     if agent == "dsh" and project.confidential and resume_session:
         # AGE-139: a stored dsh session can carry its own sandbox/approval events; the patch
         # cannot prove the effective mode. A fresh session is the only confidential form.
@@ -2720,7 +2729,8 @@ def _project_cmd(agent: str, project, prompt: str, resume_session: str | None) -
             "confidential dsh does not resume a stored session (it can carry a wider sandbox mode); "
             "start a new session")
     cli = project_runs.agent_cli(agent, project, _claude_bin(), dsh_cli.cli_prefix,
-                                 dsh_cli.confidential_cli_prefix)
+                                 dsh_cli.confidential_cli_prefix,
+                                 dsh_cli.workspace_cli_prefix if ticket_dispatch else None)
     if agent == "claude":
         resume = ["--resume", resume_session] if resume_session else []
         return cli + resume + [prompt, "--output-format", "stream-json"]
@@ -2838,11 +2848,31 @@ def _cleanup_dsh_spill(env: dict) -> None:
 
 
 def _project_exec_env(agent: str, project, worktree: str | None = None,
-                      run_id: str | None = None) -> dict:
+                      run_id: str | None = None, *, ticket_dispatch: bool = True) -> dict:
     env = _registry_exec_env(agent, _load_registry(agent))
     for k, v in project.env.items():
         env[k] = f"{v}{os.pathsep}{env.get('PATH', '')}" if k == "PATH" else v
     env.pop("AGENTICOS_DSH_SPILL_DIR", None)  # never inherited from a project or the runner
+    if agent == "dsh" and not project.confidential and ticket_dispatch and project_runs.DSH_GIT_OVERLAY:
+        # AGE-146: a non-confidential dsh project run gets the write-only overlay that adds the
+        # repo's git common dir, so it can commit in its linked worktree.
+        if not worktree:
+            raise project_runs.ProjectRunError("dsh: the ticket worktree is unknown")
+        root = os.path.realpath(worktree)
+        git_dir = os.path.realpath(project_runs.common_dir(project))
+        if not os.path.isdir(git_dir):
+            raise project_runs.ProjectRunError("dsh: the repository git directory is missing")
+        env["AGENTICOS_DSH_CONFINE_GIT"] = git_dir
+        env[dsh_cli.DSH_CONFINE_RUNNER_ENV] = json.dumps(
+            [sys.executable, "-I", str(dsh_cli.DSH_CONFINE_RUNNER)])
+        identity = _projects.commit_identity_env(Path(root)) or {}
+        for key in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"):
+            if key in identity:
+                env[key] = identity[key]
+        try:
+            dsh_cli.verify_workspace_launch(env, root)
+        except RuntimeError as exc:
+            raise project_runs.ProjectRunError(str(exc)) from exc
     if agent == "claude" and project.confidential:  # AGE-129: Codex inside Claude's sandbox
         env["PATH"] = f"{project_runs.SANDBOXED_BIN}{os.pathsep}{env.get('PATH', '')}"
     if agent == "dsh" and project.confidential:
@@ -3491,8 +3521,6 @@ def _run_project_ticket_locked(*, project_key: str, ident: str, agent: str, prom
             # has its own context, and a confidential prompt never reaches the wiki.
             memory_brief = "" if (resume_session or project.confidential) else ai_memory.brief(project.key, ident)
             prompt_text = project_runs.project_prompt(prompt, project, binding, agent)
-            if agent == "dsh" and project.confidential:
-                prompt_text = dsh_cli.confidential_prompt(prompt_text)
             cmd = _project_cmd(agent, project,
                                project_runs.with_memory_brief(prompt_text, memory_brief),
                                resume_session)
@@ -5266,8 +5294,11 @@ def _retry_session_card_held(run_id, original, intent, data, reply, attachments,
                         _after_card_run(new_run_id, linear_issue_id, run_agent, run_sid)  # DSI-02
                     return
                 try:
-                    cmd = _project_cmd(run_agent, eff, prompt, run_sid)  # the sandboxed CLI for a confidential project
-                    exec_env = _project_exec_env(run_agent, eff, target["cwd"], new_run_id)
+                    # A native session is not a ticket dispatch: it keeps the old dsh prefix and
+                    # gets no AGE-146 git grant (it has no post_run leftover commit).
+                    cmd = _project_cmd(run_agent, eff, prompt, run_sid, ticket_dispatch=False)
+                    exec_env = _project_exec_env(run_agent, eff, target["cwd"], new_run_id,
+                                                 ticket_dispatch=False)
                     try:
                         output, it, ot, model, _new_sid, stderr_s, ok = run_agent_process(
                             new_run_id, cmd, stream=run_agent, cwd=target["cwd"],
@@ -6973,6 +7004,8 @@ def favicon():
 
 
 def main() -> None:
+    # AGE-146: a child's confinement marker must never disarm the runner's own git sandbox.
+    _projects.clear_inherited_sandbox_marker()
     parser = argparse.ArgumentParser(description="AgenticOS web dashboard.")
     parser.add_argument("--port", type=int, default=8510)
     parser.add_argument("--host", default="127.0.0.1")
