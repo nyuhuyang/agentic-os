@@ -752,21 +752,32 @@
     </div>
     {% endif %}
     {% if windows_deepseek %}
-    {% set w5 = windows_deepseek.window_5h %}
+    {% set ds_cards = [windows_deepseek.window_5h, windows_deepseek.window_7d, windows_deepseek.aux] %}
     <div class="windows-row" id="windows-row-deepseek">
       <div class="win-agent-label">⬢ DeepSeek</div>
-      <div class="windows-row-cards" style="grid-template-columns:1fr">
-      <div class="win-card">
+      <div class="windows-row-cards">
+      {% for w in ds_cards %}
+      <div class="win-card"{% if w.sub_line %} title="{{ w.sub_line }}"{% endif %}>
         <div class="win-header">
-          <span class="win-title">{{ w5.title or "Spend" }}</span>
-          <span class="win-reset-label">{{ w5.reset }}</span>
+          <span class="win-title">{{ w.title }}</span>
+          <span class="win-reset-label">{{ w.reset }}</span>
         </div>
         <div class="win-bar-wrap">
-          <div class="win-bar {% if w5.pct >= 80 %}high{% elif w5.pct >= 50 %}medium{% else %}low{% endif %}" style="width:{{ w5.pct }}%"></div>
+          <div class="win-bar {% if w.pct >= 80 %}high{% elif w.pct >= 50 %}medium{% else %}low{% endif %}"
+               style="width:{{ w.pct }}%"></div>
         </div>
-        <div class="win-remaining">{% if w5.remaining_pct is not none %}{{ w5.remaining_pct }}<span class="pct-label">% remaining</span>{% else %}<span class="pct-label">no data</span>{% endif %}</div>
-        <div class="win-main">{{ w5.display_line }}</div>
+        <div class="win-remaining">
+          {% if w.value is defined and w.value is not none %}
+            {{ w.value }}<span class="pct-label">{{ w.value_suffix or "" }}</span>
+          {% elif w.remaining_pct is not none %}
+            {{ w.remaining_pct }}<span class="pct-label">% remaining</span>
+          {% else %}
+            —<span class="pct-label">no data</span>
+          {% endif %}
+        </div>
+        <div class="win-main">{{ w.display_line }}</div>
       </div>
+      {% endfor %}
       </div>
     </div>
     {% endif %}
@@ -1838,6 +1849,7 @@ function _updateOneRow(row, w) {
     { card: cards[1], d: w.window_7d },
   ].forEach(({ card, d }) => {
     if (!card) return;
+    card.title = d.sub_line || '';
     const titleEl = card.querySelector('.win-title');
     if (titleEl && d.title) titleEl.textContent = d.title;
     const rst = card.querySelector('.win-reset-label');
@@ -1846,7 +1858,9 @@ function _updateOneRow(row, w) {
     bar.style.width = d.pct + '%';
     bar.className = _barClass(d.pct);
     const remEl = card.querySelector('.win-remaining');
-    if (preferRemaining && d.remaining_pct !== null && d.remaining_pct !== undefined) {
+    if (d.value !== null && d.value !== undefined) {
+      remEl.innerHTML = `${d.value}<span class="pct-label">${_esc(d.value_suffix || '')}</span>`;
+    } else if (preferRemaining && d.remaining_pct !== null && d.remaining_pct !== undefined) {
       remEl.innerHTML = `${d.remaining_pct}<span class="pct-label">% remaining</span>`;
     } else if (d.used_pct !== null && d.used_pct !== undefined) {
       remEl.innerHTML = `${d.used_pct}<span class="pct-label">% used</span>`;
@@ -1889,6 +1903,7 @@ function _updateOneRow(row, w) {
   const rc = cards[2];
   if (!rc) return;
   const r = w.aux;
+  rc.title = r.sub_line || '';
   rc.querySelector('.win-title').textContent = r.title;
   const rst3 = rc.querySelector('.win-reset-label');
   if (rst3) rst3.textContent = r.reset || '';

@@ -6928,20 +6928,27 @@ def api_deepseek_refresh():
 
 def _ds_load_usage() -> dict[str, Any]:
     """Load DeepSeek usage via monitor's cached file."""
-    from usage_reader import load_deepseek_usage as _load_ds
+    from usage_reader import load_deepseek_usage as _load_ds, deepseek_balance_totals as _ds_totals
     data = _load_ds()
     if not data:
         return {"available": False}
     bal = data.get("balance", {})
+    total_usd, total_cny = _ds_totals(data)
     return {
         "available": True,
         "balance_cny": bal.get("balance_cny", 0),
         "balance_usd": bal.get("balance_usd", 0),
+        "balance_total_usd": total_usd,
+        "balance_total_cny": total_cny,
         "total_cost_usd": data.get("total_cost_usd", 0),
         "total_cost_cny": data.get("total_cost_cny", 0),
+        "month_cost": data.get("month_cost", data.get("window_30d_cost", 0)),
+        "month_cost_cny": data.get("month_cost_cny", data.get("window_30d_cost_cny", 0)),
+        "month_resets_at": data.get("month_resets_at"),
         "today_tokens": data.get("today", {}).get("tokens", 0),
         "by_model": data.get("by_model", {}),
         "session_count": data.get("session_count", 0),
+        "stale": bool(data.get("stale")),
     }
 
 
