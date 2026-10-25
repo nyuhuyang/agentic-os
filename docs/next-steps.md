@@ -6,13 +6,13 @@
 
 ### P20 — Dashboard Fixes & Token Panel Redesign
 Finish the dashboard follow-through work: verify nullable Linear timestamps, run `pnpm build`, complete run-history wiring from Flask, and visually check the card/header changes.
-→ [`docs/exec-plans/active/p20-dashboard.md`](exec-plans/active/p20-dashboard.md)
+→ [`docs/exec-plans/deferred/p20-dashboard.md`](exec-plans/deferred/p20-dashboard.md)
 
 ## Deferred
 
 ### P15 — DeepSeek TUI Exec Tools
-Plan remains in `docs/exec-plans/active/`, but its own status is `Deferred`. Do not treat it as the next implementation target until it is explicitly reactivated.
-→ [`docs/exec-plans/active/p15-deepseek-tui-exec-tools.md`](exec-plans/active/p15-deepseek-tui-exec-tools.md)
+Plan lives in `docs/exec-plans/deferred/`, and its own status is `Deferred`. Do not treat it as the next implementation target until it is explicitly reactivated.
+→ [`docs/exec-plans/deferred/p15-deepseek-tui-exec-tools.md`](exec-plans/deferred/p15-deepseek-tui-exec-tools.md)
 
 ## Recently Completed
 

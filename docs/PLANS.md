@@ -25,13 +25,13 @@
 
 **Status:** active — symphony-ts engine refactor complete (P17). Agent dispatch via `task_shell_start`/`wait` stable. Next: end-to-end validation with deepseek backend.
 
-→ [`docs/exec-plans/active/p15-deepseek-tui-exec-tools.md`](exec-plans/active/p15-deepseek-tui-exec-tools.md)
+→ [`docs/exec-plans/deferred/p15-deepseek-tui-exec-tools.md`](exec-plans/deferred/p15-deepseek-tui-exec-tools.md)
 
 ### P10 — Modular Architecture: 可插拔模块系统
 
 **Status:** active — 核心拆分 + Agent/集成模块化 + 前端动态渲染 + 安装系统。Phase 1 待开始。
 
-→ [`docs/exec-plans/active/p10-modular-architecture.md`](exec-plans/active/p10-modular-architecture.md)
+→ [`docs/exec-plans/completed/p10-modular-architecture.md`](exec-plans/completed/p10-modular-architecture.md)
 
 ### P6 — Structured Operational Memory
 
@@ -41,7 +41,7 @@
 
 **Status:** planned — 调研 DeepSeek TUI exec 模式下能否通过 MCP 获取真实 shell 工具。
 
-→ [`docs/exec-plans/active/p9-deepseek-shell-via-mcp.md`](exec-plans/active/p9-deepseek-shell-via-mcp.md)
+→ [`docs/exec-plans/completed/p9-deepseek-shell-via-mcp.md`](exec-plans/completed/p9-deepseek-shell-via-mcp.md)
 
 ---
 
