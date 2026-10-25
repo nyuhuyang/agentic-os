@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""dsh sandbox runner for confidential projects (AGE-139).
+"""dsh sandbox runner for confidential and workspace projects (AGE-139, AGE-146).
 
-dsh's own macOS sandbox confines file writes only; its shell network stays open. For a
-confidential project the runner points dsh's `sandbox.runnerCommand` at this script. dsh
-appends its bwrap-style profile arguments, then `--`, then the real command. This script
-ignores the bwrap dialect, builds the runner's Seatbelt profile from the worktree root dsh
-passed as the first launcher argument, and execs the command under it.
+dsh's own macOS sandbox confines file writes only; its shell network stays open. The runner
+points dsh's `sandbox.runnerCommand` at this script. dsh appends its bwrap-style profile
+arguments, then `--`, then the real command. This script ignores the bwrap dialect, builds the
+runner's Seatbelt profile from the worktree root dsh passed as the first launcher argument, and
+execs the command under it.
+
+Two modes: `confidential` keeps the AGE-139 profile (network/app-service denials, `/tmp` as the
+shell temp) and is the default when the token is absent; `workspace` mirrors dsh's native
+write-only profile and adds the repository's git common dir so a non-confidential agent can
+`git add`/`git commit` in its linked worktree (AGE-146).
 
 The root travels in argv, not the environment: dsh strips `DSH_*` from children and its
 PTC/workflow runtime drops almost all ambient variables, so argv is the one channel every
@@ -37,6 +42,7 @@ class ConfineError(Exception):
 
 
 _SHELL_TEMP = "/tmp"
+_MODES = ("confidential", "workspace")
 
 
 def _temp_root() -> str:
@@ -59,16 +65,22 @@ def _workspace_write(profile_args: list[str], root: str) -> bool:
     return False
 
 
+def _mode_of(argv: list[str]) -> str:
+    """The optional mode token after the git dir; absent means confidential (AGE-139 callers)."""
+    return argv[2] if len(argv) > 2 and argv[2] in _MODES else "confidential"
+
+
 def build_argv(argv: list[str], env: dict[str, str] | None = None) -> list[str]:
     """(sandbox-exec profile, command) for one dsh command. Raises ConfineError on refusal.
 
-    `argv` is dsh's launcher tail: `root, git-common-dir-or-"-", bwrap-profile... , "--",
-    command...`. The git common dir is writable when dsh grants workspace-write, so the
-    agent can `git add`/`git commit` in its worktree; the runner still commits leftovers.
-    `env` is accepted for callers/tests; paths are deliberately not read from it.
+    `argv` is dsh's launcher tail: `root, git-common-dir-or-"-", [confidential|workspace],
+    bwrap-profile... , "--", command...`. The git common dir is writable when dsh grants
+    workspace-write, so the agent can `git add`/`git commit` in its worktree; the runner still
+    commits leftovers. `env` is accepted for callers/tests; paths are deliberately not read
+    from it.
     """
     if sys.platform != "darwin":
-        raise ConfineError("the confidential dsh sandbox is macOS-only")
+        raise ConfineError("the dsh sandbox is macOS-only")
     if not argv:
         raise ConfineError("missing worktree root")
     root = argv[0]
@@ -88,6 +100,10 @@ def build_argv(argv: list[str], env: dict[str, str] | None = None) -> list[str]:
                 start = 2
             else:
                 raise ConfineError("the git common dir must be an absolute existing path or -")
+    mode = "confidential"
+    if len(argv) > start and argv[start] in _MODES:
+        mode = argv[start]
+        start += 1
     try:
         sep = argv.index("--", start)
     except ValueError:
@@ -105,11 +121,21 @@ def build_argv(argv: list[str], env: dict[str, str] | None = None) -> list[str]:
     writable = [Path(root)] if _workspace_write(profile_args, root) else []
     if writable and git_dir:
         writable.append(Path(git_dir))
-    temp = "--tmpfs" in profile_args
-    try:
-        prefix = projects.sandbox_prefix(writable, temp=temp, temp_root=_temp_root() if temp else None)
-    except Exception as exc:
-        raise ConfineError(f"cannot build the sandbox profile: {exc}") from exc
+    if mode == "workspace":
+        # dsh's native workspace-write grants the root, /tmp and os.tmpdir(); read-only grants
+        # none of them. Keep the ambient TMPDIR, unlike the confidential spill separation.
+        temp = bool(writable)
+        try:
+            prefix = projects.sandbox_prefix(writable, temp=temp, temp_root=None, write_only=True)
+        except Exception as exc:
+            raise ConfineError(f"cannot build the sandbox profile: {exc}") from exc
+    else:
+        temp = "--tmpfs" in profile_args
+        try:
+            prefix = projects.sandbox_prefix(writable, temp=temp,
+                                             temp_root=_temp_root() if temp else None)
+        except Exception as exc:
+            raise ConfineError(f"cannot build the sandbox profile: {exc}") from exc
     return [*prefix, *command]
 
 
@@ -123,8 +149,13 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # fail closed even on an unexpected wrapper error
         print(f"dsh-confine: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 126
+    mode = _mode_of(argv)
     child_env = dict(os.environ)
-    child_env["TMPDIR"] = child_env["TMP"] = child_env["TEMP"] = _temp_root()
+    # A process already under this Seatbelt must not nest sandbox-exec (macOS refuses it); the
+    # marker lets projects.py skip the inner profile while the parent keeps the same boundary.
+    child_env[projects.DSH_SANDBOX_ENV] = mode
+    if mode == "confidential":  # the shell gets its own temp; dsh keeps the spill dir
+        child_env["TMPDIR"] = child_env["TMP"] = child_env["TEMP"] = _temp_root()
     try:
         os.execve(exec_argv[0], exec_argv, child_env)
     except OSError as exc:

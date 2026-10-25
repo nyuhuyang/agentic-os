@@ -18,7 +18,7 @@
   name: '@deepseek-ai/dsh-sandbox-local'
   disabled: false
   config:
-    runnerCommand: !!js (() => { const raw = process.env.AGENTICOS_DSH_CONFINE_RUNNER; if (!raw) throw new Error("AGENTICOS_DSH_CONFINE_RUNNER is required"); return [...JSON.parse(raw), process.cwd(), process.env.AGENTICOS_DSH_CONFINE_GIT || "-"]; })()
+    runnerCommand: !!js (() => { const raw = process.env.AGENTICOS_DSH_CONFINE_RUNNER; if (!raw) throw new Error("AGENTICOS_DSH_CONFINE_RUNNER is required"); return [...JSON.parse(raw), process.cwd(), process.env.AGENTICOS_DSH_CONFINE_GIT || "-", "confidential"]; })()
     runnerFailureSignatures:
       - "dsh-confine:"
 

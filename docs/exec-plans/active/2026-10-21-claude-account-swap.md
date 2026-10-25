@@ -221,38 +221,37 @@ performs no deletion.
 
 ## Merge with main (2026-10-24)
 
-`main` moved ~60 commits ahead while this branch was in review. A `git merge` in this worktree
-cannot even start here: the worktree's git metadata lives in the main checkout's
-`.git/worktrees/AGE-125`, and this session's sandbox refuses the `ORIG_HEAD.lock` write (`EPERM`);
-there is no approval channel to widen it. The merge was therefore resolved in a scratch clone and
-the resulting tree applied to the worktree as uncommitted changes (the runner commits them).
+`main` is at `68972a8` (it merged AGE-120/146 after this branch's last review). `git merge main` was
+run for real in this worktree, preserving the merge parents; the branch is older, so **main's
+version won every conflict where the branch only carried stale copies of main** and the ticket's
+still-relevant changes were re-applied on top.
 
-Overlap and resolution:
+Conflicts (13) and resolution:
 
-- `runner/app.py` — both sides changed `_project_exec_env`; main added `worktree`/`run_id` and the
-  confidential-dsh environment. **Main's version is kept as is.** The ticket's guarantee (a
-  `project.env` value must not defeat the account) is re-applied at the two places that actually
-  spawn Claude: `run_agent_process` (dashboard/card/project engine) and `project_runs.run_agent`
-  (the project-ticket spawn). `_registry_exec_env` still sets the directory for skill, routing and
-  resume calls. The other app.py changes (quota token, `is_error` stream results, result-text
-  error, startup warning) auto-merged.
-- `docs/context-maintenance.md` — **main's version is kept verbatim.** Main's AGE-125 lines describe
-  the retired design; replacing them (or appending a section at the file's end) conflicts, which
-  would leave the branch unmergeable. The revision is recorded in this plan and the review log, and
-  the old lines remain as main's history.
-- `runner/modules/pty/__init__.py`, `runner/run_skill.py`, `tests/conftest.py` — auto-merged; the
-  ticket's lines are present.
-- `runner/claude_account.py`, `tests/test_claude_account.py`, this plan and the review log — not
-  changed by main, so the branch's versions are kept.
+- `runner/app.py` — `_project_exec_env` is main's (new `worktree`/`run_id` parameters and the
+  confidential-dsh environment). The AGE-125 guarantee is re-applied at the spawn points:
+  `run_agent_process` (`stream == "claude"`) and `project_runs.run_agent` (the project-ticket
+  spawn), with `_registry_exec_env` still setting the directory for skill/routing calls; main's
+  `_project_exec_env` is untouched. Also re-applied: quota token via
+  `claude_account.access_token()`, `is_error` stream results failing the run, the result text as
+  the error, and the startup override warning.
+- `runner/project_runs.py` — main's file plus the same last-word injection in `run_agent`.
+- `AGENTS.md`, `docs/context-maintenance.md`, `docs/exec-plans/active/2026-10-21-scale-agent-fleet.md`,
+  `docs/references/index.md`, `runner/dsh_cli.py`, `runner/dsh_confine.py`, `runner/projects.py`,
+  `runner/scripts/dsh-confidential.yml`, `tests/test_dsh_confidential.py`,
+  `tests/test_project_dispatch.py`, `tests/test_projects.py` — **main's version**, because the
+  branch's copies only contained main's older state (AGE-120/146 and docs moved on).
+- `docs/context-maintenance.md` therefore describes main's older AGE-125 design; the revision is
+  recorded in this plan and the review log, and the Definition-of-Done item is marked N/A with that
+  reason.
+- Unchanged by main and kept: `runner/claude_account.py`, `tests/test_claude_account.py` (81
+  tests), `runner/modules/pty/__init__.py`, `runner/run_skill.py`, `tests/conftest.py`, this plan
+  and the review log.
 
-Verification of the resolution: a scratch clone with the final tree (including this plan, the
-review log and the 81-test account file) replayed as a commit on `e8da827` merges into `main` with
-"Automatic merge went well" and no conflicts. `py_compile` passes; account tests are 81 passed; the
-full suite is 1010 passed / 79 failed, where 78 failures are identical on a clean `main` clone
-(sandbox-exec/PTY) and the 79th passes as soon as `.gitignore` is committed. Details under
-Verification and in the review log.
+The merge commit on `agent/AGE-125` has both `20dc04b` and `68972a8` as parents, so `main` is an
+ancestor and the runner's merge into `main` cannot conflict on these files.
 
-## Acceptance Criteria
+## Acceptance Criteria## Acceptance Criteria
 
 Account setup and identity:
 
@@ -454,10 +453,8 @@ Authentication failures and quota:
 - [x] Codex inspection rounds; every finding resolved and re-tested (R1-R3 in round 7, I8-01/02 in
       round 8; round 9 returned no new finding). Independent approval withheld for the same
       repository-access reason.
-- [ ] Commit on `agent/AGE-125` — this session's sandbox refuses every write to the worktree's
-      git metadata (main checkout `.git/worktrees/AGE-125`), so neither the merge commit nor a
-      normal commit can be created here. The resolved tree is left uncommitted; the runner commits
-      it, and a scratch-clone replay of that tree merges into `main` with no conflicts.
+- [x] Merge `main` into `agent/AGE-125` and commit the merge (parents `20dc04b` and `68972a8`);
+      no push.
 
 ## User follow-up (not claimable in this session)
 

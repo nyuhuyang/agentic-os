@@ -5,11 +5,40 @@
 - AGE-137 ai-memory: **closed 2026-10-24**, plan archived at `docs/exec-plans/completed/2026-10-23-ai-memory.md`. Installed and live on 49434; `tickets/AGE-137.md` has three DSH runs; follow-up = one non-confidential ticket with Claude + Codex
 - STT two-pass: done, plan archived in completed/ (2026-10-14); optional follow-ups = one cross-provider Codex inspection, low-severity Open Issues in its review log
 - Multi-Project Dispatch — `docs/exec-plans/active/2026-10-13-multi-project-dispatch.md`: Phases 0–3 built on `feat/multi-project-dispatch` (2026-10-14). Open: the cross-provider Codex inspection of the build (Codex quota), spike (d2) for Codex, dogfood tickets, one user decision (`/run` free prompts), one project's committed .gitignore
+- AGE-146 dsh commit: non-confidential dsh project runs get a macOS write-only overlay
+  (`runner/scripts/dsh-workspace.yml` + `dsh_confine.py` `workspace` mode) that adds the
+  linked worktree's git common dir, so the agent can `git add`/`commit`/`merge` itself. The
+  project prompt now asks for a real `git merge` on merge tasks and forbids clone/tree-copy
+  workarounds; `runner_commit` refuses unresolved, non-merge and empty pending operations and
+  finishes a resolved merge with both parents. Evidence and remaining edge cases:
+  `docs/references/dsh-commit-failures.md`. Live runner restart, one fresh-ticket check and
+  the residual I12-002 seed-copy race follow-up remain.
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- 2026-10-25 live check: the first post-restart dsh project run ran `git add`/`git commit`
+  from its own worktree with the AGE-146 workspace overlay (no runner fallback); main
+  already contains `a1f0cce Merge branch 'agent/AGE-146'`.
+- AGE-146 merge `main` (8604180) into the branch content: the only conflict was this file;
+  kept main's closed AGE-137 line and moved the AGE-146 WIP entry below Multi-Project, so the
+  runner's stale-base merge is conflict-free. A simulated runner normal commit +
+  `git merge-tree --write-tree` into main exits 0. A true two-parent merge commit could not
+  be written from this run (old workspace sandbox: `ORIG_HEAD.lock`); the runner commits the
+  resolved tree. Full verify in this dsh shell: 855 passed / 209 failed / 15 errors, all the
+  known nested-sandbox/PTY class; `tests/test_ai_memory.py` 37 passed — 2026-10-24
+- AGE-146 dsh commit: `tests/test_projects.py` + `tests/test_dsh_confidential.py` +
+  `tests/test_project_dispatch.py` = 236 passed / 14 failed / 3 skipped. The 14 are the
+  confidential nested-`sandbox-exec` class and the Codex shim (HEAD has 11 in the dispatch file
+  alone); every AGE-146 regression passes. `python3 -m py_compile runner/*.py` and
+  `git diff --check` pass. Codex plan review approved the design before the session-evidence
+  round; six fresh code inspections hardened the grant (pin, merge state, CodeGraph,
+  lazy-fetch, network policy). The last verdict is **REVISE** on residual I12-002: a
+  smudge-filter detached child can still swap a seed destination before `shutil` copies; the
+  follow-up is descriptor-anchored seed copying or a write-confined worker. Live runner must
+  be restarted after merge, then one fresh ticket must show the new prompt/overlay — 2026-10-24
 - AGE-141 board latency, closed 2026-10-24 (`completed/2026-10-23-board-latency.md`): `/api/projects` no longer runs per-session commit git on the request thread — it reads a cache filled by one worker with a generation re-run, `codex_sessions` rows are memoized by DB/WAL stat (5 s cap), and `loadProjects()` is single-flight. Live runner restarted 2026-10-23 23:15 after the fix; live checks on 2026-10-24: warm `GET /api/projects` 0.87 / 0.87 / 1.00 / 0.99 / 1.13 s (was 135 s), 139 of 142 session rows carried `commit_state`, a dispatch retry returned 200 in the same second and started run `9eac22d6` (this session), and creating a Todo returned 200 before Linear's created_at landed 5 s later. Full suite 950 pass / 1 pre-existing sandbox failure; Codex inspection 2 APPROVED — 2026-10-24
 - AGE-138 switch Claude → DeepSeek: dsh runs `workspace-write`, whose root is the worktree; a linked worktree's git metadata lives in the main checkout's `.git`, so `git commit`/`git add` were denied and the switch looked broken. dsh now gets the same "leave your changes uncommitted" rule as sandboxed Codex (the runner already commits leftovers in `post_run`), switch/reply handoffs use `git log`/`git diff` instead of `git status`, and `GIT_OPTIONAL_LOCKS=0` keeps status from refreshing an unwritable index. Merged `main` (through `df7e019`) into the branch, keeping main's AGE-137/140/142/143/144 entries and re-applying the AGE-138 prompt/env changes on top; full suite 1008 pass from the merged worktree. Live runner needs a restart after merge — 2026-10-23
+- AGE-120 cheap parallel agents: `docs/references/parallel-agents-cheap-backends.md` — DeepSeek pay-per-token beats flat coding plans for parallel threads; runner already does threads via `dsh`; only the coordinator is missing. Ladder folded into umbrella plan `2026-10-21-scale-agent-fleet.md` (Phase 3 rungs, Phase 4 DeepSeek cost, cheap-backend section). Merged `main` (`a1f0cce`) into the branch as a two-parent merge: conflicts resolved by keeping main's side — its AGE-146/AGE-126 `context-maintenance.md` entries, the quota-aware-routing bullet in the fleet plan, and the closed `completed/2026-10-23-ai-memory.md` — with this ticket's DeepSeek cost/rung additions re-applied on top. `py_compile` passes; full suite 1022 pass / 56 fail / 4 skip in this dsh shell, all the known nested-sandbox/PTY class (`already_confined()` skips the sandboxed-commit assertion, `out of pty devices`); code is byte-identical to main — 2026-10-24
 - AGE-143 a card's sessions after an agent switch: the project panel still lists every real session, but groups same-card rows and shows the card's current session on top (newest run record naming a session, or a launch started after it), with earlier sessions folded under an "N earlier sessions" toggle. Both stay resumable; nothing is hidden or removed. `runner/app.py` adds `_current_card_sessions` and a `current` label flag plus `card_current` on rows; `index.html` folds only rows sharing a card identifier. Main merged in; 210 session/ai-memory tests pass on the merged tree; `node --check` on the three inline scripts and `py_compile` pass. Full suite 918 pass / 87 fail, all in test_session_commit, test_terminals, test_project_dispatch, test_task_project and related git/PTY modules (detached-HEAD worktrees and sandbox limits; same environmental class as AGE-137, untouched by this change). Live runner needs a restart after merge — 2026-10-23
 - AGE-140 long test runs announce themselves: `project_runs.render_event` prepends a `[runner] ▶ running tests: <cmd> — this can take a while; the run is still alive.` note on the start event (Claude Bash, Codex `command_execution`, dsh `tool_call`; best-effort program/argv detection in `is_test_command`), the card status line repeats it via `run_progress` for non-project runs, dsh, and project runs, and the dispatch prompt asks agents to say what they are about to run before a long suite. 27 run-engine + 126 dsh/session tests pass; `py_compile` passes; project-dispatch prompt test passes (11 sandbox-exec failures in that file are this DSH sandbox, reproduce on HEAD). Live runner needs a restart after merge — 2026-10-23
 - AGE-142 DeepSeek (dsh) sessions on the project page: native dsh sessions are listed beside Claude/Codex with Resume (`dsh --resume`, same session id and cwd), Rename (appends a native title record, compressed logs too) and Remove (folder moves to `~/.agentic-os/session-trash/dsh`). Follow-up fix: the session-row badge used `${{...}}` inside a JS template literal, which Jinja parsed as a print tag and broke `/` (TemplateSyntaxError); now `${({...})[agent]}`. Full suite 971 pass. Live runner needs a restart after merge — 2026-10-23

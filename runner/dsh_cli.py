@@ -28,6 +28,8 @@ DSH_CONFINE_RUNNER_ENV = "AGENTICOS_DSH_CONFINE_RUNNER"
 _RUNNER_DIR = Path(__file__).resolve().parent
 DSH_CONFINE_RUNNER = _RUNNER_DIR / "dsh_confine.py"
 DSH_CONFIDENTIAL_PATCH = _RUNNER_DIR / "scripts" / "dsh-confidential.yml"
+DSH_WORKSPACE_PATCH = _RUNNER_DIR / "scripts" / "dsh-workspace.yml"
+DSH_WORKSPACE_SUPPORTED = sys.platform == "darwin"
 DSH_CONFIDENTIAL_BUNDLES = ("@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless")
 _DISABLED_TOOLS = frozenset({"tool-web", "tool-working-directory", "tool-fs"})
 _DISABLED_EXTRA = frozenset({"otel", "session-telemetry-otel"})
@@ -132,6 +134,17 @@ def confidential_cli_prefix() -> list[str]:
     if launcher is None:
         raise RuntimeError("confidential dsh needs an absolute node interpreter and bin.js")
     return [*launcher, "--profile", "headless", "--patch", str(DSH_CONFIDENTIAL_PATCH)]
+
+
+def workspace_cli_prefix() -> list[str] | None:
+    """The non-confidential dsh prefix with the workspace git overlay, or None off macOS.
+
+    The overlay only replaces the sandbox provider's runner; the user's profile and patch
+    layers stay in force, unlike `confidential_cli_prefix()`.
+    """
+    if not DSH_WORKSPACE_SUPPORTED:
+        return None
+    return [*cli_prefix(), "--patch", str(DSH_WORKSPACE_PATCH)]
 
 
 def _entry_blocks(text: str) -> dict[str, str]:
@@ -253,12 +266,71 @@ def composition_problem(stock_text: str, patched_text: str, patch_path: Path) ->
     return None
 
 
+def workspace_problem(dump_text: str, patch_path: Path) -> str | None:
+    """Why the composed non-confidential profile cannot commit, or None when it can."""
+    patch = str(patch_path)
+    if f"patched by {patch}" not in dump_text:
+        return "dsh did not apply the workspace git patch"
+    sandbox = _entry_blocks(dump_text).get("sandbox", "")
+    if "runnerCommand:" not in sandbox or "dsh-confine:" not in sandbox:
+        return "the sandbox provider is not using the dsh-confine runner"
+    if '"workspace"' not in sandbox and "'workspace'" not in sandbox:
+        return "the sandbox runner is not in workspace mode"
+    return None
+
+
+def _runner_env_problem(env: dict[str, str], label: str = "the dsh-confine runner") -> str | None:
+    """Validate the [python, -I, script] argv the patch will read from the environment."""
+    try:
+        runner_argv = json.loads(env.get(DSH_CONFINE_RUNNER_ENV) or "")
+    except ValueError:
+        return f"{DSH_CONFINE_RUNNER_ENV} must be a JSON argv array"
+    if (not isinstance(runner_argv, list) or len(runner_argv) != 3
+            or not all(isinstance(item, str) for item in runner_argv)
+            or runner_argv[1] != "-I"):
+        return f"{DSH_CONFINE_RUNNER_ENV} must be a JSON [python, -I, script] array"
+    if not os.path.isabs(runner_argv[0]):
+        return f"{label} interpreter must be absolute"
+    if Path(runner_argv[2]).resolve() != DSH_CONFINE_RUNNER.resolve():
+        return f"{label} script is not the runner's own wrapper"
+    if not Path(runner_argv[2]).is_file():
+        return f"{label} script is missing"
+    return None
+
+
+def verify_workspace_launch(env: dict[str, str], worktree: str) -> None:
+    """Fail closed unless the composed non-confidential profile uses the git overlay.
+
+    Unlike the confidential check this does not require the stock profile: a user's own
+    bundles and patch layers are legitimate here. It only proves the sandbox runner (and its
+    `workspace` mode) survived composition.
+    """
+    prefix = workspace_cli_prefix()
+    if prefix is None:
+        raise RuntimeError("the dsh workspace git overlay needs macOS")
+    if not DSH_WORKSPACE_PATCH.is_file():
+        raise RuntimeError(f"the dsh workspace patch is missing: {DSH_WORKSPACE_PATCH}")
+    problem = _runner_env_problem(env)
+    if problem:
+        raise RuntimeError(f"dsh workspace: {problem}")
+    check_env = dict(env)
+    dump = _dump([prefix[0]], ["--profile", "headless", "--patch", str(DSH_WORKSPACE_PATCH),
+                               "--dump-config"], check_env, worktree)
+    if dump.returncode:
+        raise RuntimeError(f"dsh workspace: --dump-config failed (exit {dump.returncode})")
+    if "patch: entry" in dump.stderr:
+        raise RuntimeError("dsh workspace: the git patch was not applied (unknown plugin id)")
+    problem = workspace_problem(dump.stdout, DSH_WORKSPACE_PATCH)
+    if problem:
+        raise RuntimeError(f"dsh workspace: {problem}")
+
+
 def _dump(launcher: list[str], args: list[str], env: dict[str, str], cwd: str) -> subprocess.CompletedProcess:
     try:
         return subprocess.run([*launcher, *args], env=env, cwd=cwd, stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError) as exc:
-        raise RuntimeError(f"confidential dsh: cannot compose its profile: {exc}") from exc
+        raise RuntimeError(f"dsh: cannot compose its profile: {exc}") from exc
 
 
 def verify_confidential_launch(env: dict[str, str], worktree: str) -> None:
@@ -315,23 +387,6 @@ def verify_confidential_launch(env: dict[str, str], worktree: str) -> None:
         raise RuntimeError(f"confidential dsh: {problem}")
 
 
-def confidential_prompt(prompt: str) -> str:
-    """Replace the AGE-138 leave-it-to-the-runner rules for a confidential dsh run.
-
-    Main's `project_runs.project_prompt` still emits the "leave uncommitted / do not run git"
-    pair for dsh; a confidential run uses the runner's wrapper and may write the git common
-    dir, so it is asked to commit instead. Keep this separate so a merge with main does not
-    rewrite main's shared prompt helper.
-    """
-    head, sep, tail = prompt.partition("\n\n")
-    lines = [line for line in head.splitlines()
-             if not line.startswith("Leave your changes uncommitted")
-             and not line.startswith("Do not run `git commit`")]
-    if lines:
-        lines.insert(1, "Commit your work on this branch. Do not switch branches.")
-    return "\n".join(lines) + sep + tail
-
-
 def resolve_api_key() -> str | None:
     """DEEPSEEK_API_KEY from the environment first, else ~/.deepseek/config.toml api_key."""
     key = (os.environ.get("DEEPSEEK_API_KEY") or "").strip()
@@ -355,8 +410,8 @@ def dsh_env(env: dict[str, str]) -> dict[str, str]:
     if key:
         env["DEEPSEEK_API_KEY"] = key
     env["DSH_PERMISSION_MODE"] = DSH_PERMISSION_MODE
-    # AGE-138: a ticket worktree's git metadata is outside the workspace-write root. Without this,
-    # `git status` refreshes the index and is denied; with it, status/log/diff never write .git.
+    # AGE-138/146: optional index refreshes stay off even though the workspace overlay now
+    # grants the git common dir; `git add`/`commit` still take their required locks.
     env["GIT_OPTIONAL_LOCKS"] = "0"
     return env
 
