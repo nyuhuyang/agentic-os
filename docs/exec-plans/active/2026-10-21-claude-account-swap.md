@@ -443,9 +443,8 @@ Authentication failures and quota:
 - [x] Add the stream/auth-failure and run-skill tests.
 - [x] Add `tests/conftest.py` `WORKTREE_ROOT` isolation (unrelated real-worktree leak that failed
       `test_local_tracker` on this machine).
-- [x] `docs/context-maintenance.md` — **N/A for this merge**: main's version is kept verbatim so
-      the branch merges cleanly (any edit conflicted at the file's end); the revision is recorded
-      in this plan and the review log instead.
+- [x] `docs/context-maintenance.md` records the revision (the three AGE-125 lines updated on top of
+      main after the merge commit, so they cannot conflict).
 - [x] Run the verification checks above.
 - [x] Three fresh Codex plan reviews (R1-R5 resolved). No approving verdict: the reviewer cannot
       read repository files in this sandbox, and Claude review is organization-blocked. Recorded in
