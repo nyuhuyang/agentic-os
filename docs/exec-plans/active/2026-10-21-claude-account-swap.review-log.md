@@ -759,3 +759,9 @@ changes on top:
 Verification after the merge: `py_compile runner/*.py`; `tests/test_claude_account.py` 81 passed;
 targeted regression set; full suite (recorded below). Merge commit parents: `20dc04b` +
 `68972a8`, so `main` is an ancestor.
+
+Final validation after the merge commit (`b11254b`, parents `20dc04b` + `68972a8`): full suite
+1073 passed / 46 failed / 4 skipped. The same 46 failures, by name, occur on a clean `main` clone
+at `68972a8` (confinement/PTY modules: card_terminal, project_dispatch, project_registry,
+projects, relocate, session_commit, session_to_board, terminals), so none is merge-induced.
+`py_compile` passes; `tests/test_claude_account.py` is 81 passed. Worktree clean, no push.

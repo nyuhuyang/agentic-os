@@ -397,14 +397,14 @@ Authentication failures and quota:
 - [x] Test: `_fetch_claude_oauth_usage` uses `claude_account.access_token()`.
 - [x] Test: GET/POST endpoints keep their token check and payload shape.
 - [x] Test: the module never invokes a keychain write.
-- [x] `.venv/bin/python3 -m pytest tests -q` on the merged tree — 1010 passed / 79 failed in this
-      session's sandbox. Running the same seven confinement/PTY modules on a clean `main` clone
-      gives 78 identical failures; those tests need `/usr/bin/sandbox-exec` or a PTY, both refused
-      here. The 79th (`test_resume_argv_policy`) is the uncommitted `.gitignore` tripping
-      `_ignored_by_committed_rule`; the same tree committed in a clone passes it (verified). The
-      unsandboxed venv remains the authority.
-- [x] Merge proof: the resolved tree, replayed as a commit on `e8da827`, merges into `main` with
-      "Automatic merge went well" and no conflicts (throwaway clone).
+- [x] `.venv/bin/python3 -m pytest tests -q` on the merged tree — 1073 passed / 46 failed / 4
+      skipped. The same 46 failures occur in a clean `main` clone at `68972a8` (identical names,
+      eight confinement/PTY modules): they need `/usr/bin/sandbox-exec` or a PTY, both refused in
+      this sandbox. No failure is introduced by the merge; the unsandboxed venv remains the
+      authority.
+- [x] Real merge: `git merge main` in this worktree, 13 conflicts, main's version kept where the
+      branch only carried stale copies and the AGE-125 feature re-applied on top. Merge commit
+      `b11254b` has parents `20dc04b` and `68972a8`; `main` is now an ancestor.
 - [x] `claude_account.py list` and `status` run on the real machine without printing secrets.
       (Both report the retired index and no active account, as expected before the user logs in.)
 - [x] Dashboard via the Flask test client: `/` renders, the picker is hidden with < 2 accounts and
