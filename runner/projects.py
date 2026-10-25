@@ -739,8 +739,11 @@ def remove_project(key: str, expected_hash: str, *, cleanup: bool = False,
         # Nothing else can hold this key's ticket locks while its exclusive project lock is held
         # (every ticket-lock holder takes the shared project lock first), so lock-only leftovers go.
         key_dir, meta = WORKTREE_ROOT / key, WORKTREE_ROOT / key / ".meta"
+        runner_meta = lambda e: e.is_file() and (
+            e.suffix == ".lock" or e.name == "project.json"
+            or (e.name.startswith("codegraph-") and e.suffix == ".db"))
         if key_dir.is_dir() and not _worktree_dirs(key) and \
-                all(e.is_file() and e.suffix == ".lock" for e in (meta.iterdir() if meta.is_dir() else [])) and \
+                all(runner_meta(e) for e in (meta.iterdir() if meta.is_dir() else [])) and \
                 all(e.name == ".meta" for e in key_dir.iterdir()):
             shutil.rmtree(key_dir)
     return {"removed": key, "worktrees_removed": removed}
@@ -1657,11 +1660,17 @@ def _git_operation(repo: Path, confine: list[Path] | None) -> str | None:
     # committing the merge would finish the rebase's step behind its back.
     for d, what in (("rebase-merge", "a rebase"), ("rebase-apply", "a rebase"),
                     ("sequencer", "a cherry-pick/revert sequence")):
-        p = _git(repo, "rev-parse", "--git-path", d, confine=confine).stdout.strip()
-        if (repo / p if not os.path.isabs(p) else Path(p)).exists():
+        r = _git(repo, "rev-parse", "--git-path", d, check=False, confine=confine)
+        p = r.stdout.strip()
+        # An empty answer is not the repo root: `Path("") == repo`, which would report a
+        # permanent false "rebase in progress" for a command that produced no path.
+        path = Path(p) if os.path.isabs(p) else repo / p
+        if p and r.returncode == 0 and path.exists():
             return what
     for ref, what in (("MERGE_HEAD", "a merge"), ("CHERRY_PICK_HEAD", "a cherry-pick"), ("REVERT_HEAD", "a revert")):
-        if _git(repo, "rev-parse", "-q", "--verify", ref, check=False, confine=confine).returncode == 0:
+        r = _git(repo, "rev-parse", "-q", "--verify", ref, check=False, confine=confine)
+        # `--verify` prints the object name; a bare success with no commit id is not that ref.
+        if r.returncode == 0 and re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", r.stdout.strip()):
             return what
     if _git(repo, "--no-optional-locks", "ls-files", "-u", confine=confine).stdout.strip():
         return "unresolved conflicts"

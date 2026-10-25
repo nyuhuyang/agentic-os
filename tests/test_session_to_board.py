@@ -476,6 +476,7 @@ def test_badge_for_a_run_that_changed_nothing(monkeypatch, tmp_path, commits, di
     project = pj.Project(key="demo", path=tmp_path, verify="make test" if verify else "")
     monkeypatch.setattr(pr.projects, "uncommitted", lambda p, wt: list(dirty))
     monkeypatch.setattr(pr.projects, "_git", lambda wt, *a, **k: subprocess.CompletedProcess(a, 0, commits, ""))
+    monkeypatch.setattr(pr.projects, "_git_operation", lambda *a, **k: None)  # the blanket git mock has no MERGE_HEAD
     monkeypatch.setattr(pr.projects, "confine_for", lambda p, wt: None)
     monkeypatch.setattr(pr.projects, "load_binding", lambda p, i: {})
     monkeypatch.setattr(pr.projects, "committed_seeds", lambda p, wt, base: [])
@@ -494,6 +495,7 @@ def test_verify_runs_when_the_run_committed(monkeypatch, tmp_path):
     project = pj.Project(key="demo", path=tmp_path, verify="make test")
     monkeypatch.setattr(pr.projects, "uncommitted", lambda p, wt: [])
     monkeypatch.setattr(pr.projects, "_git", lambda wt, *a, **k: subprocess.CompletedProcess(a, 0, "abc", ""))
+    monkeypatch.setattr(pr.projects, "_git_operation", lambda *a, **k: None)  # the blanket git mock has no MERGE_HEAD
     monkeypatch.setattr(pr.projects, "confine_for", lambda p, wt: None)
     monkeypatch.setattr(pr.projects, "load_binding", lambda p, i: {})
     monkeypatch.setattr(pr.projects, "committed_seeds", lambda p, wt, base: [])
@@ -834,6 +836,7 @@ def test_seed_committed_by_this_run_is_red_even_when_nothing_else_changed(monkey
     project = pj.Project(key="demo", path=tmp_path, verify="make test")
     monkeypatch.setattr(pr.projects, "uncommitted", lambda p, wt: [])
     monkeypatch.setattr(pr.projects, "_git", lambda wt, *a, **k: subprocess.CompletedProcess(a, 0, "", ""))
+    monkeypatch.setattr(pr.projects, "_git_operation", lambda *a, **k: None)  # the blanket git mock has no MERGE_HEAD
     monkeypatch.setattr(pr.projects, "confine_for", lambda p, wt: None)
     monkeypatch.setattr(pr.projects, "load_binding", lambda p, i: {})
     monkeypatch.setattr(pr.projects, "run_verify", lambda *a, **k: {"status": "pass", "exit": 0, "duration_s": 0, "tail": ""})

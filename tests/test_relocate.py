@@ -9,6 +9,10 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "relocate_checkout.sh"
 
+# An outer DSH Seatbelt hides another process's argv from the shell script's pgrep.
+outer_sandbox = pytest.mark.skipif(bool(os.environ.get("AGENTICOS_DSH_SANDBOX")),
+                                   reason="process arguments are hidden by the outer sandbox")
+
 SHIMS = {
     # bootstrap marks the runner "up" from the checkout named in the plist, unless that checkout
     # is SHIM_FAIL_AT; SHIM_KILL_AT sends the script a TERM on the first bootstrap there.
@@ -122,6 +126,7 @@ def test_moves_repoints_and_restarts(env):
     assert "DONE" in r.stdout
 
 
+@outer_sandbox
 def test_refusals_change_nothing(env, tmp_path):
     old, new, plist, up, e = env
     before = plist.read_text()

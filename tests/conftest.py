@@ -1,11 +1,27 @@
 """Every test keeps the runner's lock and trash directories out of the real home directory."""
 
+import os
+import pty
 import sys
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runner"))
+
+
+@pytest.fixture(autouse=True)
+def _real_pty_modules_need_a_pty(request):
+    """The terminal suites drive real PTYs; a constrained host can run out of them."""
+    if Path(str(request.node.fspath)).name not in ("test_terminals.py", "test_card_terminal.py"):
+        return
+    try:
+        master, slave = pty.openpty()
+    except OSError:
+        pytest.skip("out of pty devices")
+    else:
+        os.close(master)
+        os.close(slave)
 
 
 @pytest.fixture(autouse=True)

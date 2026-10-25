@@ -16,6 +16,14 @@
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- AGE-150 fixed the 14 post-AGE-146 regressions: `_git_operation` no longer treats an empty
+  `rev-parse --git-path` answer (or a mocked non-SHA "success") as an unfinished rebase/merge;
+  removing a project also drops the runner-owned `.meta/project.json` pin; `_registry_exec_env`
+  strips dsh-only mode/marker variables from non-dsh children; and the tests now match
+  `readonly_status(cwd, confidential)` / `sandbox_prefix(..., write_only=...)`, use a hermetic
+  `WORKTREE_ROOT`, and skip only when the host has no nested Seatbelt or no PTY. Full suite in
+  this DSH sandbox: 976 passed / 106 skipped / 0 failed; the skips are the nested-sandbox and
+  PTY classes, which run on a normal host. `py_compile` and `git diff --check` pass — 2026-10-25
 - 2026-10-25 live check: the first post-restart dsh project run ran `git add`/`git commit`
   from its own worktree with the AGE-146 workspace overlay (no runner fallback); main
   already contains `a1f0cce Merge branch 'agent/AGE-146'`.

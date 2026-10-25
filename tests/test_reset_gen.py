@@ -37,6 +37,9 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(lin, "STATE_DIR", tmp_path)
     import projects
     monkeypatch.setattr(projects, "CARD_LOCK_DIR", tmp_path / "card-locks")  # never the real home dir
+    # Ticket locks, bindings and worktrees always belong to the test, never ~/.agentic-os:
+    # an outer DSH sandbox refuses writes there and would turn a missing patch into a failure.
+    monkeypatch.setattr(projects, "WORKTREE_ROOT", tmp_path / "worktrees")
     log = tmp_path / "run_log.jsonl"
     for name in ("RUN_LOG", "STATE_RUN_LOG"):
         monkeypatch.setattr(app_mod, name, log if name == "RUN_LOG" else tmp_path / "runs.jsonl")

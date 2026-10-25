@@ -179,9 +179,13 @@ def test_staged_rename_counts_once(repo):
 def test_commit_is_always_sandboxed(repo, monkeypatch):
     """Not confidential in the registry, still confined: no stale policy can leave git unconfined (SC-006)."""
     project, root = repo
+    monkeypatch.setattr(pj, "already_confined", lambda: False)  # the runner is unsandboxed
+    if pj._nested_sandbox_unavailable():
+        pytest.skip("nested sandbox-exec is unavailable")
     seen = []
     real = pj.sandbox_prefix
-    monkeypatch.setattr(pj, "sandbox_prefix", lambda writable, temp=True: seen.append(list(writable)) or real(writable, temp))
+    monkeypatch.setattr(pj, "sandbox_prefix", lambda writable, temp=True, **kw:
+                        seen.append(list(writable)) or real(writable, temp, **kw))
     (root / "a.txt").write_text("c\n")
     assert not project.confidential and pj.commit_checkout(project, root, "msg")["committed"]
     assert [] in seen  # the status: nothing writable
@@ -191,6 +195,9 @@ def test_commit_is_always_sandboxed(repo, monkeypatch):
 def test_preview_status_is_sandboxed_too(repo, monkeypatch):
     """Status can run clean filters: the preview's status runs in a write-nothing sandbox (SC-008/011)."""
     project, root = repo
+    monkeypatch.setattr(pj, "already_confined", lambda: False)  # the runner is unsandboxed
+    if pj._nested_sandbox_unavailable():
+        pytest.skip("nested sandbox-exec is unavailable")
     argvs = []
     real = pj._run_bounded
     monkeypatch.setattr(pj, "_run_bounded", lambda argv, *a, **k: argvs.append(argv) or real(argv, *a, **k))
@@ -226,9 +233,10 @@ def test_route_holds_the_lifecycle_lock(repo, tmp_path, monkeypatch):
     assert r.status_code == 200 and seen["locked"] is True
 
 
-def test_preview_runs_a_clean_filter_with_nothing_writable(repo):
+def test_preview_runs_a_clean_filter_with_nothing_writable(repo, monkeypatch):
     """A clean filter run by the preview's status cannot write outside the granted roots."""
     import os
+    monkeypatch.setattr(pj, "already_confined", lambda: False)  # the runner is unsandboxed
     if pj._nested_sandbox_unavailable():
         pytest.skip("nested sandbox-exec is unavailable")
     project, root = repo
@@ -240,7 +248,7 @@ def test_preview_runs_a_clean_filter_with_nothing_writable(repo):
     git(root, "config", "filter.spy.required", "true")  # a failing filter must fail status
     outside.unlink(missing_ok=True)  # setup ran the filter
     os.utime(root / "a.txt", (1, 1))  # stat-dirty: status re-reads it through the filter
-    (root / "a.txt").write_text("changed\n")
+    (root / "a.txt").write_text("b\n")  # same size: status must re-read it through the filter
     try:
         pj.commit_checkout(project, root, dry_run=True)
     except pj.ProjectError as exc:
@@ -336,7 +344,7 @@ def test_api_projects_rows_carry_commit_state(repo, tmp_path, monkeypatch, commi
     (root / "a.txt").write_text("c\n")
     calls = []
     real = pj.readonly_status
-    monkeypatch.setattr(pj, "readonly_status", lambda cwd: calls.append(cwd) or real(cwd))
+    monkeypatch.setattr(pj, "readonly_status", lambda cwd, confidential=False: calls.append(cwd) or real(cwd, confidential))
     rows = _alpha_rows(app_mod)
     assert {s["commit_state"] for s in rows} == {None} and not calls and started == [1]  # neutral, no git here
     app_mod._commit_pass_loop()
@@ -465,7 +473,7 @@ def test_commit_state_one_status_per_checkout_root(repo, monkeypatch):
     project, root = repo
     calls = []
     real = pj.readonly_status
-    monkeypatch.setattr(pj, "readonly_status", lambda cwd: calls.append(cwd) or real(cwd))
+    monkeypatch.setattr(pj, "readonly_status", lambda cwd, confidential=False: calls.append(cwd) or real(cwd, confidential))
     cache = {}
     (root / "src" / "deep").mkdir()
     for cwd in (root, root / "src", root / "src" / "deep"):
@@ -503,7 +511,7 @@ def test_failing_status_is_cached_as_neutral(repo, monkeypatch):
     project, root = repo
     calls = []
 
-    def boom(cwd):
+    def boom(cwd, confidential=False):
         calls.append(cwd)
         raise pj.ProjectError("git status timed out")
 

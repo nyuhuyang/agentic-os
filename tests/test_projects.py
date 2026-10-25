@@ -4,6 +4,7 @@ import os
 import time
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runner"))
 
 import projects as pj  # noqa: E402
+
+needs_seatbelt = pytest.mark.skipif(pj._nested_sandbox_unavailable(),
+                                    reason="nested sandbox-exec is unavailable")
 
 
 def git(cwd, *args):
@@ -285,6 +289,7 @@ def test_hardened_git_runs_no_fsmonitor_or_hook(repo, tmp_path):
     assert not marker.exists()
 
 
+@needs_seatbelt
 def test_sandbox_prefix_blocks_outside_write(repo):
     # $TMPDIR is writable by design, so probe a path in the home directory instead.
     outside = Path.home() / f".agentic-os-sandbox-probe-{os.getpid()}"
@@ -436,6 +441,7 @@ def test_runner_commit_ignores_gpg_sign(repo):
 
 # ── confidential confinement ─────────────────────────────────────────────────
 
+@needs_seatbelt
 def test_confidential_verify_is_sandboxed(repo):
     outside = Path.home() / f".agentic-os-verify-probe-{os.getpid()}"
     try:
@@ -446,6 +452,7 @@ def test_confidential_verify_is_sandboxed(repo):
         outside.unlink(missing_ok=True)
 
 
+@needs_seatbelt
 def test_confidential_worktree_and_commit_work_confined(repo):
     p, wt, info = make(repo, seed=["data"], confidential=True)
     (wt / "tracked.txt").write_text("edit\n")
@@ -613,13 +620,14 @@ def test_uncommitted_runs_a_clean_filter_with_nothing_writable(repo, monkeypatch
     monkeypatch.setattr(pj, "already_confined", lambda: False)
     p = project(repo)
     outside = Path.home() / f".agentic-os-uncommitted-probe-{os.getpid()}"
-    sentinel = repo / "uncommitted-filter-ran"
+    # The status profile can write only temp: a sentinel in the checkout would be denied too.
+    sentinel = Path(tempfile.gettempdir()) / f".agentic-os-uncommitted-filter-{os.getpid()}"
     git(repo, "config", "filter.spy.clean", f"touch {sentinel}; touch {outside}; cat")
     (repo / ".gitattributes").write_text("tracked.txt filter=spy\n")
     git(repo, "add", ".gitattributes"); git(repo, "commit", "-qm", "attrs")
     outside.unlink(missing_ok=True); sentinel.unlink(missing_ok=True)
     os.utime(repo / "tracked.txt", (1, 1))
-    (repo / "tracked.txt").write_text("changed\n")
+    (repo / "tracked.txt").write_text("c\n")  # same size: status must re-read it through the filter
     try:
         pj.uncommitted(p, repo)
     except pj.ProjectError as exc:
@@ -634,13 +642,14 @@ def test_fingerprint_runs_a_clean_filter_with_nothing_writable(repo, monkeypatch
     monkeypatch.setattr(pj, "already_confined", lambda: False)
     p = project(repo)
     outside = Path.home() / f".agentic-os-fingerprint-probe-{os.getpid()}"
-    sentinel = repo / "fingerprint-filter-ran"
+    # The fingerprint profile can write only temp: a sentinel in the checkout would be denied too.
+    sentinel = Path(tempfile.gettempdir()) / f".agentic-os-fingerprint-filter-{os.getpid()}"
     git(repo, "config", "filter.spy.clean", f"touch {sentinel}; touch {outside}; cat")
     (repo / ".gitattributes").write_text("tracked.txt filter=spy\n")
     git(repo, "add", ".gitattributes"); git(repo, "commit", "-qm", "attrs")
     outside.unlink(missing_ok=True); sentinel.unlink(missing_ok=True)
     os.utime(repo / "tracked.txt", (1, 1))
-    (repo / "tracked.txt").write_text("changed\n")
+    (repo / "tracked.txt").write_text("c\n")  # same size: status must re-read it through the filter
     try:
         pj.fingerprint(p)
     except pj.ProjectError as exc:
