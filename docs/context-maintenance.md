@@ -2,11 +2,6 @@
 
 ## Current WIP (WIP = 1)
 <!-- One active task at a time. What is it? -->
-- AGE-151 architecture: docs-only note `docs/design-docs/technology-stack.md` records the
-  current stack (Python/Flask + Jinja2 + vanilla JS), explains why there is no PHP or Rust
-  backend, and compares a full-JS rewrite with an incremental TypeScript frontend. No code or
-  runtime change. Merged `main` (`a22e018`) into the branch; the only conflict was this file,
-  resolved by keeping main's AGE-147 entry and re-applying the AGE-151 entry.
 - AGE-147 DeepSeek usage: the account reports USD and CNY; the dashboard row now shows a
   `$20.00` USD-normalized monthly budget, both balances, and 5h/7d/30d spend in both currencies
   (`deepseek_monitor.py` raw per-currency snapshots + `_schema: 2`, `usage_reader.py` three
@@ -28,11 +23,19 @@
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
-- 2026-10-25 AGE-151 merge: full pytest in this DSH shell = 1088 passed / 47 failed / 4
-  skipped (414 s). `runner/` and `tests/` are byte-identical to main (`git diff --quiet main --
-  runner tests`), so the failures are inherited from main, not introduced by this merge; they
-  are the known nested-`sandbox-exec`/PTY class plus ambient env and stale monkeypatch
-  signatures. `py_compile` and `git diff --check` pass.
+- AGE-150 fixed the 14 post-AGE-146 regressions: `_git_operation` no longer treats an empty
+  `rev-parse --git-path` answer (or a mocked non-SHA "success") as an unfinished rebase/merge;
+  removing a project also drops the runner-owned `.meta/project.json` pin; `_registry_exec_env`
+  strips dsh-only mode/marker variables from non-dsh children; and the tests now match
+  `readonly_status(cwd, confidential)` / `sandbox_prefix(..., write_only=...)`, use a hermetic
+  `WORKTREE_ROOT`, and skip only when the host has no nested Seatbelt or no PTY. Full suite in
+  this DSH sandbox: 976 passed / 106 skipped / 0 failed; the skips are the nested-sandbox and
+  PTY classes, which run on a normal host. `py_compile` and `git diff --check` pass. Merged main
+  (`4eef431`, AGE-125): only `runner/app.py` conflicted; kept main's
+  `claude_account.activate_env` and re-applied the dsh env strip; merge suite 1017 passed /
+  106 skipped / 0 failed. Then merged the next main (`a22e018`, AGE-147 DeepSeek usage): the
+  only conflict was this file; kept both AGE-150 and AGE-147 entries; final merge suite 1033
+  passed / 106 skipped / 0 failed — 2026-10-25
 - AGE-147 DeepSeek usage: `py_compile` passes; `tests/test_deepseek_usage.py` 16 passed;
   `tests/test_dsh_backend.py` 49 passed with ambient `GIT_OPTIONAL_LOCKS` unset;
   `tests/test_claude_account.py tests/test_activity_chart.py` 45 passed. Temp-cache live check:
@@ -113,9 +116,6 @@
 
 ## Next Action
 <!-- Concrete first step for the next session -->
-- AGE-151: review `docs/design-docs/technology-stack.md`; if the direction is accepted, the next
-  concrete step is a frontend-only extraction (ES modules or Vite + TypeScript), not a backend
-  rewrite.
 - AGE-138: switch a card from Claude to DeepSeek after the merge and let it finish: it should leave changes uncommitted and the runner should commit/merge them.
 - AGE-144: restart the live runner after merge, then open the project page and confirm DeepSeek rows show `agent/<id>` (worktree) or the main checkout's branch, as Claude/Codex rows do
 - AGE-143: restart the live runner after merge and switch one live card from Claude to Codex mid-review: the project panel should show the card once with the new session on top and an "N earlier sessions" toggle, and Resume on the old row should move the card back to it

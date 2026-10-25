@@ -297,6 +297,13 @@ def _registry_exec_env(agent: str, registry: dict[str, dict]) -> dict[str, str]:
     env["REGISTRY_JSON"] = str(path)
     if agent == "dsh":
         dsh_cli.dsh_env(env)
+    else:
+        # Never leak the dsh launcher's mode or sandbox marker into another agent: a Codex
+        # child that inherits AGENTICOS_DSH_SANDBOX would look already-confined to the runner.
+        for key in ("DSH_PERMISSION_MODE", "GIT_OPTIONAL_LOCKS", "AGENTICOS_DSH_SANDBOX",
+                    "AGENTICOS_DSH_CONFINE_GIT", "AGENTICOS_DSH_CONFINE_RUNNER",
+                    "AGENTICOS_DSH_SPILL_DIR"):
+            env.pop(key, None)
     if agent == "claude":
         claude_account.activate_env(env)  # AGE-125: the active account's config directory
     return env

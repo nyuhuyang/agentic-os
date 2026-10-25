@@ -17,6 +17,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "runner"))
 
 import projects as pj  # noqa: E402
 
+needs_seatbelt = pytest.mark.skipif(pj._nested_sandbox_unavailable(),
+                                    reason="nested sandbox-exec is unavailable")
+
 
 def git(cwd, *args):
     subprocess.run(["git", "-C", str(cwd), *args], check=True, capture_output=True)
@@ -301,6 +304,7 @@ def test_cleanup_is_all_or_nothing(reg, work):
     assert pj._worktree_dirs("alpha") == ["T-1", "T-2"] and path.read_bytes() == before
 
 
+@needs_seatbelt
 def test_broken_entry_is_removable_and_cleaned_via_minimal_descriptor(reg, monkeypatch):
     path, a, b = reg
     worktree("alpha", "T-1")
@@ -337,6 +341,7 @@ def test_broken_entry_without_worktrees_is_removed(reg):
     assert list(pj.raw_entries(path.read_bytes())) == ["beta"]
 
 
+@needs_seatbelt
 def test_sidecar_confidential_worktree_is_preflighted_confined(reg, monkeypatch):
     path, a, b = reg
     p, wt = worktree("beta", "T-1")
@@ -414,7 +419,15 @@ def test_registry_write_failure_after_init_keeps_and_reports_the_folder(reg, tmp
     path, a, b = reg
     fresh = tmp_path / "fresh"
     real = pj.tempfile.mkstemp
-    monkeypatch.setattr(pj.tempfile, "mkstemp", lambda **kw: (_ for _ in ()).throw(PermissionError("read-only dir")))
+
+    def only_registry_fails(**kw):
+        # The worktree setup also uses mkstemp (the git-common-dir pin and CodeGraph): let those
+        # succeed so this exercises the registry write, not an earlier setup failure.
+        if Path(kw.get("dir", path.parent)).resolve() == path.parent.resolve():
+            raise PermissionError("read-only dir")
+        return real(**kw)
+
+    monkeypatch.setattr(pj.tempfile, "mkstemp", only_registry_fails)
     with pytest.raises(pj.ProjectError, match="cannot write.*created and kept") as exc:
         pj.save_project("gamma", entry(fresh, verify="true"), h(path), create=True)
     assert exc.value.initialized == str(fresh) and (fresh / ".git").exists()

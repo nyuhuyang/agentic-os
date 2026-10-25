@@ -23,6 +23,8 @@ import project_runs as pr  # noqa: E402
 
 SENTINEL = "SENTINEL-CONFIDENTIAL-4242"
 REAL_RECORD_PROBLEM = pj.record_location_problem
+needs_seatbelt = pytest.mark.skipif(pj._nested_sandbox_unavailable(),
+                                    reason="nested sandbox-exec is unavailable")
 
 
 def git(cwd, *args):
@@ -112,6 +114,7 @@ def test_confidential_claude_settings_and_sources(proj):
     assert str(codex_home / "config.toml") in settings["filesystem"]["denyWrite"]
 
 
+@needs_seatbelt
 def test_sandboxed_codex_shim(tmp_path):
     """Passes through outside a sandbox; inside one (nested sandbox-exec refused) it drops Codex's
     own sandbox for the outer one and points Codex at the bundled CA file."""
@@ -651,6 +654,7 @@ def test_cleanup_while_locked_rejected(proj):
         assert pj.main(["cleanup", "demo", "T-1"]) == 2
 
 
+@needs_seatbelt
 def test_confidential_verify_cannot_write_the_shared_git_dir(proj):
     repo, _ = proj
     p = project(repo, True)
@@ -881,6 +885,7 @@ def test_shutdown_kills_in_flight_agent(helper, tmp_path, monkeypatch):
 
 # ── build inspection 6 regressions ───────────────────────────────────────────
 
+@needs_seatbelt
 def test_binding_persisted_before_the_agent_starts(helper, monkeypatch):
     """I6-01: while the first run is still going, the issue is already bound (and confidential)."""
     import runner.modules.linear as lin
@@ -899,6 +904,7 @@ def test_binding_persisted_before_the_agent_starts(helper, monkeypatch):
         t.join(20)
 
 
+@needs_seatbelt
 def test_sticky_confidentiality_keeps_the_sandboxed_policy(helper, monkeypatch):
     """I6-02: registry flag dropped later -> the ticket still gets the confidential argv and verify."""
     app_mod, run, records, state, events, comments, pushes, repo, write_registry = helper
@@ -1006,19 +1012,23 @@ def test_declared_confidentiality_counts_even_for_invalid_entries(tmp_path):
 
 # ── build inspection 7 regressions ───────────────────────────────────────────
 
+@needs_seatbelt
 def test_cli_verify_keeps_sticky_confidentiality(helper, monkeypatch):
     """I7-02: `projects.py verify` sandboxes a ticket that ran confidential, whatever the registry says now."""
+    if pj._nested_sandbox_unavailable():
+        pytest.skip("nested sandbox-exec is unavailable: the confidential worktree cannot be made")
     app_mod, run, records, state, events, comments, pushes, repo, write_registry = helper
     write_registry(confidential=True)
     run()
     write_registry(confidential=False)
     sandboxed = []
     monkeypatch.setattr(pj, "already_confined", lambda: False)  # the runner is unsandboxed
-    monkeypatch.setattr(pj, "sandbox_prefix", lambda roots: (sandboxed.append(roots), [])[1])
+    monkeypatch.setattr(pj, "sandbox_prefix", lambda roots, **kw: (sandboxed.append(roots), [])[1])
     assert pj.main(["verify", "demo", "--worktree", records()[-1]["worktree"]]) == 0
     assert sandboxed
 
 
+@needs_seatbelt
 def test_shutdown_finalizes_a_confidential_run_without_git(helper, monkeypatch):
     """I7-03: after stop_all() the location check cannot run git: the record is still written, redacted,
     before shutdown returns."""
@@ -1074,6 +1084,7 @@ def test_failed_closing_snapshot_is_recorded(helper, monkeypatch):
 
 # ── build inspection 8 regressions ───────────────────────────────────────────
 
+@needs_seatbelt
 def test_cli_made_confidential_worktree_stays_confidential(helper, monkeypatch):
     """I8-01: a worktree created confidential (CLI) keeps the sandboxed policy for dispatch and resume."""
     import runner.modules.pty as tpty
@@ -1121,6 +1132,7 @@ def test_cancel_refused_once_the_run_is_finishing(helper):
 
 # ── build inspection 9 regressions ───────────────────────────────────────────
 
+@needs_seatbelt
 def test_locked_cli_confidential_worktree_leaks_nothing(helper):
     """I9-01: policy is resolved before the lock: a refused launch of a CLI-confidential ticket
     posts only the template."""
@@ -1136,6 +1148,7 @@ def test_locked_cli_confidential_worktree_leaks_nothing(helper):
     assert comments and all(SENTINEL not in c for c in comments)
 
 
+@needs_seatbelt
 def test_cli_verify_promotion_reaches_retry_feedback_and_comment_route(helper, monkeypatch):
     """I9-02: a confidentiality promotion made only by `projects.py verify` gates every comment."""
     import runner.modules.linear as lin
@@ -1154,6 +1167,7 @@ def test_cli_verify_promotion_reaches_retry_feedback_and_comment_route(helper, m
 
 # ── build inspection 10 regressions ──────────────────────────────────────────
 
+@needs_seatbelt
 def test_unreadable_sidecar_is_unknown_not_false(helper):
     """I10-01: a damaged sidecar keeps the ticket's policy unknown: template comment, no prompt."""
     app_mod, run, records, state, events, comments, pushes, repo, write_registry = helper
@@ -1168,6 +1182,7 @@ def test_unreadable_sidecar_is_unknown_not_false(helper):
     assert comments and all(SENTINEL not in c for c in comments)
 
 
+@needs_seatbelt
 def test_unbound_labelled_issue_with_cli_confidential_worktree(helper):
     """I10-02: the comment route sees a CLI-made confidential worktree before any dashboard run."""
     import runner.modules.linear as lin
