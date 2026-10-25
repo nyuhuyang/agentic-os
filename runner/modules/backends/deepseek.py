@@ -81,19 +81,25 @@ class DeepSeekModule(AgenticModule):
     def load_usage(self) -> dict[str, Any]:
         """Load DeepSeek usage from monitor's cached file."""
         try:
-            from usage_reader import load_deepseek_usage as _load_ds
+            from usage_reader import load_deepseek_usage as _load_ds, deepseek_balance_totals as _ds_totals
         except ImportError:
             return {"available": False}
         data = _load_ds()
         if not data:
             return {"available": False}
         bal = data.get("balance", {})
+        total_usd, total_cny = _ds_totals(data)
         return {
             "available": True,
             "balance_cny": bal.get("balance_cny", 0),
             "balance_usd": bal.get("balance_usd", 0),
+            "balance_total_usd": total_usd,
+            "balance_total_cny": total_cny,
             "total_cost_usd": data.get("total_cost_usd", 0),
             "total_cost_cny": data.get("total_cost_cny", 0),
+            "month_cost": data.get("month_cost", data.get("window_30d_cost", 0)),
+            "month_cost_cny": data.get("month_cost_cny", data.get("window_30d_cost_cny", 0)),
+            "month_resets_at": data.get("month_resets_at"),
             "stale": bool(data.get("stale")),
         }
 

@@ -5,7 +5,15 @@
 - AGE-151 architecture: docs-only note `docs/design-docs/technology-stack.md` records the
   current stack (Python/Flask + Jinja2 + vanilla JS), explains why there is no PHP or Rust
   backend, and compares a full-JS rewrite with an incremental TypeScript frontend. No code or
-  runtime change.
+  runtime change. Merged `main` (`a22e018`) into the branch; the only conflict was this file,
+  resolved by keeping main's AGE-147 entry and re-applying the AGE-151 entry.
+- AGE-147 DeepSeek usage: the account reports USD and CNY; the dashboard row now shows a
+  `$20.00` USD-normalized monthly budget, both balances, and 5h/7d/30d spend in both currencies
+  (`deepseek_monitor.py` raw per-currency snapshots + `_schema: 2`, `usage_reader.py` three
+  cards, `index.html` three-card row). CNY is converted at 7.2; legacy USD-only history is
+  migrated once. Plan archived at `docs/exec-plans/completed/2026-10-24-deepseek-dual-currency-budget.md`.
+  Next action: restart the managed runner so the 2-minute poll rewrites `~/.deepseek/usage.json`
+  with the month/schema fields, then confirm the live DeepSeek row shows the budget card.
 - AGE-137 ai-memory: **closed 2026-10-24**, plan archived at `docs/exec-plans/completed/2026-10-23-ai-memory.md`. Installed and live on 49434; `tickets/AGE-137.md` has three DSH runs; follow-up = one non-confidential ticket with Claude + Codex
 - STT two-pass: done, plan archived in completed/ (2026-10-14); optional follow-ups = one cross-provider Codex inspection, low-severity Open Issues in its review log
 - Multi-Project Dispatch — `docs/exec-plans/active/2026-10-13-multi-project-dispatch.md`: Phases 0–3 built on `feat/multi-project-dispatch` (2026-10-14). Open: the cross-provider Codex inspection of the build (Codex quota), spike (d2) for Codex, dogfood tickets, one user decision (`/run` free prompts), one project's committed .gitignore
@@ -20,8 +28,18 @@
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
-- 2026-10-25 AGE-151 docs-only: `git diff --check` and `python3 -m py_compile runner/*.py`
-  pass; no code or template change, so no pytest run was needed.
+- 2026-10-25 AGE-151 merge: full pytest in this DSH shell = 1088 passed / 47 failed / 4
+  skipped (414 s). `runner/` and `tests/` are byte-identical to main (`git diff --quiet main --
+  runner tests`), so the failures are inherited from main, not introduced by this merge; they
+  are the known nested-`sandbox-exec`/PTY class plus ambient env and stale monkeypatch
+  signatures. `py_compile` and `git diff --check` pass.
+- AGE-147 DeepSeek usage: `py_compile` passes; `tests/test_deepseek_usage.py` 16 passed;
+  `tests/test_dsh_backend.py` 49 passed with ambient `GIT_OPTIONAL_LOCKS` unset;
+  `tests/test_claude_account.py tests/test_activity_chart.py` 45 passed. Temp-cache live check:
+  schema 2, month `$6.10 / $20.00`, balance `$19.76 total`, recent `$0.19 (5h) / $3.57 (7d) /
+  $6.10 (30d)`. Codex plan review APPROVED round 4 (`b6178600…`); fresh Codex code inspection
+  APPROVED round 2 (`98be4fc3…`), cross_provider. The final code snapshot matches that
+  inspection; only plan/log/context docs changed afterward — 2026-10-24
 - 2026-10-25 live check: the first post-restart dsh project run ran `git add`/`git commit`
   from its own worktree with the AGE-146 workspace overlay (no runner fallback); main
   already contains `a1f0cce Merge branch 'agent/AGE-146'`.
@@ -62,7 +80,7 @@
 - AGE-127 follow-up: adding a new folder whose name differed only in letter case from a registered key (private project A) failed with "REGCHECK… is not a worktree; refusing to delete it": macOS folders ignore case, so both keys shared one worktree dir and git reported the other case. Keys now clash case-insensitively (UI + `derive_key` add `-2`; an explicit clash → "already exists"), and `_is_worktree_of` uses `samefile`. Leftovers from the failed tries (5 REGCHECK worktrees, branches, `.meta` files) wait for a user decision. 52 registry pytest pass; isolated runner 8599 reproduced and fixed — 2026-10-22
 - AGE-139 confidential dsh: allowed through `runner/dsh_confine.py` + `runner/scripts/dsh-confidential.yml` — shell network/DNS/trustd/nsurlsessiond closed; writes in the worktree or session folder, `/private/tmp` and the repo git common dir so the agent can commit; telemetry off; approval ask; sessions never resume. Merged main `fe466a5` and re-applied AGE-139 on top (main->branch merge-tree exit 0); confidential dsh prompt override in `dsh_cli.confidential_prompt`, main's shared `leaves_commit_to_runner` unchanged; full suite 960 pass / 87 fail (same DSH sandbox/PTY class), focused dsh 87 pass. Plan `docs/exec-plans/completed/2026-10-23-dsh-confidential-network.md` — 2026-10-23
 - AGE-127 add-project without a terminal: a folder with files but no commit (plain folder, or a repo with no commits) now answers `needs_commit`; the dialog asks once and resubmits with `commit_existing`, which git-inits if needed and commits every file .gitignore keeps. Files over 50 MB refuse the save (a .git it made is removed); a non-empty folder inside another repo is refused. 51 registry pytest pass; isolated runner 8599: plain/bare → 400 needs_commit then 200 (confidential), 51 MB file → 400. Live runner needs a restart after merge — 2026-10-21
-- AGE-125 Claude account swap: `runner/claude_account.py save|use|list` + dashboard picker beside "◆ Claude" (≥ 2 saved accounts). Keychain holds per-account credential snapshots (service `agenticos-claude-account`); identity in `~/.agentic-os/claude-accounts.json` (0600). Owner = refresh-token match or `/api/oauth/profile`, never `~/.claude.json`; unknown owner refused without `--force`; one machine-wide lock; usage cache dropped on every swap (index mtime). No runner restart needed — every run spawns a fresh `claude` that reads the keychain. 40 account tests pass; full suite 900 pass; isolated runner 8599: `/` 200, picker hidden, GET 403 without token / 200 with. Codex plan review approved round 4; fresh Codex inspection approved round 6 (cross_provider). Real two-account swap is a user follow-up — 2026-10-21
+- AGE-125 Claude account swap (per-account `CLAUDE_CONFIG_DIR`): `runner/claude_account.py login|save|use|list|status|claude` + dashboard picker beside "◆ Claude" (≥ 2 saved). Each account is a config dir `~/.agentic-os/claude-accounts/<label>` (0700) whose shared stores (projects/skills/plugins/settings) are symlinked from `~/.claude`; the selector lives in `~/.agentic-os/claude-accounts.json` (0600). The runner applies `CLAUDE_CONFIG_DIR` at its spawn chokepoints (`run_agent_process`, `project_runs.run_agent`, `_registry_exec_env`, PTY tabs, `run_skill`) and reads that account's hashed keychain item for the quota cards; no credential is copied, so a switch cannot rotate a login away. `_stream_claude_run` fails a run whose result has `is_error` (a logged-out CLI exits 0). 81 account tests; full suite 1073 pass / 46 fail, all 46 identical on a clean main clone (sandbox-exec/PTY limits). Codex review: 3 plan rounds + 6 inspections, no open finding, but the reviewer could not read files in that sandbox. Real two-account login is the user follow-up — 2026-10-24
 - AGE-126 design talk: docs-only umbrella plan `docs/exec-plans/active/2026-10-21-scale-agent-fleet.md` (4 phases: verify gate → exception inbox → ticket decomposition → concurrency/cost ceiling); no code — 2026-10-21
 - AGE-122 "All Teams" create: with an empty `tracker.team_id` (what "All Teams" stores), the + form and session to-board now create in the viewer's only team (fresh `fetch_teams`); several teams or a failed/raising lookup refuse with a message before any placeholder. 861 pytest pass; isolated runner on 8599 (local mode, All Teams) POST → 200; Codex plan review approved round 4, fresh Codex inspection approved after one fix (cross_provider). Live runner needs a restart after merge — 2026-10-21
 - AGE-122 team selector: `fetch_teams` now queries `viewer.teams` (your memberships), not root `teams` (every workspace team, including ones you left). Linear can't delete a team, only leave it, so left teams kept showing. Live Linear: root `teams` = ML4+AGE, `fetch_teams()` = AGE only; py_compile passes. Dashboard and poller pick it up after a runner restart, or within 30 min for the poller — 2026-10-21
@@ -86,7 +104,7 @@
 ## Open Decisions
 <!-- Decisions made and their rationale — so a new session knows the "why" -->
 - Confidential projects never reach Linear (user, 2026-10-22): option A built (local-only board tasks), plan `completed/2026-10-22-confidential-local-tasks`. The unpushed main commits that carried a private project name (one message, one context line) were rewritten after AGE-124 merged: 4b7c966/a30ef92/33ee95e → 5fc0954/a910a53/fca1d5c, same changes otherwise; main and agent/AGE-124 re-pointed, old objects only in reflogs.
-- AGE-125 Claude account swap ships in the release (user decision 2026-10-21). Constraints to keep visible: macOS only; depends on Claude Code internals (keychain item `Claude Code-credentials`, `~/.claude.json` `oauthAccount`, `/api/oauth/profile`), so a Claude Code storage change breaks it (it fails closed); picker stays hidden until ≥ 2 accounts are saved. Before public release docs advertise it: check Anthropic's terms on multiple accounts and document it as an opt-in power-user feature
+- AGE-125 Claude account swap ships in the release (user decision 2026-10-21). Constraints: macOS only; depends on Claude Code internals (per-config-dir keychain service `Claude Code-credentials-<sha256(dir)[:8]>`, `.claude.json` inside the custom config dir, `claude auth status --json` fields). If storage changes, switching still works (it is an env pointer) but `status`/quota cards report none; it never falls back to another account. Picker stays hidden until ≥ 2 accounts are saved; check Anthropic's terms on multiple accounts before public docs advertise it
 - Long-term direction (AGE-126): scale = less human attention per verified merge, not more agents. Order trust → attention → fan-out → ceiling; plan `2026-10-21-scale-agent-fleet`. Known gap: verify badge `no check` still auto-merges
 - P15, P20, P23 parked in `docs/exec-plans/deferred/` (2026-10-13); P20 depended on `../symphony-ts`, which no longer exists
 - Server bound to 127.0.0.1 only — multi-host/remote scope is explicitly out of scope
@@ -102,7 +120,7 @@
 - AGE-144: restart the live runner after merge, then open the project page and confirm DeepSeek rows show `agent/<id>` (worktree) or the main checkout's branch, as Claude/Codex rows do
 - AGE-143: restart the live runner after merge and switch one live card from Claude to Codex mid-review: the project panel should show the card once with the new session on top and an "N earlier sessions" toggle, and Resume on the old row should move the card back to it
 - AGE-140: restart the live runner after merge, then watch one run's card while it starts a test suite: the card status line and the terminal both show the "running tests" note before the quiet stretch
-- AGE-125: user saves both Claude accounts (`claude auth login` → `runner/claude_account.py save a`, same for b), then confirms `use` + dashboard picker; then archive plan `2026-10-21-claude-account-swap`
+- AGE-125: `runner/claude_account.py login nyu` and `login rancho` (browser, once each; the old snapshot items are inert), then `use` + the dashboard picker; confirm a switch and a same-session resume across accounts; then archive plan `2026-10-21-claude-account-swap`
 - Multi-Project Dispatch: run the cross-provider Codex inspection of the build (base a8ab382) and spike (d2) for Codex, then dogfood one labelled ticket per project
 - AGE-137: run `sh scripts/install_ai_memory.sh` once in the main checkout after the merge, then dogfood one non-confidential ticket across two agents and read the page with `python3 runner/ai_memory.py brief <project> <TICKET>`
 - AGE-142: after the runner restarts, confirm the project page's session badge colours: DeepSeek green (`#7ec8a0`), Codex blue (`#6fb5d4`), Claude orange (`#e8a87c`); the session row had CX/DS swapped

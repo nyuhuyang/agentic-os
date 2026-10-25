@@ -848,6 +848,9 @@ def run_agent(argv: list[str], cwd: str, env: dict, run_id: str, agent: str, tim
     Every stdout line is kept for completion parsing; each structured event also goes to
     the run's EventRing and out as `run_event`. The whole process group is killed and
     reaped on every exit path. Returns (stdout_lines, stderr, returncode, timed_out)."""
+    if agent == "claude":  # AGE-125: applied last, after project.env
+        import claude_account
+        env = claude_account.activate_env(dict(env))
     ring = ring_for(run_id)
     proc = projects.spawn(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           stdin=subprocess.DEVNULL)
