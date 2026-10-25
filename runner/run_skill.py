@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO
 
+import ai_memory
+
 try:
     import fcntl
     _HAVE_FCNTL = True
@@ -280,6 +282,7 @@ def _cmd_run(skill: str, skill_args: list[str], retry: int, dry_run: bool, yes: 
             if record["status"] == "success":
                 break
 
+        record = ai_memory.scrub_record(record)  # never persist the memory bearer token
         _append_log(record)
         _update_state(skill, record)
 

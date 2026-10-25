@@ -2,6 +2,9 @@
 
 ## Current WIP (WIP = 1)
 <!-- One active task at a time. What is it? -->
+- AGE-137 ai-memory: **closed 2026-10-24**, plan archived at `docs/exec-plans/completed/2026-10-23-ai-memory.md`. Installed and live on 49434; `tickets/AGE-137.md` has three DSH runs; follow-up = one non-confidential ticket with Claude + Codex
+- STT two-pass: done, plan archived in completed/ (2026-10-14); optional follow-ups = one cross-provider Codex inspection, low-severity Open Issues in its review log
+- Multi-Project Dispatch — `docs/exec-plans/active/2026-10-13-multi-project-dispatch.md`: Phases 0–3 built on `feat/multi-project-dispatch` (2026-10-14). Open: the cross-provider Codex inspection of the build (Codex quota), spike (d2) for Codex, dogfood tickets, one user decision (`/run` free prompts), one project's committed .gitignore
 - AGE-146 dsh commit: non-confidential dsh project runs get a macOS write-only overlay
   (`runner/scripts/dsh-workspace.yml` + `dsh_confine.py` `workspace` mode) that adds the
   linked worktree's git common dir, so the agent can `git add`/`commit`/`merge` itself. The
@@ -10,11 +13,16 @@
   finishes a resolved merge with both parents. Evidence and remaining edge cases:
   `docs/references/dsh-commit-failures.md`. Live runner restart, one fresh-ticket check and
   the residual I12-002 seed-copy race follow-up remain.
-- STT two-pass: done, plan archived in completed/ (2026-10-14); optional follow-ups = one cross-provider Codex inspection, low-severity Open Issues in its review log
-- Multi-Project Dispatch — `docs/exec-plans/active/2026-10-13-multi-project-dispatch.md`: Phases 0–3 built on `feat/multi-project-dispatch` (2026-10-14). Open: the cross-provider Codex inspection of the build (Codex quota), spike (d2) for Codex, dogfood tickets, one user decision (`/run` free prompts), one project's committed .gitignore
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- AGE-146 merge `main` (8604180) into the branch content: the only conflict was this file;
+  kept main's closed AGE-137 line and moved the AGE-146 WIP entry below Multi-Project, so the
+  runner's stale-base merge is conflict-free. A simulated runner normal commit +
+  `git merge-tree --write-tree` into main exits 0. A true two-parent merge commit could not
+  be written from this run (old workspace sandbox: `ORIG_HEAD.lock`); the runner commits the
+  resolved tree. Full verify in this dsh shell: 855 passed / 209 failed / 15 errors, all the
+  known nested-sandbox/PTY class; `tests/test_ai_memory.py` 37 passed — 2026-10-24
 - AGE-146 dsh commit: `tests/test_projects.py` + `tests/test_dsh_confidential.py` +
   `tests/test_project_dispatch.py` = 236 passed / 14 failed / 3 skipped. The 14 are the
   confidential nested-`sandbox-exec` class and the Codex shim (HEAD has 11 in the dispatch file
