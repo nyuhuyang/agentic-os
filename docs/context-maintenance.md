@@ -2,6 +2,10 @@
 
 ## Current WIP (WIP = 1)
 <!-- One active task at a time. What is it? -->
+- AGE-151 architecture: docs-only note `docs/design-docs/technology-stack.md` records the
+  current stack (Python/Flask + Jinja2 + vanilla JS), explains why there is no PHP or Rust
+  backend, and compares a full-JS rewrite with an incremental TypeScript frontend. No code or
+  runtime change.
 - AGE-137 ai-memory: **closed 2026-10-24**, plan archived at `docs/exec-plans/completed/2026-10-23-ai-memory.md`. Installed and live on 49434; `tickets/AGE-137.md` has three DSH runs; follow-up = one non-confidential ticket with Claude + Codex
 - STT two-pass: done, plan archived in completed/ (2026-10-14); optional follow-ups = one cross-provider Codex inspection, low-severity Open Issues in its review log
 - Multi-Project Dispatch — `docs/exec-plans/active/2026-10-13-multi-project-dispatch.md`: Phases 0–3 built on `feat/multi-project-dispatch` (2026-10-14). Open: the cross-provider Codex inspection of the build (Codex quota), spike (d2) for Codex, dogfood tickets, one user decision (`/run` free prompts), one project's committed .gitignore
@@ -16,6 +20,8 @@
 
 ## Last Validated State
 <!-- What passed most recently? test suite / lint / manual check + date -->
+- 2026-10-25 AGE-151 docs-only: `git diff --check` and `python3 -m py_compile runner/*.py`
+  pass; no code or template change, so no pytest run was needed.
 - 2026-10-25 live check: the first post-restart dsh project run ran `git add`/`git commit`
   from its own worktree with the AGE-146 workspace overlay (no runner fallback); main
   already contains `a1f0cce Merge branch 'agent/AGE-146'`.
@@ -89,6 +95,9 @@
 
 ## Next Action
 <!-- Concrete first step for the next session -->
+- AGE-151: review `docs/design-docs/technology-stack.md`; if the direction is accepted, the next
+  concrete step is a frontend-only extraction (ES modules or Vite + TypeScript), not a backend
+  rewrite.
 - AGE-138: switch a card from Claude to DeepSeek after the merge and let it finish: it should leave changes uncommitted and the runner should commit/merge them.
 - AGE-144: restart the live runner after merge, then open the project page and confirm DeepSeek rows show `agent/<id>` (worktree) or the main checkout's branch, as Claude/Codex rows do
 - AGE-143: restart the live runner after merge and switch one live card from Claude to Codex mid-review: the project panel should show the card once with the new session on top and an "N earlier sessions" toggle, and Resume on the old row should move the card back to it
