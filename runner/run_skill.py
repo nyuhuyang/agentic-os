@@ -160,6 +160,11 @@ def run_once(skill: str, entrypoint: str, skill_args: list[str]) -> dict:
         }
 
     cmd = [_python(), str(script)] + skill_args
+    try:
+        import claude_account
+        child_env = claude_account.inherit_env(os.environ.copy())  # explicit value wins
+    except Exception:  # the account selector must never stop a skill run
+        child_env = None
     started = time.monotonic()
     started_at = _now_iso()
 
@@ -167,6 +172,7 @@ def run_once(skill: str, entrypoint: str, skill_args: list[str]) -> dict:
         result = subprocess.run(
             cmd,
             cwd=str(ROOT),
+            env=child_env,
             capture_output=False,  # let stdout/stderr pass through to terminal
             text=True,
         )

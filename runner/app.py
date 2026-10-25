@@ -304,6 +304,8 @@ def _registry_exec_env(agent: str, registry: dict[str, dict]) -> dict[str, str]:
                     "AGENTICOS_DSH_CONFINE_GIT", "AGENTICOS_DSH_CONFINE_RUNNER",
                     "AGENTICOS_DSH_SPILL_DIR"):
             env.pop(key, None)
+    if agent == "claude":
+        claude_account.activate_env(env)  # AGE-125: the active account's config directory
     return env
 
 
@@ -1222,15 +1224,7 @@ def _claude_cli_user_agent() -> str:
 def _fetch_claude_oauth_usage(timeout_s: float = 4.0) -> dict:
     """Read the authenticated Claude usage endpoint without persisting its token."""
     try:
-        credentials = subprocess.run(
-            ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-        )
-        token = ((json.loads(credentials.stdout).get("claudeAiOauth") or {})
-                 .get("accessToken"))
+        token = claude_account.access_token()  # AGE-125: active account, else the default login
         if not isinstance(token, str) or not token:
             return {}
         request_obj = urllib.request.Request(
@@ -2470,10 +2464,11 @@ def _stream_claude_run(
     proc: "subprocess.Popen[bytes]",
     run_id: str,
     timeout: float = 600,
-) -> tuple[str, int | None, int | None, str | None, str | None, str]:
+) -> tuple[str, int | None, int | None, str | None, str | None, str, bool]:
     """Stream Claude stream-json stdout to a JSONL progress file.
 
-    Returns (output, input_tokens, output_tokens, model, session_id, stderr).
+    Returns (output, input_tokens, output_tokens, model, session_id, stderr, ok). ok is false for
+    a reported error event, e.g. a logged-out account exits 0 but emits is_error=True.
     """
     stream_path = _claude_stream_log_path(run_id)
     RUN_PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
@@ -2519,7 +2514,8 @@ def _stream_claude_run(
     session_id = session_id_holder[0] or result_event.get("session_id")
 
     _write_run_progress_json(run_id, {"stream_log": str(stream_path)})
-    return output, usage.get("input_tokens"), usage.get("output_tokens"), model, session_id, stderr_s
+    ok = bool(result_event) and not result_event.get("is_error") and proc.returncode == 0
+    return output, usage.get("input_tokens"), usage.get("output_tokens"), model, session_id, stderr_s, ok
 
 
 def _stream_dsh_run(
@@ -2629,6 +2625,8 @@ def run_agent_process(run_id: str, cmd: list[str], *, stream: str, timeout: floa
     reaped on any failure after launch. Feeds the live view and the durable stream log.
     It never claims, records or pushes the tracker: run completion stays with the caller.
     Returns (output, input_tokens, output_tokens, model, session_id, stderr, ok)."""
+    if stream == "claude":  # AGE-125: applied after project.env, so a project override cannot win
+        env = claude_account.activate_env(dict(env) if env is not None else os.environ.copy())
     timeout = AI_RUN_TIMEOUT_S if timeout is None else timeout
     with _JOB_LOCK:
         live = _running_jobs.get(run_id)
@@ -2651,8 +2649,7 @@ def run_agent_process(run_id: str, cmd: list[str], *, stream: str, timeout: floa
         meta = read_json(_stream_meta_path(run_id)) or {}  # merged: an earlier attempt's diagnostics stay (UI8-04)
         write_json_atomic(_stream_meta_path(run_id), {**meta, "format": stream})  # replay reads it (C, R16)
         if stream == "claude":
-            out, it, ot, pm, sid, err = _stream_claude_run(proc, run_id, timeout=timeout)
-            ok = proc.returncode == 0
+            out, it, ot, pm, sid, err, ok = _stream_claude_run(proc, run_id, timeout=timeout)
         elif stream == "dsh":
             out, it, ot, pm, sid, err = _stream_dsh_run(proc, run_id, timeout=timeout)
             ok = _dsh_ok(proc, out)
@@ -2763,8 +2760,9 @@ def _parse_project_output(agent: str, lines: list[str], stderr: str, returncode:
                     init_model = init_model or ev["model"]
         usage = result.get("usage") or {}
         ok = returncode == 0 and not result.get("is_error")
+        failure = result.get("result") if isinstance(result.get("result"), str) else ""
         return (result.get("result") or "", usage.get("input_tokens"), usage.get("output_tokens"),
-                _observed_claude_model(init_model, result), sid, ok, "" if ok else stderr)
+                _observed_claude_model(init_model, result), sid, ok, "" if ok else (failure or stderr))
     if agent == "codex":
         text = "\n".join(lines)
         output, it, ot, model = _parse_agent_output("codex", text)
@@ -7033,6 +7031,10 @@ def main() -> None:
     _signal.signal(_signal.SIGTERM, lambda *_: sys.exit(0))  # launchd stop -> atexit runs
 
     print(f"AgenticOS dashboard → http://{args.host}:{args.port}")
+    if claude_account.accounts()["active"] and (conflicts := claude_account.env_conflicts()):
+        # One line, once: these make every spawn ignore the selected account (AGE-125).
+        print(f"warning: {', '.join(conflicts)} set: Claude runs ignore the active account",
+              file=sys.stderr)
     _migrate_legacy_state()
     _load_dismissed()
     _init_modules()
